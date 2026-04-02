@@ -1,0 +1,26 @@
+# Core numerical stack
+numpy>=1.26
+scipy>=1.13
+
+# GPU / tensor compute
+torch>=2.4
+
+# Meteorology data I/O
+xarray>=2024.2
+dask>=2024.2
+zarr>=2.18
+numcodecs>=0.13
+gcsfs>=2024.3
+fsspec>=2024.3
+
+# Tabular and columnar output
+pandas>=2.2
+pyarrow>=16.0
+
+# Testing and visualization
+pytest>=8.2
+matplotlib>=3.9
+plotly>=5.22
+
+# Optional utilities
+typing-extensions>=4.12

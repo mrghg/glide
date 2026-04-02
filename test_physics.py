@@ -1,0 +1,169 @@
+"""Physics regression tests for GPU LPDM core behavior.
+
+These tests use analytical/mock wind fields and stochastic updates to validate:
+1) RK2 advection precision in a uniform flow.
+2) Gaussian spread under Langevin turbulence with zero mean wind.
+3) Well-mixed behavior in a periodic turbulent domain.
+
+Mass conservation is checked in each test by verifying the particle weight sum.
+"""
+
+from __future__ import annotations
+
+import torch
+
+from lpdm.gpu_engine import CoordinateBounds, GPUEngine
+
+
+def _make_particles(n: int, *, dtype: torch.dtype = torch.float64) -> torch.Tensor:
+    """Create deterministic particles with normalized total mass."""
+
+    x = torch.linspace(-500.0, 500.0, steps=n, dtype=dtype)
+    y = torch.linspace(1000.0, 2000.0, steps=n, dtype=dtype)
+    z = torch.linspace(200.0, 400.0, steps=n, dtype=dtype)
+    w = torch.full((n,), 1.0 / n, dtype=dtype)
+    return torch.stack((x, y, z, w), dim=1)
+
+
+def test_uniform_wind_advection_rk2_precision() -> None:
+    """RK2 should be exact for constant wind and conserve weight."""
+
+    torch.manual_seed(11)
+
+    engine = GPUEngine(device="cpu", dtype=torch.float64)
+    particles = _make_particles(2048)
+    initial_mass = particles[:, 3].sum()
+
+    wind = torch.tensor([2.5, -1.25, 0.3], dtype=torch.float64)
+
+    def uniform_wind(xyz: torch.Tensor) -> torch.Tensor:
+        return wind.view(1, 3).expand_as(xyz)
+
+    dt = 10.0
+    n_steps = 300
+    for _ in range(n_steps):
+        particles = engine.rk2_advect_backward(particles, dt_seconds=dt, wind_fn=uniform_wind)
+
+    total_time = dt * n_steps
+    initial_xyz = _make_particles(2048)[:, :3]
+    expected_xyz = initial_xyz - wind * total_time
+
+    max_abs_err = torch.max(torch.abs(particles[:, :3] - expected_xyz)).item()
+    assert max_abs_err < 1e-9
+
+    final_mass = particles[:, 3].sum()
+    assert torch.allclose(initial_mass, final_mass, atol=0.0, rtol=0.0)
+
+
+def test_zero_wind_diffusion_langevin_gaussian_spread() -> None:
+    """Zero-mean Langevin turbulence should produce near-Gaussian vertical spread."""
+
+    torch.manual_seed(22)
+
+    n = 30000
+    engine = GPUEngine(device="cpu", dtype=torch.float64)
+
+    particles = torch.zeros((n, 4), dtype=torch.float64)
+    particles[:, 2] = 5000.0
+    particles[:, 3] = 1.0 / n
+
+    initial_mass = particles[:, 3].sum()
+
+    w_prime = engine.initialize_turbulence_velocity(n).to(dtype=torch.float64)
+
+    dt = 1.0
+    t_lagrangian = 120.0
+    sigma_w2 = 2.0
+    n_steps = 600
+    total_time = dt * n_steps
+
+    for _ in range(n_steps):
+        w_prime = engine.update_langevin_velocity(
+            w_prime,
+            t_lagrangian=t_lagrangian,
+            sigma_w2=sigma_w2,
+            dt_seconds=dt,
+        )
+        particles = engine.apply_vertical_turbulence(
+            particles,
+            w_prime,
+            dt_seconds=dt,
+            backward=False,
+        )
+
+    dz = particles[:, 2] - 5000.0
+    mean = torch.mean(dz)
+    std = torch.std(dz, unbiased=True)
+
+    centered = dz - mean
+    skew = torch.mean((centered / std) ** 3)
+    excess_kurt = torch.mean((centered / std) ** 4) - 3.0
+
+    # Mean displacement should be close to zero relative to sampling uncertainty.
+    stderr = std / torch.sqrt(torch.tensor(float(n), dtype=std.dtype))
+
+    # Integrated OU process variance for z(t) with stationary velocity variance sigma_w2.
+    expected_var = 2.0 * sigma_w2 * t_lagrangian * (
+        total_time - t_lagrangian * (1.0 - torch.exp(torch.tensor(-total_time / t_lagrangian)))
+    )
+    expected_std = torch.sqrt(expected_var)
+
+    assert abs(mean.item()) < 4.0 * stderr.item()
+    assert 0.85 * expected_std.item() <= std.item() <= 1.15 * expected_std.item()
+    assert abs(skew.item()) < 0.2
+    assert abs(excess_kurt.item()) < 0.35
+
+    final_mass = particles[:, 3].sum()
+    assert torch.allclose(initial_mass, final_mass, atol=0.0, rtol=0.0)
+
+
+def test_well_mixed_uniformity_in_periodic_turbulence() -> None:
+    """Uniform particles in a periodic domain should remain close to uniform."""
+
+    torch.manual_seed(33)
+
+    n = 50000
+    engine = GPUEngine(device="cpu", dtype=torch.float64)
+
+    bounds = CoordinateBounds(
+        lon_min=0.0,
+        lon_max=1.0,
+        lat_min=0.0,
+        lat_max=1.0,
+        alt_min=0.0,
+        alt_max=1.0,
+    )
+
+    particles = torch.empty((n, 4), dtype=torch.float64)
+    particles[:, 0] = torch.rand(n, dtype=torch.float64)
+    particles[:, 1] = torch.rand(n, dtype=torch.float64)
+    particles[:, 2] = torch.rand(n, dtype=torch.float64)
+    particles[:, 3] = 1.0 / n
+
+    initial_mass = particles[:, 3].sum()
+
+    dt = 1.0
+    diffusivity = 0.001
+    for _ in range(250):
+        particles = engine.diffuse_positions_periodic(
+            particles,
+            diffusivity=diffusivity,
+            dt_seconds=dt,
+            bounds=bounds,
+        )
+
+    n_bins = 8
+    idx_x = torch.clamp((particles[:, 0] * n_bins).long(), min=0, max=n_bins - 1)
+    idx_y = torch.clamp((particles[:, 1] * n_bins).long(), min=0, max=n_bins - 1)
+    idx_z = torch.clamp((particles[:, 2] * n_bins).long(), min=0, max=n_bins - 1)
+    flat_idx = idx_x + n_bins * idx_y + (n_bins * n_bins) * idx_z
+
+    counts = torch.bincount(flat_idx, minlength=n_bins**3).to(torch.float64)
+    expected = float(n) / float(n_bins**3)
+
+    # Relative RMS deviation of occupancy from ideal uniform occupancy.
+    rel_rms = torch.sqrt(torch.mean(((counts - expected) / expected) ** 2)).item()
+    assert rel_rms < 0.12
+
+    final_mass = particles[:, 3].sum()
+    assert torch.allclose(initial_mass, final_mass, atol=0.0, rtol=0.0)
