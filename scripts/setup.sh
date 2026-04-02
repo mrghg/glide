@@ -61,7 +61,7 @@ echo "==> Environment ready: $(pwd)/.venv"
 
 if [[ "$RUN_TESTS" == "true" ]]; then
   echo "==> Running physics tests"
-  PYTHONPATH=src .venv/bin/python -m pytest -q test_physics.py
+  PYTHONPATH=src .venv/bin/python -m pytest -q tests/test_physics.py
 fi
 
 echo "==> Done"

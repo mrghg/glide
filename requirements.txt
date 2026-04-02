@@ -24,3 +24,4 @@ plotly>=5.22
 
 # Optional utilities
 typing-extensions>=4.12
+ipykernel>=6.25

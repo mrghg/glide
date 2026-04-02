@@ -11,7 +11,7 @@ Backward-in-time Lagrangian Particle Dispersion Model (LPDM) scaffold for GPU-fi
 - `src/lpdm/output_writer.py`: Storage/output placeholder.
 - `src/lpdm/main.py`: Orchestrator placeholder.
 - `src/lpdm/visualize.py`: Plotly and Matplotlib diagnostics.
-- `test_physics.py`: Physics unit tests with analytical/mock met fields.
+- `tests/test_physics.py`: Physics unit tests with analytical/mock met fields.
 - `Dockerfile`: GPU-enabled runtime image.
 - `deploy.sh`: Artifact Registry build + Cloud Run GPU deployment.
 
@@ -37,7 +37,7 @@ What this does:
 - Uses `uv` if available (falls back to `venv + pip` automatically).
 - Creates `.venv` with Python 3.11 by default.
 - Installs `requirements.txt`.
-- Optionally runs `test_physics.py` when `--run-tests` is passed.
+- Optionally runs `tests/test_physics.py` when `--run-tests` is passed.
 
 Custom Python executable:
 
@@ -70,7 +70,7 @@ python -m lpdm.main
 ## Physics Tests
 
 ```bash
-PYTHONPATH=src .venv/bin/python -m pytest -q test_physics.py
+PYTHONPATH=src .venv/bin/python -m pytest -q tests/test_physics.py
 ```
 
 The suite includes:
@@ -79,6 +79,41 @@ The suite includes:
 - Well-mixed periodic turbulence uniformity test.
 
 Each test also verifies particle mass conservation by checking total weight.
+
+## Minimal Trajectory Run (Local or Vertex Notebook)
+
+The entrypoint now supports a minimal end-to-end backward trajectory run,
+including met fetch, advection stepping, and output persistence.
+
+Example:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m lpdm.main \
+	--zarr-store gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3 \
+	--start-time 2024-01-01T00:00:00Z \
+	--end-time 2024-01-01T03:00:00Z \
+	--n-particles 2048 \
+	--release-lon -122.30 \
+	--release-lat 37.90 \
+	--release-alt-agl-m 500 \
+	--dt-seconds 300 \
+	--output-uri outputs/demo-run
+```
+
+Equivalent environment-variable configuration is also supported:
+
+```bash
+export LPDM_ZARR_STORE=gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3
+export LPDM_START_TIME=2024-01-01T00:00:00Z
+export LPDM_END_TIME=2024-01-01T03:00:00Z
+export LPDM_OUTPUT_URI=gs://<your-bucket>/lpdm/demo-run
+PYTHONPATH=src .venv/bin/python -m lpdm.main
+```
+
+Outputs written by default:
+- `endpoint_particles.parquet`
+- `trajectory_diagnostics.parquet`
+- `run_metadata.json`
 
 ## Deploy
 

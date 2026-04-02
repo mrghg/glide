@@ -25,6 +25,10 @@ import xarray as xr
 from lpdm.runtime import DEVICE
 
 
+GRAVITY_M_S2 = 9.80665
+R_DRY_AIR_J_KG_K = 287.05
+
+
 @dataclass(frozen=True)
 class SpatialBounds:
     """3D spatial bounds used to subset meteorology.
@@ -77,8 +81,10 @@ class MetFieldMetadata:
     lon: np.ndarray
     lat: np.ndarray
     level: np.ndarray
+    pressure_level_hpa: np.ndarray
     time_start: datetime
     time_end: datetime
+    variable_units: Mapping[str, str]
 
 
 @dataclass(frozen=True)
@@ -89,7 +95,7 @@ class HourlyMetTensors:
         [channels, z, y, x]
 
     Channel order is determined by the reader implementation and should be
-    documented centrally (for example: [u, v, w, blh]).
+    documented centrally (for example: [u, v, w, blh, sp]).
     """
 
     hour_start: torch.Tensor
@@ -129,10 +135,14 @@ class ArcoEra5ZarrReader(MetReader):
 
     # Logical names used by the LPDM engine mapped to dataset variable names.
     DEFAULT_VARIABLE_MAP: Mapping[str, str] = {
-        "u": "u",
-        "v": "v",
-        "w": "w",
-        "blh": "blh",
+        "u": "u_component_of_wind",
+        "v": "v_component_of_wind",
+        "w": "vertical_velocity",
+        "blh": "boundary_layer_height",
+        "sp": "surface_pressure",
+        "t": "temperature",
+        "z": "geopotential",
+        "z_sfc": "geopotential_at_surface",
     }
 
     def __init__(
@@ -172,6 +182,12 @@ class ArcoEra5ZarrReader(MetReader):
         self.device = torch.device(device)
         self.dtype = dtype
 
+    @property
+    def required_variable_keys(self) -> tuple[str, ...]:
+        """Logical variable keys required for LPDM stepping."""
+
+        return ("u", "v", "w", "blh", "sp", "t", "z", "z_sfc")
+
     def fetch_hourly_window(self, request: BoundingBoxRequest) -> HourlyMetTensors:
         """Read, slice, materialize, and convert one hourly met window.
 
@@ -183,17 +199,29 @@ class ArcoEra5ZarrReader(MetReader):
         5. Convert both snapshots to consistent torch tensors.
         """
 
+        t0, t1 = self._canonicalize_hour_bounds(request.time)
+        request_hour = BoundingBoxRequest(
+            spatial=request.spatial,
+            time=TimeBounds(start=t0, end=t1),
+        )
+
         ds = self._open_dataset()
         ds = self._select_variables(ds)
-        ds = self._slice_spatial_temporal(ds, request)
+        ds = self._slice_spatial_temporal(ds, request_hour)
 
         # Explicitly trigger dask graph execution here so the rest of the
         # pipeline works with in-memory numpy-backed data.
         ds_local = ds.compute()
 
-        t0, t1 = self._canonicalize_hour_bounds(request.time)
-        ds_start = ds_local.sel({self.time_name: t0})
-        ds_end = ds_local.sel({self.time_name: t1})
+        t0_sel, t1_sel = self._coerce_time_bounds_for_dataset(ds_local, t0, t1)
+        ds_start = ds_local.sel({self.time_name: t0_sel})
+        ds_end = ds_local.sel({self.time_name: t1_sel})
+
+        ds_start, ds_end, level_agl_m = self._subset_vertical_levels_by_agl(
+            ds_start=ds_start,
+            ds_end=ds_end,
+            spatial=request.spatial,
+        )
 
         hour_start = self._dataset_to_channel_tensor(ds_start)
         hour_end = self._dataset_to_channel_tensor(ds_end)
@@ -201,9 +229,11 @@ class ArcoEra5ZarrReader(MetReader):
         metadata = MetFieldMetadata(
             lon=np.asarray(ds_local[self.lon_name].values),
             lat=np.asarray(ds_local[self.lat_name].values),
-            level=np.asarray(ds_local[self.level_name].values),
+            level=level_agl_m,
+            pressure_level_hpa=np.asarray(ds_start[self.level_name].values),
             time_start=t0,
             time_end=t1,
+            variable_units=self._read_variable_units(ds_local),
         )
 
         return HourlyMetTensors(
@@ -228,11 +258,25 @@ class ArcoEra5ZarrReader(MetReader):
     def _select_variables(self, ds: xr.Dataset) -> xr.Dataset:
         """Select only required meteorological fields."""
 
-        dataset_vars: Sequence[str] = tuple(self.variable_map.values())
+        dataset_vars: Sequence[str] = tuple(self.variable_map[k] for k in self.required_variable_keys)
         missing = [name for name in dataset_vars if name not in ds.variables]
         if missing:
             raise KeyError(f"Required variables missing from dataset: {missing}")
         return ds[list(dataset_vars)]
+
+    def _read_variable_units(self, ds: xr.Dataset) -> dict[str, str]:
+        """Read units attrs for all configured logical variables."""
+
+        units: dict[str, str] = {}
+        for key in self.required_variable_keys:
+            var_name = self.variable_map[key]
+            unit = str(ds[var_name].attrs.get("units", "")).strip()
+            if not unit:
+                raise ValueError(
+                    f"Variable {var_name!r} is missing units metadata; cannot safely normalize fields"
+                )
+            units[key] = unit
+        return units
 
     def _slice_spatial_temporal(self, ds: xr.Dataset, request: BoundingBoxRequest) -> xr.Dataset:
         """Apply bounding-box slicing in physical coordinates.
@@ -246,12 +290,12 @@ class ArcoEra5ZarrReader(MetReader):
 
         spatial = request.spatial
         time = request.time
+        time_start, time_end = self._coerce_time_bounds_for_dataset(ds, time.start, time.end)
 
         ds = ds.sel(
             {
-                self.time_name: slice(time.start, time.end),
+                self.time_name: slice(time_start, time_end),
                 self.lon_name: slice(spatial.lon_min, spatial.lon_max),
-                self.level_name: slice(spatial.z_min, spatial.z_max),
             }
         )
 
@@ -266,6 +310,92 @@ class ArcoEra5ZarrReader(MetReader):
 
         return ds
 
+    def _subset_vertical_levels_by_agl(
+        self,
+        ds_start: xr.Dataset,
+        ds_end: xr.Dataset,
+        spatial: SpatialBounds,
+    ) -> tuple[xr.Dataset, xr.Dataset, np.ndarray]:
+        """Subset pressure levels using geopotential-derived geometric AGL bounds."""
+
+        level_agl_start = self._compute_level_agl_m(ds_start)
+        level_agl_end = self._compute_level_agl_m(ds_end)
+
+        level_agl_mean = 0.5 * (
+            np.mean(level_agl_start, axis=(1, 2)) + np.mean(level_agl_end, axis=(1, 2))
+        )
+        level_values = np.asarray(ds_start[self.level_name].values)
+        level_mask = (level_agl_mean >= spatial.z_min) & (level_agl_mean <= spatial.z_max)
+
+        if not np.any(level_mask):
+            raise ValueError(
+                "No vertical levels intersect requested AGL bounds "
+                f"[{spatial.z_min}, {spatial.z_max}] m"
+            )
+
+        selected_levels = level_values[level_mask]
+        ds_start_sub = ds_start.sel({self.level_name: selected_levels})
+        ds_end_sub = ds_end.sel({self.level_name: selected_levels})
+
+        level_agl_start_sub = self._compute_level_agl_m(ds_start_sub)
+        level_agl_end_sub = self._compute_level_agl_m(ds_end_sub)
+        level_agl_m = 0.5 * (
+            np.mean(level_agl_start_sub, axis=(1, 2)) + np.mean(level_agl_end_sub, axis=(1, 2))
+        )
+
+        return ds_start_sub, ds_end_sub, level_agl_m
+
+    def _compute_level_agl_m(self, ds_time_slice: xr.Dataset) -> np.ndarray:
+        """Compute geometric height above ground level in meters for each level."""
+
+        z_name = self.variable_map["z"]
+        z_sfc_name = self.variable_map["z_sfc"]
+        z_level = np.asarray(ds_time_slice[z_name].values)
+        z_sfc = np.asarray(ds_time_slice[z_sfc_name].values)
+
+        self._validate_units("z", str(ds_time_slice[z_name].attrs.get("units", "")))
+        self._validate_units("z_sfc", str(ds_time_slice[z_sfc_name].attrs.get("units", "")))
+
+        if z_level.ndim != 3:
+            raise ValueError("geopotential must be a 3D field [z, y, x]")
+        if z_sfc.ndim == 2:
+            z_sfc_3d = z_sfc[None, :, :]
+        elif z_sfc.ndim == 3:
+            z_sfc_3d = z_sfc
+        else:
+            raise ValueError("geopotential_at_surface must be a 2D or 3D field")
+
+        agl_m = (z_level - z_sfc_3d) / GRAVITY_M_S2
+        return np.maximum(agl_m, 0.0)
+
+    def _pressure_levels_to_pa(self, ds_time_slice: xr.Dataset) -> np.ndarray:
+        """Convert vertical coordinate values to pressure in Pascals."""
+
+        level_vals = np.asarray(ds_time_slice[self.level_name].values, dtype=np.float64)
+        level_units = self._normalize_units(str(ds_time_slice[self.level_name].attrs.get("units", "")))
+
+        if level_units in {"pa", "pascal", "pascals"}:
+            return level_vals
+        if level_units in {"hpa", "hectopascal", "hectopascals", "mbar", "mb", "millibar"}:
+            return level_vals * 100.0
+
+        return level_vals * 100.0 if float(np.nanmax(level_vals)) <= 2000.0 else level_vals
+
+    def _coerce_time_bounds_for_dataset(
+        self,
+        ds: xr.Dataset,
+        start: datetime,
+        end: datetime,
+    ) -> tuple[datetime | np.datetime64, datetime | np.datetime64]:
+        """Match request datetime objects to dataset time coordinate representation."""
+
+        time_coord = ds[self.time_name]
+        if np.issubdtype(time_coord.dtype, np.datetime64):
+            start_utc = start.astimezone(timezone.utc).replace(tzinfo=None)
+            end_utc = end.astimezone(timezone.utc).replace(tzinfo=None)
+            return np.datetime64(start_utc), np.datetime64(end_utc)
+        return start, end
+
     def _canonicalize_hour_bounds(self, bounds: TimeBounds) -> tuple[datetime, datetime]:
         """Return exact hour start/end timestamps used for met interpolation."""
 
@@ -277,11 +407,18 @@ class ArcoEra5ZarrReader(MetReader):
         """Convert one xarray time-slice into [channels, z, y, x] torch tensor."""
 
         channels: list[np.ndarray] = []
-        logical_keys = ("u", "v", "w", "blh")
+        logical_keys = ("u", "v", "w", "blh", "sp")
+        units_by_key = self._read_variable_units(ds_time_slice)
+
+        temperature = np.asarray(ds_time_slice[self.variable_map["t"]].values)
+        if temperature.ndim != 3:
+            raise ValueError("temperature must be a 3D field [z, y, x] for omega->w conversion")
+        self._validate_units("t", units_by_key["t"])
 
         for key in logical_keys:
             var_name = self.variable_map[key]
             arr = np.asarray(ds_time_slice[var_name].values)
+            self._validate_units(key, units_by_key[key])
 
             # Ensure shape is [z, y, x]. For 2D fields (e.g. BLH), broadcast over z.
             if arr.ndim == 2:
@@ -292,8 +429,109 @@ class ArcoEra5ZarrReader(MetReader):
                     f"Unsupported variable rank for {var_name}: expected 2D or 3D, got {arr.ndim}D"
                 )
 
+            if key == "w":
+                arr = self._convert_vertical_velocity_to_m_s(
+                    omega_or_w=arr,
+                    units=units_by_key[key],
+                    level_hpa=self._pressure_levels_to_pa(ds_time_slice),
+                    temperature_k=temperature,
+                )
+
             channels.append(arr)
 
         stacked = np.stack(channels, axis=0)  # [channels, z, y, x]
         tensor = torch.as_tensor(stacked, dtype=self.dtype, device=self.device)
         return tensor
+
+    def _validate_units(self, logical_key: str, units: str) -> None:
+        """Validate units for each logical meteorological variable."""
+
+        norm = self._normalize_units(units)
+
+        if logical_key in ("u", "v", "w"):
+            if self._is_velocity_units(norm):
+                return
+            if logical_key == "w" and self._is_pressure_tendency_units(norm):
+                return
+            raise ValueError(f"Unsupported units {units!r} for variable {logical_key!r}")
+
+        if logical_key in ("blh",):
+            if norm in {"m", "meter", "metre", "meters", "metres"}:
+                return
+            raise ValueError(f"Unsupported units {units!r} for variable {logical_key!r}")
+
+        if logical_key in ("sp",):
+            if norm in {"pa", "pascal", "pascals"}:
+                return
+            raise ValueError(f"Unsupported units {units!r} for variable {logical_key!r}")
+
+        if logical_key in ("t",):
+            if norm in {"k", "kelvin"}:
+                return
+            raise ValueError(f"Unsupported units {units!r} for variable {logical_key!r}")
+
+        if logical_key in ("z", "z_sfc"):
+            if norm in {
+                "m**2s**-2",
+                "m2/s2",
+                "m^2s^-2",
+                "m2s-2",
+                "m2s**-2",
+                "m^2/s^2",
+                "m2/s^2",
+            }:
+                return
+            raise ValueError(f"Unsupported units {units!r} for variable {logical_key!r}")
+
+    def _convert_vertical_velocity_to_m_s(
+        self,
+        omega_or_w: np.ndarray,
+        units: str,
+        level_hpa: np.ndarray,
+        temperature_k: np.ndarray,
+    ) -> np.ndarray:
+        """Convert vertical velocity to geometric m/s when needed.
+
+        ERA5 pressure-level vertical velocity is often provided as omega = dp/dt
+        with units Pa/s. The LPDM particle state uses geometric altitude z (m),
+        so advection requires dz/dt in m/s:
+
+            w = dz/dt = -(R_d * T / (g * p)) * omega
+        """
+
+        norm = self._normalize_units(units)
+        if self._is_velocity_units(norm):
+            return omega_or_w
+        if not self._is_pressure_tendency_units(norm):
+            raise ValueError(f"Unsupported units {units!r} for vertical velocity")
+
+        p_pa = np.asarray(level_hpa, dtype=np.float64)
+        if p_pa.ndim != 1:
+            raise ValueError("Vertical coordinate must be 1D pressure levels")
+
+        p_3d = p_pa[:, None, None]
+        omega = np.asarray(omega_or_w, dtype=np.float64)
+        temp = np.asarray(temperature_k, dtype=np.float64)
+        w_m_s = -(R_DRY_AIR_J_KG_K * temp / (GRAVITY_M_S2 * p_3d)) * omega
+        return w_m_s
+
+    @staticmethod
+    def _normalize_units(units: str) -> str:
+        """Normalize unit strings for robust comparisons."""
+
+        return units.strip().lower().replace(" ", "")
+
+    @staticmethod
+    def _is_velocity_units(norm_units: str) -> bool:
+        return norm_units in {"m/s", "m.s-1", "ms-1", "ms**-1", "m*s^-1", "m*s**-1"}
+
+    @staticmethod
+    def _is_pressure_tendency_units(norm_units: str) -> bool:
+        return norm_units in {
+            "pa/s",
+            "pas-1",
+            "pas**-1",
+            "pa*s^-1",
+            "pa*s**-1",
+            "pa.s-1",
+        }
