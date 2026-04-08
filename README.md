@@ -15,6 +15,16 @@ Backward-in-time Lagrangian Particle Dispersion Model (LPDM) scaffold for GPU-fi
 - `Dockerfile`: GPU-enabled runtime image.
 - `deploy.sh`: Artifact Registry build + Cloud Run GPU deployment.
 
+## Documentation Governance
+
+Use the following source-of-truth split to avoid drift:
+
+- `.github/copilot-instructions.md`: operational coding-agent behavior, guardrails, and workflow expectations.
+- `CHECKPOINT.md`: project goal, architecture intent, milestone history, and next recommended technical priorities.
+- `README.md`: user-facing setup, run commands, flags, and output contracts.
+
+If behavior or interfaces change, update both the implementation and the matching documentation source above in the same PR.
+
 ## Quick Start
 
 ```bash
@@ -119,6 +129,36 @@ Runtime timing semantics:
 - `release-duration-seconds`: release window length; particles are released uniformly across this window.
 - `simulation-length-seconds`: total backward integration length measured from the end of the release window.
 - `release-seed` (optional): makes temporal release sampling deterministic and reproducible.
+
+Memory controls and profiling logs:
+- `--met-cache-max-hours`: cap in-memory hourly met tensors (default `2`, set `0` to disable cache).
+- `--memory-log-every-steps`: emit process/device memory logs every N steps (default `10`, set `0` to disable).
+- `--gc-every-steps`: run `gc.collect()` every N steps (default `50`, set `0` to disable).
+- `--memory-guard-max-rss-gib`: abort early if RSS exceeds this threshold (unset by default).
+- `--memory-guard-max-device-allocated-gib`: abort early if device allocated memory exceeds this threshold (unset by default).
+- `--memory-guard-max-device-reserved-gib`: abort early if CUDA reserved memory or MPS driver memory exceeds this threshold (unset by default).
+- `--memory-guard-check-every-steps`: check guard every N steps (default `1`).
+
+Example with aggressive memory limits:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m lpdm.main \
+	--zarr-store gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3 \
+	--start-time 2024-01-01T00:00:00Z \
+	--release-duration-seconds 3600 \
+	--simulation-length-seconds 10800 \
+	--met-cache-max-hours 1 \
+	--memory-log-every-steps 5 \
+	--memory-guard-max-rss-gib 10 \
+	--memory-guard-max-device-allocated-gib 14 \
+	--memory-guard-max-device-reserved-gib 15 \
+	--memory-guard-check-every-steps 1 \
+	--gc-every-steps 25 \
+	--output-uri outputs/memory-profiled-run
+```
+
+If the guard is triggered, the run exits with a `MemoryError` and writes
+diagnostic metadata to `run_metadata.json`.
 
 Validation requires `simulation-length-seconds > release-duration-seconds`.
 

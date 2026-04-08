@@ -7,7 +7,12 @@ for early cloud testing (including Vertex AI user-managed notebooks).
 from __future__ import annotations
 
 import argparse
+import gc
+import logging
 import os
+import resource
+import sys
+from collections import OrderedDict
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Sequence
@@ -19,6 +24,9 @@ from lpdm.met_reader import ArcoEra5ZarrReader, BoundingBoxRequest, SpatialBound
 from lpdm.output_writer import OutputWriter
 from lpdm.release_generator import PointRelease
 from lpdm.runtime import DEVICE
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _env_str(name: str, default: str | None = None) -> str | None:
@@ -43,6 +51,62 @@ def _env_optional_int(name: str) -> int | None:
 def _env_float(name: str, default: float) -> float:
 	value = os.environ.get(name)
 	return default if value is None or value == "" else float(value)
+
+
+def _env_optional_float(name: str) -> float | None:
+	value = os.environ.get(name)
+	if value is None or value == "":
+		return None
+	return float(value)
+
+
+def _current_rss_bytes() -> int | None:
+	"""Return process memory bytes when available.
+
+	On Linux, this reports current RSS from /proc/self/status. On other
+	platforms, it falls back to getrusage() peak RSS.
+	"""
+
+	try:
+		with open("/proc/self/status", "r", encoding="utf-8") as f:
+			for line in f:
+				if line.startswith("VmRSS:"):
+					parts = line.split()
+					if len(parts) >= 2:
+						return int(parts[1]) * 1024
+	except OSError:
+		pass
+
+	try:
+		ru_maxrss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+		if sys.platform == "darwin":
+			return int(ru_maxrss)
+		return int(ru_maxrss) * 1024
+	except OSError:
+		return None
+
+
+def _device_memory_bytes(device: torch.device) -> tuple[int | None, int | None]:
+	"""Return allocated/reserved bytes for current torch device when supported."""
+
+	if device.type == "cuda" and torch.cuda.is_available():
+		idx = device.index if device.index is not None else torch.cuda.current_device()
+		return int(torch.cuda.memory_allocated(idx)), int(torch.cuda.memory_reserved(idx))
+
+	if device.type == "mps" and hasattr(torch, "mps"):
+		allocated_fn = getattr(torch.mps, "current_allocated_memory", None)
+		driver_fn = getattr(torch.mps, "driver_allocated_memory", None)
+		allocated = int(allocated_fn()) if callable(allocated_fn) else None
+		reserved = int(driver_fn()) if callable(driver_fn) else None
+		return allocated, reserved
+
+	return None, None
+
+
+def _format_gib(num_bytes: int | None) -> str:
+	if num_bytes is None:
+		return "n/a"
+	return f"{num_bytes / (1024 ** 3):.3f} GiB"
 
 
 def _parse_datetime_utc(value: str) -> datetime:
@@ -75,6 +139,13 @@ class RunConfig:
 	bbox_pad_alt_m: float
 	output_uri: str
 	device: str
+	met_cache_max_hours: int
+	memory_log_every_steps: int
+	gc_every_steps: int
+	memory_guard_max_rss_gib: float | None
+	memory_guard_max_device_allocated_gib: float | None
+	memory_guard_max_device_reserved_gib: float | None
+	memory_guard_check_every_steps: int
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
@@ -118,6 +189,48 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 	default_output_uri = _env_str("LPDM_OUTPUT_URI", f"outputs/run-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}")
 	parser.add_argument("--output-uri", default=default_output_uri)
 	parser.add_argument("--device", default=_env_str("LPDM_DEVICE", str(DEVICE)))
+	parser.add_argument(
+		"--met-cache-max-hours",
+		type=int,
+		default=_env_int("LPDM_MET_CACHE_MAX_HOURS", 2),
+		help="Maximum hourly met tensors kept in memory; 0 disables cache",
+	)
+	parser.add_argument(
+		"--memory-log-every-steps",
+		type=int,
+		default=_env_int("LPDM_MEMORY_LOG_EVERY_STEPS", 10),
+		help="Log memory usage every N integration steps; 0 disables logs",
+	)
+	parser.add_argument(
+		"--gc-every-steps",
+		type=int,
+		default=_env_int("LPDM_GC_EVERY_STEPS", 50),
+		help="Run gc.collect() every N steps to reduce delayed retention; 0 disables",
+	)
+	parser.add_argument(
+		"--memory-guard-max-rss-gib",
+		type=float,
+		default=_env_optional_float("LPDM_MEMORY_GUARD_MAX_RSS_GIB"),
+		help="Abort early if process RSS exceeds this GiB threshold; unset disables guard",
+	)
+	parser.add_argument(
+		"--memory-guard-max-device-allocated-gib",
+		type=float,
+		default=_env_optional_float("LPDM_MEMORY_GUARD_MAX_DEVICE_ALLOCATED_GIB"),
+		help="Abort early if device allocated memory exceeds this GiB threshold; unset disables guard",
+	)
+	parser.add_argument(
+		"--memory-guard-max-device-reserved-gib",
+		type=float,
+		default=_env_optional_float("LPDM_MEMORY_GUARD_MAX_DEVICE_RESERVED_GIB"),
+		help="Abort early if device reserved/driver memory exceeds this GiB threshold; unset disables guard",
+	)
+	parser.add_argument(
+		"--memory-guard-check-every-steps",
+		type=int,
+		default=_env_int("LPDM_MEMORY_GUARD_CHECK_EVERY_STEPS", 1),
+		help="Check memory guard thresholds every N integration steps",
+	)
 	return parser
 
 
@@ -142,6 +255,26 @@ def _build_config(args: argparse.Namespace) -> RunConfig:
 		raise ValueError("release-seed must be >= 0")
 	if args.dt_seconds <= 0:
 		raise ValueError("dt-seconds must be > 0")
+	if args.met_cache_max_hours < 0:
+		raise ValueError("met-cache-max-hours must be >= 0")
+	if args.memory_log_every_steps < 0:
+		raise ValueError("memory-log-every-steps must be >= 0")
+	if args.gc_every_steps < 0:
+		raise ValueError("gc-every-steps must be >= 0")
+	if args.memory_guard_max_rss_gib is not None and args.memory_guard_max_rss_gib <= 0:
+		raise ValueError("memory-guard-max-rss-gib must be > 0 when set")
+	if (
+		args.memory_guard_max_device_allocated_gib is not None
+		and args.memory_guard_max_device_allocated_gib <= 0
+	):
+		raise ValueError("memory-guard-max-device-allocated-gib must be > 0 when set")
+	if (
+		args.memory_guard_max_device_reserved_gib is not None
+		and args.memory_guard_max_device_reserved_gib <= 0
+	):
+		raise ValueError("memory-guard-max-device-reserved-gib must be > 0 when set")
+	if args.memory_guard_check_every_steps <= 0:
+		raise ValueError("memory-guard-check-every-steps must be > 0")
 
 	return RunConfig(
 		zarr_store=args.zarr_store,
@@ -159,6 +292,13 @@ def _build_config(args: argparse.Namespace) -> RunConfig:
 		bbox_pad_alt_m=args.bbox_pad_alt_m,
 		output_uri=args.output_uri,
 		device=args.device,
+		met_cache_max_hours=args.met_cache_max_hours,
+		memory_log_every_steps=args.memory_log_every_steps,
+		gc_every_steps=args.gc_every_steps,
+		memory_guard_max_rss_gib=args.memory_guard_max_rss_gib,
+		memory_guard_max_device_allocated_gib=args.memory_guard_max_device_allocated_gib,
+		memory_guard_max_device_reserved_gib=args.memory_guard_max_device_reserved_gib,
+		memory_guard_check_every_steps=args.memory_guard_check_every_steps,
 	)
 
 
@@ -190,6 +330,7 @@ def _run(cfg: RunConfig) -> dict[str, object]:
 	reader = ArcoEra5ZarrReader(zarr_store=cfg.zarr_store, device=cfg.device)
 	engine = GPUEngine(device=cfg.device)
 	writer = OutputWriter()
+	device = torch.device(cfg.device)
 
 	particles = PointRelease(
 		n_particles=cfg.n_particles,
@@ -224,7 +365,15 @@ def _run(cfg: RunConfig) -> dict[str, object]:
 
 	step_count = 0
 	hour_windows = 0
-	met_cache: dict[datetime, torch.Tensor] = {}
+	met_cache: OrderedDict[datetime, torch.Tensor] = OrderedDict()
+	peak_rss_bytes = 0
+	peak_device_allocated = 0
+	peak_device_reserved = 0
+	memory_guard_triggered = False
+
+	endpoint_path = f"{cfg.output_uri.rstrip('/')}/endpoint_particles.parquet"
+	trajectory_path = f"{cfg.output_uri.rstrip('/')}/trajectory_diagnostics.parquet"
+	metadata_path = f"{cfg.output_uri.rstrip('/')}/run_metadata.json"
 
 	t_cursor = release_end
 	while t_cursor > sim_start:
@@ -238,7 +387,10 @@ def _run(cfg: RunConfig) -> dict[str, object]:
 			active_particles = particles[active_mask]
 			hour_key = _hour_floor(t_cursor)
 
-			if hour_key not in met_cache:
+			if cfg.met_cache_max_hours > 0 and hour_key in met_cache:
+				met_cache.move_to_end(hour_key)
+				met_avg = met_cache[hour_key]
+			else:
 				bbox = _build_bbox(active_particles, cfg)
 				met_window = reader.fetch_hourly_window(
 					BoundingBoxRequest(
@@ -246,10 +398,17 @@ def _run(cfg: RunConfig) -> dict[str, object]:
 						time=TimeBounds(start=hour_key, end=hour_key + timedelta(hours=1)),
 					)
 				)
-				met_cache[hour_key] = 0.5 * (met_window.hour_start + met_window.hour_end)
+				met_avg = 0.5 * (met_window.hour_start + met_window.hour_end)
 				hour_windows += 1
 
-			met_avg = met_cache[hour_key]
+				if cfg.met_cache_max_hours > 0:
+					met_cache[hour_key] = met_avg
+					while len(met_cache) > cfg.met_cache_max_hours:
+						_, evicted = met_cache.popitem(last=False)
+						del evicted
+
+				del met_window
+
 			u_m_s, v_m_s, w_m_s = _mean_wind(met_avg)
 
 			# Convert horizontal m/s to degrees/s using local spherical approximations.
@@ -272,6 +431,8 @@ def _run(cfg: RunConfig) -> dict[str, object]:
 			advected_active = engine.rk2_advect_backward(active_particles, dt_seconds=delta_s, wind_fn=wind_fn)
 			advected_active = engine.reflect_surface(advected_active, z_surface=0.0)
 			particles[active_mask] = advected_active
+			del active_particles
+			del advected_active
 		else:
 			u_m_s, v_m_s, w_m_s = 0.0, 0.0, 0.0
 
@@ -291,11 +452,161 @@ def _run(cfg: RunConfig) -> dict[str, object]:
 			}
 		)
 
+		if cfg.gc_every_steps > 0 and step_count % cfg.gc_every_steps == 0:
+			gc.collect()
+
+		if cfg.memory_log_every_steps > 0 and step_count % cfg.memory_log_every_steps == 0:
+			rss_bytes = _current_rss_bytes()
+			if rss_bytes is not None:
+				peak_rss_bytes = max(peak_rss_bytes, rss_bytes)
+			allocated, reserved = _device_memory_bytes(device)
+			if allocated is not None:
+				peak_device_allocated = max(peak_device_allocated, allocated)
+			if reserved is not None:
+				peak_device_reserved = max(peak_device_reserved, reserved)
+			LOGGER.info(
+				"step=%d active=%d cache_hours=%d rss=%s dev_alloc=%s dev_reserved=%s",
+				step_count,
+				active_count,
+				len(met_cache),
+				_format_gib(rss_bytes),
+				_format_gib(allocated),
+				_format_gib(reserved),
+			)
+
+		if (
+			(
+				cfg.memory_guard_max_rss_gib is not None
+				or cfg.memory_guard_max_device_allocated_gib is not None
+				or cfg.memory_guard_max_device_reserved_gib is not None
+			)
+			and step_count % cfg.memory_guard_check_every_steps == 0
+		):
+			rss_bytes = _current_rss_bytes()
+			allocated, reserved = _device_memory_bytes(device)
+			if rss_bytes is not None:
+				peak_rss_bytes = max(peak_rss_bytes, rss_bytes)
+			if allocated is not None:
+				peak_device_allocated = max(peak_device_allocated, allocated)
+			if reserved is not None:
+				peak_device_reserved = max(peak_device_reserved, reserved)
+
+			if cfg.memory_guard_max_rss_gib is not None and rss_bytes is not None:
+				guard_limit_bytes = int(cfg.memory_guard_max_rss_gib * (1024 ** 3))
+				if rss_bytes > guard_limit_bytes:
+					memory_guard_triggered = True
+					guard_metadata = {
+						"status": "aborted_memory_guard",
+						"reason": "RSS exceeded memory guard threshold",
+						"config": {
+							**asdict(cfg),
+							"start_time": cfg.start_time.isoformat(),
+							"release_end_time": release_end.isoformat(),
+							"simulation_start_time": sim_start.isoformat(),
+						},
+						"runtime": {
+							"device": str(cfg.device),
+							"steps": step_count,
+							"hour_windows": hour_windows,
+							"met_cache_max_hours": cfg.met_cache_max_hours,
+							"peak_rss_bytes": peak_rss_bytes,
+							"peak_device_allocated_bytes": peak_device_allocated,
+							"peak_device_reserved_bytes": peak_device_reserved,
+							"guard_limit_rss_bytes": guard_limit_bytes,
+							"guard_observed_rss_bytes": rss_bytes,
+						},
+						"outputs": {
+							"endpoint_particles": endpoint_path,
+							"trajectory_diagnostics": trajectory_path,
+							"metadata": metadata_path,
+						},
+					}
+					writer.write_metadata_json(metadata_path, guard_metadata)
+					raise MemoryError(
+						"Memory safety guard triggered: RSS reached "
+						f"{_format_gib(rss_bytes)} which is above "
+						f"{cfg.memory_guard_max_rss_gib:.3f} GiB"
+					)
+
+			if cfg.memory_guard_max_device_allocated_gib is not None and allocated is not None:
+				guard_limit_allocated_bytes = int(cfg.memory_guard_max_device_allocated_gib * (1024 ** 3))
+				if allocated > guard_limit_allocated_bytes:
+					memory_guard_triggered = True
+					guard_metadata = {
+						"status": "aborted_memory_guard",
+						"reason": "Device allocated memory exceeded memory guard threshold",
+						"config": {
+							**asdict(cfg),
+							"start_time": cfg.start_time.isoformat(),
+							"release_end_time": release_end.isoformat(),
+							"simulation_start_time": sim_start.isoformat(),
+						},
+						"runtime": {
+							"device": str(cfg.device),
+							"steps": step_count,
+							"hour_windows": hour_windows,
+							"met_cache_max_hours": cfg.met_cache_max_hours,
+							"peak_rss_bytes": peak_rss_bytes,
+							"peak_device_allocated_bytes": peak_device_allocated,
+							"peak_device_reserved_bytes": peak_device_reserved,
+							"guard_limit_device_allocated_bytes": guard_limit_allocated_bytes,
+							"guard_observed_device_allocated_bytes": allocated,
+						},
+						"outputs": {
+							"endpoint_particles": endpoint_path,
+							"trajectory_diagnostics": trajectory_path,
+							"metadata": metadata_path,
+						},
+					}
+					writer.write_metadata_json(metadata_path, guard_metadata)
+					raise MemoryError(
+						"Memory safety guard triggered: device allocated memory reached "
+						f"{_format_gib(allocated)} which is above "
+						f"{cfg.memory_guard_max_device_allocated_gib:.3f} GiB"
+					)
+
+			if cfg.memory_guard_max_device_reserved_gib is not None and reserved is not None:
+				guard_limit_reserved_bytes = int(cfg.memory_guard_max_device_reserved_gib * (1024 ** 3))
+				if reserved > guard_limit_reserved_bytes:
+					memory_guard_triggered = True
+					guard_metadata = {
+						"status": "aborted_memory_guard",
+						"reason": "Device reserved memory exceeded memory guard threshold",
+						"config": {
+							**asdict(cfg),
+							"start_time": cfg.start_time.isoformat(),
+							"release_end_time": release_end.isoformat(),
+							"simulation_start_time": sim_start.isoformat(),
+						},
+						"runtime": {
+							"device": str(cfg.device),
+							"steps": step_count,
+							"hour_windows": hour_windows,
+							"met_cache_max_hours": cfg.met_cache_max_hours,
+							"peak_rss_bytes": peak_rss_bytes,
+							"peak_device_allocated_bytes": peak_device_allocated,
+							"peak_device_reserved_bytes": peak_device_reserved,
+							"guard_limit_device_reserved_bytes": guard_limit_reserved_bytes,
+							"guard_observed_device_reserved_bytes": reserved,
+						},
+						"outputs": {
+							"endpoint_particles": endpoint_path,
+							"trajectory_diagnostics": trajectory_path,
+							"metadata": metadata_path,
+						},
+					}
+					writer.write_metadata_json(metadata_path, guard_metadata)
+					raise MemoryError(
+						"Memory safety guard triggered: device reserved memory reached "
+						f"{_format_gib(reserved)} which is above "
+						f"{cfg.memory_guard_max_device_reserved_gib:.3f} GiB"
+					)
+
 		t_cursor = t_prev
 
-	endpoint_path = f"{cfg.output_uri.rstrip('/')}/endpoint_particles.parquet"
-	trajectory_path = f"{cfg.output_uri.rstrip('/')}/trajectory_diagnostics.parquet"
-	metadata_path = f"{cfg.output_uri.rstrip('/')}/run_metadata.json"
+	for cached in met_cache.values():
+		del cached
+	met_cache.clear()
 
 	writer.write_particles_parquet(endpoint_path, particles)
 	writer.write_trajectory_parquet(trajectory_path, step_seconds=cfg.dt_seconds, rows=diag_rows)
@@ -309,8 +620,13 @@ def _run(cfg: RunConfig) -> dict[str, object]:
 		},
 		"runtime": {
 			"device": str(cfg.device),
+			"status": "completed" if not memory_guard_triggered else "aborted_memory_guard",
 			"steps": step_count,
 			"hour_windows": hour_windows,
+			"met_cache_max_hours": cfg.met_cache_max_hours,
+			"peak_rss_bytes": peak_rss_bytes,
+			"peak_device_allocated_bytes": peak_device_allocated,
+			"peak_device_reserved_bytes": peak_device_reserved,
 		},
 		"outputs": {
 			"endpoint_particles": endpoint_path,
@@ -323,6 +639,11 @@ def _run(cfg: RunConfig) -> dict[str, object]:
 
 
 def main(argv: Sequence[str] | None = None) -> None:
+	logging.basicConfig(
+		level=logging.INFO,
+		format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+	)
+
 	parser = _build_arg_parser()
 	args = parser.parse_args(argv)
 	cfg = _build_config(args)

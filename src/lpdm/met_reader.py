@@ -207,15 +207,30 @@ class ArcoEra5ZarrReader(MetReader):
 
         ds = self._open_dataset()
         ds = self._select_variables(ds)
-        ds = self._slice_spatial_temporal(ds, request_hour)
 
-        # Explicitly trigger dask graph execution here so the rest of the
-        # pipeline works with in-memory numpy-backed data.
-        ds_local = ds.compute()
+        try:
+            # Compute each endpoint separately to lower peak memory usage versus
+            # materializing both snapshots at once.
+            start_request = BoundingBoxRequest(
+                spatial=request_hour.spatial,
+                time=TimeBounds(start=t0, end=t0),
+            )
+            end_request = BoundingBoxRequest(
+                spatial=request_hour.spatial,
+                time=TimeBounds(start=t1, end=t1),
+            )
 
-        t0_sel, t1_sel = self._coerce_time_bounds_for_dataset(ds_local, t0, t1)
-        ds_start = ds_local.sel({self.time_name: t0_sel})
-        ds_end = ds_local.sel({self.time_name: t1_sel})
+            ds_start_local = self._slice_spatial_temporal(ds, start_request).compute()
+            ds_end_local = self._slice_spatial_temporal(ds, end_request).compute()
+        finally:
+            close_fn = getattr(ds, "close", None)
+            if callable(close_fn):
+                close_fn()
+
+        t0_sel, _ = self._coerce_time_bounds_for_dataset(ds_start_local, t0, t0)
+        _, t1_sel = self._coerce_time_bounds_for_dataset(ds_end_local, t1, t1)
+        ds_start = ds_start_local.sel({self.time_name: t0_sel})
+        ds_end = ds_end_local.sel({self.time_name: t1_sel})
 
         ds_start, ds_end, level_agl_m = self._subset_vertical_levels_by_agl(
             ds_start=ds_start,
@@ -227,13 +242,13 @@ class ArcoEra5ZarrReader(MetReader):
         hour_end = self._dataset_to_channel_tensor(ds_end)
 
         metadata = MetFieldMetadata(
-            lon=np.asarray(ds_local[self.lon_name].values),
-            lat=np.asarray(ds_local[self.lat_name].values),
+            lon=np.asarray(ds_start[self.lon_name].values),
+            lat=np.asarray(ds_start[self.lat_name].values),
             level=level_agl_m,
             pressure_level_hpa=np.asarray(ds_start[self.level_name].values),
             time_start=t0,
             time_end=t1,
-            variable_units=self._read_variable_units(ds_local),
+            variable_units=self._read_variable_units(ds_start),
         )
 
         return HourlyMetTensors(
