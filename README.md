@@ -69,6 +69,7 @@ Create a virtual environment and install dependencies from `requirements.txt`:
 uv venv --python 3.11
 source .venv/bin/activate
 uv pip install -r requirements.txt
+uv pip install -e .
 ```
 
 Run the model entrypoint:
@@ -80,7 +81,19 @@ python -m lpdm.main
 ## Physics Tests
 
 ```bash
-PYTHONPATH=src .venv/bin/python -m pytest -q tests/test_physics.py
+.venv/bin/python -m pytest -q tests/test_physics.py
+```
+
+Recommended once per environment (so imports work without `PYTHONPATH`):
+
+```bash
+uv pip install --python .venv/bin/python -e .
+```
+
+Then run all tests from repo root:
+
+```bash
+.venv/bin/python -m pytest -q
 ```
 
 The suite includes:

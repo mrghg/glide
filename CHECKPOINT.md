@@ -74,5 +74,6 @@ Build a modern, highly optimized, backward-in-time LPDM for greenhouse-gas footp
 
 ## Known gotchas
 
-- Running bare `pytest` may use the wrong interpreter; prefer `PYTHONPATH=src .venv/bin/python -m pytest`.
+- Running bare `pytest` may use the wrong interpreter; prefer `.venv/bin/python -m pytest`.
+- In a fresh environment, install the package editable first: `uv pip install --python .venv/bin/python -e .`.
 - Ensure shell PATH is refreshed if `uv` was installed in-session.

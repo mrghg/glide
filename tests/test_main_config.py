@@ -5,24 +5,37 @@ from argparse import Namespace
 from lpdm.main import _build_config
 
 
+def _base_args(**overrides: object) -> Namespace:
+    args = {
+        "zarr_store": "gs://dummy/era5.zarr",
+        "start_time": "2024-01-01T00:00:00Z",
+        "release_duration_seconds": 1800,
+        "simulation_length_seconds": 7200,
+        "release_seed": 42,
+        "n_particles": 100,
+        "release_lon": 1.0,
+        "release_lat": 2.0,
+        "release_alt_agl_m": 400.0,
+        "dt_seconds": 300,
+        "bbox_pad_lon_deg": 2.0,
+        "bbox_pad_lat_deg": 2.0,
+        "bbox_pad_alt_m": 3000.0,
+        "output_uri": "outputs/test-run",
+        "device": "cpu",
+        "met_cache_max_hours": 2,
+        "memory_log_every_steps": 10,
+        "gc_every_steps": 50,
+        "memory_guard_max_rss_gib": None,
+        "memory_guard_max_device_allocated_gib": None,
+        "memory_guard_max_device_reserved_gib": None,
+        "memory_guard_check_every_steps": 1,
+    }
+    args.update(overrides)
+    return Namespace(**args)
+
+
 def test_build_config_parses_and_validates() -> None:
-    args = Namespace(
-        zarr_store="gs://dummy/era5.zarr",
-        start_time="2024-01-01T00:00:00Z",
-        release_duration_seconds=1800,
-        simulation_length_seconds=7200,
-        release_seed=42,
-        n_particles=100,
-        release_lon=1.0,
-        release_lat=2.0,
-        release_alt_agl_m=400.0,
-        dt_seconds=300,
-        bbox_pad_lon_deg=2.0,
-        bbox_pad_lat_deg=2.0,
-        bbox_pad_alt_m=3000.0,
-        output_uri="outputs/test-run",
-        device="cpu",
-    )
+    args = _base_args()
 
     cfg = _build_config(args)
     assert cfg.zarr_store == "gs://dummy/era5.zarr"
@@ -34,22 +47,10 @@ def test_build_config_parses_and_validates() -> None:
 
 
 def test_build_config_rejects_short_simulation_length() -> None:
-    args = Namespace(
-        zarr_store="gs://dummy/era5.zarr",
-        start_time="2024-01-01T00:00:00Z",
+    args = _base_args(
         release_duration_seconds=3600,
         simulation_length_seconds=3600,
         release_seed=None,
-        n_particles=100,
-        release_lon=1.0,
-        release_lat=2.0,
-        release_alt_agl_m=400.0,
-        dt_seconds=300,
-        bbox_pad_lon_deg=2.0,
-        bbox_pad_lat_deg=2.0,
-        bbox_pad_alt_m=3000.0,
-        output_uri="outputs/test-run",
-        device="cpu",
     )
 
     try:
@@ -60,22 +61,10 @@ def test_build_config_rejects_short_simulation_length() -> None:
 
 
 def test_build_config_rejects_missing_start_time() -> None:
-    args = Namespace(
-        zarr_store="gs://dummy/era5.zarr",
+    args = _base_args(
         start_time=None,
-        release_duration_seconds=1800,
         simulation_length_seconds=5400,
         release_seed=None,
-        n_particles=100,
-        release_lon=1.0,
-        release_lat=2.0,
-        release_alt_agl_m=400.0,
-        dt_seconds=300,
-        bbox_pad_lon_deg=2.0,
-        bbox_pad_lat_deg=2.0,
-        bbox_pad_alt_m=3000.0,
-        output_uri="outputs/test-run",
-        device="cpu",
     )
 
     try:
@@ -86,22 +75,9 @@ def test_build_config_rejects_missing_start_time() -> None:
 
 
 def test_build_config_rejects_negative_release_seed() -> None:
-    args = Namespace(
-        zarr_store="gs://dummy/era5.zarr",
-        start_time="2024-01-01T00:00:00Z",
-        release_duration_seconds=1800,
+    args = _base_args(
         simulation_length_seconds=5400,
         release_seed=-1,
-        n_particles=100,
-        release_lon=1.0,
-        release_lat=2.0,
-        release_alt_agl_m=400.0,
-        dt_seconds=300,
-        bbox_pad_lon_deg=2.0,
-        bbox_pad_lat_deg=2.0,
-        bbox_pad_alt_m=3000.0,
-        output_uri="outputs/test-run",
-        device="cpu",
     )
 
     try:

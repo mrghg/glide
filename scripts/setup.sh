@@ -43,6 +43,7 @@ if command -v uv >/dev/null 2>&1; then
   # shellcheck disable=SC1091
   source .venv/bin/activate
   uv pip install -r requirements.txt
+  uv pip install -e .
 else
   echo "==> uv not found, falling back to stdlib venv + pip"
   if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
@@ -55,6 +56,7 @@ else
   source .venv/bin/activate
   python -m pip install --upgrade pip
   pip install -r requirements.txt
+  pip install -e .
 fi
 
 echo "==> Environment ready: $(pwd)/.venv"
