@@ -292,12 +292,36 @@ class ArcoEra5ZarrReader(MetReader):
         time = request.time
         time_start, time_end = self._coerce_time_bounds_for_dataset(ds, time.start, time.end)
 
+        lon_values = np.asarray(ds[self.lon_name].values, dtype=np.float64)
+        lon_is_360 = float(np.nanmin(lon_values)) >= 0.0 and float(np.nanmax(lon_values)) > 180.0
+        if lon_is_360:
+            lon_min = spatial.lon_min % 360.0
+            lon_max = spatial.lon_max % 360.0
+        else:
+            lon_min = ((spatial.lon_min + 180.0) % 360.0) - 180.0
+            lon_max = ((spatial.lon_max + 180.0) % 360.0) - 180.0
+
+        lon_coord = ds[self.lon_name]
+        if lon_min <= lon_max:
+            lon_mask = (lon_coord >= lon_min) & (lon_coord <= lon_max)
+        else:
+            lon_mask = (lon_coord >= lon_min) | (lon_coord <= lon_max)
+
+        ds = ds.where(lon_mask, drop=True)
+
         ds = ds.sel(
             {
                 self.time_name: slice(time_start, time_end),
-                self.lon_name: slice(spatial.lon_min, spatial.lon_max),
             }
         )
+
+        if int(ds.sizes.get(self.lon_name, 0)) == 0:
+            lon_convention = "0..360" if lon_is_360 else "-180..180"
+            raise ValueError(
+                "Longitude subset is empty after slicing. "
+                f"Requested [{spatial.lon_min}, {spatial.lon_max}] deg; "
+                f"interpreted as [{lon_min}, {lon_max}] in {lon_convention} coordinates."
+            )
 
         lat_values = ds[self.lat_name].values
         lat_descending = lat_values[0] > lat_values[-1]
@@ -307,6 +331,12 @@ class ArcoEra5ZarrReader(MetReader):
             else slice(spatial.lat_min, spatial.lat_max)
         )
         ds = ds.sel({self.lat_name: lat_slice})
+
+        if int(ds.sizes.get(self.lat_name, 0)) == 0:
+            raise ValueError(
+                "Latitude subset is empty after slicing. "
+                f"Requested [{spatial.lat_min}, {spatial.lat_max}] deg."
+            )
 
         return ds
 
@@ -318,8 +348,25 @@ class ArcoEra5ZarrReader(MetReader):
     ) -> tuple[xr.Dataset, xr.Dataset, np.ndarray]:
         """Subset pressure levels using geopotential-derived geometric AGL bounds."""
 
+        if int(ds_start.sizes.get(self.lon_name, 0)) == 0 or int(ds_start.sizes.get(self.lat_name, 0)) == 0:
+            raise ValueError(
+                "Cannot subset vertical levels: empty spatial selection in ds_start "
+                f"(lat={int(ds_start.sizes.get(self.lat_name, 0))}, lon={int(ds_start.sizes.get(self.lon_name, 0))})."
+            )
+        if int(ds_end.sizes.get(self.lon_name, 0)) == 0 or int(ds_end.sizes.get(self.lat_name, 0)) == 0:
+            raise ValueError(
+                "Cannot subset vertical levels: empty spatial selection in ds_end "
+                f"(lat={int(ds_end.sizes.get(self.lat_name, 0))}, lon={int(ds_end.sizes.get(self.lon_name, 0))})."
+            )
+
         level_agl_start = self._compute_level_agl_m(ds_start)
         level_agl_end = self._compute_level_agl_m(ds_end)
+
+        if level_agl_start.size == 0 or level_agl_end.size == 0:
+            raise ValueError(
+                "Computed empty AGL arrays. This usually means the spatial subset is empty or the source "
+                "geopotential fields are missing the expected [level, lat, lon] coverage."
+            )
 
         level_agl_mean = 0.5 * (
             np.mean(level_agl_start, axis=(1, 2)) + np.mean(level_agl_end, axis=(1, 2))

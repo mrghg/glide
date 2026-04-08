@@ -1,0 +1,53 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "GLIDE: lpdm.main (UV)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "lpdm.main",
+            "python": "${workspaceFolder}/.venv/bin/python",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/src"
+            },
+            "args": [
+                "--zarr-store",
+                "gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3",
+                "--start-time",
+                "2024-01-01T00:00:00Z",
+                "--release-duration-seconds",
+                "3600",
+                "--simulation-length-seconds",
+                "10800",
+                "--release-seed",
+                "42",
+                "--n-particles",
+                "2048",
+                "--release-lon",
+                "-122.30",
+                "--release-lat",
+                "37.90",
+                "--release-alt-agl-m",
+                "500",
+                "--dt-seconds",
+                "300",
+                "--output-uri",
+                "outputs/demo-run"
+            ]
+        },
+        {
+            "name": "GLIDE: Current File (UV)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "python": "${workspaceFolder}/.venv/bin/python",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/src"
+            }
+        }
+    ]
+}

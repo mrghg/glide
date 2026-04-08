@@ -75,6 +75,12 @@ def _build_mock_era5_dataset() -> xr.Dataset:
     return ds
 
 
+def _build_mock_era5_dataset_360_lon() -> xr.Dataset:
+    ds = _build_mock_era5_dataset()
+    ds = ds.assign_coords(longitude=np.array([237.5, 238.5], dtype=np.float64))
+    return ds
+
+
 def test_fetch_hourly_window_includes_surface_pressure_and_converts_w() -> None:
     ds = _build_mock_era5_dataset()
     reader = _InMemoryArcoReader(ds)
@@ -147,3 +153,27 @@ def test_fetch_hourly_window_rejects_unknown_w_units() -> None:
         raise AssertionError("Expected ValueError for unsupported vertical velocity units")
     except ValueError as exc:
         assert "Unsupported units" in str(exc)
+
+
+def test_fetch_hourly_window_handles_negative_lon_request_with_360_dataset() -> None:
+    ds = _build_mock_era5_dataset_360_lon()
+    reader = _InMemoryArcoReader(ds)
+
+    request = BoundingBoxRequest(
+        spatial=SpatialBounds(
+            lon_min=-122.6,
+            lon_max=-121.4,
+            lat_min=9.5,
+            lat_max=11.5,
+            z_min=850.0,
+            z_max=1050.0,
+        ),
+        time=TimeBounds(
+            start=datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc),
+            end=datetime(2024, 1, 1, 1, 0, tzinfo=timezone.utc),
+        ),
+    )
+
+    result = reader.fetch_hourly_window(request)
+    assert result.hour_start.shape == (5, 2, 2, 2)
+    assert result.hour_end.shape == (5, 2, 2, 2)

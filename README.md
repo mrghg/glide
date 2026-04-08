@@ -91,7 +91,9 @@ Example:
 PYTHONPATH=src .venv/bin/python -m lpdm.main \
 	--zarr-store gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3 \
 	--start-time 2024-01-01T00:00:00Z \
-	--end-time 2024-01-01T03:00:00Z \
+	--release-duration-seconds 3600 \
+	--simulation-length-seconds 10800 \
+	--release-seed 42 \
 	--n-particles 2048 \
 	--release-lon -122.30 \
 	--release-lat 37.90 \
@@ -105,10 +107,20 @@ Equivalent environment-variable configuration is also supported:
 ```bash
 export LPDM_ZARR_STORE=gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3
 export LPDM_START_TIME=2024-01-01T00:00:00Z
-export LPDM_END_TIME=2024-01-01T03:00:00Z
+export LPDM_RELEASE_DURATION_SECONDS=3600
+export LPDM_SIMULATION_LENGTH_SECONDS=10800
+export LPDM_RELEASE_SEED=42
 export LPDM_OUTPUT_URI=gs://<your-bucket>/lpdm/demo-run
 PYTHONPATH=src .venv/bin/python -m lpdm.main
 ```
+
+Runtime timing semantics:
+- `start-time`: start of the particle release window.
+- `release-duration-seconds`: release window length; particles are released uniformly across this window.
+- `simulation-length-seconds`: total backward integration length measured from the end of the release window.
+- `release-seed` (optional): makes temporal release sampling deterministic and reproducible.
+
+Validation requires `simulation-length-seconds > release-duration-seconds`.
 
 Outputs written by default:
 - `endpoint_particles.parquet`
