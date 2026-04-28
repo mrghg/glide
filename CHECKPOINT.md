@@ -68,6 +68,12 @@ Build a modern, highly optimized, backward-in-time LPDM for greenhouse-gas footp
 - Fail-fast memory guards added for RSS and device memory thresholds.
 - Guard-triggered abort path writes diagnostic metadata before exit.
 
+### 2026-04-28 local testing and memory-optimization update
+
+- Fixed severe memory explosions in `src/lpdm/met_reader.py` by lazily evaluating spatial and temporal slices before executing Dask `.compute()` calls.
+- Created `scripts/download_sample_cube.py` utility to download localized ARCO ERA5 data cubes for faster local testing and debugging.
+- Updated documentation for local workflow and data subsetting.
+
 ## Next recommended task
 
 - Replace domain-mean wind placeholder usage in runtime stepping with full spatial-temporal interpolation path.

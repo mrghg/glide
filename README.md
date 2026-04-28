@@ -105,7 +105,27 @@ Each test also verifies particle mass conservation by checking total weight.
 
 ## Minimal Trajectory Run (Local or Vertex Notebook)
 
-The entrypoint now supports a minimal end-to-end backward trajectory run,
+### Downloading Local Sample Data
+
+For local development or rapid testing, reading from the remote ARCO ERA5 Zarr store can be slow or memory-intensive. You can download a cropped subset of the dataset (a "data cube") that spans only your area and time of interest:
+
+```bash
+.venv/bin/python scripts/download_sample_cube.py \
+    --out-path data/sample_met.zarr \
+    --store-uri gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3 \
+    --time-start 2023-12-31T18:00:00 \
+    --time-end 2024-01-01T06:00:00 \
+    --lon-min -125.0 \
+    --lon-max -119.0 \
+    --lat-min 35.0 \
+    --lat-max 41.0
+```
+
+After downloading the sample data, specify `--zarr-store data/sample_met.zarr` in your run commands or update `.vscode/launch.json` to use this local store instead of the remote `gs://...` URI.
+
+### Running the Model
+
+The entrypoint supports a minimal end-to-end backward trajectory run,
 including met fetch, advection stepping, and output persistence.
 
 Example:

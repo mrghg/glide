@@ -209,8 +209,6 @@ class ArcoEra5ZarrReader(MetReader):
         ds = self._select_variables(ds)
 
         try:
-            # Compute each endpoint separately to lower peak memory usage versus
-            # materializing both snapshots at once.
             start_request = BoundingBoxRequest(
                 spatial=request_hour.spatial,
                 time=TimeBounds(start=t0, end=t0),
@@ -220,23 +218,29 @@ class ArcoEra5ZarrReader(MetReader):
                 time=TimeBounds(start=t1, end=t1),
             )
 
-            ds_start_local = self._slice_spatial_temporal(ds, start_request).compute()
-            ds_end_local = self._slice_spatial_temporal(ds, end_request).compute()
+            ds_start_lazy = self._slice_spatial_temporal(ds, start_request)
+            ds_end_lazy = self._slice_spatial_temporal(ds, end_request)
+            
+            # Ensure time subsets only have 1 step before accessing values
+            t0_sel, _ = self._coerce_time_bounds_for_dataset(ds_start_lazy, t0, t0)
+            _, t1_sel = self._coerce_time_bounds_for_dataset(ds_end_lazy, t1, t1)
+            ds_start_lazy = ds_start_lazy.sel({self.time_name: t0_sel})
+            ds_end_lazy = ds_end_lazy.sel({self.time_name: t1_sel})
+
+            # Subset vertical levels using lazy Dask arrays (only reads Z/Z_SFC into memory to evaluate the bound)
+            ds_start_sub, ds_end_sub, level_agl_m = self._subset_vertical_levels_by_agl(
+                ds_start=ds_start_lazy,
+                ds_end=ds_end_lazy,
+                spatial=request.spatial,
+            )
+
+            # Materialize only the fully sliced bounding boxes
+            ds_start = ds_start_sub.compute()
+            ds_end = ds_end_sub.compute()
         finally:
             close_fn = getattr(ds, "close", None)
             if callable(close_fn):
                 close_fn()
-
-        t0_sel, _ = self._coerce_time_bounds_for_dataset(ds_start_local, t0, t0)
-        _, t1_sel = self._coerce_time_bounds_for_dataset(ds_end_local, t1, t1)
-        ds_start = ds_start_local.sel({self.time_name: t0_sel})
-        ds_end = ds_end_local.sel({self.time_name: t1_sel})
-
-        ds_start, ds_end, level_agl_m = self._subset_vertical_levels_by_agl(
-            ds_start=ds_start,
-            ds_end=ds_end,
-            spatial=request.spatial,
-        )
 
         hour_start = self._dataset_to_channel_tensor(ds_start)
         hour_end = self._dataset_to_channel_tensor(ds_end)
@@ -317,27 +321,13 @@ class ArcoEra5ZarrReader(MetReader):
             lon_max = ((spatial.lon_max + 180.0) % 360.0) - 180.0
 
         lon_coord = ds[self.lon_name]
-        if lon_min <= lon_max:
-            lon_mask = (lon_coord >= lon_min) & (lon_coord <= lon_max)
-        else:
-            lon_mask = (lon_coord >= lon_min) | (lon_coord <= lon_max)
-
-        ds = ds.where(lon_mask, drop=True)
-
-        ds = ds.sel(
-            {
-                self.time_name: slice(time_start, time_end),
-            }
-        )
-
-        if int(ds.sizes.get(self.lon_name, 0)) == 0:
-            lon_convention = "0..360" if lon_is_360 else "-180..180"
-            raise ValueError(
-                "Longitude subset is empty after slicing. "
-                f"Requested [{spatial.lon_min}, {spatial.lon_max}] deg; "
-                f"interpreted as [{lon_min}, {lon_max}] in {lon_convention} coordinates."
-            )
-
+        
+        # Slice temporal and latitude bounds first to dramatically reduce 
+        # the dask graph size and memory footprint before any longitude operations.
+        ds = ds.sel({
+            self.time_name: slice(time_start, time_end),
+        })
+        
         lat_values = ds[self.lat_name].values
         lat_descending = lat_values[0] > lat_values[-1]
         lat_slice = (
@@ -351,6 +341,22 @@ class ArcoEra5ZarrReader(MetReader):
             raise ValueError(
                 "Latitude subset is empty after slicing. "
                 f"Requested [{spatial.lat_min}, {spatial.lat_max}] deg."
+            )
+
+        # Slice longitude safely without .where(drop=True) over massive datasets
+        if lon_min <= lon_max:
+            ds = ds.sel({self.lon_name: slice(lon_min, lon_max)})
+        else:
+            ds1 = ds.sel({self.lon_name: slice(lon_min, None)})
+            ds2 = ds.sel({self.lon_name: slice(None, lon_max)})
+            ds = xr.concat([ds1, ds2], dim=self.lon_name)
+
+        if int(ds.sizes.get(self.lon_name, 0)) == 0:
+            lon_convention = "0..360" if lon_is_360 else "-180..180"
+            raise ValueError(
+                "Longitude subset is empty after slicing. "
+                f"Requested [{spatial.lon_min}, {spatial.lon_max}] deg; "
+                f"interpreted as [{lon_min}, {lon_max}] in {lon_convention} coordinates."
             )
 
         return ds
