@@ -17,7 +17,7 @@
                 "--release-duration-seconds",
                 "3600",
                 "--simulation-length-seconds",
-                "10800",
+                "36000",
                 "--release-seed",
                 "42",
                 "--n-particles",

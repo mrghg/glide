@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from argparse import Namespace
+from datetime import timedelta
 
-from lpdm.main import _build_config
+from lpdm.main import _build_config, _footprint_time_bin_index
 
 
 def _base_args(**overrides: object) -> Namespace:
@@ -85,3 +86,13 @@ def test_build_config_rejects_negative_release_seed() -> None:
         raise AssertionError("Expected ValueError for negative release seed")
     except ValueError as exc:
         assert "release-seed must be >= 0" in str(exc)
+
+
+def test_footprint_time_bin_index_advances_each_hour() -> None:
+    cfg = _build_config(_base_args(simulation_length_seconds=10800, release_duration_seconds=1800))
+    release_end = cfg.start_time + timedelta(seconds=cfg.release_duration_seconds)
+
+    assert _footprint_time_bin_index(release_end, release_end, 3) == 0
+    assert _footprint_time_bin_index(release_end, release_end - timedelta(minutes=55), 3) == 0
+    assert _footprint_time_bin_index(release_end, release_end - timedelta(minutes=60), 3) == 1
+    assert _footprint_time_bin_index(release_end, release_end - timedelta(minutes=125), 3) == 2

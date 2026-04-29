@@ -123,6 +123,16 @@ def _hour_floor(dt: datetime) -> datetime:
 	return dt.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
 
 
+def _footprint_time_bin_index(release_end: datetime, t_cursor: datetime, n_time_bins: int) -> int:
+	"""Map the current backward integration cursor to a 0-based time_ago bin."""
+
+	if n_time_bins <= 0:
+		raise ValueError("n_time_bins must be > 0")
+
+	elapsed_seconds = max(0.0, release_end.timestamp() - t_cursor.timestamp())
+	return min(n_time_bins - 1, int(elapsed_seconds / 3600.0))
+
+
 @dataclass(frozen=True)
 class RunConfig:
 	zarr_store: str
@@ -500,7 +510,7 @@ def _run(cfg: RunConfig) -> dict[str, object]:
 
 		# Accumulate footprint
 		if active_count > 0:
-			t_idx = int((sim_start.timestamp() - t_cursor.timestamp()) / 3600.0)
+			t_idx = _footprint_time_bin_index(release_end, t_cursor, gridder.n_t)
 			gridder.accumulate(
 				particles=particles[:, :3],
 				active_mask=active_mask,
