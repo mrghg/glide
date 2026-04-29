@@ -364,6 +364,22 @@ def _run(cfg: RunConfig) -> dict[str, object]:
 			release_end_ts,
 		)
 
+	# 1-hour temporal bins, 0.25 deg spatial bins
+	n_hours = int(cfg.simulation_length_seconds / 3600)
+	n_y = int(2.0 * cfg.bbox_pad_lat_deg / 0.25)
+	n_x = int(2.0 * cfg.bbox_pad_lon_deg / 0.25)
+	gridder = FootprintGridder(
+		lon_bounds=(cfg.release_lon - cfg.bbox_pad_lon_deg, cfg.release_lon + cfg.bbox_pad_lon_deg),
+		lat_bounds=(cfg.release_lat - cfg.bbox_pad_lat_deg, cfg.release_lat + cfg.bbox_pad_lat_deg),
+		z_bounds=(0.0, 5000.0),
+		n_time_bins=max(1, n_hours),
+		n_y=max(1, n_y),
+		n_x=max(1, n_x),
+		n_z_bins=5,
+		device=device,
+		dtype=particles.dtype,
+	)
+
 	step_count = 0
 	hour_windows = 0
 	met_cache: OrderedDict[datetime, HourlyMetTensors] = OrderedDict()
@@ -481,6 +497,17 @@ def _run(cfg: RunConfig) -> dict[str, object]:
 			del m_end
 		else:
 			u_m_s, v_m_s, w_m_s = 0.0, 0.0, 0.0
+
+		# Accumulate footprint
+		if active_count > 0:
+			t_idx = int((sim_start.timestamp() - t_cursor.timestamp()) / 3600.0)
+			gridder.accumulate(
+				particles=particles[:, :3],
+				active_mask=active_mask,
+				weights=particles[:, 3],
+				t_idx=t_idx,
+				dt_seconds=delta_s,
+			)
 
 		step_count += 1
 
@@ -656,6 +683,7 @@ def _run(cfg: RunConfig) -> dict[str, object]:
 
 	writer.write_particles_parquet(endpoint_path, particles)
 	writer.write_trajectory_parquet(trajectory_path, step_seconds=cfg.dt_seconds, rows=diag_rows)
+	writer.write_footprint_zarr(endpoint_path.replace("endpoint_particles.parquet", "footprints.zarr"), gridder.tensor)
 
 	metadata = {
 		"config": {
