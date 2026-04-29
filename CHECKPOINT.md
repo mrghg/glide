@@ -74,6 +74,16 @@ Build a modern, highly optimized, backward-in-time LPDM for greenhouse-gas footp
 - Created `scripts/download_sample_cube.py` utility to download localized ARCO ERA5 data cubes for faster local testing and debugging.
 - Updated documentation for local workflow and data subsetting.
 
+### 2026-04-29 local met debug and zarr-compat update
+
+- `scripts/download_sample_cube.py` now opens public ARCO GCS data with anonymous access via `storage_options={"token": "anon"}`.
+- Added optional output format switch (`--zarr-version {2,3}`) and v3-safe write preparation by clearing inherited per-variable encodings before Zarr v3 writes.
+- Updated write API usage to avoid deprecation warnings by using `zarr_format` instead of deprecated `zarr_version` keyword in `xarray.Dataset.to_zarr`.
+- Added VS Code debug profile for local meteorology smoke tests in `.vscode/launch.json`:
+	- `GLIDE: lpdm.main (Local Sample Met)`
+	- Uses `${workspaceFolder}/data/sample_met.zarr` as `--zarr-store`.
+	- Writes to `outputs/demo-run-local`.
+
 ## Next recommended task
 
 - Replace domain-mean wind placeholder usage in runtime stepping with full spatial-temporal interpolation path.
@@ -83,3 +93,5 @@ Build a modern, highly optimized, backward-in-time LPDM for greenhouse-gas footp
 - Running bare `pytest` may use the wrong interpreter; prefer `.venv/bin/python -m pytest`.
 - In a fresh environment, install the package editable first: `uv pip install --python .venv/bin/python -e .`.
 - Ensure shell PATH is refreshed if `uv` was installed in-session.
+- For public GCS Zarr buckets, ADC is not required when opening with anonymous token mode (`token="anon"`).
+- Zarr v3 writes can fail if source dataset encodings contain v2 codec objects (for example `numcodecs.Blosc`); clear inherited encodings before writing v3.

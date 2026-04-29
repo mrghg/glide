@@ -14,6 +14,19 @@ REQUIRED_VARS = [
     "geopotential_at_surface"
 ]
 
+
+def _prepare_for_zarr_write(ds: xr.Dataset, zarr_version: int) -> xr.Dataset:
+    """Remove source encodings that are incompatible with target Zarr format."""
+    if zarr_version != 3:
+        return ds
+
+    # ARCO source metadata may contain v2-style numcodecs objects (e.g. Blosc)
+    # in .encoding, which are rejected by Zarr v3's codec API.
+    ds_out = ds.copy(deep=False)
+    for var_name in ds_out.variables:
+        ds_out[var_name].encoding = {}
+    return ds_out
+
 def download_sample_cube(
     out_path: str,
     store_uri: str,
@@ -23,9 +36,11 @@ def download_sample_cube(
     lon_max: float,
     lat_min: float,
     lat_max: float,
+    zarr_version: int,
 ):
     print(f"Opening remote Zarr store at {store_uri}...")
-    ds = xr.open_zarr(store_uri, consolidated=True)
+    # Public ARCO bucket access should use anonymous GCS token via gcsfs.
+    ds = xr.open_zarr(store_uri, consolidated=True, storage_options={"token": "anon"})
     
     # Select only the variables we need for LPDM
     missing = [v for v in REQUIRED_VARS if v not in ds.variables]
@@ -71,9 +86,16 @@ def download_sample_cube(
         os.makedirs(out_dir, exist_ok=True)
         
     print(f"Downloading and saving data to local Zarr: {out_path}...")
+    ds_to_write = _prepare_for_zarr_write(ds_subset, zarr_version=zarr_version)
+
     # Writing the filtered subset
     with xr.set_options(keep_attrs=True):
-        ds_subset.to_zarr(out_path, mode="w", consolidated=True)
+        ds_to_write.to_zarr(
+            out_path,
+            mode="w",
+            consolidated=True,
+            zarr_format=zarr_version,
+        )
         
     print("Download and local store setup complete.")
 
@@ -90,6 +112,13 @@ if __name__ == "__main__":
     parser.add_argument("--lon-max", type=float, default=-119.0)
     parser.add_argument("--lat-min", type=float, default=35.0)
     parser.add_argument("--lat-max", type=float, default=41.0)
+    parser.add_argument(
+        "--zarr-version",
+        type=int,
+        choices=[2, 3],
+        default=2,
+        help="Output Zarr format version (2 is safest; 3 clears inherited v2 codecs).",
+    )
     
     args = parser.parse_args()
     
@@ -102,4 +131,5 @@ if __name__ == "__main__":
         lon_max=args.lon_max,
         lat_min=args.lat_min,
         lat_max=args.lat_max,
+        zarr_version=args.zarr_version,
     )

@@ -121,7 +121,37 @@ For local development or rapid testing, reading from the remote ARCO ERA5 Zarr s
     --lat-max 41.0
 ```
 
-After downloading the sample data, specify `--zarr-store data/sample_met.zarr` in your run commands or update `.vscode/launch.json` to use this local store instead of the remote `gs://...` URI.
+Notes:
+- Public ARCO buckets are opened anonymously in the helper script, so ADC credentials are not required for that default source URI.
+- To choose output store format explicitly, pass `--zarr-version 2` (default) or `--zarr-version 3`.
+
+After downloading the sample data, either:
+- set `--zarr-store data/sample_met.zarr` in your run command, or
+- use VS Code Run/Debug profile `GLIDE: lpdm.main (Local Sample Met)` from `.vscode/launch.json`.
+
+### Local Smoke Test (Using Downloaded Sample)
+
+Use this command to validate the local meteorology path end-to-end:
+
+```bash
+.venv/bin/python -m lpdm.main \
+	--zarr-store data/sample_met.zarr \
+	--start-time 2024-01-01T00:00:00Z \
+	--release-duration-seconds 3600 \
+	--simulation-length-seconds 10800 \
+	--release-seed 42 \
+	--n-particles 2048 \
+	--release-lon -122.30 \
+	--release-lat 37.90 \
+	--release-alt-agl-m 500 \
+	--dt-seconds 300 \
+	--output-uri outputs/demo-run-local
+```
+
+Expected outputs under `outputs/demo-run-local`:
+- `endpoint_particles.parquet`
+- `trajectory_diagnostics.parquet`
+- `run_metadata.json`
 
 ### Running the Model
 
@@ -131,7 +161,7 @@ including met fetch, advection stepping, and output persistence.
 Example:
 
 ```bash
-PYTHONPATH=src .venv/bin/python -m lpdm.main \
+.venv/bin/python -m lpdm.main \
 	--zarr-store gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3 \
 	--start-time 2024-01-01T00:00:00Z \
 	--release-duration-seconds 3600 \
@@ -154,7 +184,7 @@ export LPDM_RELEASE_DURATION_SECONDS=3600
 export LPDM_SIMULATION_LENGTH_SECONDS=10800
 export LPDM_RELEASE_SEED=42
 export LPDM_OUTPUT_URI=gs://<your-bucket>/lpdm/demo-run
-PYTHONPATH=src .venv/bin/python -m lpdm.main
+.venv/bin/python -m lpdm.main
 ```
 
 Runtime timing semantics:
@@ -175,7 +205,7 @@ Memory controls and profiling logs:
 Example with aggressive memory limits:
 
 ```bash
-PYTHONPATH=src .venv/bin/python -m lpdm.main \
+.venv/bin/python -m lpdm.main \
 	--zarr-store gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3 \
 	--start-time 2024-01-01T00:00:00Z \
 	--release-duration-seconds 3600 \
