@@ -177,3 +177,13 @@ def test_fetch_hourly_window_handles_negative_lon_request_with_360_dataset() -> 
     result = reader.fetch_hourly_window(request)
     assert result.hour_start.shape == (5, 2, 2, 2)
     assert result.hour_end.shape == (5, 2, 2, 2)
+
+
+def test_get_time_coverage_returns_dataset_bounds() -> None:
+    ds = _build_mock_era5_dataset()
+    reader = _InMemoryArcoReader(ds)
+
+    start, end = reader.get_time_coverage()
+
+    assert start == datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
+    assert end == datetime(2024, 1, 1, 1, 0, tzinfo=timezone.utc)

@@ -122,6 +122,10 @@ class MetReader(ABC):
             HourlyMetTensors containing start/end snapshots and metadata.
         """
 
+    @abstractmethod
+    def get_time_coverage(self) -> tuple[datetime, datetime]:
+        """Return the dataset time coverage as UTC datetimes."""
+
 
 class ArcoEra5ZarrReader(MetReader):
     """Reader for ARCO ERA5 Zarr stores hosted on Google Cloud Storage.
@@ -260,6 +264,24 @@ class ArcoEra5ZarrReader(MetReader):
             hour_end=hour_end,
             metadata=metadata,
         )
+
+    def get_time_coverage(self) -> tuple[datetime, datetime]:
+        """Return the first and last timestamps available in the dataset."""
+
+        ds = self._open_dataset()
+        try:
+            time_coord = ds[self.time_name]
+            if int(time_coord.size) == 0:
+                raise ValueError(f"Dataset time coordinate {self.time_name!r} is empty")
+
+            values = np.asarray(time_coord.values)
+            start = self._time_value_to_utc_datetime(values[0])
+            end = self._time_value_to_utc_datetime(values[-1])
+            return start, end
+        finally:
+            close_fn = getattr(ds, "close", None)
+            if callable(close_fn):
+                close_fn()
 
     def _open_dataset(self) -> xr.Dataset:
         """Open the remote Zarr store lazily.
@@ -463,6 +485,21 @@ class ArcoEra5ZarrReader(MetReader):
             end_utc = end.astimezone(timezone.utc).replace(tzinfo=None)
             return np.datetime64(start_utc), np.datetime64(end_utc)
         return start, end
+
+    def _time_value_to_utc_datetime(self, value: object) -> datetime:
+        """Normalize a dataset time coordinate value to UTC datetime."""
+
+        value_array = np.asarray(value)
+        if np.issubdtype(value_array.dtype, np.datetime64):
+            iso_value = np.datetime_as_string(value_array.astype("datetime64[s]"), timezone="UTC")
+            return datetime.fromisoformat(iso_value.replace("Z", "+00:00"))
+
+        if isinstance(value, datetime):
+            if value.tzinfo is None:
+                return value.replace(tzinfo=timezone.utc)
+            return value.astimezone(timezone.utc)
+
+        raise TypeError(f"Unsupported time coordinate value type: {type(value)!r}")
 
     def _canonicalize_hour_bounds(self, bounds: TimeBounds) -> tuple[datetime, datetime]:
         """Return exact hour start/end timestamps used for met interpolation."""

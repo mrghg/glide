@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from argparse import Namespace
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
-from lpdm.main import _build_config, _footprint_time_bin_index
+from lpdm.main import _build_config, _footprint_time_bin_index, _validate_meteorology_time_coverage
 
 
 def _base_args(**overrides: object) -> Namespace:
@@ -96,3 +96,35 @@ def test_footprint_time_bin_index_advances_each_hour() -> None:
     assert _footprint_time_bin_index(release_end, release_end - timedelta(minutes=55), 3) == 0
     assert _footprint_time_bin_index(release_end, release_end - timedelta(minutes=60), 3) == 1
     assert _footprint_time_bin_index(release_end, release_end - timedelta(minutes=125), 3) == 2
+
+
+class _CoverageReader:
+    def __init__(self, start: datetime, end: datetime) -> None:
+        self._start = start
+        self._end = end
+
+    def get_time_coverage(self) -> tuple[datetime, datetime]:
+        return self._start, self._end
+
+
+def test_validate_meteorology_time_coverage_rejects_insufficient_history() -> None:
+    cfg = _build_config(
+        _base_args(
+            start_time="2024-01-01T06:00:00Z",
+            release_duration_seconds=3600,
+            simulation_length_seconds=36000,
+        )
+    )
+    release_end = cfg.start_time + timedelta(seconds=cfg.release_duration_seconds)
+    sim_start = release_end - timedelta(seconds=cfg.simulation_length_seconds)
+    reader = _CoverageReader(
+        datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc),
+        datetime(2024, 1, 1, 12, 0, tzinfo=timezone.utc),
+    )
+
+    try:
+        _validate_meteorology_time_coverage(reader, cfg, release_end, sim_start)
+        raise AssertionError("Expected ValueError for insufficient meteorology coverage")
+    except ValueError as exc:
+        assert "Meteorological dataset does not cover the requested simulation window" in str(exc)
+        assert "Reduce simulation-length-seconds" in str(exc)
