@@ -411,11 +411,24 @@ class ArcoEra5ZarrReader(MetReader):
                 "geopotential fields are missing the expected [level, lat, lon] coverage."
             )
 
-        level_agl_mean = 0.5 * (
-            np.mean(level_agl_start, axis=(1, 2)) + np.mean(level_agl_end, axis=(1, 2))
-        )
+        if not np.isfinite(level_agl_start).all() or not np.isfinite(level_agl_end).all():
+            raise ValueError(
+                "Geopotential-derived AGL heights contain non-finite values in the requested region/time window. "
+                "The meteorology store is incomplete or corrupted, or the source dataset is missing required "
+                "geopotential coverage for this slice."
+            )
+
         level_values = np.asarray(ds_start[self.level_name].values)
-        level_mask = (level_agl_mean >= spatial.z_min) & (level_agl_mean <= spatial.z_max)
+
+        level_agl_min = np.fmin(
+            np.nanmin(level_agl_start, axis=(1, 2)),
+            np.nanmin(level_agl_end, axis=(1, 2)),
+        )
+        level_agl_max = np.fmax(
+            np.nanmax(level_agl_start, axis=(1, 2)),
+            np.nanmax(level_agl_end, axis=(1, 2)),
+        )
+        level_mask = (level_agl_max >= spatial.z_min) & (level_agl_min <= spatial.z_max)
 
         if not np.any(level_mask):
             raise ValueError(

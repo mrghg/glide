@@ -1,5 +1,8 @@
 import os
+import shutil
 import argparse
+from pathlib import Path
+import numpy as np
 import xarray as xr
 
 # Logical to ERA5 physical mapping required by ARCO Zarr
@@ -26,6 +29,45 @@ def _prepare_for_zarr_write(ds: xr.Dataset, zarr_version: int) -> xr.Dataset:
     for var_name in ds_out.variables:
         ds_out[var_name].encoding = {}
     return ds_out
+
+
+def _replace_store_atomically(tmp_path: str, out_path: str) -> None:
+    out_store = Path(out_path)
+    tmp_store = Path(tmp_path)
+    backup_store = out_store.with_name(f"{out_store.name}.bak-replace")
+
+    if backup_store.exists():
+        shutil.rmtree(backup_store)
+
+    try:
+        if out_store.exists():
+            os.replace(out_store, backup_store)
+        os.replace(tmp_store, out_store)
+    except Exception:
+        if out_store.exists():
+            shutil.rmtree(out_store)
+        if backup_store.exists():
+            os.replace(backup_store, out_store)
+        raise
+    else:
+        if backup_store.exists():
+            shutil.rmtree(backup_store)
+
+
+def _validate_written_store(out_path: str) -> None:
+    ds = xr.open_zarr(out_path, consolidated=True)
+    try:
+        for var_name in REQUIRED_VARS:
+            values = np.asarray(ds[var_name].values)
+            if not bool(np.isfinite(values).all()):
+                raise ValueError(
+                    f"Downloaded store validation failed: variable {var_name!r} contains non-finite values. "
+                    "The local sample cube is incomplete or corrupted, so it was not installed."
+                )
+    finally:
+        close_fn = getattr(ds, "close", None)
+        if callable(close_fn):
+            close_fn()
 
 def download_sample_cube(
     out_path: str,
@@ -85,17 +127,24 @@ def download_sample_cube(
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
         
-    print(f"Downloading and saving data to local Zarr: {out_path}...")
+    tmp_out_path = f"{out_path}.tmp-download"
+    if os.path.exists(tmp_out_path):
+        shutil.rmtree(tmp_out_path)
+
+    print(f"Downloading and saving data to temporary local Zarr: {tmp_out_path}...")
     ds_to_write = _prepare_for_zarr_write(ds_subset, zarr_version=zarr_version)
 
     # Writing the filtered subset
     with xr.set_options(keep_attrs=True):
         ds_to_write.to_zarr(
-            out_path,
+            tmp_out_path,
             mode="w",
             consolidated=True,
             zarr_format=zarr_version,
         )
+
+    _validate_written_store(tmp_out_path)
+    _replace_store_atomically(tmp_out_path, out_path)
         
     print("Download and local store setup complete.")
 
@@ -104,14 +153,14 @@ if __name__ == "__main__":
     parser.add_argument("--out-path", default="data/sample_met.zarr", help="Path to write the local zarr store")
     parser.add_argument("--store-uri", default="gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3")
     
-    # Using defaults that match your launch.json run config for SF tests
-    parser.add_argument("--time-start", default="2023-12-31T18:00:00", help="Start time to slice (gives padding for backwards run)")
+    # Defaults leave extra temporal and spatial padding for local SF-area runs.
+    parser.add_argument("--time-start", default="2023-12-29T18:00:00", help="Start time to slice (gives padding for backwards run)")
     parser.add_argument("--time-end", default="2024-01-01T06:00:00", help="End time to slice")
     
-    parser.add_argument("--lon-min", type=float, default=-125.0)
-    parser.add_argument("--lon-max", type=float, default=-119.0)
-    parser.add_argument("--lat-min", type=float, default=35.0)
-    parser.add_argument("--lat-max", type=float, default=41.0)
+    parser.add_argument("--lon-min", type=float, default=-127.0)
+    parser.add_argument("--lon-max", type=float, default=-117.0)
+    parser.add_argument("--lat-min", type=float, default=33.0)
+    parser.add_argument("--lat-max", type=float, default=43.0)
     parser.add_argument(
         "--zarr-version",
         type=int,

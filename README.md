@@ -113,12 +113,12 @@ For local development or rapid testing, reading from the remote ARCO ERA5 Zarr s
 .venv/bin/python scripts/download_sample_cube.py \
     --out-path data/sample_met.zarr \
     --store-uri gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3 \
-    --time-start 2023-12-31T18:00:00 \
+	--time-start 2023-12-29T18:00:00 \
     --time-end 2024-01-01T06:00:00 \
-    --lon-min -125.0 \
-    --lon-max -119.0 \
-    --lat-min 35.0 \
-    --lat-max 41.0
+	--lon-min -127.0 \
+	--lon-max -117.0 \
+	--lat-min 33.0 \
+	--lat-max 43.0
 ```
 
 Notes:

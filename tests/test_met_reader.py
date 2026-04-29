@@ -187,3 +187,67 @@ def test_get_time_coverage_returns_dataset_bounds() -> None:
 
     assert start == datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
     assert end == datetime(2024, 1, 1, 1, 0, tzinfo=timezone.utc)
+
+
+def test_fetch_hourly_window_rejects_partial_nan_agl_cells() -> None:
+    ds = _build_mock_era5_dataset()
+    geopotential = np.asarray(ds["geopotential"].values).copy()
+    geopotential_at_surface = np.asarray(ds["geopotential_at_surface"].values).copy()
+    geopotential[0, :, 0, 0] = np.nan
+    geopotential_at_surface[0, 0, 0] = np.nan
+    ds["geopotential"] = (("time", "level", "latitude", "longitude"), geopotential)
+    ds["geopotential_at_surface"] = (("time", "latitude", "longitude"), geopotential_at_surface)
+    ds["geopotential"].attrs["units"] = "m**2 s**-2"
+    ds["geopotential_at_surface"].attrs["units"] = "m**2 s**-2"
+
+    reader = _InMemoryArcoReader(ds)
+    request = BoundingBoxRequest(
+        spatial=SpatialBounds(
+            lon_min=19.5,
+            lon_max=21.5,
+            lat_min=9.5,
+            lat_max=11.5,
+            z_min=850.0,
+            z_max=1050.0,
+        ),
+        time=TimeBounds(
+            start=datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc),
+            end=datetime(2024, 1, 1, 1, 0, tzinfo=timezone.utc),
+        ),
+    )
+
+    try:
+        reader.fetch_hourly_window(request)
+        raise AssertionError("Expected ValueError for partial-NaN AGL fields")
+    except ValueError as exc:
+        assert "contain non-finite values" in str(exc)
+
+
+def test_fetch_hourly_window_rejects_all_nan_agl_fields() -> None:
+    ds = _build_mock_era5_dataset()
+    ds["geopotential"] = (("time", "level", "latitude", "longitude"), np.full_like(ds["geopotential"].values, np.nan))
+    ds["geopotential_at_surface"] = (("time", "latitude", "longitude"), np.full_like(ds["geopotential_at_surface"].values, np.nan))
+    ds["geopotential"].attrs["units"] = "m**2 s**-2"
+    ds["geopotential_at_surface"].attrs["units"] = "m**2 s**-2"
+
+    reader = _InMemoryArcoReader(ds)
+    request = BoundingBoxRequest(
+        spatial=SpatialBounds(
+            lon_min=19.5,
+            lon_max=21.5,
+            lat_min=9.5,
+            lat_max=11.5,
+            z_min=850.0,
+            z_max=1050.0,
+        ),
+        time=TimeBounds(
+            start=datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc),
+            end=datetime(2024, 1, 1, 1, 0, tzinfo=timezone.utc),
+        ),
+    )
+
+    try:
+        reader.fetch_hourly_window(request)
+        raise AssertionError("Expected ValueError for all-NaN AGL fields")
+    except ValueError as exc:
+        assert "contain non-finite values" in str(exc)

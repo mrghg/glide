@@ -18,6 +18,15 @@ import torch
 import xarray as xr
 
 
+def _coord_dims(coord_value: Any) -> tuple[str, ...]:
+	if isinstance(coord_value, tuple):
+		coord_dims = coord_value[0]
+		if isinstance(coord_dims, str):
+			return (coord_dims,)
+		return tuple(coord_dims)
+	return ()
+
+
 def _is_remote_path(path: str) -> bool:
 	return "://" in path
 
@@ -83,7 +92,9 @@ class OutputWriter:
 		path: str,
 		footprint: torch.Tensor,
 		*,
-		dims: tuple[str, str, str, str] = ("time_ago", "z_bin", "y", "x"),
+		dims: tuple[str, str, str, str] = ("time_ago", "z_bin", "latitude", "longitude"),
+		coords: Mapping[str, Any] | None = None,
+		attrs: Mapping[str, Any] | None = None,
 	) -> None:
 		"""Write footprint tensor shaped (T, Z, Y, X) to Zarr store."""
 
@@ -91,8 +102,21 @@ class OutputWriter:
 		if arr.ndim != 4:
 			raise ValueError("footprint must have shape (T, Z, Y, X)")
 
-		da = xr.DataArray(arr, dims=dims, name="footprint")
+		array_coords: dict[str, Any] = {}
+		dataset_coords: dict[str, Any] = {}
+		for coord_name, coord_value in (coords or {}).items():
+			coord_dims = _coord_dims(coord_value)
+			if all(dim in dims for dim in coord_dims):
+				array_coords[coord_name] = coord_value
+			else:
+				dataset_coords[coord_name] = coord_value
+
+		da = xr.DataArray(arr, dims=dims, coords=array_coords, name="footprint")
 		ds = da.to_dataset()
+		if dataset_coords:
+			ds = ds.assign_coords(dataset_coords)
+		if attrs:
+			ds.attrs.update(dict(attrs))
 
 		if not _is_remote_path(path):
 			Path(path).mkdir(parents=True, exist_ok=True)

@@ -17,6 +17,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Sequence
 
+import numpy as np
 import torch
 
 from lpdm.footprint_gridder import FootprintGridder
@@ -135,6 +136,39 @@ def _footprint_time_bin_index(release_end: datetime, t_cursor: datetime, n_time_
 
 	elapsed_seconds = max(0.0, release_end.timestamp() - t_cursor.timestamp())
 	return min(n_time_bins - 1, int(elapsed_seconds / 3600.0))
+
+
+def _build_footprint_dataset_metadata(
+	cfg: RunConfig,
+	gridder: FootprintGridder,
+) -> tuple[dict[str, object], dict[str, float]]:
+	"""Build coordinate metadata for the footprint Zarr dataset."""
+
+	lon_edges = np.linspace(gridder.lon_min, gridder.lon_max, gridder.n_x + 1, dtype=np.float64)
+	lat_edges = np.linspace(gridder.lat_min, gridder.lat_max, gridder.n_y + 1, dtype=np.float64)
+	z_edges_m = np.linspace(gridder.z_min, gridder.z_max, gridder.n_z + 1, dtype=np.float64)
+	hours_per_bin = max(1.0, float(cfg.simulation_length_seconds) / 3600.0 / max(1, gridder.n_t))
+	time_bin_start_h = np.arange(gridder.n_t, dtype=np.float64) * hours_per_bin
+	time_bin_end_h = time_bin_start_h + hours_per_bin
+
+	coords: dict[str, object] = {
+		"time_ago": np.arange(gridder.n_t, dtype=np.int64),
+		"time_ago_start_hours": ("time_ago", time_bin_start_h),
+		"time_ago_end_hours": ("time_ago", time_bin_end_h),
+		"z_bin": 0.5 * (z_edges_m[:-1] + z_edges_m[1:]),
+		"z_bottom_m": ("z_bin", z_edges_m[:-1]),
+		"z_top_m": ("z_bin", z_edges_m[1:]),
+		"latitude": 0.5 * (lat_edges[:-1] + lat_edges[1:]),
+		"longitude": 0.5 * (lon_edges[:-1] + lon_edges[1:]),
+		"latitude_edge": ("latitude_edge", lat_edges),
+		"longitude_edge": ("longitude_edge", lon_edges),
+	}
+	attrs = {
+		"release_lon": float(cfg.release_lon),
+		"release_lat": float(cfg.release_lat),
+		"release_alt_agl_m": float(cfg.release_alt_agl_m),
+	}
+	return coords, attrs
 
 
 def _validate_meteorology_time_coverage(
@@ -796,10 +830,16 @@ def _run(cfg: RunConfig) -> dict[str, object]:
 	for cached in met_cache.values():
 		del cached
 	met_cache.clear()
+	footprint_coords, footprint_attrs = _build_footprint_dataset_metadata(cfg, gridder)
 
 	writer.write_particles_parquet(outputs.endpoint_particles, particles)
 	writer.write_trajectory_parquet(outputs.trajectory_diagnostics, step_seconds=cfg.dt_seconds, rows=diag_rows)
-	writer.write_footprint_zarr(outputs.footprints, gridder.tensor)
+	writer.write_footprint_zarr(
+		outputs.footprints,
+		gridder.tensor,
+		coords=footprint_coords,
+		attrs=footprint_attrs,
+	)
 
 	metadata = {
 		"config": _config_metadata(cfg, release_end, sim_start),

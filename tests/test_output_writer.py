@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import torch
 import xarray as xr
@@ -53,8 +54,38 @@ def test_output_writer_footprint_zarr(tmp_path: Path) -> None:
 
     footprint = torch.ones((2, 3, 4, 5), dtype=torch.float32)
     zarr_path = tmp_path / "footprint.zarr"
-    writer.write_footprint_zarr(str(zarr_path), footprint)
+    writer.write_footprint_zarr(
+        str(zarr_path),
+        footprint,
+        coords={
+            "time_ago": np.array([0, 1], dtype=np.int64),
+            "time_ago_start_hours": ("time_ago", np.array([0.0, 1.0], dtype=np.float64)),
+            "time_ago_end_hours": ("time_ago", np.array([1.0, 2.0], dtype=np.float64)),
+            "z_bin": np.array([500.0, 1500.0, 2500.0], dtype=np.float64),
+            "z_bottom_m": ("z_bin", np.array([0.0, 1000.0, 2000.0], dtype=np.float64)),
+            "z_top_m": ("z_bin", np.array([1000.0, 2000.0, 3000.0], dtype=np.float64)),
+            "latitude": np.array([35.25, 35.75, 36.25, 36.75], dtype=np.float64),
+            "longitude": np.array([-122.5, -122.0, -121.5, -121.0, -120.5], dtype=np.float64),
+            "latitude_edge": ("latitude_edge", np.array([35.0, 35.5, 36.0, 36.5, 37.0], dtype=np.float64)),
+            "longitude_edge": ("longitude_edge", np.array([-122.75, -122.25, -121.75, -121.25, -120.75, -120.25], dtype=np.float64)),
+        },
+        attrs={
+            "release_lon": -122.3,
+            "release_lat": 37.9,
+            "release_alt_agl_m": 500.0,
+        },
+    )
 
     ds = xr.open_zarr(str(zarr_path), consolidated=False)
     assert "footprint" in ds
     assert ds["footprint"].shape == (2, 3, 4, 5)
+    assert ds["footprint"].dims == ("time_ago", "z_bin", "latitude", "longitude")
+    assert np.allclose(ds["time_ago_start_hours"].values, np.array([0.0, 1.0]))
+    assert np.allclose(ds["time_ago_end_hours"].values, np.array([1.0, 2.0]))
+    assert np.allclose(ds["z_bottom_m"].values, np.array([0.0, 1000.0, 2000.0]))
+    assert np.allclose(ds["z_top_m"].values, np.array([1000.0, 2000.0, 3000.0]))
+    assert np.allclose(ds["latitude_edge"].values, np.array([35.0, 35.5, 36.0, 36.5, 37.0]))
+    assert np.allclose(ds["longitude_edge"].values, np.array([-122.75, -122.25, -121.75, -121.25, -120.75, -120.25]))
+    assert ds.attrs["release_lon"] == -122.3
+    assert ds.attrs["release_lat"] == 37.9
+    assert ds.attrs["release_alt_agl_m"] == 500.0

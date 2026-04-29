@@ -91,9 +91,131 @@ Build a modern, highly optimized, backward-in-time LPDM for greenhouse-gas footp
 - Fully implemented Eulerian footprint accumulation via `FootprintGridder.accumulate()` in `src/lpdm/footprint_gridder.py` using parallel `scatter_add_` on fractional indices.
 - Integrated the footprint gridder into the main event loop to generate and serialize `footprints.zarr` alongside other run artifacts.
 
-## Next recommended task
+### 2026-04-29 runtime validation and local met integrity update
 
-- Setup column release generation and observation integration to support generic multi-point footprints.
+- Fixed footprint time-bin indexing in `src/lpdm/main.py`; bins are now keyed from `release_end` rather than `sim_start`, so multi-hour footprint output populates all expected time slices.
+- Refactored `src/lpdm/main.py` to isolate output-path handling, memory telemetry/guard metadata, hourly met fetching, and active-particle transport from the main stepping loop.
+- Added a preflight meteorology time-coverage check so runs fail early with a clear error if the requested backward window exceeds available met data.
+- Expanded local sample met defaults to cover two extra days of history and a wider lat/lon box for SF-area debugging.
+- Hardened `scripts/download_sample_cube.py` to write into a temporary Zarr store, validate that all required variables are fully finite, and only then replace the live `data/sample_met.zarr`.
+- Tightened `src/lpdm/met_reader.py` to reject any non-finite geopotential-derived AGL values instead of attempting to continue with inconsistent meteorology.
+- Persisted spatial and time-bin coordinate metadata into `footprints.zarr`, and updated the demo notebook to consume those coordinates directly while remaining compatible with older stores.
+
+## Milestone roadmap
+
+### Milestone 0: Validation baseline and reference cases
+
+- Build a small scientific validation suite before changing core transport physics.
+- Add deterministic seeded regression cases in `tests/test_physics.py` and focused end-to-end smoke cases around `src/lpdm/main.py`.
+- Define comparison metrics for plume spread, time-height structure, and footprint agreement against analytic cases and, where practical, FLEXPART/STILT-style reference behavior.
+- Implementation checklist:
+	- Add synthetic met fixtures or in-memory harnesses so core transport tests do not depend on remote ERA5 access.
+	- Separate validation into three layers: unit physics checks, end-to-end runtime checks, and external reference comparisons.
+	- Record one canonical validation command set in this file or README so future physics changes can be checked consistently.
+	- Keep all stochastic cases seeded and treat seed stability as part of the contract.
+- Unit and regression cases to add first:
+	- Constant horizontal wind backward advection: particle mean position should match the analytic trajectory within a tight tolerance.
+	- Zero-wind, zero-turbulence persistence: particles should remain stationary aside from explicitly enabled physics.
+	- Vertical OU/Langevin variance check: measured variance growth should match the current discrete formulation over repeated seeded trials.
+	- Surface reflection check: particles crossing below `z=0` should reflect correctly with no negative post-step altitudes.
+	- Footprint conservation check: integrated footprint mass should scale consistently with active particle weights and residence time.
+	- Footprint time-bin assignment check: occupancy should land in the expected hourly bins across a multi-hour run.
+- End-to-end smoke cases to maintain:
+	- Short local sample-met point release run that verifies `endpoint_particles.parquet`, `trajectory_diagnostics.parquet`, `footprints.zarr`, and `run_metadata.json` are all produced.
+	- Local run with persisted footprint coordinates, confirming the `footprints.zarr` schema contains time-bin bounds, vertical bin bounds, and horizontal edge coordinates.
+	- Invalid met coverage case that confirms preflight failure happens before stepping begins and emits a useful error.
+	- Local corrupted-met rejection case that confirms non-finite geopotential-derived AGL values fail loudly rather than degrading silently.
+- Reference comparison targets:
+	- Analytic baselines first: constant wind, no-turbulence, and simple diffusion-growth cases.
+	- One canonical offline comparison case against FLEXPART or STILT once a matching forcing/release setup is defined.
+	- If exact external intercomparison is not yet practical, define acceptance against self-consistent surrogate metrics first and promote to cross-model comparison later.
+- Metrics to compute and track:
+	- Endpoint mean and spread in longitude, latitude, and altitude.
+	- Time-height integrated footprint structure.
+	- Column-integrated footprint magnitude and spatial extent.
+	- Particle survival counts and any future domain-exit or merge counts.
+	- Runtime and peak memory for representative local smoke cases.
+- Deliverables for Milestone 0 completion:
+	- Expanded regression coverage in `tests/test_physics.py` and neighboring focused test modules.
+	- At least one reproducible end-to-end validation command using `data/sample_met.zarr`.
+	- A short validation note documenting expected tolerances, seeds, and known gaps.
+- Exit criteria:
+	- Reproducible seeded runs with stable regression fixtures.
+	- Clear numerical baselines for advection, vertical mixing, and footprint accumulation.
+	- A documented validation workflow for future physics changes.
+
+### Milestone 1: Full turbulence scheme
+
+- Replace the current placeholder vertical OU/Langevin path in `src/lpdm/gpu_engine.py` with a scientifically grounded turbulence parameterization.
+- Choose and document the target formulation first, likely a FLEXPART-like or STILT-like vertical mixing scheme, then implement a first validated version before adding extensions.
+- Extend `src/lpdm/met_reader.py` as needed to supply all stability, boundary-layer, and mixing inputs required by the chosen scheme.
+- Preserve batch-friendly tensor interfaces so the runtime loop in `src/lpdm/main.py` stays vectorized.
+- Exit criteria:
+	- Stable long-run behavior across different boundary-layer regimes.
+	- Validation against Milestone 0 reference cases.
+	- Clear documentation of assumptions, required met fields, and known limitations.
+
+### Milestone 2: Adaptive particle aggregation
+
+- Implement a conservative far-field particle aggregation methodology to reduce compute cost once particles move away from the release region.
+- Keep strict no-merge zones near the receptor, near the surface, and anywhere flow gradients or footprint sensitivity are high.
+- Preserve at minimum total mass and low-order moments during merges, and add diagnostics to quantify approximation error.
+- Integrate aggregation controls into the runtime loop without breaking memory guards or output contracts.
+- Exit criteria:
+	- Demonstrated runtime or memory reduction versus an unaggregated baseline.
+	- Bounded footprint error against Milestone 0 reference runs.
+	- Diagnostics for merge counts, effective sample size, and approximation drift.
+
+### Milestone 3: Production GPU execution
+
+- Harden the existing device-aware runtime for real CUDA execution rather than just device selection and local MPS compatibility.
+- Profile interpolation, met staging, footprint accumulation, and any host-device transfers in the current runtime.
+- Benchmark on a representative NVIDIA target and tune memory behavior under the existing guardrails.
+- Ensure the turbulence and aggregation implementations remain GPU-efficient and do not reintroduce hidden CPU bottlenecks.
+- Exit criteria:
+	- Documented single-GPU benchmark for a representative run.
+	- Verified memory telemetry and guard behavior on CUDA.
+	- A short performance note identifying the dominant remaining bottlenecks.
+
+### Milestone 4: Versioned input schema and domain semantics
+
+- Replace the current thin CLI-first configuration surface in `src/lpdm/main.py` with a versioned run schema loaded from YAML or JSON.
+- Make output grid definition explicit, including horizontal domain, vertical bins, and time-bin resolution, instead of deriving them from bbox padding and fixed defaults.
+- Add explicit regional-domain semantics, including what happens when particles leave the domain laterally or vertically.
+- Keep preflight validation strong and user-facing so invalid or incomplete configs fail early with clear messages.
+- Exit criteria:
+	- One validated config model owns run definition.
+	- Output grid, domain limits, release definition, and physics options are all schema-controlled.
+	- The CLI becomes a thin wrapper around schema loading and overrides.
+
+### Milestone 5: Observation and release generalization
+
+- Expand `src/lpdm/release_generator.py` beyond single-point releases to support column releases, multi-point releases, and observation-linked release definitions.
+- Connect release definitions to the new run schema so user inputs map cleanly into particle initialization.
+- Ensure the output metadata clearly records which release strategy was used.
+- Exit criteria:
+	- Generic release definitions supported without ad hoc runtime branching.
+	- Tests cover point, column, and multi-point initialization paths.
+	- Run metadata is sufficient to reproduce a release setup from config alone.
+
+### Milestone 6: Usability and operational hardening
+
+- Revisit notebook defaults and plotting helpers so they adapt automatically to arbitrary run durations and output paths.
+- Add restart/checkpoint strategy for longer or more expensive runs once turbulence and aggregation increase runtime complexity.
+- Improve run metadata, diagnostics, and artifact discoverability for debugging and review.
+- Exit criteria:
+	- Demo notebook works across arbitrary run lengths without brittle manual edits.
+	- Long runs can be resumed or at least checkpointed safely.
+	- Diagnostics are sufficient to explain failures, approximation decisions, and performance regressions.
+
+## Immediate recommendation
+
+- Start with Milestone 0 before implementing the full turbulence scheme.
+- Once the validation baseline exists, prioritize Milestone 1 and Milestone 2 in that order.
+- Defer substantial GPU tuning until the turbulence and aggregation interfaces are stable enough to benchmark meaningfully.
+
+## Operational notes
+
 - Running bare `pytest` may use the wrong interpreter; prefer `.venv/bin/python -m pytest`.
 - In a fresh environment, install the package editable first: `uv pip install --python .venv/bin/python -e .`.
 - Ensure shell PATH is refreshed if `uv` was installed in-session.
