@@ -21,7 +21,7 @@ from lpdm.runtime import DEVICE
 
 @dataclass(frozen=True)
 class CoordinateBounds:
-	"""Physical coordinate bounds used for normalization into [-1, 1]."""
+	"""Physical coordinate bounds used for periodic wrapping."""
 
 	lon_min: float
 	lon_max: float
@@ -29,6 +29,19 @@ class CoordinateBounds:
 	lat_max: float
 	alt_min: float
 	alt_max: float
+
+
+@dataclass(frozen=True)
+class GridInterpolationBounds:
+	"""Physical bounds mapping grid index 0 to 1st element, index N-1 to 2nd element.
+	Values can be descending (e.g. lat_first > lat_last)."""
+
+	lon_first: float
+	lon_last: float
+	lat_first: float
+	lat_last: float
+	alt_first: float
+	alt_last: float
 
 
 class GPUEngine:
@@ -57,13 +70,13 @@ class GPUEngine:
 	def normalize_particle_coordinates(
 		self,
 		particle_xyz: torch.Tensor,
-		bounds: CoordinateBounds,
+		bounds: GridInterpolationBounds,
 	) -> torch.Tensor:
 		"""Normalize particle coordinates into grid_sample's [-1, 1] space.
 
 		Args:
 			particle_xyz: Tensor shaped (N, 3) with [lon, lat, alt].
-			bounds: Physical bounds for each axis.
+			bounds: Exact boundary coordinates matching grid index endpoints.
 		"""
 
 		if particle_xyz.ndim != 2 or particle_xyz.shape[1] != 3:
@@ -75,15 +88,15 @@ class GPUEngine:
 		lat = pts[:, 1]
 		alt = pts[:, 2]
 
-		def scale(vals: torch.Tensor, vmin: float, vmax: float) -> torch.Tensor:
-			denom = float(vmax - vmin)
-			if denom <= 0.0:
-				raise ValueError("Invalid bounds: max must be greater than min")
-			return 2.0 * ((vals - vmin) / denom) - 1.0
+		def scale(vals: torch.Tensor, v0: float, v1: float) -> torch.Tensor:
+			denom = float(v1 - v0)
+			if denom == 0.0:
+				raise ValueError("Grid dimension has 0 span (first == last)")
+			return 2.0 * ((vals - v0) / denom) - 1.0
 
-		x = scale(lon, bounds.lon_min, bounds.lon_max)
-		y = scale(lat, bounds.lat_min, bounds.lat_max)
-		z = scale(alt, bounds.alt_min, bounds.alt_max)
+		x = scale(lon, bounds.lon_first, bounds.lon_last)
+		y = scale(lat, bounds.lat_first, bounds.lat_last)
+		z = scale(alt, bounds.alt_first, bounds.alt_last)
 
 		# Clamp protects against small numerical drifts beyond interpolation range.
 		return torch.stack((x, y, z), dim=1).clamp(-1.0, 1.0)

@@ -19,8 +19,9 @@ from typing import Sequence
 
 import torch
 
-from lpdm.gpu_engine import GPUEngine
-from lpdm.met_reader import ArcoEra5ZarrReader, BoundingBoxRequest, SpatialBounds, TimeBounds
+from lpdm.footprint_gridder import FootprintGridder
+from lpdm.gpu_engine import CoordinateBounds, GPUEngine, GridInterpolationBounds
+from lpdm.met_reader import ArcoEra5ZarrReader, BoundingBoxRequest, HourlyMetTensors, SpatialBounds, TimeBounds
 from lpdm.output_writer import OutputWriter
 from lpdm.release_generator import PointRelease
 from lpdm.runtime import DEVICE
@@ -365,7 +366,11 @@ def _run(cfg: RunConfig) -> dict[str, object]:
 
 	step_count = 0
 	hour_windows = 0
-	met_cache: OrderedDict[datetime, torch.Tensor] = OrderedDict()
+	met_cache: OrderedDict[datetime, HourlyMetTensors] = OrderedDict()
+	
+	# Keep vertical turbulence state alongside particles [N,]
+	w_prime = engine.initialize_turbulence_velocity(cfg.n_particles)
+	
 	peak_rss_bytes = 0
 	peak_device_allocated = 0
 	peak_device_reserved = 0
@@ -389,7 +394,7 @@ def _run(cfg: RunConfig) -> dict[str, object]:
 
 			if cfg.met_cache_max_hours > 0 and hour_key in met_cache:
 				met_cache.move_to_end(hour_key)
-				met_avg = met_cache[hour_key]
+				met_window = met_cache[hour_key]
 			else:
 				bbox = _build_bbox(active_particles, cfg)
 				met_window = reader.fetch_hourly_window(
@@ -398,41 +403,82 @@ def _run(cfg: RunConfig) -> dict[str, object]:
 						time=TimeBounds(start=hour_key, end=hour_key + timedelta(hours=1)),
 					)
 				)
-				met_avg = 0.5 * (met_window.hour_start + met_window.hour_end)
 				hour_windows += 1
 
 				if cfg.met_cache_max_hours > 0:
-					met_cache[hour_key] = met_avg
+					met_cache[hour_key] = met_window
 					while len(met_cache) > cfg.met_cache_max_hours:
 						_, evicted = met_cache.popitem(last=False)
 						del evicted
 
-				del met_window
+			# 1. Prepare interpolation state and constants
+			t_start_s = met_window.metadata.time_start.timestamp()
+			t_end_s = met_window.metadata.time_end.timestamp()
+			
+			# We use the midpoint of the timestep for interpolation weight
+			t_eval_s = t_cursor.timestamp() - 0.5 * delta_s
+			alpha = (t_eval_s - t_start_s) / max(1.0, float(t_end_s - t_start_s))
+			alpha = max(0.0, min(1.0, alpha))
 
-			u_m_s, v_m_s, w_m_s = _mean_wind(met_avg)
-
-			# Convert horizontal m/s to degrees/s using local spherical approximations.
-			lat_mean_deg = float(torch.mean(active_particles[:, 1]).item())
-			meters_per_deg_lat = 110540.0
-			meters_per_deg_lon = max(
-				1e-6,
-				111320.0 * max(0.05, abs(torch.cos(torch.deg2rad(torch.tensor(lat_mean_deg))).item())),
+			grid_bounds = GridInterpolationBounds(
+				lon_first=float(met_window.metadata.lon[0]),
+				lon_last=float(met_window.metadata.lon[-1]),
+				lat_first=float(met_window.metadata.lat[0]),
+				lat_last=float(met_window.metadata.lat[-1]),
+				alt_first=float(met_window.metadata.level[0]),
+				alt_last=float(met_window.metadata.level[-1]),
 			)
-			u_deg_s = u_m_s / meters_per_deg_lon
-			v_deg_s = v_m_s / meters_per_deg_lat
+
+			m_start = met_window.hour_start[:3].unsqueeze(0).to(device=device, dtype=particles.dtype)
+			m_end = met_window.hour_end[:3].unsqueeze(0).to(device=device, dtype=particles.dtype)
 
 			def wind_fn(xyz: torch.Tensor) -> torch.Tensor:
+				xyz_norm = engine.normalize_particle_coordinates(xyz, grid_bounds)
+				grid = xyz_norm.view(1, 1, 1, -1, 3)
+
+				v_start = torch.nn.functional.grid_sample(m_start, grid, align_corners=True).view(3, -1).t()
+				v_end = torch.nn.functional.grid_sample(m_end, grid, align_corners=True).view(3, -1).t()
+				v_interp = v_start * (1.0 - alpha) + v_end * alpha
+
+				lat_deg = xyz[:, 1]
+				meters_per_deg_lat = 110540.0
+				meters_per_deg_lon = 111320.0 * torch.cos(torch.deg2rad(lat_deg)).abs().clamp(min=0.05)
+
 				out = torch.empty_like(xyz)
-				out[:, 0] = u_deg_s
-				out[:, 1] = v_deg_s
-				out[:, 2] = w_m_s
+				out[:, 0] = v_interp[:, 0] / meters_per_deg_lon
+				out[:, 1] = v_interp[:, 1] / meters_per_deg_lat
+				out[:, 2] = v_interp[:, 2]
 				return out
 
 			advected_active = engine.rk2_advect_backward(active_particles, dt_seconds=delta_s, wind_fn=wind_fn)
+			
+			# 2. Apply random vertical turbulence dispersion 
+			w_prime_active = engine.update_langevin_velocity(
+				w_prime[active_mask],
+				t_lagrangian=300.0,
+				sigma_w2=1.0,
+				dt_seconds=delta_s,
+			)
+			advected_active = engine.apply_vertical_turbulence(
+				advected_active,
+				w_prime_active,
+				dt_seconds=delta_s,
+				backward=True,
+			)
+			w_prime[active_mask] = w_prime_active
+
 			advected_active = engine.reflect_surface(advected_active, z_surface=0.0)
 			particles[active_mask] = advected_active
+			
+			# Domain-mean values strictly for the diagnostic log tracking 
+			u_m_s = float(torch.mean(m_start[0, 0] * (1-alpha) + m_end[0, 0] * alpha).item())
+			v_m_s = float(torch.mean(m_start[0, 1] * (1-alpha) + m_end[0, 1] * alpha).item())
+			w_m_s = float(torch.mean(m_start[0, 2] * (1-alpha) + m_end[0, 2] * alpha).item())
+			
 			del active_particles
 			del advected_active
+			del m_start
+			del m_end
 		else:
 			u_m_s, v_m_s, w_m_s = 0.0, 0.0, 0.0
 
@@ -628,10 +674,11 @@ def _run(cfg: RunConfig) -> dict[str, object]:
 			"peak_device_allocated_bytes": peak_device_allocated,
 			"peak_device_reserved_bytes": peak_device_reserved,
 		},
-		"outputs": {
-			"endpoint_particles": endpoint_path,
-			"trajectory_diagnostics": trajectory_path,
-		},
+		                "outputs": {
+                        "endpoint_particles": endpoint_path,
+                        "trajectory_diagnostics": trajectory_path,
+                        "footprints": endpoint_path.replace('endpoint_particles.parquet', 'footprints.zarr'),
+                },
 	}
 	writer.write_metadata_json(metadata_path, metadata)
 
