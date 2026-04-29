@@ -84,12 +84,16 @@ Build a modern, highly optimized, backward-in-time LPDM for greenhouse-gas footp
 	- Uses `${workspaceFolder}/data/sample_met.zarr` as `--zarr-store`.
 	- Writes to `outputs/demo-run-local`.
 
+### 2026-04-29 physics engine and footprint accumulation update
+
+- Replaced domain-mean wind placeholder in `src/lpdm/main.py` with full spatial-temporal interpolation utilizing `torch.nn.functional.grid_sample`.
+- Wired up `engine.update_langevin_velocity` and `engine.apply_vertical_turbulence` to apply vertical turbulence diffusion.
+- Fully implemented Eulerian footprint accumulation via `FootprintGridder.accumulate()` in `src/lpdm/footprint_gridder.py` using parallel `scatter_add_` on fractional indices.
+- Integrated the footprint gridder into the main event loop to generate and serialize `footprints.zarr` alongside other run artifacts.
+
 ## Next recommended task
 
-- Replace domain-mean wind placeholder usage in runtime stepping with full spatial-temporal interpolation path.
-
-## Known gotchas
-
+- Setup column release generation and observation integration to support generic multi-point footprints.
 - Running bare `pytest` may use the wrong interpreter; prefer `.venv/bin/python -m pytest`.
 - In a fresh environment, install the package editable first: `uv pip install --python .venv/bin/python -e .`.
 - Ensure shell PATH is refreshed if `uv` was installed in-session.
