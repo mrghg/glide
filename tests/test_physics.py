@@ -145,6 +145,48 @@ def test_reflect_surface_nonzero_z() -> None:
     assert torch.allclose(reflected[:, 2], expected_z)
 
 
+def test_apply_horizontal_turbulence_displaces_with_cos_lat_correction() -> None:
+    """u_prime moves longitude (with cos-lat scaling); v_prime moves latitude."""
+
+    engine = GPUEngine(device="cpu", dtype=torch.float64)
+
+    # Two particles at different latitudes; same u_prime, v_prime.
+    particles = torch.tensor(
+        [
+            [10.0, 0.0, 500.0, 0.5],
+            [10.0, 60.0, 500.0, 0.5],
+        ],
+        dtype=torch.float64,
+    )
+    u_prime = torch.tensor([1.0, 1.0], dtype=torch.float64)  # 1 m/s eastward
+    v_prime = torch.tensor([0.5, 0.5], dtype=torch.float64)  # 0.5 m/s northward
+    dt = 100.0
+
+    moved_back = engine.apply_horizontal_turbulence(particles, u_prime, v_prime, dt, backward=True)
+
+    # Backward integration: positions go opposite direction (west / south).
+    expected_d_lon_lat0 = -1.0 * dt / 111320.0
+    expected_d_lon_lat60 = -1.0 * dt / (111320.0 * math.cos(math.radians(60.0)))
+    expected_d_lat = -0.5 * dt / 110540.0
+
+    assert abs(moved_back[0, 0].item() - (10.0 + expected_d_lon_lat0)) < 1e-12
+    assert abs(moved_back[1, 0].item() - (10.0 + expected_d_lon_lat60)) < 1e-12
+    # |Δlon at lat=60| should be ~2x |Δlon at lat=0|.
+    assert abs(moved_back[1, 0] - 10.0).item() > 1.9 * abs(moved_back[0, 0] - 10.0).item()
+
+    assert abs(moved_back[0, 1].item() - (0.0 + expected_d_lat)) < 1e-12
+    assert abs(moved_back[1, 1].item() - (60.0 + expected_d_lat)) < 1e-12
+
+    # Forward direction flips the sign.
+    moved_fwd = engine.apply_horizontal_turbulence(particles, u_prime, v_prime, dt, backward=False)
+    assert moved_fwd[0, 0].item() > particles[0, 0].item()
+    assert moved_fwd[0, 1].item() > particles[0, 1].item()
+
+    # Mass and altitude untouched.
+    assert torch.allclose(moved_back[:, 2], particles[:, 2])
+    assert torch.allclose(moved_back[:, 3], particles[:, 3])
+
+
 def test_zero_wind_diffusion_langevin_gaussian_spread() -> None:
     """Zero-mean Langevin turbulence should produce near-Gaussian vertical spread."""
 

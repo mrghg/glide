@@ -10,9 +10,11 @@ from lpdm.turbulence.base import (
 	list_schemes,
 	register_scheme,
 )
+from lpdm.turbulence.hanna import HannaScheme
 from lpdm.turbulence.placeholder import PlaceholderConstantOU
 
 __all__ = [
+	"HannaScheme",
 	"PlaceholderConstantOU",
 	"TurbulenceScheme",
 	"TurbulenceState",

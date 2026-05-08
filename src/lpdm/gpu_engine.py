@@ -208,6 +208,45 @@ class GPUEngine:
 		out[:, 2] = out[:, 2] + direction * wp * float(dt_seconds)
 		return out
 
+	def apply_horizontal_turbulence(
+		self,
+		particles: torch.Tensor,
+		u_prime: torch.Tensor,
+		v_prime: torch.Tensor,
+		dt_seconds: float,
+		*,
+		backward: bool = True,
+	) -> torch.Tensor:
+		"""Apply horizontal displacement from turbulent velocity fluctuations.
+
+		Mirrors `apply_vertical_turbulence` but in lon/lat with the cos-lat correction
+		on lon. `u_prime` is the zonal perturbation in m/s, `v_prime` is meridional.
+		"""
+
+		if particles.ndim != 2 or particles.shape[1] != 4:
+			raise ValueError("particles must have shape (N, 4)")
+		if dt_seconds <= 0:
+			raise ValueError("dt_seconds must be > 0")
+
+		state = particles.to(device=self.device, dtype=self.dtype)
+		up = u_prime.to(device=self.device, dtype=self.dtype)
+		vp = v_prime.to(device=self.device, dtype=self.dtype)
+		if up.ndim != 1 or up.shape[0] != state.shape[0]:
+			raise ValueError("u_prime must have shape (N,)")
+		if vp.ndim != 1 or vp.shape[0] != state.shape[0]:
+			raise ValueError("v_prime must have shape (N,)")
+
+		direction = -1.0 if backward else 1.0
+		out = state.clone()
+
+		lat_deg = state[:, 1]
+		meters_per_deg_lat = 110540.0
+		meters_per_deg_lon = 111320.0 * torch.cos(torch.deg2rad(lat_deg)).abs().clamp(min=0.05)
+
+		out[:, 0] = out[:, 0] + direction * up * float(dt_seconds) / meters_per_deg_lon
+		out[:, 1] = out[:, 1] + direction * vp * float(dt_seconds) / meters_per_deg_lat
+		return out
+
 	def reflect_surface(self, particles: torch.Tensor, *, z_surface: float = 0.0) -> torch.Tensor:
 		"""Reflect particles crossing below the lower boundary back into domain."""
 

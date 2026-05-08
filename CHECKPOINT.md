@@ -101,6 +101,24 @@ Build a modern, highly optimized, backward-in-time LPDM for greenhouse-gas footp
 - Tightened `src/lpdm/met_reader.py` to reject any non-finite geopotential-derived AGL values instead of attempting to continue with inconsistent meteorology.
 - Persisted spatial and time-bin coordinate metadata into `footprints.zarr`, and updated the demo notebook to consume those coordinates directly while remaining compatible with older stores.
 
+### 2026-05-08 Milestone 1 steps 6 + 7: HannaScheme implementation
+
+- Added `engine.apply_horizontal_turbulence(particles, u_prime, v_prime, dt, *, backward)` primitive, mirroring `apply_vertical_turbulence` with the cos-lat correction on lon. Engine still owns the geometric application of perturbation velocities; schemes own the math of computing them.
+- Implemented `src/lpdm/turbulence/hanna.py` with the full Hanna 1982 / FLEXPART scheme:
+  - Free-function physics (`coriolis_parameter`, `air_density`, `obukhov_length`, `convective_velocity`, `surface_layer_sigma_w`, `in_bl_sigma_TL`) for testability in isolation. All vectorize over per-particle tensors.
+  - Three in-BL stability regimes (stable/neutral/unstable) selected per particle via `torch.where` with the FLEXPART `h/L` thresholds.
+  - Surface-layer override for `z < 0.1 h` (regime-specific σ_w; σ_u/σ_v from in-BL formula at clamped z; T_L = κ z / σ).
+  - Above-BL constant-K placeholder (σ = 0.1 m/s, T_L = 100 s) per spec, with the N²-refinement noted as M1.x in `VALIDATION.md`.
+  - FLEXPART piecewise-homogeneous treatment (no explicit Thomson 1987 drift).
+  - Numerical floors on σ, T_L, u\*, BLH to keep the OU update sane at z=0 and in calm conditions.
+- `HannaScheme.required_met_keys() = ("t", "ustar", "shf")`. The runtime's union with the baseline (`u, v, w, blh, sp`) now flows through the reader and into the channel tensor automatically.
+- `HannaScheme.step()` does the full pipeline: 2D bilinear interpolation of all surface fields (and T at lowest model level) at particle (lon, lat) → stability → in-BL formulae → SL override → above-BL override → numerical floors → OU update for u'/v'/w' → vertical+horizontal displacement → surface reflection.
+- Extended `AnalyticMetReader` in `tests/test_main_runtime.py` to emit `t`, `ustar`, `shf` with configurable scalars so Hanna runs are testable without remote ERA5.
+- Added `tests/test_hanna.py` with eleven unit tests (registry, Coriolis, density, Obukhov L, convective velocity, in-BL formulae per regime, regime selection, surface-layer formulae, above-BL constants).
+- Added three end-to-end Hanna tests in `tests/test_main_runtime.py`: smoke run, mean-trajectory preservation under constant wind, non-trivial vertical spread under convective conditions. Total test count now 57.
+- The default `--turbulence-scheme` stays `placeholder_constant_ou` until an external (FLEXPART/STILT) comparison validates the Hanna behaviour. CLI `--help` now lists both registered schemes.
+- Updated `VALIDATION.md` with all new tests and reframed the "placeholder pending M1" section to "pending external validation" — local-dispersion metrics are now Hanna-driven but the FLEXPART/STILT cross-comparison case is still future work.
+
 ### 2026-05-08 Milestone 1 steps 4 + 5: ustar/shf met inputs
 
 - Extended `ArcoEra5ZarrReader` with the met inputs Hanna needs: added `ustar -> friction_velocity` and `shf -> surface_sensible_heat_flux` to `DEFAULT_VARIABLE_MAP`.
@@ -255,12 +273,10 @@ Build a modern, highly optimized, backward-in-time LPDM for greenhouse-gas footp
 
 ## Immediate recommendation
 
-- Milestone 0 is complete: validation suite landed, `ColumnRelease` ambiguity resolved, footprint units documented, `VALIDATION.md` published.
-- Milestone 1 is in progress (paused mid-stream). Per `docs/turbulence.md` §4, steps 1, 3, 4, 5 are done: `lpdm/turbulence/{base,placeholder,__init__}.py` scaffold + registry, `--turbulence-scheme` CLI plumbing, named `HourlyMetTensors.channel(...)` accessor, `met_reader.py` extension for `ustar`/`shf` (with J/m² → W/m² de-accumulation), and `download_sample_cube.py` updated to fetch the new variables. 42 tests pass; placeholder runs are bit-equivalent to the M0 path.
-- The next chunk is `docs/turbulence.md` §4 step 6 — implementing `HannaScheme` itself, ideally landed in the staged sub-steps 6a–6e (stability classification → in-BL formulae per regime → above-BL constant-K → surface-layer override → full `step()` assembly). Step 7 (`engine.apply_horizontal_turbulence` primitive) lands inside that work; step 8 (flip the default scheme to `hanna_1982` once validated) is the closer.
-- The local sample cube needs to be re-downloaded with the updated `download_sample_cube.py` before Hanna runs against `data/sample_met.zarr`. Placeholder runs continue to work against the old cube.
-- Once Milestone 1 lands, prioritize Milestone 2.
-- Defer substantial GPU tuning until the turbulence and aggregation interfaces are stable enough to benchmark meaningfully.
+- Milestone 0 complete; Milestone 1 implementation-complete. All `docs/turbulence.md` §4 steps 1, 3, 4, 5, 6, 7 landed. The default `--turbulence-scheme` is still `placeholder_constant_ou`; the closer (step 8: flip default to `hanna_1982`) waits on external validation per `VALIDATION.md`.
+- Pre-merge work for closing M1: re-download the local sample cube with the updated `download_sample_cube.py` (it now needs `friction_velocity` and `surface_sensible_heat_flux`), then run a FLEXPART/STILT cross-comparison case. Once Hanna's plume spread agrees with the reference within a documented tolerance, flip the default and update README.
+- Optional M1.x refinement: replace the constant-K above-BL placeholder with an N²-based scheme using model-level `theta` gradients. Spec § "Open questions / known limitations" in `docs/turbulence.md` flags this; only worth doing if free-troposphere transport accuracy proves insufficient in real runs.
+- After M1 validation lands, prioritize Milestone 2 (particle aggregation). Defer substantial GPU tuning until the turbulence and aggregation interfaces are stable enough to benchmark meaningfully.
 
 ## Operational notes
 

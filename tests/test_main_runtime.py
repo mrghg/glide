@@ -31,8 +31,10 @@ class AnalyticMetReader(MetReader):
     """Synthetic met reader returning spatially-uniform analytic wind fields.
 
     Each fetch evaluates the user-provided wind callable at hour-start and hour-end
-    and broadcasts the result across a small regular grid. Spatial uniformity keeps
-    test geometry simple while still exercising temporal interpolation.
+    and broadcasts the result across a small regular grid. Surface scalars
+    (BLH, SP, T, ustar, SHF) are configurable per-instance for stability-controllable
+    Hanna-scheme tests. The active set of channels is controlled by `channel_names`,
+    so a single reader implementation serves both placeholder and Hanna setups.
     """
 
     coverage_start: datetime
@@ -46,6 +48,10 @@ class AnalyticMetReader(MetReader):
     n_lev: int = 4
     blh_m: float = 1500.0
     sp_pa: float = 101325.0
+    t_kelvin: float = 280.0
+    ustar_m_s: float = 0.4
+    shf_w_m2: float = 0.0
+    channel_names: tuple[str, ...] = ("u", "v", "w", "blh", "sp")
     device: torch.device | str = "cpu"
     dtype: torch.dtype = torch.float32
 
@@ -61,16 +67,20 @@ class AnalyticMetReader(MetReader):
         shape = (self.n_lev, self.n_lat, self.n_lon)
 
         def _build(u: float, v: float, w: float) -> torch.Tensor:
-            return torch.stack(
-                [
-                    torch.full(shape, float(u), dtype=self.dtype, device=self.device),
-                    torch.full(shape, float(v), dtype=self.dtype, device=self.device),
-                    torch.full(shape, float(w), dtype=self.dtype, device=self.device),
-                    torch.full(shape, self.blh_m, dtype=self.dtype, device=self.device),
-                    torch.full(shape, self.sp_pa, dtype=self.dtype, device=self.device),
-                ],
-                dim=0,
-            )
+            available = {
+                "u": torch.full(shape, float(u), dtype=self.dtype, device=self.device),
+                "v": torch.full(shape, float(v), dtype=self.dtype, device=self.device),
+                "w": torch.full(shape, float(w), dtype=self.dtype, device=self.device),
+                "blh": torch.full(shape, self.blh_m, dtype=self.dtype, device=self.device),
+                "sp": torch.full(shape, self.sp_pa, dtype=self.dtype, device=self.device),
+                "t": torch.full(shape, self.t_kelvin, dtype=self.dtype, device=self.device),
+                "ustar": torch.full(shape, self.ustar_m_s, dtype=self.dtype, device=self.device),
+                "shf": torch.full(shape, self.shf_w_m2, dtype=self.dtype, device=self.device),
+            }
+            missing = [k for k in self.channel_names if k not in available]
+            if missing:
+                raise KeyError(f"AnalyticMetReader cannot supply channels: {missing}")
+            return torch.stack([available[name] for name in self.channel_names], dim=0)
 
         metadata = MetFieldMetadata(
             lon=np.linspace(self.lon_bounds[0], self.lon_bounds[1], self.n_lon),
@@ -88,6 +98,8 @@ class AnalyticMetReader(MetReader):
                 "t": "K",
                 "z": "m**2s**-2",
                 "z_sfc": "m**2s**-2",
+                "ustar": "m/s",
+                "shf": "W m**-2",
             },
         )
 
@@ -95,7 +107,7 @@ class AnalyticMetReader(MetReader):
             hour_start=_build(u0, v0, w0),
             hour_end=_build(u1, v1, w1),
             metadata=metadata,
-            channel_names=("u", "v", "w", "blh", "sp"),
+            channel_names=tuple(self.channel_names),
         )
 
 
@@ -205,6 +217,107 @@ def test_constant_wind_advection_trajectory(tmp_path: Path) -> None:
     expected_final_lon = cfg.release_lon + expected_disp_m / m_per_deg_lon
 
     assert abs(final_lon - expected_final_lon) < 5e-3
+
+
+def _make_hanna_reader(
+    cfg: RunConfig,
+    wind_fn: Callable[[datetime], tuple[float, float, float]],
+    *,
+    ustar_m_s: float = 0.4,
+    shf_w_m2: float = 0.0,
+    t_kelvin: float = 280.0,
+) -> AnalyticMetReader:
+    """AnalyticMetReader configured to supply the channels Hanna needs."""
+
+    return AnalyticMetReader(
+        coverage_start=cfg.start_time - timedelta(seconds=cfg.simulation_length_seconds + 7200),
+        coverage_end=cfg.start_time + timedelta(seconds=cfg.release_duration_seconds + 3600),
+        wind_fn=wind_fn,
+        channel_names=("u", "v", "w", "blh", "sp", "t", "ustar", "shf"),
+        ustar_m_s=ustar_m_s,
+        shf_w_m2=shf_w_m2,
+        t_kelvin=t_kelvin,
+    )
+
+
+def test_hanna_run_completes_with_synthetic_met(tmp_path: Path) -> None:
+    """Hanna scheme should run end-to-end and produce all expected artifacts."""
+
+    cfg = _make_run_config(
+        output_uri=str(tmp_path / "out"),
+        turbulence_scheme="hanna_1982",
+    )
+    reader = _make_hanna_reader(cfg, wind_fn=lambda _: (5.0, 0.0, 0.0))
+
+    metadata = _run(cfg, reader=reader)
+
+    assert metadata["runtime"]["status"] == "completed"
+    out = tmp_path / "out"
+    assert (out / "endpoint_particles.parquet").exists()
+    assert (out / "trajectory_diagnostics.parquet").exists()
+    assert (out / "footprints.zarr").exists()
+    assert (out / "run_metadata.json").exists()
+
+
+def test_hanna_constant_wind_preserves_mean_trajectory(tmp_path: Path) -> None:
+    """Hanna's zero-mean perturbations shouldn't bias the ensemble mean position."""
+
+    cfg = _make_run_config(
+        release_duration_seconds=60,
+        simulation_length_seconds=10800,
+        dt_seconds=300,
+        release_lon=0.0,
+        release_lat=0.0,
+        n_particles=512,
+        release_seed=42,
+        output_uri=str(tmp_path / "out"),
+        turbulence_scheme="hanna_1982",
+    )
+    u_const = 5.0
+    reader = _make_hanna_reader(cfg, wind_fn=lambda _: (u_const, 0.0, 0.0))
+
+    _run(cfg, reader=reader)
+
+    traj = pd.read_parquet(tmp_path / "out" / "trajectory_diagnostics.parquet")
+    final_lon = float(traj.iloc[-1]["mean_lon"])
+
+    n_steps = cfg.simulation_length_seconds // cfg.dt_seconds
+    expected_disp_m = -u_const * (n_steps - 1) * cfg.dt_seconds
+    m_per_deg_lon = 111320.0
+    expected_final_lon = cfg.release_lon + expected_disp_m / m_per_deg_lon
+
+    # Looser tolerance than the placeholder test (1e-2 deg ~ 1.1 km) to accommodate
+    # ensemble noise from the new horizontal stochastic component.
+    assert abs(final_lon - expected_final_lon) < 1e-2
+
+
+def test_hanna_produces_nontrivial_vertical_spread(tmp_path: Path) -> None:
+    """Hanna with positive sensible heat flux should produce substantial vertical spread."""
+
+    cfg = _make_run_config(
+        release_duration_seconds=60,
+        simulation_length_seconds=3600,
+        dt_seconds=120,
+        release_alt_agl_m=500.0,
+        n_particles=512,
+        release_seed=42,
+        output_uri=str(tmp_path / "out"),
+        turbulence_scheme="hanna_1982",
+    )
+    # Convective conditions: positive SHF, w* > 0, particles should mix vertically.
+    reader = _make_hanna_reader(
+        cfg, wind_fn=lambda _: (0.0, 0.0, 0.0), ustar_m_s=0.5, shf_w_m2=200.0,
+    )
+
+    _run(cfg, reader=reader)
+
+    endpoints = pd.read_parquet(tmp_path / "out" / "endpoint_particles.parquet")
+    alt_std = float(endpoints["alt"].std())
+    # Empirically, an unstable run with sigma_w ~0.7 m/s for ~1 hour should produce
+    # vertical std of order 100m+. Loose threshold to avoid flakiness.
+    assert alt_std > 50.0
+    # Surface reflection should keep all particles non-negative.
+    assert float(endpoints["alt"].min()) >= 0.0
 
 
 def test_footprint_total_matches_active_particle_time(tmp_path: Path) -> None:
