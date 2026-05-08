@@ -95,6 +95,7 @@ class AnalyticMetReader(MetReader):
             hour_start=_build(u0, v0, w0),
             hour_end=_build(u1, v1, w1),
             metadata=metadata,
+            channel_names=("u", "v", "w", "blh", "sp"),
         )
 
 

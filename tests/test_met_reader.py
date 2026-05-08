@@ -36,6 +36,9 @@ def _build_mock_era5_dataset() -> xr.Dataset:
     t = np.full(shape_4d, 280.0, dtype=np.float64)  # K
     blh = np.full(shape_3d, 400.0, dtype=np.float64)
     sp = np.full(shape_3d, 101325.0, dtype=np.float64)
+    ustar = np.full(shape_3d, 0.4, dtype=np.float64)  # m/s
+    # 100 W/m^2 accumulated over 3600 s = 360_000 J/m^2
+    shf_accumulated = np.full(shape_3d, 360_000.0, dtype=np.float64)
 
     # Build geopotential fields so the implied AGL is exactly [900, 1000] m.
     z_sfc = np.full(shape_3d, 150.0 * 9.80665, dtype=np.float64)  # 150 m AMSL in m^2 s^-2
@@ -53,6 +56,8 @@ def _build_mock_era5_dataset() -> xr.Dataset:
             "surface_pressure": (("time", "latitude", "longitude"), sp),
             "geopotential": (("time", "level", "latitude", "longitude"), z),
             "geopotential_at_surface": (("time", "latitude", "longitude"), z_sfc),
+            "friction_velocity": (("time", "latitude", "longitude"), ustar),
+            "surface_sensible_heat_flux": (("time", "latitude", "longitude"), shf_accumulated),
         },
         coords={
             "time": times,
@@ -70,6 +75,8 @@ def _build_mock_era5_dataset() -> xr.Dataset:
     ds["surface_pressure"].attrs["units"] = "Pa"
     ds["geopotential"].attrs["units"] = "m**2 s**-2"
     ds["geopotential_at_surface"].attrs["units"] = "m**2 s**-2"
+    ds["friction_velocity"].attrs["units"] = "m s**-1"
+    ds["surface_sensible_heat_flux"].attrs["units"] = "J m**-2"
     ds["level"].attrs["units"] = "hPa"
 
     return ds
@@ -251,3 +258,132 @@ def test_fetch_hourly_window_rejects_all_nan_agl_fields() -> None:
         raise AssertionError("Expected ValueError for all-NaN AGL fields")
     except ValueError as exc:
         assert "contain non-finite values" in str(exc)
+
+
+def test_hourly_met_tensors_channel_accessors_match_positional() -> None:
+    """channel() / channels() should agree with positional indexing and respect order."""
+
+    ds = _build_mock_era5_dataset()
+    reader = _InMemoryArcoReader(ds)
+    request = BoundingBoxRequest(
+        spatial=SpatialBounds(
+            lon_min=19.5, lon_max=21.5, lat_min=9.5, lat_max=11.5, z_min=850.0, z_max=1050.0,
+        ),
+        time=TimeBounds(
+            start=datetime(2024, 1, 1, 0, 15, tzinfo=timezone.utc),
+            end=datetime(2024, 1, 1, 1, 0, tzinfo=timezone.utc),
+        ),
+    )
+
+    result = reader.fetch_hourly_window(request)
+    assert result.channel_names == ("u", "v", "w", "blh", "sp")
+
+    # Single-channel access matches positional index.
+    sp_start, sp_end = result.channel("sp")
+    assert torch.equal(sp_start, result.hour_start[4])
+    assert torch.equal(sp_end, result.hour_end[4])
+
+    # Multi-channel access stacks in the requested order, not the underlying order.
+    stacked_start, stacked_end = result.channels("w", "u", "blh")
+    assert torch.equal(stacked_start[0], result.hour_start[2])
+    assert torch.equal(stacked_start[1], result.hour_start[0])
+    assert torch.equal(stacked_start[2], result.hour_start[3])
+    assert stacked_end.shape == (3, *result.hour_end.shape[1:])
+
+
+def test_fetch_hourly_window_includes_ustar_and_deaccumulates_shf() -> None:
+    """Extending channel_names should bring ustar/shf into the tensor; J/m^2 -> W/m^2."""
+
+    ds = _build_mock_era5_dataset()
+
+    class _ExtendedReader(_InMemoryArcoReader):
+        pass
+
+    reader = _ExtendedReader(ds)
+    reader.channel_names = ("u", "v", "w", "blh", "sp", "ustar", "shf")
+
+    request = BoundingBoxRequest(
+        spatial=SpatialBounds(
+            lon_min=19.5, lon_max=21.5, lat_min=9.5, lat_max=11.5, z_min=850.0, z_max=1050.0,
+        ),
+        time=TimeBounds(
+            start=datetime(2024, 1, 1, 0, 15, tzinfo=timezone.utc),
+            end=datetime(2024, 1, 1, 1, 0, tzinfo=timezone.utc),
+        ),
+    )
+
+    result = reader.fetch_hourly_window(request)
+
+    assert result.channel_names == ("u", "v", "w", "blh", "sp", "ustar", "shf")
+    assert result.hour_start.shape == (7, 2, 2, 2)
+
+    ustar_start, _ = result.channel("ustar")
+    assert torch.allclose(ustar_start, torch.full_like(ustar_start, 0.4))
+
+    # Mock SHF is 360_000 J/m^2 accumulated over 3600 s; expect 100 W/m^2.
+    shf_start, _ = result.channel("shf")
+    assert torch.allclose(shf_start, torch.full_like(shf_start, 100.0))
+
+
+def test_fetch_hourly_window_passes_through_instantaneous_shf() -> None:
+    """If SHF is supplied as W/m^2 the de-accumulation step should be a no-op."""
+
+    ds = _build_mock_era5_dataset()
+    ds["surface_sensible_heat_flux"] = ds["surface_sensible_heat_flux"] / 3600.0
+    ds["surface_sensible_heat_flux"].attrs["units"] = "W m**-2"
+
+    class _ExtendedReader(_InMemoryArcoReader):
+        pass
+
+    reader = _ExtendedReader(ds)
+    reader.channel_names = ("u", "v", "w", "blh", "sp", "ustar", "shf")
+
+    request = BoundingBoxRequest(
+        spatial=SpatialBounds(
+            lon_min=19.5, lon_max=21.5, lat_min=9.5, lat_max=11.5, z_min=850.0, z_max=1050.0,
+        ),
+        time=TimeBounds(
+            start=datetime(2024, 1, 1, 0, 15, tzinfo=timezone.utc),
+            end=datetime(2024, 1, 1, 1, 0, tzinfo=timezone.utc),
+        ),
+    )
+
+    result = reader.fetch_hourly_window(request)
+
+    shf_start, _ = result.channel("shf")
+    assert torch.allclose(shf_start, torch.full_like(shf_start, 100.0))
+
+
+def test_reader_rejects_channel_names_with_no_variable_map_entry() -> None:
+    try:
+        ArcoEra5ZarrReader(
+            zarr_store="in-memory",
+            channel_names=("u", "v", "w", "blh", "sp", "totally_unknown"),
+            device="cpu",
+        )
+        raise AssertionError("Expected KeyError for unmapped channel name")
+    except KeyError as exc:
+        assert "totally_unknown" in str(exc)
+
+
+def test_hourly_met_tensors_channel_unknown_name_raises() -> None:
+    ds = _build_mock_era5_dataset()
+    reader = _InMemoryArcoReader(ds)
+    request = BoundingBoxRequest(
+        spatial=SpatialBounds(
+            lon_min=19.5, lon_max=21.5, lat_min=9.5, lat_max=11.5, z_min=850.0, z_max=1050.0,
+        ),
+        time=TimeBounds(
+            start=datetime(2024, 1, 1, 0, 15, tzinfo=timezone.utc),
+            end=datetime(2024, 1, 1, 1, 0, tzinfo=timezone.utc),
+        ),
+    )
+
+    result = reader.fetch_hourly_window(request)
+
+    try:
+        result.channel("ustar")
+        raise AssertionError("Expected KeyError for unknown channel name")
+    except KeyError as exc:
+        assert "'ustar'" in str(exc)
+        assert "Available" in str(exc)

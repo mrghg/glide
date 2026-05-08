@@ -94,13 +94,43 @@ class HourlyMetTensors:
     Shape convention for each tensor:
         [channels, z, y, x]
 
-    Channel order is determined by the reader implementation and should be
-    documented centrally (for example: [u, v, w, blh, sp]).
+    `channel_names[i]` identifies the logical variable at axis 0 index `i` (for
+    example `("u", "v", "w", "blh", "sp")`). Use `channel(name)` or
+    `channels(*names)` to slice by name rather than position.
     """
 
     hour_start: torch.Tensor
     hour_end: torch.Tensor
     metadata: MetFieldMetadata
+    channel_names: tuple[str, ...]
+
+    def _channel_index(self, name: str) -> int:
+        try:
+            return self.channel_names.index(name)
+        except ValueError as exc:
+            available = ", ".join(self.channel_names) or "<none>"
+            raise KeyError(
+                f"Channel {name!r} not present in met window. Available: {available}"
+            ) from exc
+
+    def channel(self, name: str) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return `(hour_start_slice, hour_end_slice)` for one named channel.
+
+        Each slice has shape `[z, y, x]`.
+        """
+
+        idx = self._channel_index(name)
+        return self.hour_start[idx], self.hour_end[idx]
+
+    def channels(self, *names: str) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return stacked hour-start and hour-end slices for the named channels.
+
+        Each returned tensor has shape `[len(names), z, y, x]`. Channel order in
+        the result matches the order of `names` rather than the underlying tensor.
+        """
+
+        indices = [self._channel_index(name) for name in names]
+        return self.hour_start[indices], self.hour_end[indices]
 
 
 class MetReader(ABC):
@@ -147,18 +177,34 @@ class ArcoEra5ZarrReader(MetReader):
         "t": "temperature",
         "z": "geopotential",
         "z_sfc": "geopotential_at_surface",
+        # Single-level fields used by turbulence schemes (e.g. Hanna). Override
+        # to "instantaneous_surface_sensible_heat_flux" if the dataset provides it.
+        "ustar": "friction_velocity",
+        "shf": "surface_sensible_heat_flux",
     }
+
+    # Default channel order packed into the [C, Z, Y, X] tensors returned by
+    # fetch_hourly_window. Override per-instance via the `channel_names` argument
+    # to add scheme-specific extras (for example ustar, shf for Hanna).
+    DEFAULT_CHANNEL_NAMES: tuple[str, ...] = ("u", "v", "w", "blh", "sp")
+
+    # Logical keys always required for derivations, regardless of channel_names:
+    #   t       -> omega -> w conversion
+    #   z, z_sfc -> geopotential -> AGL conversion
+    _DERIVATION_KEYS: tuple[str, ...] = ("t", "z", "z_sfc")
 
     def __init__(
         self,
         zarr_store: str,
         *,
         variable_map: Mapping[str, str] | None = None,
+        channel_names: Sequence[str] | None = None,
         lon_name: str = "longitude",
         lat_name: str = "latitude",
         level_name: str = "level",
         time_name: str = "time",
         chunk_overrides: Mapping[str, int] | None = None,
+        accumulation_seconds: int = 3600,
         device: torch.device | str = DEVICE,
         dtype: torch.dtype = torch.float32,
     ) -> None:
@@ -167,30 +213,55 @@ class ArcoEra5ZarrReader(MetReader):
         Args:
             zarr_store: GCS path (for example `gs://bucket/path/to.zarr`).
             variable_map: Optional override for logical-to-dataset variable names.
+            channel_names: Optional override for the channels packed into the [C, Z,
+                Y, X] hourly tensors. Defaults to `DEFAULT_CHANNEL_NAMES`. Add
+                scheme-specific keys (e.g. "ustar", "shf") to make the new fields
+                available via `HourlyMetTensors.channel(name)`.
             lon_name: Longitude coordinate name in source dataset.
             lat_name: Latitude coordinate name in source dataset.
             level_name: Vertical coordinate name in source dataset.
             time_name: Time coordinate name in source dataset.
             chunk_overrides: Optional xarray/dask chunk override dict.
+            accumulation_seconds: Period over which accumulated surface fluxes (e.g.
+                surface_sensible_heat_flux as J/m^2) are aggregated. Used to convert
+                accumulated flux fields back to instantaneous W/m^2. Default 3600 s
+                matches ERA5 hourly accumulation.
             device: Torch target device for returned tensors.
             dtype: Torch dtype for returned tensors.
         """
 
         self.zarr_store = zarr_store
         self.variable_map = dict(variable_map or self.DEFAULT_VARIABLE_MAP)
+        self.channel_names: tuple[str, ...] = (
+            tuple(channel_names) if channel_names is not None else self.DEFAULT_CHANNEL_NAMES
+        )
         self.lon_name = lon_name
         self.lat_name = lat_name
         self.level_name = level_name
         self.time_name = time_name
         self.chunk_overrides = dict(chunk_overrides or {})
+        self.accumulation_seconds = int(accumulation_seconds)
         self.device = torch.device(device)
         self.dtype = dtype
 
+        unknown = [k for k in self.channel_names if k not in self.variable_map]
+        if unknown:
+            raise KeyError(
+                f"channel_names contains keys with no entry in variable_map: {unknown}. "
+                f"Add them to variable_map or remove from channel_names."
+            )
+        if self.accumulation_seconds <= 0:
+            raise ValueError("accumulation_seconds must be > 0")
+
     @property
     def required_variable_keys(self) -> tuple[str, ...]:
-        """Logical variable keys required for LPDM stepping."""
+        """Logical variable keys required for LPDM stepping.
 
-        return ("u", "v", "w", "blh", "sp", "t", "z", "z_sfc")
+        Union of `channel_names` (what gets packed into the channel tensor) with
+        `_DERIVATION_KEYS` (always-needed for omega->w and AGL conversion).
+        """
+
+        return tuple(dict.fromkeys((*self.channel_names, *self._DERIVATION_KEYS)))
 
     def fetch_hourly_window(self, request: BoundingBoxRequest) -> HourlyMetTensors:
         """Read, slice, materialize, and convert one hourly met window.
@@ -263,6 +334,7 @@ class ArcoEra5ZarrReader(MetReader):
             hour_start=hour_start,
             hour_end=hour_end,
             metadata=metadata,
+            channel_names=self.channel_names,
         )
 
     def get_time_coverage(self) -> tuple[datetime, datetime]:
@@ -525,7 +597,7 @@ class ArcoEra5ZarrReader(MetReader):
         """Convert one xarray time-slice into [channels, z, y, x] torch tensor."""
 
         channels: list[np.ndarray] = []
-        logical_keys = ("u", "v", "w", "blh", "sp")
+        logical_keys = self.channel_names
         units_by_key = self._read_variable_units(ds_time_slice)
 
         temperature = np.asarray(ds_time_slice[self.variable_map["t"]].values)
@@ -554,6 +626,8 @@ class ArcoEra5ZarrReader(MetReader):
                     level_hpa=self._pressure_levels_to_pa(ds_time_slice),
                     temperature_k=temperature,
                 )
+            elif key == "shf":
+                arr = self._convert_shf_to_w_per_m2(arr, units_by_key[key])
 
             channels.append(arr)
 
@@ -598,6 +672,16 @@ class ArcoEra5ZarrReader(MetReader):
                 "m^2/s^2",
                 "m2/s^2",
             }:
+                return
+            raise ValueError(f"Unsupported units {units!r} for variable {logical_key!r}")
+
+        if logical_key in ("ustar",):
+            if self._is_velocity_units(norm):
+                return
+            raise ValueError(f"Unsupported units {units!r} for variable {logical_key!r}")
+
+        if logical_key in ("shf",):
+            if self._is_flux_density_units(norm) or self._is_flux_accumulated_units(norm):
                 return
             raise ValueError(f"Unsupported units {units!r} for variable {logical_key!r}")
 
@@ -653,3 +737,47 @@ class ArcoEra5ZarrReader(MetReader):
             "pa*s**-1",
             "pa.s-1",
         }
+
+    @staticmethod
+    def _is_flux_density_units(norm_units: str) -> bool:
+        """Recognize instantaneous heat-flux units (W/m^2)."""
+
+        return norm_units in {
+            "w/m**2",
+            "wm**-2",
+            "wm-2",
+            "w/m^2",
+            "w/m2",
+            "w*m**-2",
+            "w*m^-2",
+            "w.m-2",
+        }
+
+    @staticmethod
+    def _is_flux_accumulated_units(norm_units: str) -> bool:
+        """Recognize accumulated heat-flux units (J/m^2)."""
+
+        return norm_units in {
+            "j/m**2",
+            "jm**-2",
+            "jm-2",
+            "j/m^2",
+            "j/m2",
+            "j*m**-2",
+            "j*m^-2",
+            "j.m-2",
+        }
+
+    def _convert_shf_to_w_per_m2(self, arr: np.ndarray, units: str) -> np.ndarray:
+        """Return SHF in W/m^2 regardless of source units.
+
+        Accumulated J/m^2 fluxes are de-accumulated by dividing by
+        `accumulation_seconds`. Instantaneous W/m^2 fluxes pass through unchanged.
+        """
+
+        norm = self._normalize_units(units)
+        if self._is_flux_density_units(norm):
+            return arr
+        if self._is_flux_accumulated_units(norm):
+            return arr / float(self.accumulation_seconds)
+        raise ValueError(f"Unsupported units {units!r} for surface_sensible_heat_flux")

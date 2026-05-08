@@ -101,6 +101,22 @@ Build a modern, highly optimized, backward-in-time LPDM for greenhouse-gas footp
 - Tightened `src/lpdm/met_reader.py` to reject any non-finite geopotential-derived AGL values instead of attempting to continue with inconsistent meteorology.
 - Persisted spatial and time-bin coordinate metadata into `footprints.zarr`, and updated the demo notebook to consume those coordinates directly while remaining compatible with older stores.
 
+### 2026-05-08 Milestone 1 steps 4 + 5: ustar/shf met inputs
+
+- Extended `ArcoEra5ZarrReader` with the met inputs Hanna needs: added `ustar -> friction_velocity` and `shf -> surface_sensible_heat_flux` to `DEFAULT_VARIABLE_MAP`.
+- Made the channel set pluggable: `channel_names` is now a constructor argument (defaults to `DEFAULT_CHANNEL_NAMES = ("u", "v", "w", "blh", "sp")`). `required_variable_keys` is derived as `channel_names ∪ _DERIVATION_KEYS = ("t", "z", "z_sfc")`, so unused fields aren't fetched. The constructor rejects channel names with no entry in `variable_map`.
+- Added units validation for `ustar` (m/s) and `shf` (W/m^2 instantaneous OR J/m^2 accumulated). Accumulated SHF is auto de-accumulated by dividing by `accumulation_seconds` (default 3600 s for hourly ERA5). New `_convert_shf_to_w_per_m2` helper alongside the existing omega->w conversion.
+- Wired `_run` in `main.py` to compute the required channel set as `("u", "v", "w", "blh", "sp") ∪ scheme.required_met_keys()` and pass it to the reader. Placeholder runs unchanged; Hanna will pick up `ustar`, `shf` automatically once the scheme declares them.
+- Updated `scripts/download_sample_cube.py` so locally-cached cubes now also fetch `friction_velocity` and `surface_sensible_heat_flux` from ARCO ERA5. Existing local cubes will need re-running once Hanna lands; placeholder runs continue to work against the old cube.
+- Added three tests in `tests/test_met_reader.py`: extended channel_names brings ustar into the tensor and de-accumulates J/m^2 SHF to 100 W/m^2; instantaneous W/m^2 SHF passes through unchanged; constructor rejects channel names absent from variable_map. Total test count now 42.
+
+### 2026-05-08 Milestone 1 step 3: named met-channel accessor
+
+- Added `channel_names: tuple[str, ...]` field to `HourlyMetTensors` plus `channel(name)` and `channels(*names)` accessor methods. `channels(*names)` returns stacked tensors in the requested order, not the underlying tensor order. Unknown channel names raise `KeyError` with the available channels listed.
+- Promoted the previously local `logical_keys = ("u", "v", "w", "blh", "sp")` tuple in `ArcoEra5ZarrReader._dataset_to_channel_tensor` to a class-level `CHANNEL_NAMES` constant. `fetch_hourly_window` now populates `HourlyMetTensors.channel_names` from it.
+- Migrated the `met_window.hour_start[:3]` / `hour_end[:3]` slice site in `_advect_active_particles` to `met_window.channels("u", "v", "w")`. Schemes will use the same accessor pattern when reading their declared met inputs (e.g. `met.channel("ustar")`).
+- Added two unit tests in `tests/test_met_reader.py`: positive-path matching against positional indexing and order preservation; error-path KeyError on unknown channel. Total test count now 39.
+
 ### 2026-05-08 Milestone 1 step 1: turbulence subpackage scaffold
 
 - Wrote `docs/turbulence.md` capturing the modular architecture (`TurbulenceScheme` ABC, registry, `lpdm/turbulence/{base,placeholder,hanna}.py`), the Hanna 1982 / FLEXPART formulation per stability regime, the day-1 above-BL constant-K placeholder, surface-layer override, drift handling (FLEXPART piecewise-homogeneous, no explicit Thomson 1987 drift), and the M1 implementation/validation plan. Linked from `README.md` Documentation Governance.
@@ -239,8 +255,10 @@ Build a modern, highly optimized, backward-in-time LPDM for greenhouse-gas footp
 
 ## Immediate recommendation
 
-- Milestone 0 is complete: validation suite landed, `ColumnRelease` ambiguity resolved, footprint units documented, `VALIDATION.md` published. See the 2026-05-07 and 2026-05-08 entries above for what was added and the placeholder list.
-- Move directly to Milestone 1. Treat horizontal stochastic diffusion as in-scope for M1, not a separate follow-on. The first sub-task is choosing and documenting the turbulence parameterization (Hanna, Degrazia, STILT-style, etc.) before any code change, so we can baseline the new behaviour against `VALIDATION.md`'s placeholder metrics.
+- Milestone 0 is complete: validation suite landed, `ColumnRelease` ambiguity resolved, footprint units documented, `VALIDATION.md` published.
+- Milestone 1 is in progress (paused mid-stream). Per `docs/turbulence.md` §4, steps 1, 3, 4, 5 are done: `lpdm/turbulence/{base,placeholder,__init__}.py` scaffold + registry, `--turbulence-scheme` CLI plumbing, named `HourlyMetTensors.channel(...)` accessor, `met_reader.py` extension for `ustar`/`shf` (with J/m² → W/m² de-accumulation), and `download_sample_cube.py` updated to fetch the new variables. 42 tests pass; placeholder runs are bit-equivalent to the M0 path.
+- The next chunk is `docs/turbulence.md` §4 step 6 — implementing `HannaScheme` itself, ideally landed in the staged sub-steps 6a–6e (stability classification → in-BL formulae per regime → above-BL constant-K → surface-layer override → full `step()` assembly). Step 7 (`engine.apply_horizontal_turbulence` primitive) lands inside that work; step 8 (flip the default scheme to `hanna_1982` once validated) is the closer.
+- The local sample cube needs to be re-downloaded with the updated `download_sample_cube.py` before Hanna runs against `data/sample_met.zarr`. Placeholder runs continue to work against the old cube.
 - Once Milestone 1 lands, prioritize Milestone 2.
 - Defer substantial GPU tuning until the turbulence and aggregation interfaces are stable enough to benchmark meaningfully.
 

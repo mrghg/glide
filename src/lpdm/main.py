@@ -661,8 +661,9 @@ def _advect_active_particles(
 		alt_last=float(met_window.metadata.level[-1]),
 	)
 
-	m_start = met_window.hour_start[:3].unsqueeze(0).to(device=device, dtype=dtype)
-	m_end = met_window.hour_end[:3].unsqueeze(0).to(device=device, dtype=dtype)
+	m_start_uvw, m_end_uvw = met_window.channels("u", "v", "w")
+	m_start = m_start_uvw.unsqueeze(0).to(device=device, dtype=dtype)
+	m_end = m_end_uvw.unsqueeze(0).to(device=device, dtype=dtype)
 
 	def wind_fn(xyz: torch.Tensor) -> torch.Tensor:
 		xyz_norm = engine.normalize_particle_coordinates(xyz, grid_bounds)
@@ -702,10 +703,19 @@ def _run(
 	reader: MetReader | None = None,
 	scheme: TurbulenceScheme | None = None,
 ) -> dict[str, object]:
-	if reader is None:
-		reader = ArcoEra5ZarrReader(zarr_store=cfg.zarr_store, device=cfg.device)
 	if scheme is None:
 		scheme = get_scheme(cfg.turbulence_scheme)
+	if reader is None:
+		# Channels = baseline (advection needs u/v/w; runtime telemetry uses blh/sp)
+		# unioned with whatever the chosen turbulence scheme declares it needs.
+		required_channels = tuple(
+			dict.fromkeys(("u", "v", "w", "blh", "sp", *scheme.required_met_keys()))
+		)
+		reader = ArcoEra5ZarrReader(
+			zarr_store=cfg.zarr_store,
+			channel_names=required_channels,
+			device=cfg.device,
+		)
 	engine = GPUEngine(device=cfg.device)
 	writer = OutputWriter()
 	device = torch.device(cfg.device)

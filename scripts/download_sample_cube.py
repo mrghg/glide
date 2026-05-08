@@ -5,7 +5,11 @@ from pathlib import Path
 import numpy as np
 import xarray as xr
 
-# Logical to ERA5 physical mapping required by ARCO Zarr
+# Logical to ERA5 physical mapping required by ARCO Zarr.
+# friction_velocity and surface_sensible_heat_flux are required by the M1 Hanna
+# turbulence scheme (see docs/turbulence.md). They are surface fields so adding them
+# is cheap; downloading them keeps the local cube ready for either placeholder or
+# Hanna runs.
 REQUIRED_VARS = [
     "u_component_of_wind",
     "v_component_of_wind",
@@ -14,7 +18,9 @@ REQUIRED_VARS = [
     "surface_pressure",
     "temperature",
     "geopotential",
-    "geopotential_at_surface"
+    "geopotential_at_surface",
+    "friction_velocity",
+    "surface_sensible_heat_flux",
 ]
 
 
