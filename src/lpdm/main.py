@@ -31,6 +31,19 @@ from lpdm.runtime import DEVICE
 LOGGER = logging.getLogger(__name__)
 
 
+FOOTPRINT_UNITS_DOC = {
+	"value": "Σ over active particles in cell of (weight_i × dt_step_seconds)",
+	"value_dimensionality": "(dimensionless mass fraction) × seconds — residence time per unit released mass",
+	"particle_weight_convention": "1/n_particles for uniform releases; each particle represents 1/N of the total released mass",
+	"notes": (
+		"Raw residence-time accumulator; downstream code is responsible for converting to a physical "
+		"sensitivity (e.g. ppm per emission flux), which requires cell volume, mixed-layer thickness, "
+		"air density, and molar-mass conversions. See Lin et al. 2003 (STILT) or Seibert & Frank 2004 "
+		"for standard recipes."
+	),
+}
+
+
 class PreflightValidationError(ValueError):
 	"""Raised when run inputs are invalid before stepping begins."""
 
@@ -482,6 +495,7 @@ def _write_memory_guard_metadata(
 				**runtime_extra,
 			),
 			"outputs": asdict(outputs),
+			"footprint_units": FOOTPRINT_UNITS_DOC,
 		},
 	)
 
@@ -851,6 +865,7 @@ def _run(cfg: RunConfig, *, reader: MetReader | None = None) -> dict[str, object
 		"config": _config_metadata(cfg, release_end, sim_start),
 		"runtime": _runtime_metadata(cfg, step_count, hour_windows, memory_stats, status="completed"),
 		"outputs": asdict(outputs),
+		"footprint_units": FOOTPRINT_UNITS_DOC,
 	}
 	writer.write_metadata_json(outputs.metadata, metadata)
 

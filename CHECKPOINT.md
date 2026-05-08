@@ -101,6 +101,13 @@ Build a modern, highly optimized, backward-in-time LPDM for greenhouse-gas footp
 - Tightened `src/lpdm/met_reader.py` to reject any non-finite geopotential-derived AGL values instead of attempting to continue with inconsistent meteorology.
 - Persisted spatial and time-bin coordinate metadata into `footprints.zarr`, and updated the demo notebook to consume those coordinates directly while remaining compatible with older stores.
 
+### 2026-05-08 Milestone 0 closure
+
+- Rewrote `ColumnRelease` in `src/lpdm/release_generator.py` to take altitudes (m AGL) directly and use the averaging kernel as the only sampling weight. The old API's `levels` argument was internally inconsistent (used both as a pressure-mass weight and as the particle altitude column); pressure-mass weighting is now the caller's responsibility, passed in via `averaging_kernel`. Added `tests/test_release_generator.py` covering uniform sampling, AK-biased sampling, and three input-validation paths.
+- Documented footprint output units. The `FootprintGridder` module docstring and `accumulate` docstring now describe the raw accumulator value (`Σ over active particles of (weight_i × dt_step)`, dimensionality `(mass fraction) × seconds`) and the conversion path to physical sensitivity. The same description is persisted into `run_metadata.json` under `footprint_units` for both successful and memory-guard-aborted runs.
+- Added `VALIDATION.md` at the repo root: full table of tests with their tolerances and seeds, an explicit list of placeholder metrics pending Milestone 1, the canonical pytest command, the sample-met end-to-end command pointer, and a workflow for adding new physics regression tests.
+- Total test coverage now stands at 37 cases across `tests/test_physics.py`, `tests/test_footprint.py`, `tests/test_release_generator.py`, `tests/test_main_runtime.py`, and the pre-existing `tests/test_main_config.py`, `tests/test_output_writer.py`, `tests/test_met_reader.py`, `tests/test_download_sample_cube.py`. Suite runs in ~12 s with no network.
+
 ### 2026-05-07 Milestone 0 validation suite first wave
 
 - Added engine-level regression tests in `tests/test_physics.py`: RK2 second-order accuracy under a linear (spatially-varying) wind, and surface-reflection edge cases including non-zero `z_surface`. The pre-existing constant-wind test only proved the scheme was exact for trivial wind; it did not distinguish RK1 from RK2.
@@ -225,10 +232,9 @@ Build a modern, highly optimized, backward-in-time LPDM for greenhouse-gas footp
 
 ## Immediate recommendation
 
-- Start with Milestone 0, but treat it as scaffolding rather than a full physical baseline. Lock in advection, surface reflection, and footprint binning. Mark dispersion metrics as placeholder.
-- Pick up the `ColumnRelease` semantic fix and the footprint units documentation inside Milestone 0; both are small and unblock later work.
-- Move directly to Milestone 1 once Milestone 0 scaffolding is in place. Treat horizontal diffusion as in-scope for Milestone 1, not a separate item.
-- Once Milestone 1 lands, prioritize Milestone 2 next.
+- Milestone 0 is complete: validation suite landed, `ColumnRelease` ambiguity resolved, footprint units documented, `VALIDATION.md` published. See the 2026-05-07 and 2026-05-08 entries above for what was added and the placeholder list.
+- Move directly to Milestone 1. Treat horizontal stochastic diffusion as in-scope for M1, not a separate follow-on. The first sub-task is choosing and documenting the turbulence parameterization (Hanna, Degrazia, STILT-style, etc.) before any code change, so we can baseline the new behaviour against `VALIDATION.md`'s placeholder metrics.
+- Once Milestone 1 lands, prioritize Milestone 2.
 - Defer substantial GPU tuning until the turbulence and aggregation interfaces are stable enough to benchmark meaningfully.
 
 ## Operational notes

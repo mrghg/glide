@@ -123,42 +123,47 @@ class FlightTrackRelease(Release):
 
 @dataclass
 class ColumnRelease(Release):
-	"""Importance-sampled vertical column release (for satellite retrievals)."""
+	"""Vertical column release at a fixed (lon, lat) over a set of altitude levels.
+
+	Particles are placed at user-supplied altitudes (m AGL). When an averaging kernel
+	is provided, levels are sampled with probability proportional to the kernel;
+	otherwise sampling is uniform across the supplied altitudes. Pressure-mass
+	weighting (when wanted, e.g. for satellite retrieval applications) should be
+	pre-computed by the caller and passed via `averaging_kernel`.
+	"""
 
 	lon: float = 0.0
 	lat: float = 0.0
-	levels: Sequence[float] = ()
+	altitudes_agl_m: Sequence[float] = ()
 	averaging_kernel: Sequence[float] | None = None
 
 	def _compute_pdf(self) -> torch.Tensor:
-		levels = _as_1d_tensor(self.levels)
-		if levels.numel() == 0:
-			raise ValueError("levels must contain at least one value")
-		if torch.any(levels <= 0):
-			raise ValueError("levels must be positive for pressure-weight computation")
-
-		# Higher pressure generally means more near-surface mass weighting.
-		pressure_weight = levels / torch.sum(levels)
+		altitudes = _as_1d_tensor(self.altitudes_agl_m)
+		if altitudes.numel() == 0:
+			raise ValueError("altitudes_agl_m must contain at least one value")
+		if torch.any(altitudes < 0):
+			raise ValueError("altitudes_agl_m must be non-negative")
 
 		if self.averaging_kernel is None:
-			ak = torch.ones_like(levels)
+			weights = torch.ones_like(altitudes)
 		else:
-			ak = _as_1d_tensor(self.averaging_kernel)
-			if ak.numel() != levels.numel():
-				raise ValueError("averaging_kernel length must match levels length")
+			weights = _as_1d_tensor(self.averaging_kernel)
+			if weights.numel() != altitudes.numel():
+				raise ValueError("averaging_kernel length must match altitudes_agl_m length")
+			if torch.any(weights < 0):
+				raise ValueError("averaging_kernel values must be non-negative")
 
-		raw = pressure_weight * ak
-		total = torch.sum(raw)
+		total = torch.sum(weights)
 		if not torch.isfinite(total) or float(total) <= 0.0:
-			raise ValueError("Computed column PDF is invalid; check levels and AK values")
-		return raw / total
+			raise ValueError("Column sampling weights sum to zero; check averaging_kernel values")
+		return weights / total
 
 	def generate(self) -> torch.Tensor:
-		levels = _as_1d_tensor(self.levels)
+		altitudes = _as_1d_tensor(self.altitudes_agl_m)
 		pdf = self._compute_pdf()
 
 		sampled_idx = torch.multinomial(pdf, num_samples=self.n_particles, replacement=True)
-		alt = levels[sampled_idx].to(device=self.device, dtype=self.dtype)
+		alt = altitudes[sampled_idx].to(device=self.device, dtype=self.dtype)
 
 		lon = torch.full((self.n_particles,), self.lon, dtype=self.dtype, device=self.device)
 		lat = torch.full((self.n_particles,), self.lat, dtype=self.dtype, device=self.device)

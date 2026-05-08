@@ -1,9 +1,17 @@
 """GPU-based footprint accumulation module.
 
-Implementation TODO:
-- Initialize [time_ago, z_bin, y, x] footprint tensor
-- Bin particles by altitude and horizontal index
-- Accumulate weighted residence time with scatter_add_
+Output units convention: each cell of the footprint tensor accumulates
+`Σ over active particles in cell of (weight_i × dt_step_seconds)` where `weight_i`
+is the per-particle weight set by the release generator (typically `1/n_particles`
+for uniform releases). The raw value therefore has dimensionality
+`(dimensionless mass fraction) × seconds`, i.e. residence time per unit released
+mass.
+
+Conversion to a physical sensitivity (e.g. ppm per (μmol/m²/s) emission flux)
+requires additional factors not applied here: cell volume, mixed-layer thickness,
+air density, and molar-mass conversions. See Lin et al. 2003 (STILT) or
+Seibert & Frank 2004 for the standard recipes. Downstream code is responsible
+for converting the raw accumulator to whichever physical sensitivity is needed.
 """
 
 from __future__ import annotations
@@ -14,7 +22,11 @@ from lpdm.runtime import DEVICE
 
 
 class FootprintGridder:
-        """Allocate and own the footprint tensor on the configured device."""
+        """Allocate and own the footprint tensor on the configured device.
+
+        Output dimensions are `(time_ago, z_bin, latitude, longitude)`. See the
+        module docstring for the units convention used by `accumulate`.
+        """
 
         def __init__(
                 self,
@@ -57,13 +69,19 @@ class FootprintGridder:
                 dt_seconds: float,
         ) -> None:
                 """Accumulate weighted residence time in the footprint grid.
-                
+
+                Each in-bounds active particle adds `weights[i] * dt_seconds` to the cell
+                it currently occupies at time bin `t_idx`. Inactive particles are skipped;
+                out-of-bounds particles are silently dropped (no edge clamping); an
+                out-of-range `t_idx` is a silent no-op. See module docstring for the units
+                convention.
+
                 Args:
-                        particles: float tensor [N, 3] (lon, lat, alt)
-                        active_mask: bool tensor [N]
-                        weights: float tensor [N] (particle mass/weight)
-                        t_idx: current time step bin index (0 to n_t-1)
-                        dt_seconds: time spent in this bin
+                        particles: float tensor [N, 3] (lon, lat, alt).
+                        active_mask: bool tensor [N].
+                        weights: float tensor [N] of per-particle release weights.
+                        t_idx: current time-bin index in [0, n_time_bins).
+                        dt_seconds: timestep length over which `weights` apply.
                 """
                 if not torch.any(active_mask):
                         return
