@@ -101,6 +101,21 @@ Build a modern, highly optimized, backward-in-time LPDM for greenhouse-gas footp
 - Tightened `src/lpdm/met_reader.py` to reject any non-finite geopotential-derived AGL values instead of attempting to continue with inconsistent meteorology.
 - Persisted spatial and time-bin coordinate metadata into `footprints.zarr`, and updated the demo notebook to consume those coordinates directly while remaining compatible with older stores.
 
+### 2026-05-08 Configurable vertical bin edges (b)
+
+- Replaced the `FootprintGridder` API of `(z_bounds, n_z_bins)` with a single `z_edges_m` argument: a strictly-ascending sequence of bin edges in m AGL. Each adjacent pair defines one bin, so non-uniform layouts like `(0, 40, 1000, 5000)` are first-class — surface layer + mixed layer + free troposphere with no abuse.
+- Vertical binning in `accumulate` switched from uniform-fraction-floor to `torch.bucketize` against the edge tensor (kept on the gridder's device to avoid host syncs). Below the first edge → bin index −1, at-or-above the last edge → bin index = `n_z`; both filtered by the existing `valid_mask`.
+- Added `z_edges_m: tuple[float, ...]` to `RunConfig` and a `--z-edges-m` CLI flag (`nargs="+"`, default `(0, 1000, 2000, 3000, 4000, 5000)` matching the previous uniform layout). `LPDM_Z_EDGES_M` env mirror takes a comma-separated list. Default behaviour is unchanged; FLEXPART/NAME-style comparison runs use e.g. `--z-edges-m 0 40 1000 5000`.
+- `_run` now wires `cfg.z_edges_m` into the gridder; `_build_footprint_dataset_metadata` reads `gridder.z_edges` directly so the persisted `z_bottom_m` / `z_top_m` coords are exact non-uniform edges. The demo notebook already reads these coords without assuming uniformity.
+- Three new tests in `tests/test_footprint.py`: non-uniform binning correctness (one particle per asymmetric bin lands in the right z slot), constructor rejection of non-ascending edges, and rejection of too-few-edge lists. Existing tests updated to the new API. Total test count now 74.
+
+### 2026-05-08 Footprint comparison utilities (a + c)
+
+- Added `src/lpdm/comparison.py` with two post-processing helpers, kept out of the main runtime so they can grow at comparison time without affecting steady-state runs.
+- `to_stilt_surface_footprint`: converts the raw 4D GLIDE residence-time footprint (`s` per cell) to STILT-style surface sensitivity in `m**2 s mol**-1` (equivalently `(mol/mol)/(mol/m**2/s)`) per Lin 2003 Eq. 5. Surface-layer integration uses depth-weighted overlap so bins that don't exactly match the chosen `surface_layer_depth_m` are credited proportionally; an exact match (e.g. running the model with a 0–40 m bottom bin) avoids the approximation entirely. Records the conversion parameters in `attrs` for downstream traceability.
+- `regrid_conservative`: pure-NumPy area-weighted mass-conservative regridder for rectangular lat/lon grids. Uses spherical-cell areas (`(sin(lat_top) - sin(lat_bot)) × dlon_rad`) so high-latitude cos-lat curvature is respected. Factors into 1D weight matrices and applies them with an `einsum` so leading dims (`time_ago`, `z_bin`) are preserved without explicit loops. No `xesmf` / `ESMPy` dependency. Rectangular-grid only — sufficient for FLEXPART and NAME outputs.
+- 14 new tests in `tests/test_comparison.py` covering exact/partial surface-layer overlap, integrated-vs-time-resolved STILT conversion, attrs propagation, identity / coarsen / refine regridding, redistribution proportionality, conservation at high latitudes, multi-dim preservation, out-of-extent zeroing, and input validation. Total test count now 71.
+
 ### 2026-05-08 Milestone 1 steps 6 + 7: HannaScheme implementation
 
 - Added `engine.apply_horizontal_turbulence(particles, u_prime, v_prime, dt, *, backward)` primitive, mirroring `apply_vertical_turbulence` with the cos-lat correction on lon. Engine still owns the geometric application of perturbation velocities; schemes own the math of computing them.
@@ -273,9 +288,9 @@ Build a modern, highly optimized, backward-in-time LPDM for greenhouse-gas footp
 
 ## Immediate recommendation
 
-- Milestone 0 complete; Milestone 1 implementation-complete. All `docs/turbulence.md` §4 steps 1, 3, 4, 5, 6, 7 landed. The default `--turbulence-scheme` is still `placeholder_constant_ou`; the closer (step 8: flip default to `hanna_1982`) waits on external validation per `VALIDATION.md`.
-- Pre-merge work for closing M1: re-download the local sample cube with the updated `download_sample_cube.py` (it now needs `friction_velocity` and `surface_sensible_heat_flux`), then run a FLEXPART/STILT cross-comparison case. Once Hanna's plume spread agrees with the reference within a documented tolerance, flip the default and update README.
-- Optional M1.x refinement: replace the constant-K above-BL placeholder with an N²-based scheme using model-level `theta` gradients. Spec § "Open questions / known limitations" in `docs/turbulence.md` flags this; only worth doing if free-troposphere transport accuracy proves insufficient in real runs.
+- Milestone 0 complete; Milestone 1 implementation-complete. All `docs/turbulence.md` §4 steps 1, 3, 4, 5, 6, 7 landed, plus the comparison utilities (`lpdm.comparison` for STILT-unit conversion and conservative regridding) and configurable vertical bins (`--z-edges-m`). The default `--turbulence-scheme` is still `placeholder_constant_ou`; the closer (step 8: flip default to `hanna_1982`) waits on external validation.
+- Pre-merge work for closing M1: re-download the local sample cube with the updated `download_sample_cube.py` (it now needs `friction_velocity` and `surface_sensible_heat_flux`), then run a FLEXPART/NAME cross-comparison using the workflow recorded in `VALIDATION.md` § "Comparing against FLEXPART / NAME / STILT". Reference footprints are already on hand. Once Hanna's plume agrees with the reference within a documented tolerance, flip the default and update README.
+- Optional M1.x refinement: replace the constant-K above-BL placeholder with an N²-based scheme using model-level `theta` gradients. Spec § "Open questions / known limitations" in `docs/turbulence.md` flags this; only worth doing if free-troposphere transport accuracy proves insufficient.
 - After M1 validation lands, prioritize Milestone 2 (particle aggregation). Defer substantial GPU tuning until the turbulence and aggregation interfaces are stable enough to benchmark meaningfully.
 
 ## Operational notes

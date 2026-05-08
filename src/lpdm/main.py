@@ -80,6 +80,15 @@ def _env_optional_float(name: str) -> float | None:
 	return float(value)
 
 
+def _env_float_list(name: str) -> list[float] | None:
+	"""Parse a comma-separated list of floats from an env var; None if unset."""
+
+	value = os.environ.get(name)
+	if value is None or value == "":
+		return None
+	return [float(token.strip()) for token in value.split(",") if token.strip()]
+
+
 def _current_rss_bytes() -> int | None:
 	"""Return process memory bytes when available.
 
@@ -160,7 +169,7 @@ def _build_footprint_dataset_metadata(
 
 	lon_edges = np.linspace(gridder.lon_min, gridder.lon_max, gridder.n_x + 1, dtype=np.float64)
 	lat_edges = np.linspace(gridder.lat_min, gridder.lat_max, gridder.n_y + 1, dtype=np.float64)
-	z_edges_m = np.linspace(gridder.z_min, gridder.z_max, gridder.n_z + 1, dtype=np.float64)
+	z_edges_m = gridder.z_edges.detach().cpu().numpy().astype(np.float64)
 	hours_per_bin = max(1.0, float(cfg.simulation_length_seconds) / 3600.0 / max(1, gridder.n_t))
 	time_bin_start_h = np.arange(gridder.n_t, dtype=np.float64) * hours_per_bin
 	time_bin_end_h = time_bin_start_h + hours_per_bin
@@ -231,6 +240,7 @@ class RunConfig:
 	memory_guard_max_device_reserved_gib: float | None
 	memory_guard_check_every_steps: int
 	turbulence_scheme: str
+	z_edges_m: tuple[float, ...]
 
 
 @dataclass(frozen=True)
@@ -352,6 +362,18 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 			f"{', '.join(list_schemes()) or '<none>'}. See docs/turbulence.md."
 		),
 	)
+	parser.add_argument(
+		"--z-edges-m",
+		nargs="+",
+		type=float,
+		default=_env_float_list("LPDM_Z_EDGES_M") or [0.0, 1000.0, 2000.0, 3000.0, 4000.0, 5000.0],
+		help=(
+			"Vertical bin edges in m AGL, strictly ascending, ≥2 values. Each pair of "
+			"adjacent edges defines one z bin. Use e.g. '0 40 1000 5000' for a thin "
+			"surface layer (FLEXPART/NAME-style). Env var LPDM_Z_EDGES_M takes a "
+			"comma-separated list."
+		),
+	)
 	return parser
 
 
@@ -402,6 +424,12 @@ def _build_config(args: argparse.Namespace) -> RunConfig:
 			f"Registered schemes: {', '.join(list_schemes())}"
 		)
 
+	z_edges_m = tuple(float(z) for z in args.z_edges_m)
+	if len(z_edges_m) < 2:
+		raise ValueError("z-edges-m must have at least 2 values")
+	if any(z_edges_m[i] >= z_edges_m[i + 1] for i in range(len(z_edges_m) - 1)):
+		raise ValueError("z-edges-m must be strictly ascending")
+
 	return RunConfig(
 		zarr_store=args.zarr_store,
 		start_time=start_time,
@@ -426,6 +454,7 @@ def _build_config(args: argparse.Namespace) -> RunConfig:
 		memory_guard_max_device_reserved_gib=args.memory_guard_max_device_reserved_gib,
 		memory_guard_check_every_steps=args.memory_guard_check_every_steps,
 		turbulence_scheme=args.turbulence_scheme,
+		z_edges_m=z_edges_m,
 	)
 
 
@@ -757,18 +786,17 @@ def _run(
 			release_duration_s,
 		)
 
-	# 1-hour temporal bins, 0.25 deg spatial bins
+	# 1-hour temporal bins, 0.25 deg spatial bins. Vertical edges from cfg.
 	n_hours = int(cfg.simulation_length_seconds / 3600)
 	n_y = int(2.0 * cfg.bbox_pad_lat_deg / 0.25)
 	n_x = int(2.0 * cfg.bbox_pad_lon_deg / 0.25)
 	gridder = FootprintGridder(
 		lon_bounds=(cfg.release_lon - cfg.bbox_pad_lon_deg, cfg.release_lon + cfg.bbox_pad_lon_deg),
 		lat_bounds=(cfg.release_lat - cfg.bbox_pad_lat_deg, cfg.release_lat + cfg.bbox_pad_lat_deg),
-		z_bounds=(0.0, 5000.0),
+		z_edges_m=cfg.z_edges_m,
 		n_time_bins=max(1, n_hours),
 		n_y=max(1, n_y),
 		n_x=max(1, n_x),
-		n_z_bins=5,
 		device=device,
 		dtype=particles.dtype,
 	)

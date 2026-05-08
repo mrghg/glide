@@ -16,6 +16,9 @@ for converting the raw accumulator to whichever physical sensitivity is needed.
 
 from __future__ import annotations
 
+from typing import Sequence
+
+import numpy as np
 import torch
 
 from lpdm.runtime import DEVICE
@@ -24,24 +27,34 @@ from lpdm.runtime import DEVICE
 class FootprintGridder:
         """Allocate and own the footprint tensor on the configured device.
 
-        Output dimensions are `(time_ago, z_bin, latitude, longitude)`. See the
-        module docstring for the units convention used by `accumulate`.
+        Output dimensions are `(time_ago, z_bin, latitude, longitude)`. The vertical
+        bin layout is controlled by `z_edges_m`, a strictly-ascending sequence of bin
+        edges in metres above ground level (so `z_edges_m=(0, 40, 1000, 5000)` defines
+        three bins: surface 0-40 m, mixed-layer 40-1000 m, free-troposphere 1000-5000 m).
+        The number of vertical bins is `len(z_edges_m) - 1`. See the module docstring
+        for the units convention used by `accumulate`.
         """
 
         def __init__(
                 self,
                 lon_bounds: tuple[float, float],
                 lat_bounds: tuple[float, float],
-                z_bounds: tuple[float, float],
+                z_edges_m: Sequence[float],
                 n_time_bins: int,
                 n_y: int,
                 n_x: int,
                 *,
-                n_z_bins: int = 4,
                 device: torch.device | str = DEVICE,
                 dtype: torch.dtype = torch.float32,
         ) -> None:
-                if min(n_time_bins, n_z_bins, n_y, n_x) <= 0:
+                z_edges_arr = np.asarray(list(z_edges_m), dtype=float)
+                if z_edges_arr.ndim != 1 or z_edges_arr.size < 2:
+                        raise ValueError("z_edges_m must be a 1D sequence with at least 2 values")
+                if not np.all(np.diff(z_edges_arr) > 0):
+                        raise ValueError("z_edges_m must be strictly ascending")
+
+                n_z_bins = int(z_edges_arr.size - 1)
+                if min(n_time_bins, n_y, n_x) <= 0 or n_z_bins <= 0:
                         raise ValueError("All footprint dimensions must be > 0")
 
                 self.device = torch.device(device)
@@ -51,10 +64,14 @@ class FootprintGridder:
                         device=self.device,
                         dtype=self.dtype,
                 )
-                
+
                 self.lon_min, self.lon_max = lon_bounds
                 self.lat_min, self.lat_max = lat_bounds
-                self.z_min, self.z_max = z_bounds
+                # Edge tensor stays on the gridder device so torch.bucketize avoids host syncs.
+                self.z_edges = torch.tensor(z_edges_arr, dtype=self.dtype, device=self.device)
+                # Convenience scalars for downstream code wanting overall vertical extent.
+                self.z_min = float(z_edges_arr[0])
+                self.z_max = float(z_edges_arr[-1])
                 self.n_t = n_time_bins
                 self.n_z = n_z_bins
                 self.n_y = n_y
@@ -91,16 +108,19 @@ class FootprintGridder:
                         
                 act_p = particles[active_mask]
                 act_w = weights[active_mask]
-                
-                # Convert coords to fractional indices
-                # (lon, lat, z) -> (x, y, z)
+
+                # Horizontal: uniform fractional indices.
                 x_frac = (act_p[:, 0] - self.lon_min) / max(1e-6, self.lon_max - self.lon_min) * (self.n_x)
                 y_frac = (act_p[:, 1] - self.lat_min) / max(1e-6, self.lat_max - self.lat_min) * (self.n_y)
-                z_frac = (act_p[:, 2] - self.z_min) / max(1e-6, self.z_max - self.z_min) * (self.n_z)
-                
                 x_idx = torch.floor(x_frac).long()
                 y_idx = torch.floor(y_frac).long()
-                z_idx = torch.floor(z_frac).long()
+
+                # Vertical: bucketize against (potentially non-uniform) edges. With
+                # right=False, bucketize returns the smallest i such that z < edges[i];
+                # subtracting 1 gives the half-open bin index in [0, n_z-1] for in-range
+                # values. Below the first edge → -1, at-or-above the last edge → n_z;
+                # both are filtered by valid_mask below.
+                z_idx = torch.bucketize(act_p[:, 2], self.z_edges, right=False) - 1
                 
                 # Filter out-of-bounds
                 valid_mask = (

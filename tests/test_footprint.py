@@ -7,6 +7,7 @@ determinism and have no dependency on real meteorology or the main runtime loop.
 
 from __future__ import annotations
 
+import pytest
 import torch
 
 from lpdm.footprint_gridder import FootprintGridder
@@ -21,11 +22,10 @@ def _make_gridder() -> FootprintGridder:
     return FootprintGridder(
         lon_bounds=(-1.0, 1.0),
         lat_bounds=(-1.0, 1.0),
-        z_bounds=(0.0, 1000.0),
+        z_edges_m=(0.0, 500.0, 1000.0),
         n_time_bins=3,
         n_y=4,
         n_x=4,
-        n_z_bins=2,
         device="cpu",
         dtype=torch.float64,
     )
@@ -162,3 +162,62 @@ def test_empty_active_mask_is_noop() -> None:
     g.accumulate(particles, active, weights, t_idx=0, dt_seconds=1.0)
 
     assert g.tensor.sum().item() == 0.0
+
+
+def test_non_uniform_z_edges_assign_correct_bins() -> None:
+    """Non-uniform z edges should bin particles by interval, not fraction."""
+
+    g = FootprintGridder(
+        lon_bounds=(-1.0, 1.0),
+        lat_bounds=(-1.0, 1.0),
+        z_edges_m=(0.0, 40.0, 1000.0, 5000.0),
+        n_time_bins=1,
+        n_y=2,
+        n_x=2,
+        device="cpu",
+        dtype=torch.float64,
+    )
+
+    # One particle in each of the three asymmetric vertical bins.
+    particles = torch.tensor(
+        [
+            [-0.5, -0.5, 20.0],     # surface bin (0-40 m)
+            [-0.5, -0.5, 500.0],    # mixed-layer bin (40-1000 m)
+            [-0.5, -0.5, 3000.0],   # free-trop bin (1000-5000 m)
+        ],
+        dtype=torch.float64,
+    )
+    weights = torch.tensor([1.0, 1.0, 1.0], dtype=torch.float64)
+    active = torch.ones(3, dtype=torch.bool)
+
+    g.accumulate(particles, active, weights, t_idx=0, dt_seconds=1.0)
+
+    # Each particle should land in a different z bin, all at the same horizontal cell.
+    assert g.tensor[0, 0].sum().item() == 1.0
+    assert g.tensor[0, 1].sum().item() == 1.0
+    assert g.tensor[0, 2].sum().item() == 1.0
+    assert g.tensor.sum().item() == 3.0
+
+
+def test_z_edges_validation_rejects_non_ascending() -> None:
+    with pytest.raises(ValueError, match="ascending"):
+        FootprintGridder(
+            lon_bounds=(-1.0, 1.0),
+            lat_bounds=(-1.0, 1.0),
+            z_edges_m=(0.0, 1000.0, 500.0),
+            n_time_bins=1,
+            n_y=2,
+            n_x=2,
+        )
+
+
+def test_z_edges_validation_rejects_too_few_values() -> None:
+    with pytest.raises(ValueError, match="at least 2"):
+        FootprintGridder(
+            lon_bounds=(-1.0, 1.0),
+            lat_bounds=(-1.0, 1.0),
+            z_edges_m=(40.0,),
+            n_time_bins=1,
+            n_y=2,
+            n_x=2,
+        )

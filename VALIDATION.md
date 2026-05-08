@@ -44,7 +44,7 @@ The validation suite is split into three layers, each owned by a separate file.
 
 ### Footprint gridder tests (`tests/test_footprint.py`)
 
-Seven tests, all deterministic, covering: single-cell binning correctness, total mass conservation for in-bounds particles, inactive-particle exclusion, out-of-bounds rejection, repeat-accumulate summing into the same bin, the silent no-op contract for invalid `t_idx`, and empty-active-mask behaviour.
+Ten tests, all deterministic, covering: single-cell binning correctness, total mass conservation for in-bounds particles, inactive-particle exclusion, out-of-bounds rejection, repeat-accumulate summing into the same bin, the silent no-op contract for invalid `t_idx`, empty-active-mask behaviour, non-uniform z-edge binning (each interval treated as its own bin via `torch.bucketize`), and constructor validation rejecting non-ascending or too-short edge lists.
 
 ### Release-generator tests (`tests/test_release_generator.py`)
 
@@ -55,6 +55,27 @@ Seven tests, all deterministic, covering: single-cell binning correctness, total
 | `test_column_release_rejects_negative_altitudes` | Validation of negative altitude inputs | exact (raises `ValueError`) | none |
 | `test_column_release_rejects_kernel_length_mismatch` | Validation of AK shape | exact (raises `ValueError`) | none |
 | `test_column_release_rejects_zero_total_weight` | Validation of all-zero AK | exact (raises `ValueError`) | none |
+
+### Comparison utility tests (`tests/test_comparison.py`)
+
+Cover the post-processing helpers in `src/lpdm/comparison.py` used to put GLIDE footprints onto common ground with FLEXPART / NAME / STILT references.
+
+| Test | Asserts | Tolerance | Seed |
+| --- | --- | --- | --- |
+| `test_to_stilt_full_overlap_thin_surface_bin` | Exact STILT-style conversion when a single z-bin matches the surface layer | rel `< 1e-12` | none |
+| `test_to_stilt_partial_overlap_with_thicker_bin` | Partial-overlap depth-weighting for thick bins | rel `< 1e-12` | none |
+| `test_to_stilt_time_integration_flag` | `integrate_time=False` keeps `time_ago` axis and is consistent with the integrated form | exact | none |
+| `test_to_stilt_rejects_missing_z_edges_coords` | Missing `z_bottom_m` / `z_top_m` coords fail loud | exact (raises) | none |
+| `test_to_stilt_rejects_nonpositive_surface_depth` | `surface_layer_depth_m <= 0` rejected | exact (raises) | none |
+| `test_to_stilt_records_conversion_metadata` | Conversion attrs (units, depth, density, reference) attached | exact | none |
+| `test_regrid_identity_when_grids_match` | Regridding to the same grid returns values unchanged | abs `< 1e-12` | none |
+| `test_regrid_coarsen_preserves_total` | Fine → coarse mass conservation | rel `< 1e-12` | none |
+| `test_regrid_refine_preserves_total` | Coarse → fine mass conservation | rel `< 1e-12` | none |
+| `test_regrid_redistributes_to_overlapping_targets` | Localised pulse splits proportionally between target cells | abs `< 1.0` | none |
+| `test_regrid_preserves_extra_dimensions` | Per-frame conservation across leading time/z dims | rel `< 1e-12` | none |
+| `test_regrid_lat_cosine_area_factor` | Conservation holds at high latitudes where `cos(lat)` curvature matters | rel `< 1e-12` | none |
+| `test_regrid_zero_outside_source_extent` | Target cells outside source extent return zero | exact | none |
+| `test_regrid_rejects_non_ascending_centres` | Non-ascending centres rejected | exact (raises) | none |
 
 ### End-to-end runtime tests (`tests/test_main_runtime.py`)
 
@@ -90,6 +111,86 @@ The Hanna 1982 / FLEXPART scheme (`hanna_1982`) landed in M1 with the unit and e
 ## End-to-end run with sample met
 
 For a manual end-to-end check using `data/sample_met.zarr`, see the "Local Smoke Test" section of `README.md`. That command exercises the full pipeline against real (cropped) ERA5 data and writes the four output artifacts under `outputs/demo-run-local`. It is complementary to the synthetic-met tests above; the test suite covers correctness, the smoke command covers met-reader integration with a real Zarr store.
+
+## Comparing against FLEXPART / NAME / STILT
+
+The `lpdm.comparison` module plus the `--z-edges-m` CLI flag are the machinery for putting GLIDE footprints onto common ground with reference outputs. End-to-end workflow:
+
+### 1. Run GLIDE matching the reference setup
+
+Match the reference run's release point, time, duration, and backward integration length. Use the Hanna scheme and a thin surface z-bin matching the reference's surface-layer convention (typically 0–40 m for FLEXPART / NAME):
+
+```bash
+.venv/bin/python -m lpdm.main \
+    --zarr-store data/sample_met.zarr \
+    --start-time 2024-01-01T00:00:00Z \
+    --release-duration-seconds 3600 \
+    --simulation-length-seconds 86400 \
+    --release-lon -3.21 --release-lat 50.27 --release-alt-agl-m 30 \
+    --n-particles 10000 \
+    --turbulence-scheme hanna_1982 \
+    --z-edges-m 0 40 1000 5000 \
+    --output-uri outputs/comparison-run
+```
+
+The bottom z-bin exactly matches the reference's surface-layer depth, so the downstream STILT-unit conversion is exact (no overlap-fraction approximation).
+
+### 2. Convert the raw footprint to STILT units
+
+```python
+import xarray as xr
+from lpdm.comparison import to_stilt_surface_footprint
+
+glide_raw = xr.open_zarr("outputs/comparison-run/footprints.zarr")["footprint"]
+
+# Raw footprint is in `s` per cell. Lin 2003 Eq. 5 converts to m^2 s mol^-1
+# (equivalent to (mol/mol)/(mol/m^2/s)). surface_layer_depth_m must equal the
+# bottom z-bin you ran with. Density: 1.225 kg/m^3 for standard conditions,
+# or derive from sp / (R_d * T) per cell using the run's met fields.
+glide_stilt = to_stilt_surface_footprint(
+    glide_raw,
+    surface_layer_depth_m=40.0,
+    air_density_kg_m3=1.225,
+    integrate_time=True,
+)
+```
+
+### 3. Regrid onto the reference grid
+
+```python
+from lpdm.comparison import regrid_conservative
+
+ref = xr.open_dataset("flexpart_footprint.nc")  # or NAME equivalent
+glide_on_ref = regrid_conservative(
+    glide_stilt,
+    target_latitude=ref["latitude"].values,
+    target_longitude=ref["longitude"].values,
+)
+```
+
+The regridder is mass-conservative for rectangular lat/lon grids (FLEXPART and NAME both output that format). Pass `src_lat_dim` / `src_lon_dim` if the source uses non-default dim names. For 3D footprints with a `time_ago` dim, leading dims pass through; only `(latitude, longitude)` are regridded.
+
+### 4. Compare
+
+```python
+import numpy as np
+
+ref_field = ref["footprint"]
+diff = glide_on_ref - ref_field
+
+print(f"GLIDE total:     {float(glide_on_ref.sum()):.3e}")
+print(f"Reference total: {float(ref_field.sum()):.3e}")
+print(f"RMSE:            {float(np.sqrt((diff ** 2).mean())):.3e}")
+print(f"Correlation:     {float(xr.corr(glide_on_ref, ref_field)):.3f}")
+```
+
+### Tips & caveats
+
+- **Mismatched surface-layer depth**: if the reference uses a layer other than 0–40 m, set `surface_layer_depth_m` to match and use a corresponding bottom z-bin. If you can't make them match exactly, the converter depth-weights overlapping bins (approximate, assumes uniform residence-time density within each bin).
+- **Spatial air-density variation**: for runs spanning large lat or elevation ranges, replace the scalar `air_density_kg_m3` with a 2D `xarray.DataArray` of `sp / (R_d * T_surface)` from the met.
+- **Different met**: GLIDE uses ARCO ERA5 model-level fields; FLEXPART runs typically use ECMWF operational analyses; NAME uses UM analyses. Inter-model met differences contribute to footprint differences that aren't due to the turbulence scheme — note this in any documented tolerance.
+- **Different release setup**: keep the release within the surface layer (`release-alt-agl-m < surface_layer_depth_m`) to avoid "particle-not-yet-mixed" startup transients dominating the comparison.
+- **Time resolution**: pass `integrate_time=False` if you want time-resolved sensitivity; useful for diagnosing when the GLIDE plume diverges from the reference.
 
 ## Adding a new physics test
 
