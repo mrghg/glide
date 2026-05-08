@@ -22,7 +22,7 @@ import torch
 
 from lpdm.footprint_gridder import FootprintGridder
 from lpdm.gpu_engine import GPUEngine, GridInterpolationBounds
-from lpdm.met_reader import ArcoEra5ZarrReader, BoundingBoxRequest, HourlyMetTensors, SpatialBounds, TimeBounds
+from lpdm.met_reader import ArcoEra5ZarrReader, BoundingBoxRequest, HourlyMetTensors, MetReader, SpatialBounds, TimeBounds
 from lpdm.output_writer import OutputWriter
 from lpdm.release_generator import PointRelease
 from lpdm.runtime import DEVICE
@@ -172,7 +172,7 @@ def _build_footprint_dataset_metadata(
 
 
 def _validate_meteorology_time_coverage(
-	reader: ArcoEra5ZarrReader,
+	reader: MetReader,
 	cfg: RunConfig,
 	release_end: datetime,
 	sim_start: datetime,
@@ -570,7 +570,7 @@ def _build_bbox(particles: torch.Tensor, cfg: RunConfig) -> SpatialBounds:
 
 
 def _get_hourly_met_window(
-	reader: ArcoEra5ZarrReader,
+	reader: MetReader,
 	cfg: RunConfig,
 	active_particles: torch.Tensor,
 	t_cursor: datetime,
@@ -673,8 +673,9 @@ def _advect_active_particles(
 	return advected_active, w_prime_next, diag_means
 
 
-def _run(cfg: RunConfig) -> dict[str, object]:
-	reader = ArcoEra5ZarrReader(zarr_store=cfg.zarr_store, device=cfg.device)
+def _run(cfg: RunConfig, *, reader: MetReader | None = None) -> dict[str, object]:
+	if reader is None:
+		reader = ArcoEra5ZarrReader(zarr_store=cfg.zarr_store, device=cfg.device)
 	engine = GPUEngine(device=cfg.device)
 	writer = OutputWriter()
 	device = torch.device(cfg.device)
@@ -694,19 +695,21 @@ def _run(cfg: RunConfig) -> dict[str, object]:
 	_validate_meteorology_time_coverage(reader, cfg, release_end, sim_start)
 
 	# Uniformly distribute per-particle release times across [release_start, release_end].
+	# Use float64: Unix timestamps near 1.7e9 only resolve to ~128 s in float32, which collapses
+	# short release windows to a few discrete values and pushes some samples outside the window.
 	release_start_ts = release_start.timestamp()
 	release_end_ts = release_end.timestamp()
 	if cfg.release_seed is not None:
 		release_rng = torch.Generator(device="cpu")
 		release_rng.manual_seed(cfg.release_seed)
-		release_times_ts = torch.empty(cfg.n_particles, device="cpu", dtype=torch.float32).uniform_(
+		release_times_ts = torch.empty(cfg.n_particles, device="cpu", dtype=torch.float64).uniform_(
 			release_start_ts,
 			release_end_ts,
 			generator=release_rng,
 		)
 		release_times_ts = release_times_ts.to(device=particles.device)
 	else:
-		release_times_ts = torch.empty(cfg.n_particles, device=particles.device, dtype=torch.float32).uniform_(
+		release_times_ts = torch.empty(cfg.n_particles, device=particles.device, dtype=torch.float64).uniform_(
 			release_start_ts,
 			release_end_ts,
 		)

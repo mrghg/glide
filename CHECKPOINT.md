@@ -101,6 +101,14 @@ Build a modern, highly optimized, backward-in-time LPDM for greenhouse-gas footp
 - Tightened `src/lpdm/met_reader.py` to reject any non-finite geopotential-derived AGL values instead of attempting to continue with inconsistent meteorology.
 - Persisted spatial and time-bin coordinate metadata into `footprints.zarr`, and updated the demo notebook to consume those coordinates directly while remaining compatible with older stores.
 
+### 2026-05-07 Milestone 0 validation suite first wave
+
+- Added engine-level regression tests in `tests/test_physics.py`: RK2 second-order accuracy under a linear (spatially-varying) wind, and surface-reflection edge cases including non-zero `z_surface`. The pre-existing constant-wind test only proved the scheme was exact for trivial wind; it did not distinguish RK1 from RK2.
+- Added `tests/test_footprint.py` with seven unit tests for `FootprintGridder` covering binning, mass conservation, active-mask handling, out-of-bounds rejection, repeat accumulation, and the silent no-op contract for invalid time-bin indices.
+- Built a synthetic `AnalyticMetReader` test fixture and refactored `_run` in `src/lpdm/main.py` to accept an injectable `reader: MetReader | None = None`. Added `tests/test_main_runtime.py` exercising the full main loop without remote ERA5: smoke run, met-coverage preflight failure, analytic backward-trajectory match for constant wind, and footprint conservation against the trajectory's active-particle-time integral.
+- Fixed a precision bug in `src/lpdm/main.py`: `release_times_ts` was stored in `torch.float32`, which only resolves to ~128 s near Unix timestamps of 1.7e9. For release windows shorter than that resolution the staggered release collapsed to a few discrete times and some samples landed outside the intended window. Promoted to `torch.float64`.
+- Retracted the earlier "RK2 temporal-order" claim. Empirical convergence and Taylor analysis confirm the call-site scheme remains globally second-order despite reusing one `alpha` for both substeps; the corresponding fix was removed from M1 scope and the M0 time-varying-wind regression case was reframed as a confirmation rather than a bug-exposure test.
+
 ## Milestone roadmap
 
 ### Milestone 0: Validation baseline and reference cases
@@ -108,15 +116,19 @@ Build a modern, highly optimized, backward-in-time LPDM for greenhouse-gas footp
 - Build a small scientific validation suite before changing core transport physics.
 - Add deterministic seeded regression cases in `tests/test_physics.py` and focused end-to-end smoke cases around `src/lpdm/main.py`.
 - Define comparison metrics for plume spread, time-height structure, and footprint agreement against analytic cases and, where practical, FLEXPART/STILT-style reference behavior.
+- Treat all dispersion-related metrics (vertical spread, footprint extent, plume width) as PLACEHOLDER baselines only. The current turbulence step uses hard-coded `t_lagrangian=300 s` and `sigma_w2=1.0 m^2/s^2` constants in `src/lpdm/main.py`, and there is no horizontal turbulence at all. Meaningful dispersion baselines must wait until Milestone 1 wires real turbulence parameters from the met fields.
 - Implementation checklist:
 	- Add synthetic met fixtures or in-memory harnesses so core transport tests do not depend on remote ERA5 access.
 	- Separate validation into three layers: unit physics checks, end-to-end runtime checks, and external reference comparisons.
 	- Record one canonical validation command set in this file or README so future physics changes can be checked consistently.
 	- Keep all stochastic cases seeded and treat seed stability as part of the contract.
+	- Resolve `ColumnRelease` semantic ambiguity in `src/lpdm/release_generator.py`: `levels` is currently used both as a pressure-weighting input and as the particle altitude column, which cannot both be correct. Decide whether the input is altitudes (m AGL) or pressures (hPa) and align the variable name, docstring, and `alt` assignment accordingly.
+	- Document footprint output units explicitly in `src/lpdm/footprint_gridder.py` and `run_metadata.json`. The current accumulator sums `weight * dt_seconds` per bin; describe the resulting units and the conversion path to a sensitivity.
 - Unit and regression cases to add first:
 	- Constant horizontal wind backward advection: particle mean position should match the analytic trajectory within a tight tolerance.
+	- Time-varying analytic wind backward advection (for example a wind that ramps linearly across the hour): confirm RK2 stays globally second-order under temporal wind variation, not just under time-invariant wind. Note: the call-site `wind_fn` in `src/lpdm/main.py` reuses one `alpha` (timestep midpoint) for both RK2 substeps, which is non-standard but Taylor analysis and empirical convergence tests show it remains globally second-order with comparable error to the textbook midpoint method.
 	- Zero-wind, zero-turbulence persistence: particles should remain stationary aside from explicitly enabled physics.
-	- Vertical OU/Langevin variance check: measured variance growth should match the current discrete formulation over repeated seeded trials.
+	- Vertical OU/Langevin variance check: confirm the discrete OU step matches the closed-form integrated OU variance for the supplied `t_lagrangian` and `sigma_w2`. This validates the numerical implementation only; it does not validate physical realism of dispersion.
 	- Surface reflection check: particles crossing below `z=0` should reflect correctly with no negative post-step altitudes.
 	- Footprint conservation check: integrated footprint mass should scale consistently with active particle weights and residence time.
 	- Footprint time-bin assignment check: occupancy should land in the expected hourly bins across a multi-hour run.
@@ -126,39 +138,41 @@ Build a modern, highly optimized, backward-in-time LPDM for greenhouse-gas footp
 	- Invalid met coverage case that confirms preflight failure happens before stepping begins and emits a useful error.
 	- Local corrupted-met rejection case that confirms non-finite geopotential-derived AGL values fail loudly rather than degrading silently.
 - Reference comparison targets:
-	- Analytic baselines first: constant wind, no-turbulence, and simple diffusion-growth cases.
-	- One canonical offline comparison case against FLEXPART or STILT once a matching forcing/release setup is defined.
+	- Analytic baselines first: constant wind, time-varying wind, no-turbulence, and simple diffusion-growth cases.
+	- One canonical offline comparison case against FLEXPART or STILT once a matching forcing/release setup is defined. Defer this until after Milestone 1, since the placeholder turbulence makes any current external comparison meaningless.
 	- If exact external intercomparison is not yet practical, define acceptance against self-consistent surrogate metrics first and promote to cross-model comparison later.
 - Metrics to compute and track:
-	- Endpoint mean and spread in longitude, latitude, and altitude.
-	- Time-height integrated footprint structure.
-	- Column-integrated footprint magnitude and spatial extent.
+	- Endpoint mean position in longitude, latitude, and altitude (baselineable in M0).
+	- Endpoint spread in longitude, latitude, and altitude (placeholder until M1).
+	- Time-height integrated footprint structure (placeholder until M1).
+	- Column-integrated footprint magnitude and spatial extent (placeholder until M1).
 	- Particle survival counts and any future domain-exit or merge counts.
 	- Runtime and peak memory for representative local smoke cases.
 - Deliverables for Milestone 0 completion:
 	- Expanded regression coverage in `tests/test_physics.py` and neighboring focused test modules.
 	- At least one reproducible end-to-end validation command using `data/sample_met.zarr`.
-	- A short validation note documenting expected tolerances, seeds, and known gaps.
+	- A short validation note documenting expected tolerances, seeds, and which metrics are placeholders pending Milestone 1.
 - Exit criteria:
-	- Reproducible seeded runs with stable regression fixtures.
-	- Clear numerical baselines for advection, vertical mixing, and footprint accumulation.
+	- Reproducible seeded regression fixtures for advection, surface reflection, and footprint binning/conservation.
+	- Documented placeholder status for dispersion-related metrics, with reasons.
 	- A documented validation workflow for future physics changes.
 
 ### Milestone 1: Full turbulence scheme
 
-- Replace the current placeholder vertical OU/Langevin path in `src/lpdm/gpu_engine.py` with a scientifically grounded turbulence parameterization.
-- Choose and document the target formulation first, likely a FLEXPART-like or STILT-like vertical mixing scheme, then implement a first validated version before adding extensions.
-- Extend `src/lpdm/met_reader.py` as needed to supply all stability, boundary-layer, and mixing inputs required by the chosen scheme.
+- Replace the placeholder vertical OU/Langevin path in `src/lpdm/gpu_engine.py` and the hard-coded `t_lagrangian=300` / `sigma_w2=1.0` arguments at the call site in `src/lpdm/main.py` with a scientifically grounded turbulence parameterization driven by the met fields.
+- Choose and document the target formulation first (likely a FLEXPART-like or STILT-like vertical mixing scheme), then implement a first validated version before adding extensions. Do not pre-empt the formulation choice in this document.
+- Add horizontal stochastic diffusion alongside the vertical scheme. The current pipeline has no horizontal turbulence, so transport spread is governed only by mean-wind shear and is systematically under-dispersed laterally. Treat horizontal diffusion as in-scope for this milestone, not a follow-on item.
+- Wire the `blh` and `sp` channels (already fetched into the hourly met tensors but currently sliced off at `met_window.hour_start[:3]` in `src/lpdm/main.py`) into the turbulence parameterization. Add the additional inputs the chosen scheme requires (for example friction velocity, Obukhov length, convective velocity scale) to `src/lpdm/met_reader.py`.
 - Preserve batch-friendly tensor interfaces so the runtime loop in `src/lpdm/main.py` stays vectorized.
 - Exit criteria:
 	- Stable long-run behavior across different boundary-layer regimes.
-	- Validation against Milestone 0 reference cases.
+	- Validation against Milestone 0 reference cases, plus re-baselined dispersion metrics that previously carried placeholder status.
 	- Clear documentation of assumptions, required met fields, and known limitations.
 
 ### Milestone 2: Adaptive particle aggregation
 
 - Implement a conservative far-field particle aggregation methodology to reduce compute cost once particles move away from the release region.
-- Keep strict no-merge zones near the receptor, near the surface, and anywhere flow gradients or footprint sensitivity are high.
+- Keep strict no-merge zones near the receptor, near the surface, anywhere flow gradients or footprint sensitivity are high, and anywhere within the boundary layer. Use the `blh` channel from the met tensors so the merge boundary tracks diurnal mixed-layer evolution rather than a fixed altitude threshold.
 - Preserve at minimum total mass and low-order moments during merges, and add diagnostics to quantify approximation error.
 - Integrate aggregation controls into the runtime loop without breaking memory guards or output contracts.
 - Exit criteria:
@@ -170,6 +184,7 @@ Build a modern, highly optimized, backward-in-time LPDM for greenhouse-gas footp
 
 - Harden the existing device-aware runtime for real CUDA execution rather than just device selection and local MPS compatibility.
 - Profile interpolation, met staging, footprint accumulation, and any host-device transfers in the current runtime.
+- Address the vertical-interpolation approximation in `src/lpdm/main.py`: the `grid_sample` call treats the vertical tensor axis as linear in AGL meters using only the first/last level's spatially-averaged AGL, but ARCO ERA5 data sits on pressure levels that are roughly log-linear in altitude. Either resample the met tensor onto a uniform AGL grid before interpolation, or perform vertical interpolation in log-pressure (or pressure-level-index) space and convert at the end. Profile both options before committing.
 - Benchmark on a representative NVIDIA target and tune memory behavior under the existing guardrails.
 - Ensure the turbulence and aggregation implementations remain GPU-efficient and do not reintroduce hidden CPU bottlenecks.
 - Exit criteria:
@@ -210,8 +225,10 @@ Build a modern, highly optimized, backward-in-time LPDM for greenhouse-gas footp
 
 ## Immediate recommendation
 
-- Start with Milestone 0 before implementing the full turbulence scheme.
-- Once the validation baseline exists, prioritize Milestone 1 and Milestone 2 in that order.
+- Start with Milestone 0, but treat it as scaffolding rather than a full physical baseline. Lock in advection, surface reflection, and footprint binning. Mark dispersion metrics as placeholder.
+- Pick up the `ColumnRelease` semantic fix and the footprint units documentation inside Milestone 0; both are small and unblock later work.
+- Move directly to Milestone 1 once Milestone 0 scaffolding is in place. Treat horizontal diffusion as in-scope for Milestone 1, not a separate item.
+- Once Milestone 1 lands, prioritize Milestone 2 next.
 - Defer substantial GPU tuning until the turbulence and aggregation interfaces are stable enough to benchmark meaningfully.
 
 ## Operational notes

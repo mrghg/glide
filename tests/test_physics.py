@@ -10,6 +10,8 @@ Mass conservation is checked in each test by verifying the particle weight sum.
 
 from __future__ import annotations
 
+import math
+
 import torch
 
 from lpdm.gpu_engine import CoordinateBounds, GPUEngine
@@ -53,6 +55,94 @@ def test_uniform_wind_advection_rk2_precision() -> None:
 
     final_mass = particles[:, 3].sum()
     assert torch.allclose(initial_mass, final_mass, atol=0.0, rtol=0.0)
+
+
+def test_rk2_advection_second_order_in_dt() -> None:
+    """RK2 backward advection should converge at order 2 under a linear wind.
+
+    With v(x) = -a*x the backward integrator advances x as exp(a*t). RK2 captures
+    only the first three terms of that expansion, so global error scales as dt^2
+    and halving dt should reduce it by ~4x. This distinguishes a true second-order
+    scheme from first-order Euler, which the constant-wind test cannot do.
+    """
+
+    engine = GPUEngine(device="cpu", dtype=torch.float64)
+
+    a = 1e-3  # 1/s
+    total_time = 200.0
+    initial = torch.tensor([[100.0, 0.0, 0.0, 1.0]], dtype=torch.float64)
+    expected_x = 100.0 * math.exp(a * total_time)
+
+    def linear_wind(xyz: torch.Tensor) -> torch.Tensor:
+        out = torch.zeros_like(xyz)
+        out[:, 0] = -a * xyz[:, 0]
+        return out
+
+    dts = [10.0, 5.0, 2.5, 1.25]
+    errors: list[float] = []
+    for dt in dts:
+        n_steps = int(round(total_time / dt))
+        p = initial.clone()
+        for _ in range(n_steps):
+            p = engine.rk2_advect_backward(p, dt_seconds=dt, wind_fn=linear_wind)
+        errors.append(abs(p[0, 0].item() - expected_x))
+
+    for i in range(len(errors) - 1):
+        ratio = errors[i] / max(errors[i + 1], 1e-15)
+        assert ratio > 3.5, (
+            f"RK2 not second-order in dt: error ratio {ratio:.2f} at "
+            f"dt={dts[i]}->{dts[i + 1]} (expected ~4x reduction)"
+        )
+
+    p_final = initial.clone()
+    for _ in range(int(round(total_time / dts[-1]))):
+        p_final = engine.rk2_advect_backward(p_final, dt_seconds=dts[-1], wind_fn=linear_wind)
+    assert torch.allclose(p_final[:, 3].sum(), torch.tensor(1.0, dtype=torch.float64))
+
+
+def test_reflect_surface_handles_boundary_cases() -> None:
+    """Surface reflection should mirror below-surface particles around z_surface."""
+
+    engine = GPUEngine(device="cpu", dtype=torch.float64)
+
+    particles = torch.tensor(
+        [
+            [0.0, 0.0, 200.0, 0.25],
+            [0.0, 0.0, 0.0, 0.25],
+            [0.0, 0.0, -100.0, 0.25],
+            [0.0, 0.0, -1500.0, 0.25],
+        ],
+        dtype=torch.float64,
+    )
+    initial_mass = particles[:, 3].sum()
+
+    reflected = engine.reflect_surface(particles, z_surface=0.0)
+
+    expected_z = torch.tensor([200.0, 0.0, 100.0, 1500.0], dtype=torch.float64)
+    assert torch.allclose(reflected[:, 2], expected_z)
+    assert torch.allclose(initial_mass, reflected[:, 3].sum())
+
+
+def test_reflect_surface_nonzero_z() -> None:
+    """Reflection must use z_surface as the mirror plane, not z=0."""
+
+    engine = GPUEngine(device="cpu", dtype=torch.float64)
+
+    z_surf = 100.0
+    particles = torch.tensor(
+        [
+            [0.0, 0.0, 50.0, 1.0],
+            [0.0, 0.0, 90.0, 1.0],
+            [0.0, 0.0, 100.0, 1.0],
+            [0.0, 0.0, 200.0, 1.0],
+        ],
+        dtype=torch.float64,
+    )
+
+    reflected = engine.reflect_surface(particles, z_surface=z_surf)
+
+    expected_z = torch.tensor([150.0, 110.0, 100.0, 200.0], dtype=torch.float64)
+    assert torch.allclose(reflected[:, 2], expected_z)
 
 
 def test_zero_wind_diffusion_langevin_gaussian_spread() -> None:
