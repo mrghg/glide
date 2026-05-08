@@ -695,23 +695,26 @@ def _run(cfg: RunConfig, *, reader: MetReader | None = None) -> dict[str, object
 	_validate_meteorology_time_coverage(reader, cfg, release_end, sim_start)
 
 	# Uniformly distribute per-particle release times across [release_start, release_end].
-	# Use float64: Unix timestamps near 1.7e9 only resolve to ~128 s in float32, which collapses
-	# short release windows to a few discrete values and pushes some samples outside the window.
+	# Stored as offsets-from-release_start in seconds rather than absolute Unix timestamps:
+	# offsets stay in [0, release_duration_seconds) where float32 precision is fine, while
+	# absolute timestamps near 1.7e9 drop to ~128 s resolution in float32 (collapsing short
+	# release windows to a few discrete values). float32 is also the only option on MPS.
 	release_start_ts = release_start.timestamp()
 	release_end_ts = release_end.timestamp()
+	release_duration_s = release_end_ts - release_start_ts
 	if cfg.release_seed is not None:
 		release_rng = torch.Generator(device="cpu")
 		release_rng.manual_seed(cfg.release_seed)
-		release_times_ts = torch.empty(cfg.n_particles, device="cpu", dtype=torch.float64).uniform_(
-			release_start_ts,
-			release_end_ts,
+		release_offsets_s = torch.empty(cfg.n_particles, device="cpu", dtype=torch.float32).uniform_(
+			0.0,
+			release_duration_s,
 			generator=release_rng,
 		)
-		release_times_ts = release_times_ts.to(device=particles.device)
+		release_offsets_s = release_offsets_s.to(device=particles.device)
 	else:
-		release_times_ts = torch.empty(cfg.n_particles, device=particles.device, dtype=torch.float64).uniform_(
-			release_start_ts,
-			release_end_ts,
+		release_offsets_s = torch.empty(cfg.n_particles, device=particles.device, dtype=torch.float32).uniform_(
+			0.0,
+			release_duration_s,
 		)
 
 	# 1-hour temporal bins, 0.25 deg spatial bins
@@ -744,7 +747,7 @@ def _run(cfg: RunConfig, *, reader: MetReader | None = None) -> dict[str, object
 		delta_s = min(float(cfg.dt_seconds), (t_cursor - sim_start).total_seconds())
 		t_prev = t_cursor - timedelta(seconds=delta_s)
 
-		active_mask = release_times_ts >= t_cursor.timestamp()
+		active_mask = release_offsets_s >= (t_cursor.timestamp() - release_start_ts)
 		active_count = int(torch.count_nonzero(active_mask).item())
 
 		if active_count > 0:
