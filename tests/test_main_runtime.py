@@ -124,6 +124,7 @@ def _make_run_config(**overrides: object) -> RunConfig:
         memory_guard_max_device_allocated_gib=None,
         memory_guard_max_device_reserved_gib=None,
         memory_guard_check_every_steps=1,
+        turbulence_scheme="placeholder_constant_ou",
     )
     defaults.update(overrides)
     return RunConfig(**defaults)  # type: ignore[arg-type]

@@ -101,6 +101,13 @@ Build a modern, highly optimized, backward-in-time LPDM for greenhouse-gas footp
 - Tightened `src/lpdm/met_reader.py` to reject any non-finite geopotential-derived AGL values instead of attempting to continue with inconsistent meteorology.
 - Persisted spatial and time-bin coordinate metadata into `footprints.zarr`, and updated the demo notebook to consume those coordinates directly while remaining compatible with older stores.
 
+### 2026-05-08 Milestone 1 step 1: turbulence subpackage scaffold
+
+- Wrote `docs/turbulence.md` capturing the modular architecture (`TurbulenceScheme` ABC, registry, `lpdm/turbulence/{base,placeholder,hanna}.py`), the Hanna 1982 / FLEXPART formulation per stability regime, the day-1 above-BL constant-K placeholder, surface-layer override, drift handling (FLEXPART piecewise-homogeneous, no explicit Thomson 1987 drift), and the M1 implementation/validation plan. Linked from `README.md` Documentation Governance.
+- Created `src/lpdm/turbulence/` subpackage. `base.py` provides the `TurbulenceScheme` ABC and a `name`-keyed registry (`register_scheme` decorator, `get_scheme(name)`, `list_schemes()`); `placeholder.py` extracts the M0 constant-OU behaviour into `PlaceholderConstantOU`.
+- Refactored `src/lpdm/main.py` to dispatch turbulence through the scheme: `_advect_active_particles` is now advection-only and returns the temporal interpolation weight `t_alpha` so the scheme can re-use it; the runtime loop calls `scheme.step(...)` after advection. Added `--turbulence-scheme` CLI flag (and `LPDM_TURBULENCE_SCHEME` env mirror) with default `placeholder_constant_ou`. `_run` accepts an optional `scheme` parameter alongside the existing `reader` parameter so tests can inject schemes directly.
+- All 37 existing tests pass against the refactored runtime; behaviour against the placeholder scheme is bit-equivalent to the pre-refactor M0 path.
+
 ### 2026-05-08 Milestone 0 closure
 
 - Rewrote `ColumnRelease` in `src/lpdm/release_generator.py` to take altitudes (m AGL) directly and use the averaging kernel as the only sampling weight. The old API's `levels` argument was internally inconsistent (used both as a pressure-mass weight and as the particle altitude column); pressure-mass weighting is now the caller's responsibility, passed in via `averaging_kernel`. Added `tests/test_release_generator.py` covering uniform sampling, AK-biased sampling, and three input-validation paths.

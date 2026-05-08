@@ -26,6 +26,7 @@ from lpdm.met_reader import ArcoEra5ZarrReader, BoundingBoxRequest, HourlyMetTen
 from lpdm.output_writer import OutputWriter
 from lpdm.release_generator import PointRelease
 from lpdm.runtime import DEVICE
+from lpdm.turbulence import TurbulenceScheme, get_scheme, list_schemes
 
 
 LOGGER = logging.getLogger(__name__)
@@ -229,6 +230,7 @@ class RunConfig:
 	memory_guard_max_device_allocated_gib: float | None
 	memory_guard_max_device_reserved_gib: float | None
 	memory_guard_check_every_steps: int
+	turbulence_scheme: str
 
 
 @dataclass(frozen=True)
@@ -342,6 +344,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 		default=_env_int("LPDM_MEMORY_GUARD_CHECK_EVERY_STEPS", 1),
 		help="Check memory guard thresholds every N integration steps",
 	)
+	parser.add_argument(
+		"--turbulence-scheme",
+		default=_env_str("LPDM_TURBULENCE_SCHEME", "placeholder_constant_ou"),
+		help=(
+			"Turbulence scheme name. Registered schemes: "
+			f"{', '.join(list_schemes()) or '<none>'}. See docs/turbulence.md."
+		),
+	)
 	return parser
 
 
@@ -386,6 +396,11 @@ def _build_config(args: argparse.Namespace) -> RunConfig:
 		raise ValueError("memory-guard-max-device-reserved-gib must be > 0 when set")
 	if args.memory_guard_check_every_steps <= 0:
 		raise ValueError("memory-guard-check-every-steps must be > 0")
+	if args.turbulence_scheme not in list_schemes():
+		raise ValueError(
+			f"Unknown turbulence scheme {args.turbulence_scheme!r}. "
+			f"Registered schemes: {', '.join(list_schemes())}"
+		)
 
 	return RunConfig(
 		zarr_store=args.zarr_store,
@@ -410,6 +425,7 @@ def _build_config(args: argparse.Namespace) -> RunConfig:
 		memory_guard_max_device_allocated_gib=args.memory_guard_max_device_allocated_gib,
 		memory_guard_max_device_reserved_gib=args.memory_guard_max_device_reserved_gib,
 		memory_guard_check_every_steps=args.memory_guard_check_every_steps,
+		turbulence_scheme=args.turbulence_scheme,
 	)
 
 
@@ -616,12 +632,18 @@ def _advect_active_particles(
 	engine: GPUEngine,
 	device: torch.device,
 	active_particles: torch.Tensor,
-	w_prime_active: torch.Tensor,
 	met_window: HourlyMetTensors,
 	t_cursor: datetime,
 	delta_s: float,
 	dtype: torch.dtype,
-) -> tuple[torch.Tensor, torch.Tensor, tuple[float, float, float]]:
+) -> tuple[torch.Tensor, float, tuple[float, float, float]]:
+	"""RK2 backward advection on the active particle subset.
+
+	Returns the advected active particles, the temporal interpolation weight `alpha`
+	used here (so the turbulence scheme can re-use the same met blending), and the
+	domain-mean wind diagnostics for the trajectory output.
+	"""
+
 	t_start_s = met_window.metadata.time_start.timestamp()
 	t_end_s = met_window.metadata.time_end.timestamp()
 
@@ -661,19 +683,6 @@ def _advect_active_particles(
 		return out
 
 	advected_active = engine.rk2_advect_backward(active_particles, dt_seconds=delta_s, wind_fn=wind_fn)
-	w_prime_next = engine.update_langevin_velocity(
-		w_prime_active,
-		t_lagrangian=300.0,
-		sigma_w2=1.0,
-		dt_seconds=delta_s,
-	)
-	advected_active = engine.apply_vertical_turbulence(
-		advected_active,
-		w_prime_next,
-		dt_seconds=delta_s,
-		backward=True,
-	)
-	advected_active = engine.reflect_surface(advected_active, z_surface=0.0)
 
 	diag_means = (
 		float(torch.mean(m_start[0, 0] * (1 - alpha) + m_end[0, 0] * alpha).item()),
@@ -684,12 +693,19 @@ def _advect_active_particles(
 	del m_start
 	del m_end
 
-	return advected_active, w_prime_next, diag_means
+	return advected_active, alpha, diag_means
 
 
-def _run(cfg: RunConfig, *, reader: MetReader | None = None) -> dict[str, object]:
+def _run(
+	cfg: RunConfig,
+	*,
+	reader: MetReader | None = None,
+	scheme: TurbulenceScheme | None = None,
+) -> dict[str, object]:
 	if reader is None:
 		reader = ArcoEra5ZarrReader(zarr_store=cfg.zarr_store, device=cfg.device)
+	if scheme is None:
+		scheme = get_scheme(cfg.turbulence_scheme)
 	engine = GPUEngine(device=cfg.device)
 	writer = OutputWriter()
 	device = torch.device(cfg.device)
@@ -751,9 +767,10 @@ def _run(cfg: RunConfig, *, reader: MetReader | None = None) -> dict[str, object
 	hour_windows = 0
 	met_cache: OrderedDict[datetime, HourlyMetTensors] = OrderedDict()
 	memory_stats = MemoryStats()
-	
-	# Keep vertical turbulence state alongside particles [N,]
-	w_prime = engine.initialize_turbulence_velocity(cfg.n_particles)
+
+	turbulence_state = scheme.initialize_state(
+		cfg.n_particles, device=device, dtype=particles.dtype
+	)
 	outputs = _build_output_paths(cfg.output_uri)
 
 	t_cursor = release_end
@@ -768,19 +785,27 @@ def _run(cfg: RunConfig, *, reader: MetReader | None = None) -> dict[str, object
 			active_particles = particles[active_mask]
 			met_window, fetched_windows = _get_hourly_met_window(reader, cfg, active_particles, t_cursor, met_cache)
 			hour_windows += fetched_windows
-			advected_active, w_prime_active, (u_m_s, v_m_s, w_m_s) = _advect_active_particles(
+			advected_active, t_alpha, (u_m_s, v_m_s, w_m_s) = _advect_active_particles(
 				engine,
 				device,
 				active_particles,
-				w_prime[active_mask],
 				met_window,
 				t_cursor,
 				delta_s,
 				particles.dtype,
 			)
-			w_prime[active_mask] = w_prime_active
 			particles[active_mask] = advected_active
-			
+
+			particles, turbulence_state = scheme.step(
+				particles=particles,
+				state=turbulence_state,
+				met_window=met_window,
+				t_alpha=t_alpha,
+				dt_seconds=delta_s,
+				active_mask=active_mask,
+				engine=engine,
+			)
+
 			del active_particles
 			del advected_active
 		else:

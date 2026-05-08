@@ -22,6 +22,8 @@ Use the following source-of-truth split to avoid drift:
 - `.github/copilot-instructions.md`: operational coding-agent behavior, guardrails, and workflow expectations.
 - `CHECKPOINT.md`: project goal, architecture intent, milestone history, and next recommended technical priorities.
 - `README.md`: user-facing setup, run commands, flags, and output contracts.
+- `VALIDATION.md`: validation suite scope, test tolerances and seeds, and which metrics are placeholder pending later milestones.
+- `docs/turbulence.md`: turbulence parameterization spec — modular architecture, scheme math, and the M1 implementation/validation plan.
 
 If behavior or interfaces change, update both the implementation and the matching documentation source above in the same PR.
 
