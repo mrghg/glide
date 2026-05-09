@@ -2,6 +2,10 @@
 
 This module provides a minimal end-to-end backward trajectory run mode suitable
 for early cloud testing (including Vertex AI user-managed notebooks).
+
+The CLI surface is intentionally small: a YAML ``--config`` plus a few overrides
+(``--device``, ``--output-uri``, ``--start-time``). Schema is defined in
+:mod:`lpdm.config`.
 """
 
 from __future__ import annotations
@@ -13,16 +17,24 @@ import os
 import resource
 import sys
 from collections import OrderedDict
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Sequence
 
 import numpy as np
 import torch
 
+from lpdm.config import RunConfig
 from lpdm.footprint_gridder import FootprintGridder
 from lpdm.gpu_engine import GPUEngine, GridInterpolationBounds
-from lpdm.met_reader import ArcoEra5ZarrReader, BoundingBoxRequest, HourlyMetTensors, MetReader, SpatialBounds, TimeBounds
+from lpdm.met_reader import (
+	ArcoEra5ZarrReader,
+	BoundingBoxRequest,
+	HourlyMetTensors,
+	MetReader,
+	SpatialBounds,
+	TimeBounds,
+)
 from lpdm.output_writer import OutputWriter
 from lpdm.release_generator import PointRelease
 from lpdm.runtime import DEVICE
@@ -49,52 +61,16 @@ class PreflightValidationError(ValueError):
 	"""Raised when run inputs are invalid before stepping begins."""
 
 
-def _env_str(name: str, default: str | None = None) -> str | None:
-	value = os.environ.get(name)
-	if value is None or value == "":
-		return default
-	return value
+def _resolve_device(name: str) -> str:
+	"""Resolve a config device string ('auto', 'cpu', 'cuda', 'mps', 'cuda:N') to a concrete torch device."""
 
-
-def _env_int(name: str, default: int) -> int:
-	value = os.environ.get(name)
-	return default if value is None or value == "" else int(value)
-
-
-def _env_optional_int(name: str) -> int | None:
-	value = os.environ.get(name)
-	if value is None or value == "":
-		return None
-	return int(value)
-
-
-def _env_float(name: str, default: float) -> float:
-	value = os.environ.get(name)
-	return default if value is None or value == "" else float(value)
-
-
-def _env_optional_float(name: str) -> float | None:
-	value = os.environ.get(name)
-	if value is None or value == "":
-		return None
-	return float(value)
-
-
-def _env_float_list(name: str) -> list[float] | None:
-	"""Parse a comma-separated list of floats from an env var; None if unset."""
-
-	value = os.environ.get(name)
-	if value is None or value == "":
-		return None
-	return [float(token.strip()) for token in value.split(",") if token.strip()]
+	if name == "auto":
+		return str(DEVICE)
+	return name
 
 
 def _current_rss_bytes() -> int | None:
-	"""Return process memory bytes when available.
-
-	On Linux, this reports current RSS from /proc/self/status. On other
-	platforms, it falls back to getrusage() peak RSS.
-	"""
+	"""Return process memory bytes when available."""
 
 	try:
 		with open("/proc/self/status", "r", encoding="utf-8") as f:
@@ -116,8 +92,6 @@ def _current_rss_bytes() -> int | None:
 
 
 def _device_memory_bytes(device: torch.device) -> tuple[int | None, int | None]:
-	"""Return allocated/reserved bytes for current torch device when supported."""
-
 	if device.type == "cuda" and torch.cuda.is_available():
 		idx = device.index if device.index is not None else torch.cuda.current_device()
 		return int(torch.cuda.memory_allocated(idx)), int(torch.cuda.memory_reserved(idx))
@@ -136,15 +110,6 @@ def _format_gib(num_bytes: int | None) -> str:
 	if num_bytes is None:
 		return "n/a"
 	return f"{num_bytes / (1024 ** 3):.3f} GiB"
-
-
-def _parse_datetime_utc(value: str) -> datetime:
-	"""Parse ISO datetime string and normalize to UTC."""
-
-	dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
-	if dt.tzinfo is None:
-		dt = dt.replace(tzinfo=timezone.utc)
-	return dt.astimezone(timezone.utc)
 
 
 def _hour_floor(dt: datetime) -> datetime:
@@ -170,7 +135,9 @@ def _build_footprint_dataset_metadata(
 	lon_edges = np.linspace(gridder.lon_min, gridder.lon_max, gridder.n_x + 1, dtype=np.float64)
 	lat_edges = np.linspace(gridder.lat_min, gridder.lat_max, gridder.n_y + 1, dtype=np.float64)
 	z_edges_m = gridder.z_edges.detach().cpu().numpy().astype(np.float64)
-	hours_per_bin = max(1.0, float(cfg.simulation_length_seconds) / 3600.0 / max(1, gridder.n_t))
+	hours_per_bin = max(
+		1.0, float(cfg.simulation.length_seconds) / 3600.0 / max(1, gridder.n_t)
+	)
 	time_bin_start_h = np.arange(gridder.n_t, dtype=np.float64) * hours_per_bin
 	time_bin_end_h = time_bin_start_h + hours_per_bin
 
@@ -187,9 +154,9 @@ def _build_footprint_dataset_metadata(
 		"longitude_edge": ("longitude_edge", lon_edges),
 	}
 	attrs = {
-		"release_lon": float(cfg.release_lon),
-		"release_lat": float(cfg.release_lat),
-		"release_alt_agl_m": float(cfg.release_alt_agl_m),
+		"release_lon": float(cfg.release.lon),
+		"release_lat": float(cfg.release.lat),
+		"release_alt_agl_m": float(cfg.release.alt_agl_m),
 	}
 	return coords, attrs
 
@@ -211,36 +178,8 @@ def _validate_meteorology_time_coverage(
 			"Meteorological dataset does not cover the requested simulation window. "
 			f"Need hourly data from {required_start.isoformat()} through {required_end.isoformat()}, "
 			f"but dataset only covers {available_start.isoformat()} through {available_end.isoformat()}. "
-			"Reduce simulation-length-seconds, choose a different release time, or use a dataset with wider time coverage."
+			"Reduce simulation.length_seconds, choose a different start_time, or use a dataset with wider time coverage."
 		)
-
-
-@dataclass(frozen=True)
-class RunConfig:
-	zarr_store: str
-	start_time: datetime
-	release_duration_seconds: int
-	simulation_length_seconds: int
-	release_seed: int | None
-	n_particles: int
-	release_lon: float
-	release_lat: float
-	release_alt_agl_m: float
-	dt_seconds: int
-	bbox_pad_lon_deg: float
-	bbox_pad_lat_deg: float
-	bbox_pad_alt_m: float
-	output_uri: str
-	device: str
-	met_cache_max_hours: int
-	memory_log_every_steps: int
-	gc_every_steps: int
-	memory_guard_max_rss_gib: float | None
-	memory_guard_max_device_allocated_gib: float | None
-	memory_guard_max_device_reserved_gib: float | None
-	memory_guard_check_every_steps: int
-	turbulence_scheme: str
-	z_edges_m: tuple[float, ...]
 
 
 @dataclass(frozen=True)
@@ -272,190 +211,12 @@ class MemoryStats:
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
-	parser = argparse.ArgumentParser(description="Run a minimal backward LPDM trajectory simulation")
-
-	parser.add_argument("--zarr-store", default=_env_str("LPDM_ZARR_STORE"), help="ERA5 ARCO Zarr store URI")
-	parser.add_argument(
-		"--start-time",
-		default=_env_str("LPDM_START_TIME"),
-		help="UTC ISO timestamp for start of particle release window (e.g. 2024-01-01T00:00:00Z)",
-	)
-	parser.add_argument(
-		"--release-duration-seconds",
-		type=int,
-		default=_env_int("LPDM_RELEASE_DURATION_SECONDS", 3600),
-		help="Total duration of the particle release window in seconds",
-	)
-	parser.add_argument(
-		"--simulation-length-seconds",
-		type=int,
-		default=_env_int("LPDM_SIMULATION_LENGTH_SECONDS", 10800),
-		help="Total backward tracking length in seconds from end of release window",
-	)
-	parser.add_argument(
-		"--release-seed",
-		type=int,
-		default=_env_optional_int("LPDM_RELEASE_SEED"),
-		help="Optional RNG seed for deterministic temporal release sampling",
-	)
-
-	parser.add_argument("--n-particles", type=int, default=_env_int("LPDM_N_PARTICLES", 1024))
-	parser.add_argument("--release-lon", type=float, default=_env_float("LPDM_RELEASE_LON", 0.0))
-	parser.add_argument("--release-lat", type=float, default=_env_float("LPDM_RELEASE_LAT", 0.0))
-	parser.add_argument("--release-alt-agl-m", type=float, default=_env_float("LPDM_RELEASE_ALT_AGL_M", 500.0))
-
-	parser.add_argument("--dt-seconds", type=int, default=_env_int("LPDM_DT_SECONDS", 300))
-	parser.add_argument("--bbox-pad-lon-deg", type=float, default=_env_float("LPDM_BBOX_PAD_LON_DEG", 2.0))
-	parser.add_argument("--bbox-pad-lat-deg", type=float, default=_env_float("LPDM_BBOX_PAD_LAT_DEG", 2.0))
-	parser.add_argument("--bbox-pad-alt-m", type=float, default=_env_float("LPDM_BBOX_PAD_ALT_M", 3000.0))
-
-	default_output_uri = _env_str("LPDM_OUTPUT_URI", f"outputs/run-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}")
-	parser.add_argument("--output-uri", default=default_output_uri)
-	parser.add_argument("--device", default=_env_str("LPDM_DEVICE", str(DEVICE)))
-	parser.add_argument(
-		"--met-cache-max-hours",
-		type=int,
-		default=_env_int("LPDM_MET_CACHE_MAX_HOURS", 2),
-		help="Maximum hourly met tensors kept in memory; 0 disables cache",
-	)
-	parser.add_argument(
-		"--memory-log-every-steps",
-		type=int,
-		default=_env_int("LPDM_MEMORY_LOG_EVERY_STEPS", 10),
-		help="Log memory usage every N integration steps; 0 disables logs",
-	)
-	parser.add_argument(
-		"--gc-every-steps",
-		type=int,
-		default=_env_int("LPDM_GC_EVERY_STEPS", 50),
-		help="Run gc.collect() every N steps to reduce delayed retention; 0 disables",
-	)
-	parser.add_argument(
-		"--memory-guard-max-rss-gib",
-		type=float,
-		default=_env_optional_float("LPDM_MEMORY_GUARD_MAX_RSS_GIB"),
-		help="Abort early if process RSS exceeds this GiB threshold; unset disables guard",
-	)
-	parser.add_argument(
-		"--memory-guard-max-device-allocated-gib",
-		type=float,
-		default=_env_optional_float("LPDM_MEMORY_GUARD_MAX_DEVICE_ALLOCATED_GIB"),
-		help="Abort early if device allocated memory exceeds this GiB threshold; unset disables guard",
-	)
-	parser.add_argument(
-		"--memory-guard-max-device-reserved-gib",
-		type=float,
-		default=_env_optional_float("LPDM_MEMORY_GUARD_MAX_DEVICE_RESERVED_GIB"),
-		help="Abort early if device reserved/driver memory exceeds this GiB threshold; unset disables guard",
-	)
-	parser.add_argument(
-		"--memory-guard-check-every-steps",
-		type=int,
-		default=_env_int("LPDM_MEMORY_GUARD_CHECK_EVERY_STEPS", 1),
-		help="Check memory guard thresholds every N integration steps",
-	)
-	parser.add_argument(
-		"--turbulence-scheme",
-		default=_env_str("LPDM_TURBULENCE_SCHEME", "placeholder_constant_ou"),
-		help=(
-			"Turbulence scheme name. Registered schemes: "
-			f"{', '.join(list_schemes()) or '<none>'}. See docs/turbulence.md."
-		),
-	)
-	parser.add_argument(
-		"--z-edges-m",
-		nargs="+",
-		type=float,
-		default=_env_float_list("LPDM_Z_EDGES_M") or [0.0, 1000.0, 2000.0, 3000.0, 4000.0, 5000.0],
-		help=(
-			"Vertical bin edges in m AGL, strictly ascending, ≥2 values. Each pair of "
-			"adjacent edges defines one z bin. Use e.g. '0 40 1000 5000' for a thin "
-			"surface layer (FLEXPART/NAME-style). Env var LPDM_Z_EDGES_M takes a "
-			"comma-separated list."
-		),
-	)
+	parser = argparse.ArgumentParser(description="Run a backward LPDM trajectory simulation from a YAML config")
+	parser.add_argument("--config", required=True, help="Path to the run YAML config (see configs/example_mhd_january.yaml)")
+	parser.add_argument("--device", default=None, help="Override simulation.device")
+	parser.add_argument("--output-uri", default=None, help="Override io.output_uri")
+	parser.add_argument("--start-time", default=None, help="Override simulation.start_time (UTC ISO)")
 	return parser
-
-
-def _build_config(args: argparse.Namespace) -> RunConfig:
-	if not args.zarr_store:
-		raise ValueError("Missing --zarr-store (or LPDM_ZARR_STORE)")
-	if not args.start_time:
-		raise ValueError("Missing --start-time (or LPDM_START_TIME)")
-
-	start_time = _parse_datetime_utc(args.start_time)
-	release_duration_seconds = int(args.release_duration_seconds)
-	simulation_length_seconds = int(args.simulation_length_seconds)
-	release_seed = None if args.release_seed is None else int(args.release_seed)
-
-	if release_duration_seconds <= 0:
-		raise ValueError("release-duration-seconds must be > 0")
-	if simulation_length_seconds <= 0:
-		raise ValueError("simulation-length-seconds must be > 0")
-	if simulation_length_seconds <= release_duration_seconds:
-		raise ValueError("simulation-length-seconds must be > release-duration-seconds")
-	if release_seed is not None and release_seed < 0:
-		raise ValueError("release-seed must be >= 0")
-	if args.dt_seconds <= 0:
-		raise ValueError("dt-seconds must be > 0")
-	if args.met_cache_max_hours < 0:
-		raise ValueError("met-cache-max-hours must be >= 0")
-	if args.memory_log_every_steps < 0:
-		raise ValueError("memory-log-every-steps must be >= 0")
-	if args.gc_every_steps < 0:
-		raise ValueError("gc-every-steps must be >= 0")
-	if args.memory_guard_max_rss_gib is not None and args.memory_guard_max_rss_gib <= 0:
-		raise ValueError("memory-guard-max-rss-gib must be > 0 when set")
-	if (
-		args.memory_guard_max_device_allocated_gib is not None
-		and args.memory_guard_max_device_allocated_gib <= 0
-	):
-		raise ValueError("memory-guard-max-device-allocated-gib must be > 0 when set")
-	if (
-		args.memory_guard_max_device_reserved_gib is not None
-		and args.memory_guard_max_device_reserved_gib <= 0
-	):
-		raise ValueError("memory-guard-max-device-reserved-gib must be > 0 when set")
-	if args.memory_guard_check_every_steps <= 0:
-		raise ValueError("memory-guard-check-every-steps must be > 0")
-	if args.turbulence_scheme not in list_schemes():
-		raise ValueError(
-			f"Unknown turbulence scheme {args.turbulence_scheme!r}. "
-			f"Registered schemes: {', '.join(list_schemes())}"
-		)
-
-	z_edges_m = tuple(float(z) for z in args.z_edges_m)
-	if len(z_edges_m) < 2:
-		raise ValueError("z-edges-m must have at least 2 values")
-	if any(z_edges_m[i] >= z_edges_m[i + 1] for i in range(len(z_edges_m) - 1)):
-		raise ValueError("z-edges-m must be strictly ascending")
-
-	return RunConfig(
-		zarr_store=args.zarr_store,
-		start_time=start_time,
-		release_duration_seconds=release_duration_seconds,
-		simulation_length_seconds=simulation_length_seconds,
-		release_seed=release_seed,
-		n_particles=args.n_particles,
-		release_lon=args.release_lon,
-		release_lat=args.release_lat,
-		release_alt_agl_m=args.release_alt_agl_m,
-		dt_seconds=args.dt_seconds,
-		bbox_pad_lon_deg=args.bbox_pad_lon_deg,
-		bbox_pad_lat_deg=args.bbox_pad_lat_deg,
-		bbox_pad_alt_m=args.bbox_pad_alt_m,
-		output_uri=args.output_uri,
-		device=args.device,
-		met_cache_max_hours=args.met_cache_max_hours,
-		memory_log_every_steps=args.memory_log_every_steps,
-		gc_every_steps=args.gc_every_steps,
-		memory_guard_max_rss_gib=args.memory_guard_max_rss_gib,
-		memory_guard_max_device_allocated_gib=args.memory_guard_max_device_allocated_gib,
-		memory_guard_max_device_reserved_gib=args.memory_guard_max_device_reserved_gib,
-		memory_guard_check_every_steps=args.memory_guard_check_every_steps,
-		turbulence_scheme=args.turbulence_scheme,
-		z_edges_m=z_edges_m,
-	)
 
 
 def _build_output_paths(output_uri: str) -> OutputPaths:
@@ -469,9 +230,9 @@ def _build_output_paths(output_uri: str) -> OutputPaths:
 
 
 def _config_metadata(cfg: RunConfig, release_end: datetime, sim_start: datetime) -> dict[str, object]:
+	# mode="json" serializes datetimes / tuples to JSON-friendly types.
 	return {
-		**asdict(cfg),
-		"start_time": cfg.start_time.isoformat(),
+		**cfg.model_dump(mode="json"),
 		"release_end_time": release_end.isoformat(),
 		"simulation_start_time": sim_start.isoformat(),
 	}
@@ -487,11 +248,11 @@ def _runtime_metadata(
 	**extra: object,
 ) -> dict[str, object]:
 	runtime = {
-		"device": str(cfg.device),
+		"device": _resolve_device(cfg.simulation.device),
 		"status": status,
 		"steps": step_count,
 		"hour_windows": hour_windows,
-		"met_cache_max_hours": cfg.met_cache_max_hours,
+		"met_cache_max_hours": cfg.memory.met_cache_max_hours,
 		"peak_rss_bytes": memory_stats.peak_rss_bytes,
 		"peak_device_allocated_bytes": memory_stats.peak_device_allocated_bytes,
 		"peak_device_reserved_bytes": memory_stats.peak_device_reserved_bytes,
@@ -501,12 +262,13 @@ def _runtime_metadata(
 
 
 def _memory_guard_enabled(cfg: RunConfig) -> bool:
+	mem = cfg.memory
 	return any(
 		limit is not None
 		for limit in (
-			cfg.memory_guard_max_rss_gib,
-			cfg.memory_guard_max_device_allocated_gib,
-			cfg.memory_guard_max_device_reserved_gib,
+			mem.guard_max_rss_gib,
+			mem.guard_max_device_allocated_gib,
+			mem.guard_max_device_reserved_gib,
 		)
 	)
 
@@ -539,7 +301,12 @@ def _write_memory_guard_metadata(
 				status="aborted_memory_guard",
 				**runtime_extra,
 			),
-			"outputs": asdict(outputs),
+			"outputs": {
+				"endpoint_particles": outputs.endpoint_particles,
+				"trajectory_diagnostics": outputs.trajectory_diagnostics,
+				"footprints": outputs.footprints,
+				"metadata": outputs.metadata,
+			},
 			"footprint_units": FOOTPRINT_UNITS_DOC,
 		},
 	)
@@ -559,9 +326,10 @@ def _raise_if_memory_guard_exceeded(
 	allocated: int | None,
 	reserved: int | None,
 ) -> None:
+	mem = cfg.memory
 	guard_checks = (
 		(
-			cfg.memory_guard_max_rss_gib,
+			mem.guard_max_rss_gib,
 			rss_bytes,
 			"RSS exceeded memory guard threshold",
 			"RSS",
@@ -569,7 +337,7 @@ def _raise_if_memory_guard_exceeded(
 			"guard_observed_rss_bytes",
 		),
 		(
-			cfg.memory_guard_max_device_allocated_gib,
+			mem.guard_max_device_allocated_gib,
 			allocated,
 			"Device allocated memory exceeded memory guard threshold",
 			"device allocated memory",
@@ -577,7 +345,7 @@ def _raise_if_memory_guard_exceeded(
 			"guard_observed_device_allocated_bytes",
 		),
 		(
-			cfg.memory_guard_max_device_reserved_gib,
+			mem.guard_max_device_reserved_gib,
 			reserved,
 			"Device reserved memory exceeded memory guard threshold",
 			"device reserved memory",
@@ -613,44 +381,39 @@ def _raise_if_memory_guard_exceeded(
 		)
 
 
-def _build_bbox(particles: torch.Tensor, cfg: RunConfig) -> SpatialBounds:
-	lon = particles[:, 0]
-	lat = particles[:, 1]
-	alt = particles[:, 2]
-
+def _met_domain_bounds(cfg: RunConfig) -> SpatialBounds:
+	md = cfg.met_domain
 	return SpatialBounds(
-		lon_min=float(torch.min(lon).item()) - cfg.bbox_pad_lon_deg,
-		lon_max=float(torch.max(lon).item()) + cfg.bbox_pad_lon_deg,
-		lat_min=float(torch.min(lat).item()) - cfg.bbox_pad_lat_deg,
-		lat_max=float(torch.max(lat).item()) + cfg.bbox_pad_lat_deg,
-		z_min=max(0.0, float(torch.min(alt).item()) - cfg.bbox_pad_alt_m),
-		z_max=float(torch.max(alt).item()) + cfg.bbox_pad_alt_m,
+		lon_min=md.lon_bounds[0],
+		lon_max=md.lon_bounds[1],
+		lat_min=md.lat_bounds[0],
+		lat_max=md.lat_bounds[1],
+		z_min=0.0,
+		z_max=md.alt_max_m,
 	)
 
 
 def _get_hourly_met_window(
 	reader: MetReader,
 	cfg: RunConfig,
-	active_particles: torch.Tensor,
 	t_cursor: datetime,
 	met_cache: OrderedDict[datetime, HourlyMetTensors],
 ) -> tuple[HourlyMetTensors, int]:
 	hour_key = _hour_floor(t_cursor)
-	if cfg.met_cache_max_hours > 0 and hour_key in met_cache:
+	if cfg.memory.met_cache_max_hours > 0 and hour_key in met_cache:
 		met_cache.move_to_end(hour_key)
 		return met_cache[hour_key], 0
 
-	bbox = _build_bbox(active_particles, cfg)
 	met_window = reader.fetch_hourly_window(
 		BoundingBoxRequest(
-			spatial=bbox,
+			spatial=_met_domain_bounds(cfg),
 			time=TimeBounds(start=hour_key, end=hour_key + timedelta(hours=1)),
 		)
 	)
 
-	if cfg.met_cache_max_hours > 0:
+	if cfg.memory.met_cache_max_hours > 0:
 		met_cache[hour_key] = met_window
-		while len(met_cache) > cfg.met_cache_max_hours:
+		while len(met_cache) > cfg.memory.met_cache_max_hours:
 			_, evicted = met_cache.popitem(last=False)
 			del evicted
 
@@ -666,17 +429,11 @@ def _advect_active_particles(
 	delta_s: float,
 	dtype: torch.dtype,
 ) -> tuple[torch.Tensor, float, tuple[float, float, float]]:
-	"""RK2 backward advection on the active particle subset.
-
-	Returns the advected active particles, the temporal interpolation weight `alpha`
-	used here (so the turbulence scheme can re-use the same met blending), and the
-	domain-mean wind diagnostics for the trajectory output.
-	"""
+	"""RK2 backward advection on the active particle subset."""
 
 	t_start_s = met_window.metadata.time_start.timestamp()
 	t_end_s = met_window.metadata.time_end.timestamp()
 
-	# Use the midpoint of the timestep for interpolation weight.
 	t_eval_s = t_cursor.timestamp() - 0.5 * delta_s
 	alpha = (t_eval_s - t_start_s) / max(1.0, float(t_end_s - t_start_s))
 	alpha = max(0.0, min(1.0, alpha))
@@ -732,8 +489,14 @@ def _run(
 	reader: MetReader | None = None,
 	scheme: TurbulenceScheme | None = None,
 ) -> dict[str, object]:
+	sim = cfg.simulation
+	rel = cfg.release
+	mem = cfg.memory
+	out_grid = cfg.output_grid
+	device_str = _resolve_device(sim.device)
+
 	if scheme is None:
-		scheme = get_scheme(cfg.turbulence_scheme)
+		scheme = get_scheme(cfg.turbulence.scheme)
 	if reader is None:
 		# Channels = baseline (advection needs u/v/w; runtime telemetry uses blh/sp)
 		# unioned with whatever the chosen turbulence scheme declares it needs.
@@ -741,62 +504,55 @@ def _run(
 			dict.fromkeys(("u", "v", "w", "blh", "sp", *scheme.required_met_keys()))
 		)
 		reader = ArcoEra5ZarrReader(
-			zarr_store=cfg.zarr_store,
+			zarr_store=cfg.io.zarr_store,
 			channel_names=required_channels,
-			device=cfg.device,
+			device=device_str,
 		)
-	engine = GPUEngine(device=cfg.device)
+	engine = GPUEngine(device=device_str)
 	writer = OutputWriter()
-	device = torch.device(cfg.device)
+	device = torch.device(device_str)
 
 	particles = PointRelease(
-		n_particles=cfg.n_particles,
-		lon=cfg.release_lon,
-		lat=cfg.release_lat,
-		alt=cfg.release_alt_agl_m,
-		device=cfg.device,
+		n_particles=rel.n_particles,
+		lon=rel.lon,
+		lat=rel.lat,
+		alt=rel.alt_agl_m,
+		device=device_str,
 	).generate()
 
 	diag_rows: list[dict[str, float | int | str]] = []
-	release_start = cfg.start_time
-	release_end = release_start + timedelta(seconds=cfg.release_duration_seconds)
-	sim_start = release_end - timedelta(seconds=cfg.simulation_length_seconds)
+	release_start = sim.start_time
+	release_end = release_start + timedelta(seconds=rel.duration_seconds)
+	sim_start = release_end - timedelta(seconds=sim.length_seconds)
 	_validate_meteorology_time_coverage(reader, cfg, release_end, sim_start)
 
-	# Uniformly distribute per-particle release times across [release_start, release_end].
-	# Stored as offsets-from-release_start in seconds rather than absolute Unix timestamps:
-	# offsets stay in [0, release_duration_seconds) where float32 precision is fine, while
-	# absolute timestamps near 1.7e9 drop to ~128 s resolution in float32 (collapsing short
-	# release windows to a few discrete values). float32 is also the only option on MPS.
+	# Per-particle release times stored as offsets-from-release_start in seconds.
+	# Offsets stay in [0, duration_seconds) where float32 precision is fine.
 	release_start_ts = release_start.timestamp()
 	release_end_ts = release_end.timestamp()
 	release_duration_s = release_end_ts - release_start_ts
-	if cfg.release_seed is not None:
+	if rel.seed is not None:
 		release_rng = torch.Generator(device="cpu")
-		release_rng.manual_seed(cfg.release_seed)
-		release_offsets_s = torch.empty(cfg.n_particles, device="cpu", dtype=torch.float32).uniform_(
+		release_rng.manual_seed(rel.seed)
+		release_offsets_s = torch.empty(rel.n_particles, device="cpu", dtype=torch.float32).uniform_(
 			0.0,
 			release_duration_s,
 			generator=release_rng,
 		)
 		release_offsets_s = release_offsets_s.to(device=particles.device)
 	else:
-		release_offsets_s = torch.empty(cfg.n_particles, device=particles.device, dtype=torch.float32).uniform_(
+		release_offsets_s = torch.empty(rel.n_particles, device=particles.device, dtype=torch.float32).uniform_(
 			0.0,
 			release_duration_s,
 		)
 
-	# 1-hour temporal bins, 0.25 deg spatial bins. Vertical edges from cfg.
-	n_hours = int(cfg.simulation_length_seconds / 3600)
-	n_y = int(2.0 * cfg.bbox_pad_lat_deg / 0.25)
-	n_x = int(2.0 * cfg.bbox_pad_lon_deg / 0.25)
 	gridder = FootprintGridder(
-		lon_bounds=(cfg.release_lon - cfg.bbox_pad_lon_deg, cfg.release_lon + cfg.bbox_pad_lon_deg),
-		lat_bounds=(cfg.release_lat - cfg.bbox_pad_lat_deg, cfg.release_lat + cfg.bbox_pad_lat_deg),
-		z_edges_m=cfg.z_edges_m,
-		n_time_bins=max(1, n_hours),
-		n_y=max(1, n_y),
-		n_x=max(1, n_x),
+		lon_bounds=tuple(out_grid.lon_bounds),
+		lat_bounds=tuple(out_grid.lat_bounds),
+		z_edges_m=out_grid.z_edges_m,
+		n_time_bins=out_grid.n_time_bins,
+		n_y=out_grid.n_y,
+		n_x=out_grid.n_x,
 		device=device,
 		dtype=particles.dtype,
 	)
@@ -807,13 +563,13 @@ def _run(
 	memory_stats = MemoryStats()
 
 	turbulence_state = scheme.initialize_state(
-		cfg.n_particles, device=device, dtype=particles.dtype
+		rel.n_particles, device=device, dtype=particles.dtype
 	)
-	outputs = _build_output_paths(cfg.output_uri)
+	outputs = _build_output_paths(cfg.io.output_uri)
 
 	t_cursor = release_end
 	while t_cursor > sim_start:
-		delta_s = min(float(cfg.dt_seconds), (t_cursor - sim_start).total_seconds())
+		delta_s = min(float(sim.dt_seconds), (t_cursor - sim_start).total_seconds())
 		t_prev = t_cursor - timedelta(seconds=delta_s)
 
 		active_mask = release_offsets_s >= (t_cursor.timestamp() - release_start_ts)
@@ -821,7 +577,7 @@ def _run(
 
 		if active_count > 0:
 			active_particles = particles[active_mask]
-			met_window, fetched_windows = _get_hourly_met_window(reader, cfg, active_particles, t_cursor, met_cache)
+			met_window, fetched_windows = _get_hourly_met_window(reader, cfg, t_cursor, met_cache)
 			hour_windows += fetched_windows
 			advected_active, t_alpha, (u_m_s, v_m_s, w_m_s) = _advect_active_particles(
 				engine,
@@ -849,7 +605,6 @@ def _run(
 		else:
 			u_m_s, v_m_s, w_m_s = 0.0, 0.0, 0.0
 
-		# Accumulate footprint
 		if active_count > 0:
 			t_idx = _footprint_time_bin_index(release_end, t_cursor, gridder.n_t)
 			gridder.accumulate(
@@ -876,10 +631,10 @@ def _run(
 			}
 		)
 
-		if cfg.gc_every_steps > 0 and step_count % cfg.gc_every_steps == 0:
+		if mem.gc_every_steps > 0 and step_count % mem.gc_every_steps == 0:
 			gc.collect()
 
-		if cfg.memory_log_every_steps > 0 and step_count % cfg.memory_log_every_steps == 0:
+		if mem.log_every_steps > 0 and step_count % mem.log_every_steps == 0:
 			rss_bytes, allocated, reserved = memory_stats.observe(device)
 			LOGGER.info(
 				"step=%d active=%d cache_hours=%d rss=%s dev_alloc=%s dev_reserved=%s",
@@ -891,7 +646,7 @@ def _run(
 				_format_gib(reserved),
 			)
 
-		if _memory_guard_enabled(cfg) and step_count % cfg.memory_guard_check_every_steps == 0:
+		if _memory_guard_enabled(cfg) and step_count % mem.guard_check_every_steps == 0:
 			rss_bytes, allocated, reserved = memory_stats.observe(device)
 			_raise_if_memory_guard_exceeded(
 				writer,
@@ -916,7 +671,7 @@ def _run(
 	footprint_coords, footprint_attrs = _build_footprint_dataset_metadata(cfg, gridder)
 
 	writer.write_particles_parquet(outputs.endpoint_particles, particles)
-	writer.write_trajectory_parquet(outputs.trajectory_diagnostics, step_seconds=cfg.dt_seconds, rows=diag_rows)
+	writer.write_trajectory_parquet(outputs.trajectory_diagnostics, step_seconds=sim.dt_seconds, rows=diag_rows)
 	writer.write_footprint_zarr(
 		outputs.footprints,
 		gridder.tensor,
@@ -927,7 +682,12 @@ def _run(
 	metadata = {
 		"config": _config_metadata(cfg, release_end, sim_start),
 		"runtime": _runtime_metadata(cfg, step_count, hour_windows, memory_stats, status="completed"),
-		"outputs": asdict(outputs),
+		"outputs": {
+			"endpoint_particles": outputs.endpoint_particles,
+			"trajectory_diagnostics": outputs.trajectory_diagnostics,
+			"footprints": outputs.footprints,
+			"metadata": outputs.metadata,
+		},
 		"footprint_units": FOOTPRINT_UNITS_DOC,
 	}
 	writer.write_metadata_json(outputs.metadata, metadata)
@@ -943,7 +703,14 @@ def main(argv: Sequence[str] | None = None) -> None:
 
 	parser = _build_arg_parser()
 	args = parser.parse_args(argv)
-	cfg = _build_config(args)
+	cfg = RunConfig.from_yaml(args.config).with_overrides(
+		device=args.device,
+		output_uri=args.output_uri,
+		start_time=args.start_time,
+	)
+
+	if cfg.turbulence.scheme not in list_schemes():
+		parser.exit(2, f"Error: unknown turbulence scheme {cfg.turbulence.scheme!r}. Registered: {', '.join(list_schemes())}\n")
 
 	try:
 		metadata = _run(cfg)

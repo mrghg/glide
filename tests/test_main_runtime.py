@@ -17,7 +17,8 @@ import pytest
 import torch
 import xarray as xr
 
-from lpdm.main import PreflightValidationError, RunConfig, _run
+from lpdm.config import RunConfig
+from lpdm.main import PreflightValidationError, _run
 from lpdm.met_reader import (
     BoundingBoxRequest,
     HourlyMetTensors,
@@ -28,14 +29,7 @@ from lpdm.met_reader import (
 
 @dataclass
 class AnalyticMetReader(MetReader):
-    """Synthetic met reader returning spatially-uniform analytic wind fields.
-
-    Each fetch evaluates the user-provided wind callable at hour-start and hour-end
-    and broadcasts the result across a small regular grid. Surface scalars
-    (BLH, SP, T, ustar, SHF) are configurable per-instance for stability-controllable
-    Hanna-scheme tests. The active set of channels is controlled by `channel_names`,
-    so a single reader implementation serves both placeholder and Hanna setups.
-    """
+    """Synthetic met reader returning spatially-uniform analytic wind fields."""
 
     coverage_start: datetime
     coverage_end: datetime
@@ -111,25 +105,44 @@ class AnalyticMetReader(MetReader):
         )
 
 
-def _make_run_config(**overrides: object) -> RunConfig:
-    """Construct a RunConfig with sensible test defaults; override what each test needs."""
+def _make_run_config(**flat_overrides: object) -> RunConfig:
+    """Build a RunConfig with sensible test defaults from a flat keyword surface.
 
-    defaults: dict[str, object] = dict(
+    Hides the nested schema from tests that just need to flip a knob or two.
+    """
+
+    flat: dict[str, object] = dict(
+        # IO
         zarr_store="fake://placeholder",
+        output_uri="outputs/test",
+        # Simulation
         start_time=datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc),
-        release_duration_seconds=60,
         simulation_length_seconds=10800,
-        release_seed=42,
-        n_particles=512,
+        dt_seconds=300,
+        device="cpu",
+        # Release
+        release_kind="point",
         release_lon=0.0,
         release_lat=0.0,
         release_alt_agl_m=500.0,
-        dt_seconds=300,
-        bbox_pad_lon_deg=2.0,
-        bbox_pad_lat_deg=2.0,
-        bbox_pad_alt_m=3000.0,
-        output_uri="outputs/test",
-        device="cpu",
+        release_duration_seconds=60,
+        n_particles=512,
+        release_seed=42,
+        # Turbulence
+        turbulence_scheme="placeholder_constant_ou",
+        # Output grid
+        output_lon_bounds=(-2.0, 2.0),
+        output_lat_bounds=(-2.0, 2.0),
+        output_n_x=16,
+        output_n_y=16,
+        z_edges_m=(0.0, 1000.0, 2000.0, 3000.0, 4000.0, 5000.0),
+        # Use 3 hourly time bins by default; tests with different sim lengths can override.
+        n_time_bins=3,
+        # Met domain
+        met_lon_bounds=(-3.0, 3.0),
+        met_lat_bounds=(-3.0, 3.0),
+        met_alt_max_m=10000.0,
+        # Memory
         met_cache_max_hours=2,
         memory_log_every_steps=0,
         gc_every_steps=0,
@@ -137,11 +150,55 @@ def _make_run_config(**overrides: object) -> RunConfig:
         memory_guard_max_device_allocated_gib=None,
         memory_guard_max_device_reserved_gib=None,
         memory_guard_check_every_steps=1,
-        turbulence_scheme="placeholder_constant_ou",
-        z_edges_m=(0.0, 1000.0, 2000.0, 3000.0, 4000.0, 5000.0),
     )
-    defaults.update(overrides)
-    return RunConfig(**defaults)  # type: ignore[arg-type]
+    flat.update(flat_overrides)
+
+    return RunConfig.model_validate(
+        {
+            "io": {
+                "zarr_store": flat["zarr_store"],
+                "output_uri": flat["output_uri"],
+            },
+            "simulation": {
+                "start_time": flat["start_time"],
+                "length_seconds": flat["simulation_length_seconds"],
+                "dt_seconds": flat["dt_seconds"],
+                "device": flat["device"],
+            },
+            "release": {
+                "kind": flat["release_kind"],
+                "lon": flat["release_lon"],
+                "lat": flat["release_lat"],
+                "alt_agl_m": flat["release_alt_agl_m"],
+                "duration_seconds": flat["release_duration_seconds"],
+                "n_particles": flat["n_particles"],
+                "seed": flat["release_seed"],
+            },
+            "turbulence": {"scheme": flat["turbulence_scheme"]},
+            "output_grid": {
+                "lon_bounds": flat["output_lon_bounds"],
+                "lat_bounds": flat["output_lat_bounds"],
+                "n_x": flat["output_n_x"],
+                "n_y": flat["output_n_y"],
+                "z_edges_m": flat["z_edges_m"],
+                "n_time_bins": flat["n_time_bins"],
+            },
+            "met_domain": {
+                "lon_bounds": flat["met_lon_bounds"],
+                "lat_bounds": flat["met_lat_bounds"],
+                "alt_max_m": flat["met_alt_max_m"],
+            },
+            "memory": {
+                "met_cache_max_hours": flat["met_cache_max_hours"],
+                "log_every_steps": flat["memory_log_every_steps"],
+                "gc_every_steps": flat["gc_every_steps"],
+                "guard_max_rss_gib": flat["memory_guard_max_rss_gib"],
+                "guard_max_device_allocated_gib": flat["memory_guard_max_device_allocated_gib"],
+                "guard_max_device_reserved_gib": flat["memory_guard_max_device_reserved_gib"],
+                "guard_check_every_steps": flat["memory_guard_check_every_steps"],
+            },
+        }
+    )
 
 
 def _make_reader(
@@ -149,8 +206,8 @@ def _make_reader(
     wind_fn: Callable[[datetime], tuple[float, float, float]],
 ) -> AnalyticMetReader:
     return AnalyticMetReader(
-        coverage_start=cfg.start_time - timedelta(seconds=cfg.simulation_length_seconds + 7200),
-        coverage_end=cfg.start_time + timedelta(seconds=cfg.release_duration_seconds + 3600),
+        coverage_start=cfg.simulation.start_time - timedelta(seconds=cfg.simulation.length_seconds + 7200),
+        coverage_end=cfg.simulation.start_time + timedelta(seconds=cfg.release.duration_seconds + 3600),
         wind_fn=wind_fn,
     )
 
@@ -176,8 +233,8 @@ def test_preflight_rejects_insufficient_met_coverage(tmp_path: Path) -> None:
 
     cfg = _make_run_config(output_uri=str(tmp_path / "out"))
     reader = AnalyticMetReader(
-        coverage_start=cfg.start_time,
-        coverage_end=cfg.start_time + timedelta(hours=2),
+        coverage_start=cfg.simulation.start_time,
+        coverage_end=cfg.simulation.start_time + timedelta(hours=2),
         wind_fn=lambda _: (0.0, 0.0, 0.0),
     )
 
@@ -186,13 +243,7 @@ def test_preflight_rejects_insufficient_met_coverage(tmp_path: Path) -> None:
 
 
 def test_constant_wind_advection_trajectory(tmp_path: Path) -> None:
-    """Mean particle position under constant wind should match analytic backward transport.
-
-    With u=5 m/s eastward and a release window shorter than dt, iter 1 has 0 active
-    particles (release_times are sampled half-open) and the remaining (n_steps - 1)
-    iterations transport every particle by -u*dt. Final mean lon should match
-    release_lon - u*(n_steps - 1)*dt / m_per_deg_lon.
-    """
+    """Mean particle position under constant wind should match analytic backward transport."""
 
     cfg = _make_run_config(
         release_duration_seconds=60,
@@ -212,10 +263,10 @@ def test_constant_wind_advection_trajectory(tmp_path: Path) -> None:
     traj = pd.read_parquet(tmp_path / "out" / "trajectory_diagnostics.parquet")
     final_lon = float(traj.iloc[-1]["mean_lon"])
 
-    n_steps = cfg.simulation_length_seconds // cfg.dt_seconds
-    expected_disp_m = -u_const * (n_steps - 1) * cfg.dt_seconds
+    n_steps = cfg.simulation.length_seconds // cfg.simulation.dt_seconds
+    expected_disp_m = -u_const * (n_steps - 1) * cfg.simulation.dt_seconds
     m_per_deg_lon = 111320.0
-    expected_final_lon = cfg.release_lon + expected_disp_m / m_per_deg_lon
+    expected_final_lon = cfg.release.lon + expected_disp_m / m_per_deg_lon
 
     assert abs(final_lon - expected_final_lon) < 5e-3
 
@@ -231,8 +282,8 @@ def _make_hanna_reader(
     """AnalyticMetReader configured to supply the channels Hanna needs."""
 
     return AnalyticMetReader(
-        coverage_start=cfg.start_time - timedelta(seconds=cfg.simulation_length_seconds + 7200),
-        coverage_end=cfg.start_time + timedelta(seconds=cfg.release_duration_seconds + 3600),
+        coverage_start=cfg.simulation.start_time - timedelta(seconds=cfg.simulation.length_seconds + 7200),
+        coverage_end=cfg.simulation.start_time + timedelta(seconds=cfg.release.duration_seconds + 3600),
         wind_fn=wind_fn,
         channel_names=("u", "v", "w", "blh", "sp", "t", "ustar", "shf"),
         ustar_m_s=ustar_m_s,
@@ -282,13 +333,13 @@ def test_hanna_constant_wind_preserves_mean_trajectory(tmp_path: Path) -> None:
     traj = pd.read_parquet(tmp_path / "out" / "trajectory_diagnostics.parquet")
     final_lon = float(traj.iloc[-1]["mean_lon"])
 
-    n_steps = cfg.simulation_length_seconds // cfg.dt_seconds
-    expected_disp_m = -u_const * (n_steps - 1) * cfg.dt_seconds
+    n_steps = cfg.simulation.length_seconds // cfg.simulation.dt_seconds
+    expected_disp_m = -u_const * (n_steps - 1) * cfg.simulation.dt_seconds
     m_per_deg_lon = 111320.0
-    expected_final_lon = cfg.release_lon + expected_disp_m / m_per_deg_lon
+    expected_final_lon = cfg.release.lon + expected_disp_m / m_per_deg_lon
 
-    # Looser tolerance than the placeholder test (1e-2 deg ~ 1.1 km) to accommodate
-    # ensemble noise from the new horizontal stochastic component.
+    # Looser tolerance than the placeholder test to accommodate ensemble noise from
+    # the new horizontal stochastic component.
     assert abs(final_lon - expected_final_lon) < 1e-2
 
 
@@ -304,6 +355,7 @@ def test_hanna_produces_nontrivial_vertical_spread(tmp_path: Path) -> None:
         release_seed=42,
         output_uri=str(tmp_path / "out"),
         turbulence_scheme="hanna_1982",
+        n_time_bins=1,
     )
     # Convective conditions: positive SHF, w* > 0, particles should mix vertically.
     reader = _make_hanna_reader(
@@ -322,14 +374,7 @@ def test_hanna_produces_nontrivial_vertical_spread(tmp_path: Path) -> None:
 
 
 def test_footprint_total_matches_active_particle_time(tmp_path: Path) -> None:
-    """Footprint sum should equal sum(active_count) * dt / n_particles for in-domain runs.
-
-    Each accumulate call adds (active_weight * dt). With uniform per-particle weight
-    1/n_particles, the total accumulated value equals the trajectory's sum of
-    (active_count * dt) divided by n_particles, provided no particle leaves the
-    gridder domain. Run length is kept short so vertical turbulence does not push
-    particles above the hardcoded z_max=5000 m gridder upper bound.
-    """
+    """Footprint sum should equal sum(active_count) * dt / n_particles for in-domain runs."""
 
     cfg = _make_run_config(
         release_duration_seconds=60,
@@ -338,6 +383,7 @@ def test_footprint_total_matches_active_particle_time(tmp_path: Path) -> None:
         n_particles=512,
         release_seed=42,
         output_uri=str(tmp_path / "out"),
+        n_time_bins=1,
     )
     reader = _make_reader(cfg, wind_fn=lambda _: (5.0, 0.0, 0.0))
 
@@ -345,8 +391,8 @@ def test_footprint_total_matches_active_particle_time(tmp_path: Path) -> None:
 
     traj = pd.read_parquet(tmp_path / "out" / "trajectory_diagnostics.parquet")
     expected_total = float(
-        (traj["active_particles"].astype(float) * cfg.dt_seconds).sum()
-    ) / cfg.n_particles
+        (traj["active_particles"].astype(float) * cfg.simulation.dt_seconds).sum()
+    ) / cfg.release.n_particles
 
     fp = xr.open_zarr(tmp_path / "out" / "footprints.zarr")
     actual_total = float(fp["footprint"].sum())

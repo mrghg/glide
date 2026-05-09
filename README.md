@@ -33,8 +33,14 @@ If behavior or interfaces change, update both the implementation and the matchin
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-python -m lpdm.main
+python -m lpdm.main --config configs/local_smoke_test.yaml
 ```
+
+Run configs are YAML; the schema lives in [src/lpdm/config.py](src/lpdm/config.py). Two examples ship with the repo:
+- `configs/local_smoke_test.yaml` — small backward run against `data/sample_met.zarr`.
+- `configs/example_mhd_january.yaml` — Hanna scheme, FLEXPART-aligned grid for the comparison fixture in `data/FLEXPART/`.
+
+The CLI is intentionally tiny: `--config <path>` plus `--device`, `--output-uri`, `--start-time` overrides. Everything else is set in the YAML.
 
 ## One-Command Bootstrap (Recommended)
 
@@ -77,7 +83,7 @@ uv pip install -e .
 Run the model entrypoint:
 
 ```bash
-python -m lpdm.main
+python -m lpdm.main --config configs/local_smoke_test.yaml
 ```
 
 ## Physics Tests
@@ -128,108 +134,49 @@ Notes:
 - To choose output store format explicitly, pass `--zarr-version 2` (default) or `--zarr-version 3`.
 
 After downloading the sample data, either:
-- set `--zarr-store data/sample_met.zarr` in your run command, or
-- use VS Code Run/Debug profile `GLIDE: lpdm.main (Local Sample Met)` from `.vscode/launch.json`.
+- run `python -m lpdm.main --config configs/local_smoke_test.yaml` directly, or
+- use VS Code Run/Debug profile `GLIDE: lpdm.main (Local Sample Met)` from `.vscode/launch.json` (which uses that same config).
 
 ### Local Smoke Test (Using Downloaded Sample)
 
-Use this command to validate the local meteorology path end-to-end:
+`configs/local_smoke_test.yaml` is wired to `data/sample_met.zarr` with a 3 h backward run. Use it to validate the local meteorology path end-to-end:
 
 ```bash
-.venv/bin/python -m lpdm.main \
-	--zarr-store data/sample_met.zarr \
-	--start-time 2024-01-01T00:00:00Z \
-	--release-duration-seconds 3600 \
-	--simulation-length-seconds 10800 \
-	--release-seed 42 \
-	--n-particles 2048 \
-	--release-lon -122.30 \
-	--release-lat 37.90 \
-	--release-alt-agl-m 500 \
-	--dt-seconds 300 \
-	--output-uri outputs/demo-run-local
+.venv/bin/python -m lpdm.main --config configs/local_smoke_test.yaml
 ```
 
 Expected outputs under `outputs/demo-run-local`:
 - `endpoint_particles.parquet`
 - `trajectory_diagnostics.parquet`
+- `footprints.zarr`
 - `run_metadata.json`
 
 ### Running the Model
 
-The entrypoint supports a minimal end-to-end backward trajectory run,
-including met fetch, advection stepping, and output persistence.
+Author a YAML config (start from one of the examples in `configs/`) and pass it via `--config`:
 
-Example:
+```bash
+.venv/bin/python -m lpdm.main --config configs/example_mhd_january.yaml
+```
+
+CLI overrides are intentionally limited to the three knobs that change between runs of the same physics config:
 
 ```bash
 .venv/bin/python -m lpdm.main \
-	--zarr-store gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3 \
-	--start-time 2024-01-01T00:00:00Z \
-	--release-duration-seconds 3600 \
-	--simulation-length-seconds 10800 \
-	--release-seed 42 \
-	--n-particles 2048 \
-	--release-lon -122.30 \
-	--release-lat 37.90 \
-	--release-alt-agl-m 500 \
-	--dt-seconds 300 \
-	--output-uri outputs/demo-run
+	--config configs/example_mhd_january.yaml \
+	--device cuda \
+	--output-uri outputs/run-A \
+	--start-time 2024-01-10T00:00:00Z
 ```
 
-Equivalent environment-variable configuration is also supported:
+YAML schema is defined by [src/lpdm/config.py](src/lpdm/config.py). The top-level sections are `io`, `simulation`, `release`, `turbulence`, `output_grid`, `met_domain`, and `memory`. Validation includes: `simulation.length_seconds > release.duration_seconds`, strictly ascending `output_grid.z_edges_m`, and the release point lying inside `met_domain`.
 
-```bash
-export LPDM_ZARR_STORE=gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3
-export LPDM_START_TIME=2024-01-01T00:00:00Z
-export LPDM_RELEASE_DURATION_SECONDS=3600
-export LPDM_SIMULATION_LENGTH_SECONDS=10800
-export LPDM_RELEASE_SEED=42
-export LPDM_OUTPUT_URI=gs://<your-bucket>/lpdm/demo-run
-.venv/bin/python -m lpdm.main
-```
+Memory controls live in the `memory:` section of the YAML — `met_cache_max_hours`, `log_every_steps`, `gc_every_steps`, and three optional guard thresholds (`guard_max_rss_gib`, `guard_max_device_allocated_gib`, `guard_max_device_reserved_gib`) plus `guard_check_every_steps`. If a guard fires the run exits with a `MemoryError` and writes diagnostic metadata to `run_metadata.json`.
 
-Runtime timing semantics:
-- `start-time`: start of the particle release window.
-- `release-duration-seconds`: release window length; particles are released uniformly across this window.
-- `simulation-length-seconds`: total backward integration length measured from the end of the release window.
-- `release-seed` (optional): makes temporal release sampling deterministic and reproducible.
-
-Memory controls and profiling logs:
-- `--met-cache-max-hours`: cap in-memory hourly met tensors (default `2`, set `0` to disable cache).
-- `--memory-log-every-steps`: emit process/device memory logs every N steps (default `10`, set `0` to disable).
-- `--gc-every-steps`: run `gc.collect()` every N steps (default `50`, set `0` to disable).
-- `--memory-guard-max-rss-gib`: abort early if RSS exceeds this threshold (unset by default).
-- `--memory-guard-max-device-allocated-gib`: abort early if device allocated memory exceeds this threshold (unset by default).
-- `--memory-guard-max-device-reserved-gib`: abort early if CUDA reserved memory or MPS driver memory exceeds this threshold (unset by default).
-- `--memory-guard-check-every-steps`: check guard every N steps (default `1`).
-
-Example with aggressive memory limits:
-
-```bash
-.venv/bin/python -m lpdm.main \
-	--zarr-store gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3 \
-	--start-time 2024-01-01T00:00:00Z \
-	--release-duration-seconds 3600 \
-	--simulation-length-seconds 10800 \
-	--met-cache-max-hours 1 \
-	--memory-log-every-steps 5 \
-	--memory-guard-max-rss-gib 10 \
-	--memory-guard-max-device-allocated-gib 14 \
-	--memory-guard-max-device-reserved-gib 15 \
-	--memory-guard-check-every-steps 1 \
-	--gc-every-steps 25 \
-	--output-uri outputs/memory-profiled-run
-```
-
-If the guard is triggered, the run exits with a `MemoryError` and writes
-diagnostic metadata to `run_metadata.json`.
-
-Validation requires `simulation-length-seconds > release-duration-seconds`.
-
-Outputs written by default:
+Outputs written under `io.output_uri`:
 - `endpoint_particles.parquet`
 - `trajectory_diagnostics.parquet`
+- `footprints.zarr`
 - `run_metadata.json`
 
 ## Deploy

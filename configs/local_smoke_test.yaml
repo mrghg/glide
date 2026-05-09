@@ -1,0 +1,46 @@
+# Local smoke-test config used by README examples and the
+# "GLIDE: lpdm.main (Local Sample Met)" launch profile.
+#
+# Targets data/sample_met.zarr (download via scripts/download_sample_cube.py
+# with the lon/lat extents below). 3 h backward run, placeholder turbulence.
+
+io:
+  zarr_store: data/sample_met.zarr
+  output_uri: outputs/demo-run-local
+
+simulation:
+  start_time: 2024-01-01T00:00:00Z
+  length_seconds: 10800              # 3 h backward
+  dt_seconds: 300
+  device: auto
+
+release:
+  kind: point
+  lon: -122.30
+  lat: 37.90
+  alt_agl_m: 500.0
+  duration_seconds: 3600
+  n_particles: 2048
+  seed: 42
+
+turbulence:
+  scheme: placeholder_constant_ou
+
+output_grid:
+  lon_bounds: [-127.0, -117.0]
+  lat_bounds: [33.0, 43.0]
+  n_x: 40
+  n_y: 40
+  z_edges_m: [0.0, 1000.0, 2000.0, 3000.0, 4000.0, 5000.0]
+  n_time_bins: 3
+
+met_domain:
+  lon_bounds: [-127.0, -117.0]
+  lat_bounds: [33.0, 43.0]
+  alt_max_m: 10000.0
+
+memory:
+  met_cache_max_hours: 2
+  log_every_steps: 10
+  gc_every_steps: 50
+  guard_check_every_steps: 1

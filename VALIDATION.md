@@ -114,26 +114,25 @@ For a manual end-to-end check using `data/sample_met.zarr`, see the "Local Smoke
 
 ## Comparing against FLEXPART / NAME / STILT
 
-The `lpdm.comparison` module plus the `--z-edges-m` CLI flag are the machinery for putting GLIDE footprints onto common ground with reference outputs. End-to-end workflow:
+GLIDE accumulates the residence-time footprint *directly onto a configurable target grid* (`output_grid` in the run YAML), so the most common path is to set the output grid equal to the reference's grid and skip regridding entirely. The `lpdm.comparison.regrid_conservative` helper is still available in the module for off-grid use cases. End-to-end workflow:
 
-### 1. Run GLIDE matching the reference setup
+### 1. Author a run config matching the reference setup
 
-Match the reference run's release point, time, duration, and backward integration length. Use the Hanna scheme and a thin surface z-bin matching the reference's surface-layer convention (typically 0–40 m for FLEXPART / NAME):
+Start from `configs/example_mhd_january.yaml`, which is wired to the bundled FLEXPART fixture (`data/FLEXPART/FLEXPART_MHD_test_202401.nc`). The key sections to align with the reference:
+
+- `output_grid.{lon_bounds, lat_bounds, n_x, n_y}` — set to the reference grid's *outer* cell edges (FLEXPART/NAME usually store cell centres, so add half a cell at each edge).
+- `output_grid.z_edges_m` — make the bottom edge pair match the reference's surface-layer depth (0–40 m for FLEXPART / NAME). Direct accumulation into that bin makes the downstream STILT-unit conversion exact (no overlap-fraction approximation).
+- `release.{lon, lat, alt_agl_m, duration_seconds}` — match the reference's release.
+- `simulation.{start_time, length_seconds}` — match the reference's release time and backward window.
+- `turbulence.scheme: hanna_1982`.
+
+Then run:
 
 ```bash
-.venv/bin/python -m lpdm.main \
-    --zarr-store data/sample_met.zarr \
-    --start-time 2024-01-01T00:00:00Z \
-    --release-duration-seconds 3600 \
-    --simulation-length-seconds 86400 \
-    --release-lon -3.21 --release-lat 50.27 --release-alt-agl-m 30 \
-    --n-particles 10000 \
-    --turbulence-scheme hanna_1982 \
-    --z-edges-m 0 40 1000 5000 \
-    --output-uri outputs/comparison-run
+.venv/bin/python -m lpdm.main --config configs/example_mhd_january.yaml
 ```
 
-The bottom z-bin exactly matches the reference's surface-layer depth, so the downstream STILT-unit conversion is exact (no overlap-fraction approximation).
+CLI overrides: `--device {auto|cpu|cuda|mps}`, `--output-uri PATH`, `--start-time ISO`. Anything else is set in the YAML.
 
 ### 2. Convert the raw footprint to STILT units
 
@@ -141,7 +140,7 @@ The bottom z-bin exactly matches the reference's surface-layer depth, so the dow
 import xarray as xr
 from lpdm.comparison import to_stilt_surface_footprint
 
-glide_raw = xr.open_zarr("outputs/comparison-run/footprints.zarr")["footprint"]
+glide_raw = xr.open_zarr("outputs/comparison-mhd-202401-day01/footprints.zarr")["footprint"]
 
 # Raw footprint is in `s` per cell. Lin 2003 Eq. 5 converts to m^2 s mol^-1
 # (equivalent to (mol/mol)/(mol/m^2/s)). surface_layer_depth_m must equal the
@@ -155,41 +154,30 @@ glide_stilt = to_stilt_surface_footprint(
 )
 ```
 
-### 3. Regrid onto the reference grid
-
-```python
-from lpdm.comparison import regrid_conservative
-
-ref = xr.open_dataset("flexpart_footprint.nc")  # or NAME equivalent
-glide_on_ref = regrid_conservative(
-    glide_stilt,
-    target_latitude=ref["latitude"].values,
-    target_longitude=ref["longitude"].values,
-)
-```
-
-The regridder is mass-conservative for rectangular lat/lon grids (FLEXPART and NAME both output that format). Pass `src_lat_dim` / `src_lon_dim` if the source uses non-default dim names. For 3D footprints with a `time_ago` dim, leading dims pass through; only `(latitude, longitude)` are regridded.
-
-### 4. Compare
+### 3. Compare cell-for-cell
 
 ```python
 import numpy as np
 
-ref_field = ref["footprint"]
-diff = glide_on_ref - ref_field
+ref = xr.open_dataset("data/FLEXPART/FLEXPART_MHD_test_202401.nc", engine="h5netcdf")
+ref_field = ref["srr"].sel(time="2024-01-01T00:00:00").sum("time")  # match GLIDE's release window
 
-print(f"GLIDE total:     {float(glide_on_ref.sum()):.3e}")
+diff = glide_stilt - ref_field
+print(f"GLIDE total:     {float(glide_stilt.sum()):.3e}")
 print(f"Reference total: {float(ref_field.sum()):.3e}")
 print(f"RMSE:            {float(np.sqrt((diff ** 2).mean())):.3e}")
-print(f"Correlation:     {float(xr.corr(glide_on_ref, ref_field)):.3f}")
+print(f"Correlation:     {float(xr.corr(glide_stilt, ref_field)):.3f}")
 ```
+
+If the output grid was authored to match the reference, no regridding step is needed. If you can't (or don't want to) align grids — e.g. comparing two GLIDE runs against a single reference — `lpdm.comparison.regrid_conservative` performs mass-conservative area-weighted regridding for rectangular lat/lon grids and is unit-tested in `tests/test_comparison.py`.
 
 ### Tips & caveats
 
-- **Mismatched surface-layer depth**: if the reference uses a layer other than 0–40 m, set `surface_layer_depth_m` to match and use a corresponding bottom z-bin. If you can't make them match exactly, the converter depth-weights overlapping bins (approximate, assumes uniform residence-time density within each bin).
+- **Output grid bounds are outer cell edges**: GLIDE's `output_grid.lon_bounds` / `lat_bounds` are the outermost edges, with `n_x`, `n_y` equal cells filling the interval. Reference outputs often label coordinates by cell centres — add half a cell on each side when authoring the YAML so your cells align.
+- **Mismatched surface-layer depth**: if the reference uses a layer other than 0–40 m, set `surface_layer_depth_m` (and the matching `z_edges_m` bottom bin) accordingly. If you can't make them match exactly, the converter depth-weights overlapping bins (approximate, assumes uniform residence-time density within each bin).
 - **Spatial air-density variation**: for runs spanning large lat or elevation ranges, replace the scalar `air_density_kg_m3` with a 2D `xarray.DataArray` of `sp / (R_d * T_surface)` from the met.
 - **Different met**: GLIDE uses ARCO ERA5 model-level fields; FLEXPART runs typically use ECMWF operational analyses; NAME uses UM analyses. Inter-model met differences contribute to footprint differences that aren't due to the turbulence scheme — note this in any documented tolerance.
-- **Different release setup**: keep the release within the surface layer (`release-alt-agl-m < surface_layer_depth_m`) to avoid "particle-not-yet-mixed" startup transients dominating the comparison.
+- **Different release setup**: keep the release within the surface layer (`release.alt_agl_m < surface_layer_depth_m`) to avoid "particle-not-yet-mixed" startup transients dominating the comparison.
 - **Time resolution**: pass `integrate_time=False` if you want time-resolved sensitivity; useful for diagnosing when the GLIDE plume diverges from the reference.
 
 ## Adding a new physics test
