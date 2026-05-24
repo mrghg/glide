@@ -101,7 +101,20 @@ Build a modern, highly optimized, backward-in-time LPDM for greenhouse-gas footp
 - Tightened `src/lpdm/met_reader.py` to reject any non-finite geopotential-derived AGL values instead of attempting to continue with inconsistent meteorology.
 - Persisted spatial and time-bin coordinate metadata into `footprints.zarr`, and updated the demo notebook to consume those coordinates directly while remaining compatible with older stores.
 
-### 2026-05-09 Milestone 4 (most of): YAML run config + output_grid / met_domain split
+### 2026-05-24 Meteorology archive convention: EUROPE_YYYYMM monthly Zarrs
+
+- Added the start of a real-world FLEXPART comparison workflow. Reference fixture `data/FLEXPART/FLEXPART_MHD_test_202401.nc` (Mace Head, January 2024, 96 hourly footprints subset to days 1/10/20/30, ~5 MB). Each footprint is a 30-day backward integration, so a full comparison needs ~62 days of met covering both Dec 2023 and Jan 2024.
+- Decision: run the first comparison case locally rather than building Cloud Run infra now. User will execute the downloads on a machine with sufficient disk (full FLEXPART EUROPE domain × 37 pressure levels × 1 month is ~80 GB uncompressed, ~25-30 GB on disk per month).
+- **Met archive convention** (refactored `scripts/download_sample_cube.py`):
+  - Named-domain mode: `--domain EUROPE --year-month 202401` → `data/era5/EUROPE_202401.zarr`. The `DOMAINS` dict at the top of the script registers EUROPE with the full FLEXPART-fixture extents (lon -98 to 39.5, lat 10.6 to 79.2). Add new domains there rather than at call sites.
+  - One Zarr per month, not one big Zarr per multi-month span: better resumability (only re-download a failed month), self-documenting on disk, shareable per-month, and matches ERA5's natural temporal chunking. Stores include `glide_domain`/`glide_year_month`/`glide_source_store`/`glide_domain_description` attrs so a Zarr is self-identifying.
+  - Ad-hoc subset mode preserved for SF-style smoke tests (`--out-path` + explicit time/lon/lat flags). Dispatcher refuses to mix modes.
+  - **OOM fix**: `_validate_written_store` switched from `np.asarray(ds[var].values)` (which loads each variable fully) to `np.isfinite(ds[var]).all().compute()` (dask-streaming). Required for multi-GB stores; previous version would have crashed before validation finished.
+- Added 10 unit tests for the new helpers (`_resolve_year_month_window`, `_resolve_domain_bbox`, dispatcher mode-mixing rejection, leap-Feb handling). Total test count 88; existing atomic-replace test untouched. Suite still <12 s.
+- README's "Downloading Local Sample Data" section rewritten to show both modes (named-domain canonical, ad-hoc legacy) and to flag the per-month disk footprint up front.
+- **Open follow-up** before the first multi-month comparison run can execute: `ArcoEra5ZarrReader` currently opens a single `zarr_store` URI. To consume `EUROPE_202312` + `EUROPE_202401` together it needs either a glob/list of stores or a thin merge step. Small change; not done yet — wire it up when the downloaded archives are in hand.
+
+### 2026-05-24 Milestone 4 (most of): YAML run config + output_grid / met_domain split
 
 - Replaced the argparse-and-env-var configuration surface with a single pydantic-validated YAML schema in `src/lpdm/config.py`. Top-level `RunConfig` composes `IOConfig`, `SimulationConfig`, `ReleaseConfig`, `TurbulenceConfig`, `OutputGridConfig`, `MetDomainConfig`, and `MemoryConfig`. All sub-models are frozen with `extra="forbid"`. Cross-section model validators enforce `simulation.length_seconds > release.duration_seconds`, strictly ascending `output_grid.z_edges_m`, ascending `lon_bounds` / `lat_bounds`, and the release point lying inside `met_domain`.
 - The output grid is now a first-class concept independent of the met fetch bbox: `output_grid` carries `lon_bounds, lat_bounds, n_x, n_y, z_edges_m, n_time_bins` and feeds straight into `FootprintGridder`. The previous derivation from `release_point ± bbox_pad_*` and the hardcoded 0.25° resolution is gone. This means GLIDE can accumulate footprints directly onto a reference grid (e.g. FLEXPART's 391×293) — `lpdm.comparison.regrid_conservative` is kept in the module for off-grid cases but dropped from the documented comparison workflow.
@@ -302,8 +315,17 @@ Build a modern, highly optimized, backward-in-time LPDM for greenhouse-gas footp
 
 ## Immediate recommendation
 
-- **Milestone status:** M0 complete. M1 implementation-complete (default still `placeholder_constant_ou` pending external validation). M4 mostly complete — schema, output_grid/met_domain split, and CLI shrink all landed; remaining gaps are `schema_version` field and explicit out-of-domain particle handling (see 2026-05-09 entry).
-- **Closing M1:** run the FLEXPART cross-comparison using `configs/example_mhd_january.yaml` against `data/FLEXPART/FLEXPART_MHD_test_202401.nc` per the `VALIDATION.md` § "Comparing against FLEXPART / NAME / STILT" workflow. Reference fixture is already in the repo. Re-download the local sample cube first (the updated `download_sample_cube.py` now fetches `friction_velocity` and `surface_sensible_heat_flux`). Once Hanna agrees with FLEXPART within a documented tolerance, flip the default scheme to `hanna_1982` and update `README.md`.
+- **Milestone status:** M0 complete. M1 implementation-complete (default still `placeholder_constant_ou` pending external validation). M4 mostly complete — schema, output_grid/met_domain split, and CLI shrink all landed; remaining gaps are `schema_version` field and explicit out-of-domain particle handling (see 2026-05-24 entry).
+- **Closing M1 — next step is the FLEXPART comparison run:**
+  1. On a machine with ≥60 GB free disk, download both months:
+
+         python scripts/download_sample_cube.py --domain EUROPE --year-month 202312
+         python scripts/download_sample_cube.py --domain EUROPE --year-month 202401
+
+     Produces `data/era5/EUROPE_202312.zarr` and `data/era5/EUROPE_202401.zarr`.
+  2. Wire `ArcoEra5ZarrReader` to consume multiple monthly stores (glob or list of URIs, or a thin merge step). Open follow-up flagged in the 2026-05-24 archive-convention entry.
+  3. Run a single 30-day back-trajectory case from `configs/example_mhd_january.yaml` against `data/FLEXPART/FLEXPART_MHD_test_202401.nc` using the `VALIDATION.md` § "Comparing against FLEXPART / NAME / STILT" workflow.
+  4. Once Hanna agrees with FLEXPART within a documented tolerance on this case, scale to the full 96-footprint sweep, then flip the default scheme to `hanna_1982` and update `README.md`.
 - **Closing M4:** decide policy for particles leaving `met_domain` (clip-and-flag vs drop-and-count vs abort-above-threshold) and surface the per-step escaped-particle count in `trajectory_diagnostics.parquet`. Add `schema_version: 1` to the YAML once we're ready to commit to a breaking-change discipline.
 - **Optional M1.x refinement:** replace the constant-K above-BL placeholder with an N²-based scheme using model-level `theta` gradients. Spec § "Open questions / known limitations" in `docs/turbulence.md` flags this; only worth doing if free-troposphere transport accuracy proves insufficient.
 - After M1 validation lands, prioritize M2 (particle aggregation). Defer substantial GPU tuning until the turbulence and aggregation interfaces are stable enough to benchmark meaningfully.

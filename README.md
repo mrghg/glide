@@ -115,23 +115,31 @@ Each test also verifies particle mass conservation by checking total weight.
 
 ### Downloading Local Sample Data
 
-For local development or rapid testing, reading from the remote ARCO ERA5 Zarr store can be slow or memory-intensive. You can download a cropped subset of the dataset (a "data cube") that spans only your area and time of interest:
+For local development or rapid testing, reading from the remote ARCO ERA5 Zarr store can be slow or memory-intensive. Download a cropped subset of the dataset (a "data cube") covering only your area and time of interest with [scripts/download_sample_cube.py](scripts/download_sample_cube.py). The script has two modes.
+
+**Named domain + month** — for the long-running comparison archives. One Zarr per month, named `<DOMAIN>_<YYYYMM>.zarr` under `--out-dir` (default `data/era5/`). The domain bbox is registered in the `DOMAINS` dict at the top of the script; today only `EUROPE` is defined (matches the FLEXPART comparison fixture under `data/FLEXPART/`).
+
+```bash
+.venv/bin/python scripts/download_sample_cube.py --domain EUROPE --year-month 202401
+.venv/bin/python scripts/download_sample_cube.py --domain EUROPE --year-month 202312
+```
+
+Produces `data/era5/EUROPE_202401.zarr` and `data/era5/EUROPE_202312.zarr`. The EUROPE domain at 37 pressure levels is roughly 80 GB per month uncompressed (~25–30 GB on disk). Each month is its own store so the download is resumable and shareable.
+
+**Ad-hoc subset** — for SF-area smoke tests and other one-offs. Provide an explicit `--out-path`, time window, and lon/lat bounds:
 
 ```bash
 .venv/bin/python scripts/download_sample_cube.py \
     --out-path data/sample_met.zarr \
-    --store-uri gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3 \
-	--time-start 2023-12-29T18:00:00 \
-    --time-end 2024-01-01T06:00:00 \
-	--lon-min -127.0 \
-	--lon-max -117.0 \
-	--lat-min 33.0 \
-	--lat-max 43.0
+    --time-start 2023-12-29T18:00:00 --time-end 2024-01-01T06:00:00 \
+    --lon-min -127.0 --lon-max -117.0 \
+    --lat-min 33.0 --lat-max 43.0
 ```
 
 Notes:
-- Public ARCO buckets are opened anonymously in the helper script, so ADC credentials are not required for that default source URI.
+- Public ARCO buckets are opened anonymously, so ADC credentials are not required.
 - To choose output store format explicitly, pass `--zarr-version 2` (default) or `--zarr-version 3`.
+- The validator streams finite-value checks via dask so large stores don't OOM.
 
 After downloading the sample data, either:
 - run `python -m lpdm.main --config configs/local_smoke_test.yaml` directly, or
