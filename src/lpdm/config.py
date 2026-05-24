@@ -37,8 +37,28 @@ class _Frozen(BaseModel):
 
 
 class IOConfig(_Frozen):
-    zarr_store: str = Field(..., min_length=1, description="ERA5 ARCO Zarr store URI")
+    zarr_store: str | list[str] = Field(
+        ...,
+        description=(
+            "ERA5 ARCO Zarr store. Accepts a single URI, a local glob pattern "
+            "(e.g. ~/data/arco-era5/EUROPE_*.zarr), or a list of URIs that "
+            "share lat/lon/level coordinates and will be stitched along time."
+        ),
+    )
     output_uri: str = Field(..., min_length=1, description="Output directory or URI")
+
+    @field_validator("zarr_store")
+    @classmethod
+    def _zarr_store_non_empty(cls, v: str | list[str]) -> str | list[str]:
+        if isinstance(v, str):
+            if not v:
+                raise ValueError("zarr_store must be a non-empty string")
+            return v
+        if not v:
+            raise ValueError("zarr_store list must contain at least one entry")
+        if not all(isinstance(s, str) and s for s in v):
+            raise ValueError("zarr_store list entries must all be non-empty strings")
+        return v
 
 
 class SimulationConfig(_Frozen):

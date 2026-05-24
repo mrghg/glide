@@ -101,6 +101,14 @@ Build a modern, highly optimized, backward-in-time LPDM for greenhouse-gas footp
 - Tightened `src/lpdm/met_reader.py` to reject any non-finite geopotential-derived AGL values instead of attempting to continue with inconsistent meteorology.
 - Persisted spatial and time-bin coordinate metadata into `footprints.zarr`, and updated the demo notebook to consume those coordinates directly while remaining compatible with older stores.
 
+### 2026-05-24 Multi-store reader: stitching monthly EUROPE Zarrs along time
+
+- Closed the "single `zarr_store` URI" follow-up flagged in the previous 2026-05-24 entry. `ArcoEra5ZarrReader.__init__(zarr_store=...)` now accepts a single URI, a local glob pattern (e.g. `~/data/arco-era5/EUROPE_*.zarr`), or an explicit list of URIs. Implementation lives in `_resolve_stores` (static helper: `~`/`$VAR` expansion, glob expansion for local paths only, dedupe-preserving-order, empty/blank rejection) and a rewritten `_open_dataset` that opens each store lazily, sorts by first timestamp, verifies `lat`/`lon`/`level` coords match across stores (clear error if not), concatenates along `time` with `join="exact"`, and collapses duplicate timestamps from month-boundary overlap by keeping the first occurrence. `gs://` URIs are passed through verbatim — globbing remote prefixes is not supported, callers must list them explicitly.
+- `IOConfig.zarr_store` schema relaxed to `str | list[str]` with a field validator that rejects empty lists, empty strings, and non-string list entries. Schema is otherwise untouched; existing single-string YAML configs validate as before.
+- `configs/example_mhd_january.yaml` repointed from the GCS URI to `~/data/arco-era5/EUROPE_*.zarr`, with a comment block showing the explicit-list form for `gs://` deployments. Local user has already downloaded both `EUROPE_202312.zarr` and `EUROPE_202401.zarr` (~58 GB each), so the 30-day MHD backward run can now resolve met across the December/January boundary.
+- 10 new tests (7 in `tests/test_met_reader.py`, 3 in `tests/test_main_config.py`) cover: remote URI pass-through, empty-list rejection, blank-entry rejection, dedupe order preservation, local glob expansion, glob-with-no-matches error, get_time_coverage across stitched stores, fetch_hourly_window spanning both stores, duplicate-timestamp collapse, and mismatched-coord rejection. Total test count now 104; suite runs in ~29 s.
+- **What's not done** (intentional, separate change): the per-fetch open-stitch-close pattern is preserved — opening multiple Zarrs every hour is wasteful but matches the existing single-store behaviour. Add a session-level dataset cache only if profiling on the real 30-day run shows it dominates.
+
 ### 2026-05-24 Meteorology archive convention: EUROPE_YYYYMM monthly Zarrs
 
 - Added the start of a real-world FLEXPART comparison workflow. Reference fixture `data/FLEXPART/FLEXPART_MHD_test_202401.nc` (Mace Head, January 2024, 96 hourly footprints subset to days 1/10/20/30, ~5 MB). Each footprint is a 30-day backward integration, so a full comparison needs ~62 days of met covering both Dec 2023 and Jan 2024.
@@ -317,13 +325,8 @@ Build a modern, highly optimized, backward-in-time LPDM for greenhouse-gas footp
 
 - **Milestone status:** M0 complete. M1 implementation-complete (default still `placeholder_constant_ou` pending external validation). M4 mostly complete — schema, output_grid/met_domain split, and CLI shrink all landed; remaining gaps are `schema_version` field and explicit out-of-domain particle handling (see 2026-05-24 entry).
 - **Closing M1 — next step is the FLEXPART comparison run:**
-  1. On a machine with ≥60 GB free disk, download both months:
-
-         python scripts/download_sample_cube.py --domain EUROPE --year-month 202312
-         python scripts/download_sample_cube.py --domain EUROPE --year-month 202401
-
-     Produces `data/era5/EUROPE_202312.zarr` and `data/era5/EUROPE_202401.zarr`.
-  2. Wire `ArcoEra5ZarrReader` to consume multiple monthly stores (glob or list of URIs, or a thin merge step). Open follow-up flagged in the 2026-05-24 archive-convention entry.
+  1. ✅ Downloaded `EUROPE_202312.zarr` + `EUROPE_202401.zarr` to `~/data/arco-era5/` (~58 GB each).
+  2. ✅ `ArcoEra5ZarrReader` now consumes multiple monthly stores via glob or explicit list (see 2026-05-24 multi-store reader entry). `configs/example_mhd_january.yaml` already wired to `~/data/arco-era5/EUROPE_*.zarr`.
   3. Run a single 30-day back-trajectory case from `configs/example_mhd_january.yaml` against `data/FLEXPART/FLEXPART_MHD_test_202401.nc` using the `VALIDATION.md` § "Comparing against FLEXPART / NAME / STILT" workflow.
   4. Once Hanna agrees with FLEXPART within a documented tolerance on this case, scale to the full 96-footprint sweep, then flip the default scheme to `hanna_1982` and update `README.md`.
 - **Closing M4:** decide policy for particles leaving `met_domain` (clip-and-flag vs drop-and-count vs abort-above-threshold) and surface the per-step escaped-particle count in `trajectory_diagnostics.parquet`. Add `schema_version: 1` to the YAML once we're ready to commit to a breaking-change discipline.

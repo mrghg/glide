@@ -366,6 +366,167 @@ def test_reader_rejects_channel_names_with_no_variable_map_entry() -> None:
         assert "totally_unknown" in str(exc)
 
 
+def _build_two_month_split_datasets() -> tuple[xr.Dataset, xr.Dataset]:
+    """Split the mock dataset's two timestamps into two single-hour datasets.
+
+    Used to simulate two monthly Zarr stores that need stitching along time.
+    """
+
+    base = _build_mock_era5_dataset()
+    first = base.isel(time=[0])
+    second = base.isel(time=[1])
+    return first, second
+
+
+def test_resolve_stores_passes_remote_uri_through() -> None:
+    resolved = ArcoEra5ZarrReader._resolve_stores("gs://bucket/era5.zarr")
+    assert resolved == ("gs://bucket/era5.zarr",)
+
+
+def test_resolve_stores_rejects_empty_list() -> None:
+    try:
+        ArcoEra5ZarrReader._resolve_stores([])
+        raise AssertionError("Expected ValueError for empty zarr_store list")
+    except ValueError as exc:
+        assert "empty" in str(exc).lower()
+
+
+def test_resolve_stores_rejects_non_string_entries() -> None:
+    try:
+        ArcoEra5ZarrReader._resolve_stores(["a.zarr", ""])  # type: ignore[list-item]
+        raise AssertionError("Expected ValueError for empty list entry")
+    except ValueError as exc:
+        assert "non-empty" in str(exc)
+
+
+def test_resolve_stores_dedupes_preserving_order() -> None:
+    resolved = ArcoEra5ZarrReader._resolve_stores(
+        ["gs://a/x.zarr", "gs://b/y.zarr", "gs://a/x.zarr"]
+    )
+    assert resolved == ("gs://a/x.zarr", "gs://b/y.zarr")
+
+
+def test_resolve_stores_expands_local_glob(tmp_path) -> None:
+    (tmp_path / "EUROPE_202312.zarr").mkdir()
+    (tmp_path / "EUROPE_202401.zarr").mkdir()
+    (tmp_path / "ignored.txt").write_text("not a zarr")
+
+    pattern = str(tmp_path / "EUROPE_*.zarr")
+    resolved = ArcoEra5ZarrReader._resolve_stores(pattern)
+
+    assert resolved == (
+        str(tmp_path / "EUROPE_202312.zarr"),
+        str(tmp_path / "EUROPE_202401.zarr"),
+    )
+
+
+def test_resolve_stores_raises_when_glob_matches_nothing(tmp_path) -> None:
+    pattern = str(tmp_path / "NOTHING_*.zarr")
+    try:
+        ArcoEra5ZarrReader._resolve_stores(pattern)
+        raise AssertionError("Expected FileNotFoundError for empty glob match")
+    except FileNotFoundError as exc:
+        assert "matched no Zarr stores" in str(exc)
+
+
+def test_multi_store_stitch_returns_combined_time_coverage(tmp_path) -> None:
+    """Two monthly stores should look like one continuous time axis to the reader."""
+
+    first, second = _build_two_month_split_datasets()
+    path_a = tmp_path / "EUROPE_202401_a.zarr"
+    path_b = tmp_path / "EUROPE_202401_b.zarr"
+    first.to_zarr(path_a, mode="w", zarr_format=2, consolidated=True)
+    second.to_zarr(path_b, mode="w", zarr_format=2, consolidated=True)
+
+    # Deliberately pass them in reverse order to confirm the reader sorts by time.
+    reader = ArcoEra5ZarrReader(
+        zarr_store=[str(path_b), str(path_a)],
+        device="cpu",
+        dtype=torch.float64,
+    )
+
+    start, end = reader.get_time_coverage()
+    assert start == datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
+    assert end == datetime(2024, 1, 1, 1, 0, tzinfo=timezone.utc)
+
+
+def test_multi_store_fetch_window_spans_both_stores(tmp_path) -> None:
+    """An hourly window whose bracket straddles two stores should resolve cleanly."""
+
+    first, second = _build_two_month_split_datasets()
+    path_a = tmp_path / "a.zarr"
+    path_b = tmp_path / "b.zarr"
+    first.to_zarr(path_a, mode="w", zarr_format=2, consolidated=True)
+    second.to_zarr(path_b, mode="w", zarr_format=2, consolidated=True)
+
+    reader = ArcoEra5ZarrReader(
+        zarr_store=[str(path_a), str(path_b)],
+        device="cpu",
+        dtype=torch.float64,
+    )
+
+    request = BoundingBoxRequest(
+        spatial=SpatialBounds(
+            lon_min=19.5, lon_max=21.5, lat_min=9.5, lat_max=11.5, z_min=850.0, z_max=1050.0,
+        ),
+        time=TimeBounds(
+            start=datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc),
+            end=datetime(2024, 1, 1, 1, 0, tzinfo=timezone.utc),
+        ),
+    )
+
+    result = reader.fetch_hourly_window(request)
+    assert result.hour_start.shape == (5, 2, 2, 2)
+    assert result.hour_end.shape == (5, 2, 2, 2)
+
+
+def test_multi_store_drops_duplicate_overlapping_timestamps(tmp_path) -> None:
+    """If two stores overlap on a timestamp, the combined dataset must not duplicate it."""
+
+    base = _build_mock_era5_dataset()
+    # Store A: both timestamps. Store B: just the second (overlaps with A).
+    path_a = tmp_path / "a.zarr"
+    path_b = tmp_path / "b.zarr"
+    base.to_zarr(path_a, mode="w", zarr_format=2, consolidated=True)
+    base.isel(time=[1]).to_zarr(path_b, mode="w", zarr_format=2, consolidated=True)
+
+    reader = ArcoEra5ZarrReader(
+        zarr_store=[str(path_a), str(path_b)],
+        device="cpu",
+        dtype=torch.float64,
+    )
+
+    ds = reader._open_dataset()
+    times = np.asarray(ds["time"].values)
+    assert times.size == 2  # duplicate at 2024-01-01T01 collapsed
+
+
+def test_multi_store_rejects_mismatched_spatial_coords(tmp_path) -> None:
+    """Stitching must abort if lat/lon/level coords differ across stores."""
+
+    first, second = _build_two_month_split_datasets()
+    # Shift longitude in the second store so concat is unambiguously invalid.
+    second = second.assign_coords(longitude=np.array([30.0, 31.0], dtype=np.float64))
+
+    path_a = tmp_path / "a.zarr"
+    path_b = tmp_path / "b.zarr"
+    first.to_zarr(path_a, mode="w", zarr_format=2, consolidated=True)
+    second.to_zarr(path_b, mode="w", zarr_format=2, consolidated=True)
+
+    reader = ArcoEra5ZarrReader(
+        zarr_store=[str(path_a), str(path_b)],
+        device="cpu",
+        dtype=torch.float64,
+    )
+
+    try:
+        reader._open_dataset()
+        raise AssertionError("Expected ValueError for mismatched longitude across stores")
+    except ValueError as exc:
+        assert "longitude" in str(exc)
+        assert "does not match" in str(exc)
+
+
 def test_hourly_met_tensors_channel_unknown_name_raises() -> None:
     ds = _build_mock_era5_dataset()
     reader = _InMemoryArcoReader(ds)

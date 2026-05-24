@@ -7,7 +7,13 @@
 # All paths are relative to the repo root unless otherwise noted.
 
 io:
-  zarr_store: gs://gcp-public-data-arco-era5/co/single-level-reanalysis.zarr
+  # 30-day backward integration from 2024-01-01 needs both Dec 2023 and Jan 2024
+  # met. Download with scripts/download_sample_cube.py --domain EUROPE --year-month
+  # 202312 / 202401. The glob expands locally; for gs:// URIs use an explicit list:
+  #   zarr_store:
+  #     - gs://bucket/EUROPE_202312.zarr
+  #     - gs://bucket/EUROPE_202401.zarr
+  zarr_store: ~/data/arco-era5/EUROPE_*.zarr
   output_uri: outputs/comparison-mhd-202401-day01
 
 simulation:

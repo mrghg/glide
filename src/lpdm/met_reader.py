@@ -13,6 +13,8 @@ Design goals:
 
 from __future__ import annotations
 
+import glob
+import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -195,7 +197,7 @@ class ArcoEra5ZarrReader(MetReader):
 
     def __init__(
         self,
-        zarr_store: str,
+        zarr_store: str | Sequence[str],
         *,
         variable_map: Mapping[str, str] | None = None,
         channel_names: Sequence[str] | None = None,
@@ -211,7 +213,13 @@ class ArcoEra5ZarrReader(MetReader):
         """Initialize reader configuration.
 
         Args:
-            zarr_store: GCS path (for example `gs://bucket/path/to.zarr`).
+            zarr_store: One of:
+                * A single store URI (`gs://bucket/path.zarr` or a local path).
+                * A local glob pattern (e.g. `~/data/arco-era5/EUROPE_*.zarr`) that
+                  expands to one or more local Zarr directories. Glob expansion is
+                  local-filesystem only; remote URIs are passed through verbatim.
+                * A sequence of store URIs to stitch along the time dimension. All
+                  stores must share identical lat/lon/level coordinates.
             variable_map: Optional override for logical-to-dataset variable names.
             channel_names: Optional override for the channels packed into the [C, Z,
                 Y, X] hourly tensors. Defaults to `DEFAULT_CHANNEL_NAMES`. Add
@@ -230,7 +238,9 @@ class ArcoEra5ZarrReader(MetReader):
             dtype: Torch dtype for returned tensors.
         """
 
-        self.zarr_store = zarr_store
+        self.zarr_stores: tuple[str, ...] = self._resolve_stores(zarr_store)
+        # Back-compat single-store attribute for callers that inspect this directly.
+        self.zarr_store = self.zarr_stores[0] if len(self.zarr_stores) == 1 else list(self.zarr_stores)
         self.variable_map = dict(variable_map or self.DEFAULT_VARIABLE_MAP)
         self.channel_names: tuple[str, ...] = (
             tuple(channel_names) if channel_names is not None else self.DEFAULT_CHANNEL_NAMES
@@ -355,18 +365,108 @@ class ArcoEra5ZarrReader(MetReader):
             if callable(close_fn):
                 close_fn()
 
-    def _open_dataset(self) -> xr.Dataset:
-        """Open the remote Zarr store lazily.
+    @staticmethod
+    def _resolve_stores(zarr_store: str | Sequence[str]) -> tuple[str, ...]:
+        """Normalize the user-supplied store argument into a tuple of URIs.
 
-        Keep this method isolated so later versions can add dataset caching,
-        retries, consolidated metadata toggles, or auth customization.
+        Local glob patterns are expanded; remote URIs (e.g. `gs://...`) are passed
+        through unchanged. The returned tuple is non-empty and deduplicated while
+        preserving order.
         """
 
-        return xr.open_zarr(
-            self.zarr_store,
-            consolidated=True,
-            chunks=self.chunk_overrides or None,
+        if isinstance(zarr_store, str):
+            candidates: list[str] = [zarr_store]
+        else:
+            candidates = list(zarr_store)
+            if not candidates:
+                raise ValueError("zarr_store list cannot be empty")
+            if not all(isinstance(s, str) and s for s in candidates):
+                raise ValueError("zarr_store list entries must all be non-empty strings")
+
+        resolved: list[str] = []
+        for candidate in candidates:
+            expanded = os.path.expandvars(os.path.expanduser(candidate))
+            is_remote = "://" in expanded
+            has_glob = any(c in expanded for c in "*?[")
+            if has_glob and not is_remote:
+                matches = sorted(glob.glob(expanded))
+                if not matches:
+                    raise FileNotFoundError(
+                        f"Glob pattern {candidate!r} matched no Zarr stores"
+                    )
+                resolved.extend(matches)
+            else:
+                resolved.append(expanded)
+
+        # Dedupe while preserving order.
+        seen: set[str] = set()
+        unique: list[str] = []
+        for store in resolved:
+            if store not in seen:
+                seen.add(store)
+                unique.append(store)
+
+        return tuple(unique)
+
+    def _open_dataset(self) -> xr.Dataset:
+        """Open the configured Zarr store(s) lazily.
+
+        For a single store this is a straight `xr.open_zarr` call. For multiple
+        stores, each is opened independently, sorted by first timestamp, validated
+        for matching spatial/level coordinates, and concatenated along the time
+        dimension. Any duplicate timestamps (e.g. from month-boundary overlap)
+        are collapsed by keeping the first occurrence.
+        """
+
+        if len(self.zarr_stores) == 1:
+            return xr.open_zarr(
+                self.zarr_stores[0],
+                consolidated=True,
+                chunks=self.chunk_overrides or None,
+            )
+
+        datasets = [
+            xr.open_zarr(store, consolidated=True, chunks=self.chunk_overrides or None)
+            for store in self.zarr_stores
+        ]
+
+        order = sorted(
+            range(len(datasets)),
+            key=lambda i: np.asarray(datasets[i][self.time_name].values).min(),
         )
+        datasets = [datasets[i] for i in order]
+        ordered_stores = [self.zarr_stores[i] for i in order]
+
+        ref = datasets[0]
+        for i, ds in enumerate(datasets[1:], 1):
+            for coord in (self.lat_name, self.lon_name, self.level_name):
+                if coord not in ds.coords and coord not in ds.variables:
+                    raise ValueError(
+                        f"Zarr store {ordered_stores[i]!r} is missing coordinate {coord!r}"
+                    )
+                if not np.array_equal(
+                    np.asarray(ref[coord].values), np.asarray(ds[coord].values)
+                ):
+                    raise ValueError(
+                        f"Zarr store {ordered_stores[i]!r} has {coord!r} coordinate "
+                        f"that does not match {ordered_stores[0]!r}; cannot stitch "
+                        "stores along time."
+                    )
+
+        combined = xr.concat(
+            datasets,
+            dim=self.time_name,
+            coords="minimal",
+            compat="override",
+            join="exact",
+        )
+
+        times = np.asarray(combined[self.time_name].values)
+        _, first_idx = np.unique(times, return_index=True)
+        if first_idx.size != times.size:
+            combined = combined.isel({self.time_name: np.sort(first_idx)})
+
+        return combined
 
     def _select_variables(self, ds: xr.Dataset) -> xr.Dataset:
         """Select only required meteorological fields."""

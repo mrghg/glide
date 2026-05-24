@@ -153,6 +153,23 @@ def test_run_config_from_yaml(tmp_path: Path) -> None:
     assert cfg.output_grid.z_edges_m == (0.0, 1000.0, 5000.0)
 
 
+def test_run_config_accepts_zarr_store_list() -> None:
+    cfg = RunConfig.model_validate(
+        _base_dict(io={"zarr_store": ["gs://a/x.zarr", "gs://b/y.zarr"]})
+    )
+    assert cfg.io.zarr_store == ["gs://a/x.zarr", "gs://b/y.zarr"]
+
+
+def test_run_config_rejects_empty_zarr_store_list() -> None:
+    with pytest.raises(ValidationError, match="at least one entry"):
+        RunConfig.model_validate(_base_dict(io={"zarr_store": []}))
+
+
+def test_run_config_rejects_blank_zarr_store_list_entry() -> None:
+    with pytest.raises(ValidationError, match="non-empty"):
+        RunConfig.model_validate(_base_dict(io={"zarr_store": ["gs://a.zarr", ""]}))
+
+
 def test_footprint_time_bin_index_advances_each_hour() -> None:
     cfg = RunConfig.model_validate(
         _base_dict(simulation={"length_seconds": 10800}, release={"duration_seconds": 1800})
