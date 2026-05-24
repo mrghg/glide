@@ -61,7 +61,7 @@ def test_dispatch_rejects_mixing_named_and_adhoc_modes() -> None:
         domain="EUROPE",
         year_month="202401",
         out_dir="data/era5",
-        out_path="data/sample.zarr",   # also ad-hoc → conflict
+        out_path="data/sample.zarr",   # ad-hoc flag alongside named → conflict
         time_start=None,
         time_end=None,
         lon_min=None,
@@ -71,6 +71,37 @@ def test_dispatch_rejects_mixing_named_and_adhoc_modes() -> None:
     )
     with pytest.raises(SystemExit, match="Cannot mix"):
         module._dispatch(args)
+
+
+def test_dispatch_named_mode_writes_to_out_dir_with_auto_filename(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Named-domain mode always uses <out-dir>/<DOMAIN>_<YYYYMM>.zarr; no path override."""
+
+    from argparse import Namespace
+
+    module = _load_download_sample_cube_module()
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(module, "download_sample_cube", lambda **kw: captured.update(kw))
+
+    args = Namespace(
+        store_uri="gs://x",
+        zarr_version=2,
+        domain="EUROPE",
+        year_month="202401",
+        out_dir="/Volumes/external/met",
+        out_path=None,
+        time_start=None,
+        time_end=None,
+        lon_min=None,
+        lon_max=None,
+        lat_min=None,
+        lat_max=None,
+    )
+    module._dispatch(args)
+
+    assert captured["out_path"] == "/Volumes/external/met/EUROPE_202401.zarr"
 
 
 def test_dispatch_requires_both_domain_and_year_month_together() -> None:

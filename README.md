@@ -126,6 +126,14 @@ For local development or rapid testing, reading from the remote ARCO ERA5 Zarr s
 
 Produces `data/era5/EUROPE_202401.zarr` and `data/era5/EUROPE_202312.zarr`. The EUROPE domain at 37 pressure levels is roughly 80 GB per month uncompressed (~25–30 GB on disk). Each month is its own store so the download is resumable and shareable.
 
+To write a named-domain download to a custom location (external drive, mounted volume, etc.), point `--out-dir` at it. The filename is always auto-generated as `<DOMAIN>_<YYYYMM>.zarr` inside that directory — this is intentional, to prevent on-disk names drifting out of sync with the domain registry:
+
+```bash
+.venv/bin/python scripts/download_sample_cube.py \
+    --domain EUROPE --year-month 202401 \
+    --out-dir /Volumes/external/met
+```
+
 **Ad-hoc subset** — for SF-area smoke tests and other one-offs. Provide an explicit `--out-path`, time window, and lon/lat bounds:
 
 ```bash

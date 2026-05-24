@@ -267,7 +267,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     named.add_argument(
         "--out-dir",
         default="data/era5",
-        help="Parent directory for named-domain stores. Each store is <DOMAIN>_<YYYYMM>.zarr.",
+        help=(
+            "Parent directory for named-domain stores. Filename is always auto-generated "
+            "as <DOMAIN>_<YYYYMM>.zarr inside this directory — point it at an external "
+            "drive or mounted volume to write elsewhere (e.g. --out-dir /Volumes/external/met)."
+        ),
     )
 
     # Ad-hoc subset path (legacy, kept for SF-area smoke tests and custom one-offs).
@@ -293,7 +297,8 @@ def _dispatch(args: argparse.Namespace) -> None:
     if using_named and using_adhoc:
         raise SystemExit(
             "Cannot mix named-domain mode (--domain/--year-month) with ad-hoc flags "
-            "(--out-path/--time-*/--lon-*/--lat-*). Pick one."
+            "(--out-path/--time-*/--lon-*/--lat-*). Pick one. To write a named-domain "
+            "download to a custom location, set --out-dir (the filename is always auto-generated)."
         )
 
     if using_named:
