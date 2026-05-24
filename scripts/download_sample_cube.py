@@ -69,16 +69,32 @@ DOMAINS: dict[str, dict[str, float | str]] = {
 
 
 def _prepare_for_zarr_write(ds: xr.Dataset, zarr_version: int) -> xr.Dataset:
-    """Remove source encodings that are incompatible with target Zarr format."""
+    """Strip source encodings that don't fit a spatially-subset write.
 
-    if zarr_version != 3:
-        return ds
+    Two distinct issues are handled here:
 
-    # ARCO source metadata may contain v2-style numcodecs objects (e.g. Blosc)
-    # in .encoding, which are rejected by Zarr v3's codec API.
+    1. **Chunk-shape mismatch (both v2 and v3).** ARCO ERA5 ships with globe-shaped
+       chunks (e.g. ``(1, 721, 1440)`` for surface fields). After ``.sel`` to a
+       smaller bbox the dask chunks are smaller and don't fill a full source chunk
+       anymore. Writing them into the inherited zarr chunk shape would either be
+       parallel-unsafe (multiple dask chunks land in one zarr chunk) or pad with
+       junk. We drop ``chunks`` and ``preferred_chunks`` so xarray derives the
+       output chunk shape from dask instead.
+
+    2. **Codec incompatibility (v3 only).** v2-style numcodecs objects (Blosc,
+       etc.) are rejected by Zarr v3's codec API. For v3 we clear the full
+       encoding; v2 keeps compressor/dtype/etc.
+    """
+
     ds_out = ds.copy(deep=False)
     for var_name in ds_out.variables:
-        ds_out[var_name].encoding = {}
+        if zarr_version == 3:
+            ds_out[var_name].encoding = {}
+        else:
+            enc = dict(ds_out[var_name].encoding)
+            enc.pop("chunks", None)
+            enc.pop("preferred_chunks", None)
+            ds_out[var_name].encoding = enc
     return ds_out
 
 

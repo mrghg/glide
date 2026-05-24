@@ -126,6 +126,45 @@ def test_dispatch_requires_both_domain_and_year_month_together() -> None:
         module._dispatch(args)
 
 
+def test_prepare_for_zarr_write_strips_inherited_chunks_for_v2() -> None:
+    """v2 path must drop source `chunks` to avoid spatially-subset write conflicts."""
+
+    import numpy as np
+    import xarray as xr
+
+    module = _load_download_sample_cube_module()
+
+    da = xr.DataArray(
+        np.zeros((1, 4, 8), dtype=np.float32),
+        dims=("time", "lat", "lon"),
+    )
+    da.encoding = {"chunks": (1, 721, 1440), "preferred_chunks": (1, 721, 1440), "_FillValue": -9999.0}
+    ds = xr.Dataset({"surface_sensible_heat_flux": da})
+
+    prepared = module._prepare_for_zarr_write(ds, zarr_version=2)
+    enc = prepared["surface_sensible_heat_flux"].encoding
+    assert "chunks" not in enc
+    assert "preferred_chunks" not in enc
+    # Non-chunks encoding (fill value, dtype, compressor) is preserved.
+    assert enc.get("_FillValue") == -9999.0
+
+
+def test_prepare_for_zarr_write_clears_full_encoding_for_v3() -> None:
+    """v3 path must clear everything (numcodecs Blosc rejected by v3 codec API)."""
+
+    import numpy as np
+    import xarray as xr
+
+    module = _load_download_sample_cube_module()
+
+    da = xr.DataArray(np.zeros((1, 4, 8), dtype=np.float32), dims=("time", "lat", "lon"))
+    da.encoding = {"chunks": (1, 721, 1440), "_FillValue": -9999.0}
+    ds = xr.Dataset({"surface_sensible_heat_flux": da})
+
+    prepared = module._prepare_for_zarr_write(ds, zarr_version=3)
+    assert prepared["surface_sensible_heat_flux"].encoding == {}
+
+
 def test_replace_store_atomically_restores_existing_store_on_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     module = _load_download_sample_cube_module()
 
