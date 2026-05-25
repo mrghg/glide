@@ -18,7 +18,7 @@ io:
 
 simulation:
   start_time: 2024-01-01T00:00:00Z   # release window start (UTC)
-  length_seconds: 86400              # 24 h backward integration from release end
+  length_seconds: 86400              # backward integration from release end
   dt_seconds: 60                     # 1 min: appropriate for Hanna near the surface
   device: auto                       # auto | cpu | cuda | mps
 
@@ -28,7 +28,7 @@ release:
   lat: 53.3267
   alt_agl_m: 10.0                    # Mace Head inlet height
   duration_seconds: 3600             # 1 h release window
-  n_particles: 10000
+  n_particles: 2000
   seed: 42
 
 turbulence:

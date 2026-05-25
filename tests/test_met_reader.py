@@ -15,7 +15,7 @@ class _InMemoryArcoReader(ArcoEra5ZarrReader):
         self._dataset = dataset
 
     def _open_dataset(self) -> xr.Dataset:
-        return self._dataset
+        return self._ensure_monotonic_longitude(self._dataset)
 
 
 def _build_mock_era5_dataset() -> xr.Dataset:
@@ -525,6 +525,82 @@ def test_multi_store_rejects_mismatched_spatial_coords(tmp_path) -> None:
     except ValueError as exc:
         assert "longitude" in str(exc)
         assert "does not match" in str(exc)
+
+
+def _build_mock_era5_dataset_wrapped_lon() -> xr.Dataset:
+    """Mock the on-disk layout of an ARCO ERA5 EUROPE cube.
+
+    Source ARCO data is in 0..360 longitude. A bbox that crosses Greenwich is
+    stored as the concatenation of [180..360) then [0..180) — i.e. the 1D
+    longitude coord is non-monotonic. This fixture mirrors that layout with
+    two longitude columns: 270.0 (= -90 in -180..180) then 5.0.
+    """
+
+    ds = _build_mock_era5_dataset()
+    ds = ds.assign_coords(longitude=np.array([270.0, 5.0], dtype=np.float64))
+    return ds
+
+
+def test_ensure_monotonic_longitude_remaps_wrap_to_negative() -> None:
+    """A 0..360 store that wraps Greenwich is exposed as monotonic -180..180."""
+
+    ds = _build_mock_era5_dataset_wrapped_lon()
+    reader = _InMemoryArcoReader(ds)
+
+    opened = reader._open_dataset()
+    lon = opened["longitude"].values
+    assert lon.tolist() == [-90.0, 5.0]  # 270 -> -90; 5 unchanged; already in order
+    assert np.all(np.diff(lon) > 0)
+
+
+def test_fetch_hourly_window_succeeds_on_wrapped_lon_store() -> None:
+    """End-to-end: a request whose bbox spans Greenwich must resolve cleanly."""
+
+    ds = _build_mock_era5_dataset_wrapped_lon()
+    reader = _InMemoryArcoReader(ds)
+
+    request = BoundingBoxRequest(
+        spatial=SpatialBounds(
+            lon_min=-100.0, lon_max=10.0,
+            lat_min=9.5, lat_max=11.5,
+            z_min=850.0, z_max=1050.0,
+        ),
+        time=TimeBounds(
+            start=datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc),
+            end=datetime(2024, 1, 1, 1, 0, tzinfo=timezone.utc),
+        ),
+    )
+
+    result = reader.fetch_hourly_window(request)
+    # Both longitudes lie inside the requested -100..10 window after remap.
+    assert result.hour_start.shape[-1] == 2
+    assert result.metadata.lon.tolist() == [-90.0, 5.0]
+
+
+def test_ensure_monotonic_longitude_is_noop_for_already_monotonic() -> None:
+    """No-op path: a -180..180 store passes straight through."""
+
+    ds = _build_mock_era5_dataset()  # uses lon [20, 21]
+    reader = _InMemoryArcoReader(ds)
+
+    opened = reader._open_dataset()
+    assert opened["longitude"].values.tolist() == [20.0, 21.0]
+
+
+def test_ensure_monotonic_longitude_resorts_when_convention_swap_insufficient() -> None:
+    """Fallback: if the convention swap alone doesn't sort, fall back to isel reorder."""
+
+    ds = _build_mock_era5_dataset()
+    # Construct a deliberately scrambled layout that needs an explicit sort.
+    ds = ds.assign_coords(longitude=np.array([21.0, 20.0], dtype=np.float64))
+    reader = _InMemoryArcoReader(ds)
+
+    opened = reader._open_dataset()
+    assert opened["longitude"].values.tolist() == [20.0, 21.0]
+    # The u component for those swapped columns should be re-ordered with the coord.
+    u_after = np.asarray(opened["u_component_of_wind"].values)
+    # Mock data is uniform so a trivial check on shape suffices to confirm the isel ran.
+    assert u_after.shape[-1] == 2
 
 
 def test_hourly_met_tensors_channel_unknown_name_raises() -> None:

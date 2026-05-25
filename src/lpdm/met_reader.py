@@ -408,6 +408,40 @@ class ArcoEra5ZarrReader(MetReader):
 
         return tuple(unique)
 
+    def _ensure_monotonic_longitude(self, ds: xr.Dataset) -> xr.Dataset:
+        """Guarantee a strictly ascending longitude coordinate.
+
+        ARCO ERA5 uses 0..360 longitude. Regional subsets that cross Greenwich
+        (e.g. our EUROPE domain) are stored as the concatenation of two halves
+        — [262..359.75] then [0..39.5] — which leaves a non-monotonic 1D index
+        on disk. Any pandas-style `.sel(slice(...))` against that coord raises
+        KeyError, and downstream xarray/dask graph optimisations that prune
+        chunks by coordinate range silently break, causing the runtime to
+        materialise the full domain on every fetch.
+
+        Mapping values >= 180 to (value - 360) restores monotonicity in the
+        common case (data laid out as `[180..360, 0..180)` storage order with
+        a single wrap) via a lazy `assign_coords` that does not touch chunk
+        data. If a single convention swap is insufficient (data scrambled or
+        descending), an explicit `isel` re-sort runs as a fallback. The
+        downstream slice path assumes ascending order, so descending-monotonic
+        layouts are normalised too.
+        """
+
+        lon = np.asarray(ds[self.lon_name].values, dtype=np.float64)
+        if lon.size <= 1:
+            return ds
+
+        if np.all(np.diff(lon) > 0):
+            return ds  # already strictly ascending
+
+        new_lon = np.where(lon >= 180.0, lon - 360.0, lon)
+        if np.all(np.diff(new_lon) > 0):
+            return ds.assign_coords({self.lon_name: new_lon})
+
+        order = np.argsort(new_lon)
+        return ds.assign_coords({self.lon_name: new_lon}).isel({self.lon_name: order})
+
     def _open_dataset(self) -> xr.Dataset:
         """Open the configured Zarr store(s) lazily.
 
@@ -415,18 +449,22 @@ class ArcoEra5ZarrReader(MetReader):
         stores, each is opened independently, sorted by first timestamp, validated
         for matching spatial/level coordinates, and concatenated along the time
         dimension. Any duplicate timestamps (e.g. from month-boundary overlap)
-        are collapsed by keeping the first occurrence.
+        are collapsed by keeping the first occurrence. The returned dataset always
+        has a strictly monotonic longitude coordinate.
         """
 
         if len(self.zarr_stores) == 1:
-            return xr.open_zarr(
+            ds = xr.open_zarr(
                 self.zarr_stores[0],
                 consolidated=True,
-                chunks=self.chunk_overrides or None,
+                chunks=self.chunk_overrides or "auto",
             )
+            return self._ensure_monotonic_longitude(ds)
 
         datasets = [
-            xr.open_zarr(store, consolidated=True, chunks=self.chunk_overrides or None)
+            self._ensure_monotonic_longitude(
+                xr.open_zarr(store, consolidated=True, chunks=self.chunk_overrides or "auto")
+            )
             for store in self.zarr_stores
         ]
 

@@ -68,6 +68,34 @@ DOMAINS: dict[str, dict[str, float | str]] = {
 }
 
 
+def _normalise_longitude_to_ascending(ds: xr.Dataset) -> xr.Dataset:
+    """Force a strictly ascending longitude coord on the dataset.
+
+    ARCO ERA5 uses 0..360 longitude. A bbox that wraps Greenwich is built by
+    concatenating two halves (e.g. ``[262..359.75]`` then ``[0..39.5]``),
+    which leaves a non-monotonic 1D index. Downstream consumers using
+    ``.sel(slice(...))`` would either error (KeyError on bound lookup) or
+    quietly skip dask-graph pruning, forcing the full domain into memory.
+
+    Remapping ``lon >= 180`` to ``lon - 360`` restores monotonicity in the
+    common single-wrap case via a lazy ``assign_coords`` (no chunk writes).
+    A fallback ``isel`` re-sort handles unusual layouts. The reader applies
+    the same transform on read; doing it at write time means future tools
+    (xarray, ncview, anything else) also see a clean coordinate.
+    """
+
+    lon = np.asarray(ds["longitude"].values, dtype=np.float64)
+    if lon.size <= 1 or np.all(np.diff(lon) > 0):
+        return ds
+
+    new_lon = np.where(lon >= 180.0, lon - 360.0, lon)
+    if np.all(np.diff(new_lon) > 0):
+        return ds.assign_coords(longitude=new_lon)
+
+    order = np.argsort(new_lon)
+    return ds.assign_coords(longitude=new_lon).isel(longitude=order)
+
+
 def _prepare_for_zarr_write(ds: xr.Dataset, zarr_version: int) -> xr.Dataset:
     """Strip source encodings that don't fit a spatially-subset write.
 
@@ -221,6 +249,14 @@ def download_sample_cube(
         ds1 = ds_subset.sel({"longitude": slice(req_lon_min, None)})
         ds2 = ds_subset.sel({"longitude": slice(None, req_lon_max)})
         ds_subset = xr.concat([ds1, ds2], dim="longitude")
+
+    # Normalise the stored longitude to a strictly ascending -180..180 coord.
+    # Two halves of a Greenwich-crossing bbox were concatenated above (e.g.
+    # [262..359.75] then [0..39.5]); without this step the on-disk index is
+    # non-monotonic, which breaks .sel(slice(...)) lookups in any downstream
+    # consumer. The conversion only relabels the coord, so it's a lazy op
+    # that does not touch chunk data.
+    ds_subset = _normalise_longitude_to_ascending(ds_subset)
 
     if archive_attrs:
         # Persist provenance into the local store's attrs so we can answer
