@@ -411,6 +411,30 @@ def _met_domain_bounds(cfg: RunConfig) -> SpatialBounds:
 	)
 
 
+def _within_met_domain(particles: torch.Tensor, cfg: RunConfig) -> torch.Tensor:
+	"""Boolean [N] mask: True where a particle is inside ``met_domain``.
+
+	Outside the lon/lat bbox or above ``alt_max_m`` there is no valid met — the
+	engine's coordinate normalisation clamps to the grid edge, so such a particle
+	would otherwise keep being pushed by edge winds for the rest of the
+	integration (wasted compute; it can't contribute to the footprint either,
+	being outside ``output_grid``). The runtime kills these particles. The z=0
+	floor is handled by surface reflection, so there is no lower-altitude kill.
+	"""
+
+	md = cfg.met_domain
+	lon = particles[:, 0]
+	lat = particles[:, 1]
+	alt = particles[:, 2]
+	return (
+		(lon >= md.lon_bounds[0])
+		& (lon <= md.lon_bounds[1])
+		& (lat >= md.lat_bounds[0])
+		& (lat <= md.lat_bounds[1])
+		& (alt <= md.alt_max_m)
+	)
+
+
 def _get_hourly_met_window(
 	reader: MetReader,
 	cfg: RunConfig,
@@ -529,9 +553,10 @@ def _run(
 	writer = OutputWriter()
 	device = torch.device(device_str)
 
-	# M5 stage 5: expand the schedule into batches, validate met coverage over the
-	# full schedule, and allocate a single 5D gridder big enough for every release
-	# in the schedule. Each batch contributes a slice along the leading axis.
+	# M5 stage 5: expand the schedule into batches and validate met coverage over
+	# the full schedule. Each batch is integrated independently and its footprint
+	# slice is streamed to the output Zarr region (see the batch loop below), so
+	# only one batch's footprint tensor is resident at a time.
 	batches = cfg.expand_to_batches()
 	all_releases: list[ConcreteRelease] = [r for b in batches for r in b.releases]
 	total_releases = len(all_releases)
@@ -549,18 +574,6 @@ def _run(
 		cfg.batch.max_releases_per_batch,
 	)
 
-	gridder = FootprintGridder(
-		lon_bounds=tuple(out_grid.lon_bounds),
-		lat_bounds=tuple(out_grid.lat_bounds),
-		z_edges_m=out_grid.z_edges_m,
-		n_time_bins=out_grid.n_time_bins,
-		n_y=out_grid.n_y,
-		n_x=out_grid.n_x,
-		n_releases=total_releases,
-		device=device,
-		dtype=torch.float32,
-	)
-
 	# Bookkeeping shared across batches.
 	diag_rows: list[dict[str, float | int | str]] = []
 	step_count = 0
@@ -574,14 +587,54 @@ def _run(
 
 	outputs = _build_output_paths(cfg.io.output_uri)
 	sim_length_s = float(sim.length_seconds)
+	# Total particles killed for leaving met_domain across the whole run.
+	run_escaped_total = 0
+
+	# Streaming footprint output: instead of holding the full
+	# (total_releases, T, Z, Y, X) tensor in memory for the whole run, each batch
+	# accumulates into a gridder sized for that batch alone, writes its slice to
+	# the output Zarr region, then frees the gridder. Peak footprint memory is
+	# therefore one batch's worth, not the whole schedule's. The store is created
+	# lazily on the first batch (we need a gridder's geometry to build coords).
+	footprint_store_created = False
 
 	for batch in batches:
 		particle_batch = generate_batch_particles(batch, device=device_str)
 		particles = particle_batch.particles
-		release_idx = particle_batch.release_idx
+		# release_idx from the batch is global; remap to batch-local for the
+		# per-batch gridder, then offset back to global for the region write.
+		batch_release_offset = batch.releases[0].release_idx
+		release_idx_local = particle_batch.release_idx - batch_release_offset
 		release_time_offsets_s = particle_batch.release_time_offsets_s
 		release_window_end_offsets_s = particle_batch.release_window_end_offsets_s
 		batch_start_ts = particle_batch.batch_start_time.timestamp()
+
+		gridder = FootprintGridder(
+			lon_bounds=tuple(out_grid.lon_bounds),
+			lat_bounds=tuple(out_grid.lat_bounds),
+			z_edges_m=out_grid.z_edges_m,
+			n_time_bins=out_grid.n_time_bins,
+			n_y=out_grid.n_y,
+			n_x=out_grid.n_x,
+			n_releases=len(batch.releases),
+			device=device,
+			dtype=torch.float32,
+		)
+
+		if not footprint_store_created:
+			# Geometry is batch-independent, so use this batch's gridder to build
+			# the full-schedule coords/attrs, then create the empty store sized for
+			# all releases. Subsequent batches just write their region.
+			footprint_coords, footprint_attrs = _build_footprint_dataset_metadata(
+				cfg, gridder, all_releases
+			)
+			writer.create_footprint_store(
+				outputs.footprints,
+				shape=(total_releases, gridder.n_t, gridder.n_z, gridder.n_y, gridder.n_x),
+				coords=footprint_coords,
+				attrs=footprint_attrs,
+			)
+			footprint_store_created = True
 
 		# Per-batch cursor bounds: walk from the latest window-end down to the
 		# earliest window-end minus sim.length_seconds. This gives every release
@@ -600,6 +653,13 @@ def _run(
 			particles.shape[0], device=device, dtype=particles.dtype
 		)
 
+		# Persistent per-batch liveness mask. A particle is killed (drop-and-count)
+		# the step it leaves met_domain — it can never re-enter with valid met, so
+		# stepping it further wastes compute. `active_mask` ANDs this with the
+		# release-time window, so the active set shrinks as particles escape.
+		alive = torch.ones(particles.shape[0], dtype=torch.bool, device=device)
+		batch_escaped_total = 0
+
 		t_cursor = batch_cursor_start
 		while t_cursor > batch_cursor_terminus:
 			delta_s = min(
@@ -609,12 +669,15 @@ def _run(
 			t_prev = t_cursor - timedelta(seconds=delta_s)
 
 			# Per-particle active mask uses both bounds (upper: cursor reached the
-			# release time; lower: cursor still inside the backward window). For a
-			# single-release batch both conditions evaluate identically to today's
-			# scalar check (see stage 3 entry in CHECKPOINT.md).
+			# release time; lower: cursor still inside the backward window) and the
+			# liveness mask. For a single-release batch with no escapes this is
+			# identical to the pre-kill release-time check (stage 3 entry in
+			# CHECKPOINT.md).
 			cursor_offset_s = t_cursor.timestamp() - batch_start_ts
-			active_mask = (release_time_offsets_s >= cursor_offset_s) & (
-				release_time_offsets_s - sim_length_s <= cursor_offset_s
+			active_mask = (
+				(release_time_offsets_s >= cursor_offset_s)
+				& (release_time_offsets_s - sim_length_s <= cursor_offset_s)
+				& alive
 			)
 			active_count = int(torch.count_nonzero(active_mask).item())
 
@@ -660,9 +723,22 @@ def _run(
 					active_mask=active_mask,
 					weights=particles[:, 3],
 					t_idx=t_idx,
-					release_idx=release_idx,
+					release_idx=release_idx_local,
 					dt_seconds=delta_s,
 				)
+
+			# Kill particles that left met_domain this step (drop-and-count). They
+			# accumulated 0 this step already (outside output_grid → dropped by the
+			# gridder's valid_mask), and `alive` excludes them from all future
+			# steps. Escaped particles are out-of-domain, so the cheap count is
+			# `n_particles - escaped_total` (no extra device sync needed).
+			escaped_this_step = 0
+			if active_count > 0:
+				newly_escaped = active_mask & ~_within_met_domain(particles, cfg)
+				escaped_this_step = int(torch.count_nonzero(newly_escaped).item())
+				if escaped_this_step:
+					alive = alive & ~newly_escaped
+					batch_escaped_total += escaped_this_step
 
 			step_count += 1
 
@@ -678,6 +754,8 @@ def _run(
 					"v_mean_m_s": v_m_s,
 					"w_mean_m_s": w_m_s,
 					"active_particles": active_count,
+					"escaped_this_step": escaped_this_step,
+					"alive_particles": int(particles.shape[0]) - batch_escaped_total,
 				}
 			)
 
@@ -716,23 +794,30 @@ def _run(
 
 			t_cursor = t_prev
 
-		# End of batch: capture endpoint state, drop per-batch tensors so the next
-		# batch starts with a clean slate (met_cache + gridder + bookkeeping stay).
+		# End of batch: stream this batch's footprint slice to disk, then drop the
+		# gridder and per-batch tensors so peak footprint memory is one batch's
+		# worth, not the whole schedule's. (met_cache + bookkeeping persist.)
+		writer.write_footprint_region(
+			outputs.footprints,
+			gridder.tensor,
+			release_start=batch_release_offset,
+			release_stop=batch_release_offset + len(batch.releases),
+		)
 		endpoint_particles_chunks.append(particles.detach().cpu().clone())
-		endpoint_release_idx_chunks.append(release_idx.detach().cpu().clone())
+		endpoint_release_idx_chunks.append(particle_batch.release_idx.detach().cpu().clone())
+		del gridder
 		del particles
-		del release_idx
+		del release_idx_local
 		del release_time_offsets_s
 		del release_window_end_offsets_s
 		del turbulence_state
 		del particle_batch
+		del alive
+		run_escaped_total += batch_escaped_total
 
 	for cached in met_cache.values():
 		del cached
 	met_cache.clear()
-	footprint_coords, footprint_attrs = _build_footprint_dataset_metadata(
-		cfg, gridder, all_releases
-	)
 
 	endpoint_particles_all = torch.cat(endpoint_particles_chunks, dim=0)
 	endpoint_release_idx_all = torch.cat(endpoint_release_idx_chunks, dim=0)
@@ -744,12 +829,6 @@ def _run(
 	writer.write_trajectory_parquet(
 		outputs.trajectory_diagnostics, step_seconds=sim.dt_seconds, rows=diag_rows
 	)
-	writer.write_footprint_zarr(
-		outputs.footprints,
-		gridder.tensor,
-		coords=footprint_coords,
-		attrs=footprint_attrs,
-	)
 
 	metadata = {
 		"config": _config_metadata(cfg, schedule_release_end, schedule_sim_start),
@@ -759,6 +838,7 @@ def _run(
 			"n_releases": total_releases,
 			"max_releases_per_batch": cfg.batch.max_releases_per_batch,
 			"release_times": [rel.release_time.isoformat() for rel in all_releases],
+			"escaped_met_domain_total": run_escaped_total,
 		},
 		"outputs": {
 			"endpoint_particles": outputs.endpoint_particles,

@@ -18,7 +18,7 @@ import torch
 import xarray as xr
 
 from lpdm.config import RunConfig
-from lpdm.main import PreflightValidationError, _run
+from lpdm.main import PreflightValidationError, _run, _within_met_domain
 from lpdm.met_reader import (
     BoundingBoxRequest,
     HourlyMetTensors,
@@ -668,3 +668,96 @@ def test_periodic_release_batch_chunking_preserves_shape_and_conserves_per_chunk
     # Totals can differ by one boundary-step per extra batch; just sanity-bound
     # the difference to a few percent.
     assert abs(total_one - total_two) / total_one < 5e-2
+
+
+# ---- M4: drop-and-count out-of-domain particle handling ----------------------
+
+
+def test_within_met_domain_flags_out_of_bounds_particles() -> None:
+    """Unit check of the domain predicate: lon/lat bbox + alt_max, no lower kill."""
+
+    cfg = _make_run_config(
+        met_lon_bounds=(-3.0, 3.0),
+        met_lat_bounds=(-2.0, 2.0),
+        met_alt_max_m=5000.0,
+    )
+    # [lon, lat, alt, weight]; only the first 3 columns are read.
+    particles = torch.tensor(
+        [
+            [0.0, 0.0, 100.0, 1.0],     # inside
+            [-3.0, 0.0, 100.0, 1.0],    # on lon edge -> inside (inclusive)
+            [-3.01, 0.0, 100.0, 1.0],   # just past lon_min -> outside
+            [3.01, 0.0, 100.0, 1.0],    # past lon_max -> outside
+            [0.0, 2.5, 100.0, 1.0],     # past lat_max -> outside
+            [0.0, 0.0, 5000.1, 1.0],    # above alt_max -> outside
+            [0.0, 0.0, 0.0, 1.0],       # at the surface -> inside (no lower kill)
+        ],
+        dtype=torch.float64,
+    )
+    within = _within_met_domain(particles, cfg)
+    assert within.tolist() == [True, True, False, False, False, False, True]
+
+
+def test_particles_killed_on_met_domain_exit(tmp_path: Path) -> None:
+    """A strong wind pushes particles out of a small met_domain; they must be
+    killed (drop-and-count): escaped counts appear in diagnostics, the alive set
+    monotonically shrinks, and the active set collapses to zero by the end."""
+
+    cfg = _make_run_config(
+        output_uri=str(tmp_path / "out"),
+        simulation_length_seconds=10800,   # 3 h backward
+        dt_seconds=300,
+        n_particles=256,
+        release_seed=42,
+        n_time_bins=1,
+        met_lon_bounds=(-3.0, 3.0),
+        met_lat_bounds=(-3.0, 3.0),
+        output_lon_bounds=(-2.5, 2.5),
+        output_lat_bounds=(-2.5, 2.5),
+    )
+    # u=+50 m/s: backward advection drives particles west, out through lon_min
+    # (-3 deg ≈ 333 km) after ~1.85 h — well inside the 3 h window.
+    reader = _make_reader(cfg, wind_fn=lambda _: (50.0, 0.0, 0.0))
+
+    metadata = _run(cfg, reader=reader)
+
+    traj = pd.read_parquet(tmp_path / "out" / "trajectory_diagnostics.parquet")
+    assert "escaped_this_step" in traj.columns
+    assert "alive_particles" in traj.columns
+
+    # Some particles escaped.
+    assert int(traj["escaped_this_step"].sum()) > 0
+    assert metadata["schedule"]["escaped_met_domain_total"] == int(traj["escaped_this_step"].sum())
+
+    # alive_particles is monotonically non-increasing and ends below the start.
+    alive = traj["alive_particles"].tolist()
+    assert all(alive[i] >= alive[i + 1] for i in range(len(alive) - 1))
+    assert alive[-1] < alive[0]
+
+    # The active set shrinks as particles escape (efficiency win): the final
+    # step has far fewer active particles than the peak.
+    assert int(traj["active_particles"].iloc[-1]) < int(traj["active_particles"].max())
+
+
+def test_no_escapes_leaves_alive_count_full(tmp_path: Path) -> None:
+    """A run that stays in-domain must kill nothing: alive stays at n_particles
+    and the escaped total is zero (guards bit-equivalence with pre-kill runs)."""
+
+    cfg = _make_run_config(
+        output_uri=str(tmp_path / "out"),
+        simulation_length_seconds=3600,
+        dt_seconds=300,
+        n_particles=128,
+        release_seed=42,
+        n_time_bins=1,
+        met_lon_bounds=(-5.0, 5.0),
+        met_lat_bounds=(-5.0, 5.0),
+    )
+    reader = _make_reader(cfg, wind_fn=lambda _: (5.0, 0.0, 0.0))  # gentle: ~0.16 deg drift
+
+    metadata = _run(cfg, reader=reader)
+
+    traj = pd.read_parquet(tmp_path / "out" / "trajectory_diagnostics.parquet")
+    assert int(traj["escaped_this_step"].sum()) == 0
+    assert (traj["alive_particles"] == 128).all()
+    assert metadata["schedule"]["escaped_met_domain_total"] == 0

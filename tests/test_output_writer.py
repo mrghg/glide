@@ -152,3 +152,72 @@ def test_output_writer_particles_back_compat_without_release_idx(tmp_path: Path)
     writer.write_particles_parquet(str(path), particles)
     df = pd.read_parquet(path)
     assert list(df.columns) == ["lon", "lat", "alt", "weight"]
+
+
+def _footprint_coords(n_releases: int) -> dict:
+    """Minimal coord set for a (n_releases, 2, 3, 4, 5) footprint store."""
+
+    import numpy as np
+
+    return {
+        "release_time": (
+            np.datetime64("2024-01-01T00:00:00", "ns")
+            + np.arange(n_releases) * np.timedelta64(1, "h")
+        ),
+        "time_ago": np.array([0, 1], dtype=np.int64),
+        "z_bin": np.array([500.0, 1500.0, 2500.0], dtype=np.float64),
+        "latitude": np.array([35.25, 35.75, 36.25, 36.75], dtype=np.float64),
+        "longitude": np.array([-122.5, -122.0, -121.5, -121.0, -120.5], dtype=np.float64),
+        "latitude_edge": ("latitude_edge", np.array([35.0, 35.5, 36.0, 36.5, 37.0], dtype=np.float64)),
+    }
+
+
+def test_streaming_footprint_store_create_then_region_writes(tmp_path: Path) -> None:
+    """M5 streaming: create an empty store, then fill it one batch at a time.
+
+    Verifies that create_footprint_store never materialises the full tensor (it
+    uses a lazy dask template) and that region writes land in disjoint
+    release_time slices without overwriting each other.
+    """
+
+    writer = OutputWriter()
+    path = str(tmp_path / "fp.zarr")
+    n_releases = 5
+    shape = (n_releases, 2, 3, 4, 5)
+
+    writer.create_footprint_store(path, shape=shape, coords=_footprint_coords(n_releases))
+
+    # Three batches: releases [0:2], [2:4], [4:5], each filled with a distinct value.
+    for start, stop, value in [(0, 2, 1.0), (2, 4, 2.0), (4, 5, 3.0)]:
+        block = torch.full((stop - start, 2, 3, 4, 5), value, dtype=torch.float32)
+        writer.write_footprint_region(path, block, release_start=start, release_stop=stop)
+
+    ds = xr.open_zarr(path)
+    fp = ds["footprint"]
+    assert fp.shape == shape
+    assert fp.dims == ("release_time", "time_ago", "z_bin", "latitude", "longitude")
+    per_release = [float(fp.isel(release_time=i).mean()) for i in range(n_releases)]
+    assert per_release == [1.0, 1.0, 2.0, 2.0, 3.0]
+    # Coords survived the template write.
+    assert np.allclose(ds["latitude_edge"].values, np.array([35.0, 35.5, 36.0, 36.5, 37.0]))
+
+
+def test_streaming_footprint_region_shape_mismatch_rejected(tmp_path: Path) -> None:
+    import pytest
+
+    writer = OutputWriter()
+    path = str(tmp_path / "fp.zarr")
+    writer.create_footprint_store(path, shape=(3, 2, 3, 4, 5), coords=_footprint_coords(3))
+
+    # Region [0:2] expects leading dim 2; pass 3.
+    bad = torch.ones((3, 2, 3, 4, 5), dtype=torch.float32)
+    with pytest.raises(ValueError, match="region size"):
+        writer.write_footprint_region(path, bad, release_start=0, release_stop=2)
+
+
+def test_streaming_footprint_store_rejects_non_5d_shape(tmp_path: Path) -> None:
+    import pytest
+
+    writer = OutputWriter()
+    with pytest.raises(ValueError, match="must be"):
+        writer.create_footprint_store(str(tmp_path / "fp.zarr"), shape=(3, 2, 3, 4))  # type: ignore[arg-type]
