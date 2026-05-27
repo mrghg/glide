@@ -24,7 +24,7 @@ from typing import Sequence
 import numpy as np
 import torch
 
-from lpdm.config import RunConfig
+from lpdm.config import ConcreteRelease, RunConfig, _release_point
 from lpdm.footprint_gridder import FootprintGridder
 from lpdm.gpu_engine import GPUEngine, GridInterpolationBounds
 from lpdm.met_reader import (
@@ -36,7 +36,7 @@ from lpdm.met_reader import (
 	TimeBounds,
 )
 from lpdm.output_writer import OutputWriter
-from lpdm.release_generator import PointRelease
+from lpdm.release_generator import generate_batch_particles
 from lpdm.runtime import DEVICE
 from lpdm.turbulence import TurbulenceScheme, get_scheme, list_schemes
 
@@ -129,8 +129,16 @@ def _footprint_time_bin_index(release_end: datetime, t_cursor: datetime, n_time_
 def _build_footprint_dataset_metadata(
 	cfg: RunConfig,
 	gridder: FootprintGridder,
+	releases: Sequence[ConcreteRelease],
 ) -> tuple[dict[str, object], dict[str, float]]:
-	"""Build coordinate metadata for the footprint Zarr dataset."""
+	"""Build coordinate metadata for the 5D footprint Zarr dataset.
+
+	The leading ``release_time`` axis is populated from the full expanded
+	schedule — one timestamp per :class:`ConcreteRelease` in execution order.
+	For single-release runs this is a length-1 axis carrying the release's
+	start time. Release attrs (lon/lat/alt) come from the schedule's common
+	release point (currently all variants use a single location).
+	"""
 
 	lon_edges = np.linspace(gridder.lon_min, gridder.lon_max, gridder.n_x + 1, dtype=np.float64)
 	lat_edges = np.linspace(gridder.lat_min, gridder.lat_max, gridder.n_y + 1, dtype=np.float64)
@@ -141,7 +149,16 @@ def _build_footprint_dataset_metadata(
 	time_bin_start_h = np.arange(gridder.n_t, dtype=np.float64) * hours_per_bin
 	time_bin_end_h = time_bin_start_h + hours_per_bin
 
+	release_times = np.array(
+		[np.datetime64(rel.release_time.replace(tzinfo=None), "ns") for rel in releases]
+	)
+	release_durations_s = np.array(
+		[float(rel.duration_seconds) for rel in releases], dtype=np.float64
+	)
+
 	coords: dict[str, object] = {
+		"release_time": release_times,
+		"release_duration_seconds": ("release_time", release_durations_s),
 		"time_ago": np.arange(gridder.n_t, dtype=np.int64),
 		"time_ago_start_hours": ("time_ago", time_bin_start_h),
 		"time_ago_end_hours": ("time_ago", time_bin_end_h),
@@ -153,10 +170,11 @@ def _build_footprint_dataset_metadata(
 		"latitude_edge": ("latitude_edge", lat_edges),
 		"longitude_edge": ("longitude_edge", lon_edges),
 	}
+	lon, lat, alt_agl_m = _release_point(cfg.release)
 	attrs = {
-		"release_lon": float(cfg.release.lon),
-		"release_lat": float(cfg.release.lat),
-		"release_alt_agl_m": float(cfg.release.alt_agl_m),
+		"release_lon": float(lon),
+		"release_lat": float(lat),
+		"release_alt_agl_m": float(alt_agl_m),
 	}
 	return coords, attrs
 
@@ -490,7 +508,6 @@ def _run(
 	scheme: TurbulenceScheme | None = None,
 ) -> dict[str, object]:
 	sim = cfg.simulation
-	rel = cfg.release
 	mem = cfg.memory
 	out_grid = cfg.output_grid
 	device_str = _resolve_device(sim.device)
@@ -512,39 +529,25 @@ def _run(
 	writer = OutputWriter()
 	device = torch.device(device_str)
 
-	particles = PointRelease(
-		n_particles=rel.n_particles,
-		lon=rel.lon,
-		lat=rel.lat,
-		alt=rel.alt_agl_m,
-		device=device_str,
-	).generate()
+	# M5 stage 5: expand the schedule into batches, validate met coverage over the
+	# full schedule, and allocate a single 5D gridder big enough for every release
+	# in the schedule. Each batch contributes a slice along the leading axis.
+	batches = cfg.expand_to_batches()
+	all_releases: list[ConcreteRelease] = [r for b in batches for r in b.releases]
+	total_releases = len(all_releases)
+	all_window_ends = [
+		rel.release_time + timedelta(seconds=rel.duration_seconds) for rel in all_releases
+	]
+	schedule_release_end = max(all_window_ends)
+	schedule_sim_start = min(all_window_ends) - timedelta(seconds=sim.length_seconds)
+	_validate_meteorology_time_coverage(reader, cfg, schedule_release_end, schedule_sim_start)
 
-	diag_rows: list[dict[str, float | int | str]] = []
-	release_start = sim.start_time
-	release_end = release_start + timedelta(seconds=rel.duration_seconds)
-	sim_start = release_end - timedelta(seconds=sim.length_seconds)
-	_validate_meteorology_time_coverage(reader, cfg, release_end, sim_start)
-
-	# Per-particle release times stored as offsets-from-release_start in seconds.
-	# Offsets stay in [0, duration_seconds) where float32 precision is fine.
-	release_start_ts = release_start.timestamp()
-	release_end_ts = release_end.timestamp()
-	release_duration_s = release_end_ts - release_start_ts
-	if rel.seed is not None:
-		release_rng = torch.Generator(device="cpu")
-		release_rng.manual_seed(rel.seed)
-		release_offsets_s = torch.empty(rel.n_particles, device="cpu", dtype=torch.float32).uniform_(
-			0.0,
-			release_duration_s,
-			generator=release_rng,
-		)
-		release_offsets_s = release_offsets_s.to(device=particles.device)
-	else:
-		release_offsets_s = torch.empty(rel.n_particles, device=particles.device, dtype=torch.float32).uniform_(
-			0.0,
-			release_duration_s,
-		)
+	LOGGER.info(
+		"schedule expanded: %d release(s) across %d batch(es), max %d per batch",
+		total_releases,
+		len(batches),
+		cfg.batch.max_releases_per_batch,
+	)
 
 	gridder = FootprintGridder(
 		lon_bounds=tuple(out_grid.lon_bounds),
@@ -553,125 +556,194 @@ def _run(
 		n_time_bins=out_grid.n_time_bins,
 		n_y=out_grid.n_y,
 		n_x=out_grid.n_x,
+		n_releases=total_releases,
 		device=device,
-		dtype=particles.dtype,
+		dtype=torch.float32,
 	)
 
+	# Bookkeeping shared across batches.
+	diag_rows: list[dict[str, float | int | str]] = []
 	step_count = 0
 	hour_windows = 0
 	met_cache: OrderedDict[datetime, HourlyMetTensors] = OrderedDict()
 	memory_stats = MemoryStats()
+	# Endpoint particles + their release_idx accumulated across batches, concatenated
+	# once at the end so we emit one parquet covering the whole schedule.
+	endpoint_particles_chunks: list[torch.Tensor] = []
+	endpoint_release_idx_chunks: list[torch.Tensor] = []
 
-	turbulence_state = scheme.initialize_state(
-		rel.n_particles, device=device, dtype=particles.dtype
-	)
 	outputs = _build_output_paths(cfg.io.output_uri)
+	sim_length_s = float(sim.length_seconds)
 
-	t_cursor = release_end
-	while t_cursor > sim_start:
-		delta_s = min(float(sim.dt_seconds), (t_cursor - sim_start).total_seconds())
-		t_prev = t_cursor - timedelta(seconds=delta_s)
+	for batch in batches:
+		particle_batch = generate_batch_particles(batch, device=device_str)
+		particles = particle_batch.particles
+		release_idx = particle_batch.release_idx
+		release_time_offsets_s = particle_batch.release_time_offsets_s
+		release_window_end_offsets_s = particle_batch.release_window_end_offsets_s
+		batch_start_ts = particle_batch.batch_start_time.timestamp()
 
-		active_mask = release_offsets_s >= (t_cursor.timestamp() - release_start_ts)
-		active_count = int(torch.count_nonzero(active_mask).item())
+		# Per-batch cursor bounds: walk from the latest window-end down to the
+		# earliest window-end minus sim.length_seconds. This gives every release
+		# in the batch its own full backward integration window. For a
+		# single-release batch this collapses to today's [release_end, sim_start]
+		# bounds — preserving the stage 4 bit-equivalence guarantee.
+		batch_window_ends = [
+			rel.release_time + timedelta(seconds=rel.duration_seconds) for rel in batch.releases
+		]
+		batch_cursor_start = max(batch_window_ends)
+		batch_cursor_terminus = min(batch_window_ends) - timedelta(seconds=sim_length_s)
 
-		if active_count > 0:
-			active_particles = particles[active_mask]
-			met_window, fetched_windows = _get_hourly_met_window(reader, cfg, t_cursor, met_cache)
-			hour_windows += fetched_windows
-			advected_active, t_alpha, (u_m_s, v_m_s, w_m_s) = _advect_active_particles(
-				engine,
-				device,
-				active_particles,
-				met_window,
-				t_cursor,
-				delta_s,
-				particles.dtype,
-			)
-			particles[active_mask] = advected_active
-
-			particles, turbulence_state = scheme.step(
-				particles=particles,
-				state=turbulence_state,
-				met_window=met_window,
-				t_alpha=t_alpha,
-				dt_seconds=delta_s,
-				active_mask=active_mask,
-				engine=engine,
-			)
-
-			del active_particles
-			del advected_active
-		else:
-			u_m_s, v_m_s, w_m_s = 0.0, 0.0, 0.0
-
-		if active_count > 0:
-			t_idx = _footprint_time_bin_index(release_end, t_cursor, gridder.n_t)
-			gridder.accumulate(
-				particles=particles[:, :3],
-				active_mask=active_mask,
-				weights=particles[:, 3],
-				t_idx=t_idx,
-				dt_seconds=delta_s,
-			)
-
-		step_count += 1
-
-		diag_rows.append(
-			{
-				"step": step_count,
-				"time_hour_end": t_cursor.isoformat(),
-				"mean_lon": float(torch.mean(particles[:, 0]).item()),
-				"mean_lat": float(torch.mean(particles[:, 1]).item()),
-				"mean_alt_agl_m": float(torch.mean(particles[:, 2]).item()),
-				"u_mean_m_s": u_m_s,
-				"v_mean_m_s": v_m_s,
-				"w_mean_m_s": w_m_s,
-				"active_particles": active_count,
-			}
+		# Turbulence state is re-initialised per batch because the particle count
+		# varies between batches (last batch may be smaller than the others).
+		turbulence_state = scheme.initialize_state(
+			particles.shape[0], device=device, dtype=particles.dtype
 		)
 
-		if mem.gc_every_steps > 0 and step_count % mem.gc_every_steps == 0:
-			gc.collect()
+		t_cursor = batch_cursor_start
+		while t_cursor > batch_cursor_terminus:
+			delta_s = min(
+				float(sim.dt_seconds),
+				(t_cursor - batch_cursor_terminus).total_seconds(),
+			)
+			t_prev = t_cursor - timedelta(seconds=delta_s)
 
-		if mem.log_every_steps > 0 and step_count % mem.log_every_steps == 0:
-			rss_bytes, allocated, reserved = memory_stats.observe(device)
-			LOGGER.info(
-				"step=%d active=%d cache_hours=%d rss=%s dev_alloc=%s dev_reserved=%s",
-				step_count,
-				active_count,
-				len(met_cache),
-				_format_gib(rss_bytes),
-				_format_gib(allocated),
-				_format_gib(reserved),
+			# Per-particle active mask uses both bounds (upper: cursor reached the
+			# release time; lower: cursor still inside the backward window). For a
+			# single-release batch both conditions evaluate identically to today's
+			# scalar check (see stage 3 entry in CHECKPOINT.md).
+			cursor_offset_s = t_cursor.timestamp() - batch_start_ts
+			active_mask = (release_time_offsets_s >= cursor_offset_s) & (
+				release_time_offsets_s - sim_length_s <= cursor_offset_s
+			)
+			active_count = int(torch.count_nonzero(active_mask).item())
+
+			if active_count > 0:
+				active_particles = particles[active_mask]
+				met_window, fetched_windows = _get_hourly_met_window(
+					reader, cfg, t_cursor, met_cache
+				)
+				hour_windows += fetched_windows
+				advected_active, t_alpha, (u_m_s, v_m_s, w_m_s) = _advect_active_particles(
+					engine,
+					device,
+					active_particles,
+					met_window,
+					t_cursor,
+					delta_s,
+					particles.dtype,
+				)
+				particles[active_mask] = advected_active
+
+				particles, turbulence_state = scheme.step(
+					particles=particles,
+					state=turbulence_state,
+					met_window=met_window,
+					t_alpha=t_alpha,
+					dt_seconds=delta_s,
+					active_mask=active_mask,
+					engine=engine,
+				)
+
+				del active_particles
+				del advected_active
+			else:
+				u_m_s, v_m_s, w_m_s = 0.0, 0.0, 0.0
+
+			if active_count > 0:
+				# Per-particle time-ago bin: each particle measures elapsed time
+				# from *its own* release window's end (stage 3 semantics).
+				elapsed_s = (release_window_end_offsets_s - cursor_offset_s).clamp_(min=0.0)
+				t_idx = (elapsed_s / 3600.0).floor().to(torch.int64).clamp_(max=gridder.n_t - 1)
+				gridder.accumulate(
+					particles=particles[:, :3],
+					active_mask=active_mask,
+					weights=particles[:, 3],
+					t_idx=t_idx,
+					release_idx=release_idx,
+					dt_seconds=delta_s,
+				)
+
+			step_count += 1
+
+			diag_rows.append(
+				{
+					"step": step_count,
+					"batch_idx": batch.batch_idx,
+					"time_hour_end": t_cursor.isoformat(),
+					"mean_lon": float(torch.mean(particles[:, 0]).item()),
+					"mean_lat": float(torch.mean(particles[:, 1]).item()),
+					"mean_alt_agl_m": float(torch.mean(particles[:, 2]).item()),
+					"u_mean_m_s": u_m_s,
+					"v_mean_m_s": v_m_s,
+					"w_mean_m_s": w_m_s,
+					"active_particles": active_count,
+				}
 			)
 
-		if _memory_guard_enabled(cfg) and step_count % mem.guard_check_every_steps == 0:
-			rss_bytes, allocated, reserved = memory_stats.observe(device)
-			_raise_if_memory_guard_exceeded(
-				writer,
-				outputs.metadata,
-				cfg,
-				release_end,
-				sim_start,
-				step_count,
-				hour_windows,
-				outputs,
-				memory_stats,
-				rss_bytes,
-				allocated,
-				reserved,
-			)
+			if mem.gc_every_steps > 0 and step_count % mem.gc_every_steps == 0:
+				gc.collect()
 
-		t_cursor = t_prev
+			if mem.log_every_steps > 0 and step_count % mem.log_every_steps == 0:
+				rss_bytes, allocated, reserved = memory_stats.observe(device)
+				LOGGER.info(
+					"batch=%d step=%d active=%d cache_hours=%d rss=%s dev_alloc=%s dev_reserved=%s",
+					batch.batch_idx,
+					step_count,
+					active_count,
+					len(met_cache),
+					_format_gib(rss_bytes),
+					_format_gib(allocated),
+					_format_gib(reserved),
+				)
+
+			if _memory_guard_enabled(cfg) and step_count % mem.guard_check_every_steps == 0:
+				rss_bytes, allocated, reserved = memory_stats.observe(device)
+				_raise_if_memory_guard_exceeded(
+					writer,
+					outputs.metadata,
+					cfg,
+					schedule_release_end,
+					schedule_sim_start,
+					step_count,
+					hour_windows,
+					outputs,
+					memory_stats,
+					rss_bytes,
+					allocated,
+					reserved,
+				)
+
+			t_cursor = t_prev
+
+		# End of batch: capture endpoint state, drop per-batch tensors so the next
+		# batch starts with a clean slate (met_cache + gridder + bookkeeping stay).
+		endpoint_particles_chunks.append(particles.detach().cpu().clone())
+		endpoint_release_idx_chunks.append(release_idx.detach().cpu().clone())
+		del particles
+		del release_idx
+		del release_time_offsets_s
+		del release_window_end_offsets_s
+		del turbulence_state
+		del particle_batch
 
 	for cached in met_cache.values():
 		del cached
 	met_cache.clear()
-	footprint_coords, footprint_attrs = _build_footprint_dataset_metadata(cfg, gridder)
+	footprint_coords, footprint_attrs = _build_footprint_dataset_metadata(
+		cfg, gridder, all_releases
+	)
 
-	writer.write_particles_parquet(outputs.endpoint_particles, particles)
-	writer.write_trajectory_parquet(outputs.trajectory_diagnostics, step_seconds=sim.dt_seconds, rows=diag_rows)
+	endpoint_particles_all = torch.cat(endpoint_particles_chunks, dim=0)
+	endpoint_release_idx_all = torch.cat(endpoint_release_idx_chunks, dim=0)
+	writer.write_particles_parquet(
+		outputs.endpoint_particles,
+		endpoint_particles_all,
+		release_idx=endpoint_release_idx_all,
+	)
+	writer.write_trajectory_parquet(
+		outputs.trajectory_diagnostics, step_seconds=sim.dt_seconds, rows=diag_rows
+	)
 	writer.write_footprint_zarr(
 		outputs.footprints,
 		gridder.tensor,
@@ -680,8 +752,14 @@ def _run(
 	)
 
 	metadata = {
-		"config": _config_metadata(cfg, release_end, sim_start),
+		"config": _config_metadata(cfg, schedule_release_end, schedule_sim_start),
 		"runtime": _runtime_metadata(cfg, step_count, hour_windows, memory_stats, status="completed"),
+		"schedule": {
+			"n_batches": len(batches),
+			"n_releases": total_releases,
+			"max_releases_per_batch": cfg.batch.max_releases_per_batch,
+			"release_times": [rel.release_time.isoformat() for rel in all_releases],
+		},
 		"outputs": {
 			"endpoint_particles": outputs.endpoint_particles,
 			"trajectory_diagnostics": outputs.trajectory_diagnostics,

@@ -50,14 +50,19 @@ def test_output_writer_local_files(tmp_path: Path) -> None:
 
 
 def test_output_writer_footprint_zarr(tmp_path: Path) -> None:
+    """Writer accepts 5D (R, T, Z, Y, X) tensor and round-trips coords + attrs."""
+
     writer = OutputWriter()
 
-    footprint = torch.ones((2, 3, 4, 5), dtype=torch.float32)
+    footprint = torch.ones((1, 2, 3, 4, 5), dtype=torch.float32)
     zarr_path = tmp_path / "footprint.zarr"
+    release_time = np.array([np.datetime64("2024-01-01T00:00:00", "ns")])
     writer.write_footprint_zarr(
         str(zarr_path),
         footprint,
         coords={
+            "release_time": release_time,
+            "release_duration_seconds": ("release_time", np.array([3600.0], dtype=np.float64)),
             "time_ago": np.array([0, 1], dtype=np.int64),
             "time_ago_start_hours": ("time_ago", np.array([0.0, 1.0], dtype=np.float64)),
             "time_ago_end_hours": ("time_ago", np.array([1.0, 2.0], dtype=np.float64)),
@@ -78,8 +83,10 @@ def test_output_writer_footprint_zarr(tmp_path: Path) -> None:
 
     ds = xr.open_zarr(str(zarr_path), consolidated=False)
     assert "footprint" in ds
-    assert ds["footprint"].shape == (2, 3, 4, 5)
-    assert ds["footprint"].dims == ("time_ago", "z_bin", "latitude", "longitude")
+    assert ds["footprint"].shape == (1, 2, 3, 4, 5)
+    assert ds["footprint"].dims == ("release_time", "time_ago", "z_bin", "latitude", "longitude")
+    assert ds["release_time"].values[0] == release_time[0]
+    assert np.allclose(ds["release_duration_seconds"].values, np.array([3600.0]))
     assert np.allclose(ds["time_ago_start_hours"].values, np.array([0.0, 1.0]))
     assert np.allclose(ds["time_ago_end_hours"].values, np.array([1.0, 2.0]))
     assert np.allclose(ds["z_bottom_m"].values, np.array([0.0, 1000.0, 2000.0]))
@@ -89,3 +96,59 @@ def test_output_writer_footprint_zarr(tmp_path: Path) -> None:
     assert ds.attrs["release_lon"] == -122.3
     assert ds.attrs["release_lat"] == 37.9
     assert ds.attrs["release_alt_agl_m"] == 500.0
+
+
+def test_output_writer_footprint_rejects_4d_tensor(tmp_path: Path) -> None:
+    """Stage 4 makes the writer strictly 5D; passing a legacy 4D tensor must error."""
+
+    import pytest
+
+    writer = OutputWriter()
+    footprint_4d = torch.ones((2, 3, 4, 5), dtype=torch.float32)
+    with pytest.raises(ValueError, match="must have shape"):
+        writer.write_footprint_zarr(str(tmp_path / "fp.zarr"), footprint_4d)
+
+
+def test_output_writer_particles_with_release_idx_column(tmp_path: Path) -> None:
+    """M5 stage 5: multi-release runs pass per-particle release_idx; writer adds the column."""
+
+    writer = OutputWriter()
+    particles = torch.tensor(
+        [
+            [10.0, 20.0, 500.0, 0.5],
+            [11.0, 21.0, 550.0, 0.5],
+            [12.0, 22.0, 600.0, 0.5],
+        ],
+        dtype=torch.float32,
+    )
+    release_idx = torch.tensor([0, 1, 1], dtype=torch.int64)
+
+    path = tmp_path / "particles.parquet"
+    writer.write_particles_parquet(str(path), particles, release_idx=release_idx)
+
+    df = pd.read_parquet(path)
+    assert list(df.columns) == ["lon", "lat", "alt", "weight", "release_idx"]
+    assert df["release_idx"].tolist() == [0, 1, 1]
+
+
+def test_output_writer_particles_release_idx_shape_mismatch_rejected(tmp_path: Path) -> None:
+    import pytest
+
+    writer = OutputWriter()
+    particles = torch.tensor([[10.0, 20.0, 500.0, 0.5]], dtype=torch.float32)
+    bad_release_idx = torch.tensor([0, 1, 2], dtype=torch.int64)
+    with pytest.raises(ValueError, match="release_idx shape"):
+        writer.write_particles_parquet(
+            str(tmp_path / "x.parquet"), particles, release_idx=bad_release_idx
+        )
+
+
+def test_output_writer_particles_back_compat_without_release_idx(tmp_path: Path) -> None:
+    """Single-release callers pass no release_idx and get the legacy 4-column output."""
+
+    writer = OutputWriter()
+    particles = torch.tensor([[10.0, 20.0, 500.0, 0.5]], dtype=torch.float32)
+    path = tmp_path / "single.parquet"
+    writer.write_particles_parquet(str(path), particles)
+    df = pd.read_parquet(path)
+    assert list(df.columns) == ["lon", "lat", "alt", "weight"]

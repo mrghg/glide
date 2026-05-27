@@ -14,9 +14,10 @@ Construction paths:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal, Union
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -73,17 +74,134 @@ class SimulationConfig(_Frozen):
         return _parse_datetime_utc(v)
 
 
-ReleaseKind = Literal["point"]
+class PointSpec(_Frozen):
+    """A 3D release point shared by the multi-release variants."""
+
+    lon: float
+    lat: float
+    alt_agl_m: float = Field(..., ge=0)
 
 
-class ReleaseConfig(_Frozen):
-    kind: ReleaseKind = "point"
+class PointReleaseConfig(_Frozen):
+    """Single point release (today's behaviour). Released over a single window
+    starting at ``simulation.start_time``.
+    """
+
+    kind: Literal["point"] = "point"
     lon: float
     lat: float
     alt_agl_m: float = Field(..., ge=0)
     duration_seconds: int = Field(..., gt=0)
     n_particles: int = Field(..., gt=0)
     seed: int | None = Field(None, ge=0)
+
+
+class PeriodicPointReleaseConfig(_Frozen):
+    """Equally-spaced point releases from a single location.
+
+    Generates ``n_releases`` releases at ``start_time + i * period_seconds``
+    for ``i in [0, n_releases)``. Used for the common "every hour for N days"
+    site workflow.
+    """
+
+    kind: Literal["periodic_point"]
+    point: PointSpec
+    start_time: datetime
+    period_seconds: int = Field(..., gt=0)
+    n_releases: int = Field(..., gt=0)
+    duration_seconds: int = Field(..., gt=0)
+    n_particles_per_release: int = Field(..., gt=0)
+    seed: int | None = Field(None, ge=0)
+
+    @field_validator("start_time", mode="before")
+    @classmethod
+    def _coerce_start_time(cls, v: Any) -> datetime:
+        return _parse_datetime_utc(v)
+
+
+class PointScheduleReleaseConfig(_Frozen):
+    """Irregular point-release schedule from a single location.
+
+    Each entry in ``times`` is the start of one release window of length
+    ``duration_seconds``. Foundation for the eventual multi-point satellite
+    workflow, which will add a per-time ``points`` field.
+    """
+
+    kind: Literal["point_schedule"]
+    point: PointSpec
+    times: tuple[datetime, ...] = Field(..., min_length=1)
+    duration_seconds: int = Field(..., gt=0)
+    n_particles_per_release: int = Field(..., gt=0)
+    seed: int | None = Field(None, ge=0)
+
+    @field_validator("times", mode="before")
+    @classmethod
+    def _coerce_times(cls, v: Any) -> tuple[datetime, ...]:
+        if not isinstance(v, (list, tuple)):
+            raise ValueError("times must be a list of datetime strings")
+        return tuple(_parse_datetime_utc(t) for t in v)
+
+
+ReleaseConfig = Annotated[
+    Union[PointReleaseConfig, PeriodicPointReleaseConfig, PointScheduleReleaseConfig],
+    Field(discriminator="kind"),
+]
+
+
+class BatchConfig(_Frozen):
+    """How a multi-release schedule is decomposed for execution.
+
+    The runtime groups consecutive releases into batches so they share met-fetch
+    work and process startup. Single-release (``kind: "point"``) runs ignore this
+    knob; they always emit one batch with one release.
+    """
+
+    max_releases_per_batch: int = Field(
+        24,
+        gt=0,
+        description=(
+            "Maximum number of releases to integrate in a single engine pass. "
+            "Memory scales roughly as max_releases_per_batch × n_particles_per_release × "
+            "particle_state_bytes. Default 24 (one calendar day for hourly cadence)."
+        ),
+    )
+
+
+@dataclass(frozen=True)
+class ConcreteRelease:
+    """One fully-specified release inside an expanded schedule.
+
+    Produced by :meth:`RunConfig.expand_to_batches` regardless of which YAML
+    release ``kind`` produced it. The runtime consumes these uniformly.
+    """
+
+    release_idx: int
+    release_time: datetime  # UTC; start of the release window
+    lon: float
+    lat: float
+    alt_agl_m: float
+    duration_seconds: int
+    n_particles: int
+    seed: int | None
+
+
+@dataclass(frozen=True)
+class ReleaseBatch:
+    """A contiguous slice of the schedule run together in one engine pass."""
+
+    batch_idx: int
+    releases: tuple[ConcreteRelease, ...]
+
+
+def _release_point(release: Any) -> tuple[float, float, float]:
+    """Return ``(lon, lat, alt_agl_m)`` for any release variant."""
+
+    if isinstance(release, PointReleaseConfig):
+        return float(release.lon), float(release.lat), float(release.alt_agl_m)
+    if isinstance(release, (PeriodicPointReleaseConfig, PointScheduleReleaseConfig)):
+        p = release.point
+        return float(p.lon), float(p.lat), float(p.alt_agl_m)
+    raise TypeError(f"Unsupported release variant: {type(release).__name__}")
 
 
 class TurbulenceConfig(_Frozen):
@@ -160,6 +278,7 @@ class RunConfig(_Frozen):
     output_grid: OutputGridConfig
     met_domain: MetDomainConfig
     memory: MemoryConfig = MemoryConfig()
+    batch: BatchConfig = BatchConfig()
 
     @model_validator(mode="after")
     def _check_simulation_length_vs_release(self) -> "RunConfig":
@@ -172,20 +291,84 @@ class RunConfig(_Frozen):
     @model_validator(mode="after")
     def _check_release_inside_met_domain(self) -> "RunConfig":
         md = self.met_domain
-        rel = self.release
-        if not (md.lon_bounds[0] <= rel.lon <= md.lon_bounds[1]):
+        lon, lat, alt_agl_m = _release_point(self.release)
+        if not (md.lon_bounds[0] <= lon <= md.lon_bounds[1]):
             raise ValueError(
-                f"release.lon={rel.lon} outside met_domain.lon_bounds={md.lon_bounds}"
+                f"release lon={lon} outside met_domain.lon_bounds={md.lon_bounds}"
             )
-        if not (md.lat_bounds[0] <= rel.lat <= md.lat_bounds[1]):
+        if not (md.lat_bounds[0] <= lat <= md.lat_bounds[1]):
             raise ValueError(
-                f"release.lat={rel.lat} outside met_domain.lat_bounds={md.lat_bounds}"
+                f"release lat={lat} outside met_domain.lat_bounds={md.lat_bounds}"
             )
-        if rel.alt_agl_m > md.alt_max_m:
+        if alt_agl_m > md.alt_max_m:
             raise ValueError(
-                f"release.alt_agl_m={rel.alt_agl_m} above met_domain.alt_max_m={md.alt_max_m}"
+                f"release alt_agl_m={alt_agl_m} above met_domain.alt_max_m={md.alt_max_m}"
             )
         return self
+
+    def expand_to_batches(self) -> list[ReleaseBatch]:
+        """Expand the configured release into a list of execution batches.
+
+        For ``kind: "point"`` this returns a single batch with a single
+        :class:`ConcreteRelease` at ``simulation.start_time``.
+
+        For ``kind: "periodic_point"`` and ``kind: "point_schedule"`` it
+        generates one :class:`ConcreteRelease` per release time, chunked into
+        batches of at most ``batch.max_releases_per_batch`` consecutive
+        releases each.
+
+        Per-release seeds are derived as ``seed + release_idx`` when the
+        top-level ``seed`` is non-null; otherwise each release's seed is None
+        (non-deterministic). Single-release runs therefore see ``seed_0 == seed``.
+        """
+
+        rel = self.release
+        max_per_batch = self.batch.max_releases_per_batch
+
+        if isinstance(rel, PointReleaseConfig):
+            concrete = ConcreteRelease(
+                release_idx=0,
+                release_time=self.simulation.start_time,
+                lon=float(rel.lon),
+                lat=float(rel.lat),
+                alt_agl_m=float(rel.alt_agl_m),
+                duration_seconds=int(rel.duration_seconds),
+                n_particles=int(rel.n_particles),
+                seed=rel.seed,
+            )
+            return [ReleaseBatch(batch_idx=0, releases=(concrete,))]
+
+        if isinstance(rel, PeriodicPointReleaseConfig):
+            times = tuple(
+                rel.start_time + timedelta(seconds=i * rel.period_seconds)
+                for i in range(rel.n_releases)
+            )
+        elif isinstance(rel, PointScheduleReleaseConfig):
+            times = rel.times
+        else:
+            raise TypeError(f"Unsupported release variant: {type(rel).__name__}")
+
+        lon, lat, alt_agl_m = _release_point(rel)
+        seed = rel.seed
+        concretes = [
+            ConcreteRelease(
+                release_idx=i,
+                release_time=t,
+                lon=lon,
+                lat=lat,
+                alt_agl_m=alt_agl_m,
+                duration_seconds=int(rel.duration_seconds),
+                n_particles=int(rel.n_particles_per_release),
+                seed=(seed + i) if seed is not None else None,
+            )
+            for i, t in enumerate(times)
+        ]
+
+        batches: list[ReleaseBatch] = []
+        for batch_idx, start in enumerate(range(0, len(concretes), max_per_batch)):
+            chunk = tuple(concretes[start : start + max_per_batch])
+            batches.append(ReleaseBatch(batch_idx=batch_idx, releases=chunk))
+        return batches
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> "RunConfig":

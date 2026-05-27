@@ -118,18 +118,23 @@ GLIDE accumulates the residence-time footprint *directly onto a configurable tar
 
 ### 1. Author a run config matching the reference setup
 
-Start from `configs/example_mhd_january.yaml`, which is wired to the bundled FLEXPART fixture (`data/FLEXPART/FLEXPART_MHD_test_202401.nc`). The key sections to align with the reference:
+Two starting points ship with the repo, both wired to the bundled FLEXPART fixture (`data/FLEXPART/FLEXPART_MHD_test_202401.nc`):
+
+- `configs/example_mhd_january.yaml` — single release. Run one of the FLEXPART reference release times at a time; `--output-uri` and `--start-time` overrides let you iterate over the 96 reference release times manually.
+- `configs/example_mhd_january_periodic.yaml` — 744 hourly releases for January 2024 via `kind: "periodic_point"`. One invocation, one 5D `footprints.zarr` indexed by `release_time`. Slice with `isel(release_time=…)` to align with FLEXPART's release times.
+
+The key sections to align with the reference:
 
 - `output_grid.{lon_bounds, lat_bounds, n_x, n_y}` — set to the reference grid's *outer* cell edges (FLEXPART/NAME usually store cell centres, so add half a cell at each edge).
 - `output_grid.z_edges_m` — make the bottom edge pair match the reference's surface-layer depth (0–40 m for FLEXPART / NAME). Direct accumulation into that bin makes the downstream STILT-unit conversion exact (no overlap-fraction approximation).
-- `release.{lon, lat, alt_agl_m, duration_seconds}` — match the reference's release.
-- `simulation.{start_time, length_seconds}` — match the reference's release time and backward window.
+- `release.point.{lon, lat, alt_agl_m}` and `release.duration_seconds` — match the reference's release.
+- `simulation.length_seconds` — match the reference's backward window (per release, in the periodic case).
 - `turbulence.scheme: hanna_1982`.
 
 Then run:
 
 ```bash
-.venv/bin/python -m lpdm.main --config configs/example_mhd_january.yaml
+.venv/bin/python -m lpdm.main --config configs/example_mhd_january_periodic.yaml
 ```
 
 CLI overrides: `--device {auto|cpu|cuda|mps}`, `--output-uri PATH`, `--start-time ISO`. Anything else is set in the YAML.
@@ -140,7 +145,12 @@ CLI overrides: `--device {auto|cpu|cuda|mps}`, `--output-uri PATH`, `--start-tim
 import xarray as xr
 from lpdm.comparison import to_stilt_surface_footprint
 
-glide_raw = xr.open_zarr("outputs/comparison-mhd-202401-day01/footprints.zarr")["footprint"]
+# All GLIDE footprints are 5D (release_time, time_ago, z_bin, lat, lon). For
+# single-release runs the release_time axis is length 1; for the periodic config
+# below it's 744 and you select one release to compare against the FLEXPART
+# fixture's matching timestamp.
+glide_5d = xr.open_zarr("outputs/mhd-202401-hourly/footprints.zarr")["footprint"]
+glide_raw = glide_5d.isel(release_time=0)  # or .sel(release_time="2024-01-01T00")
 
 # Raw footprint is in `s` per cell. Lin 2003 Eq. 5 converts to m^2 s mol^-1
 # (equivalent to (mol/mol)/(mol/m^2/s)). surface_layer_depth_m must equal the

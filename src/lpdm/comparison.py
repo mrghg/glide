@@ -63,6 +63,9 @@ def to_stilt_surface_footprint(
 		raw_footprint: 4D `xarray.DataArray` with dims `(time_ago, z_bin, latitude,
 			longitude)`. Must carry `z_bottom_m` and `z_top_m` coords on `z_bin`
 			(set by `FootprintGridder` via `main._build_footprint_dataset_metadata`).
+			Multi-release runs produce 5D stores `(release_time, time_ago, z_bin,
+			latitude, longitude)` — select one release with `.isel(release_time=i)`
+			before passing in.
 		surface_layer_depth_m: Depth of the surface layer for sensitivity
 			integration (m). Match the reference dataset's convention.
 		air_density_kg_m3: Surface air density. Scalar (e.g. 1.225 for standard

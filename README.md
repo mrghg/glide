@@ -36,9 +36,12 @@ pip install -r requirements.txt
 python -m lpdm.main --config configs/local_smoke_test.yaml
 ```
 
-Run configs are YAML; the schema lives in [src/lpdm/config.py](src/lpdm/config.py). Two examples ship with the repo:
+Run configs are YAML; the schema lives in [src/lpdm/config.py](src/lpdm/config.py). Three examples ship with the repo:
 - `configs/local_smoke_test.yaml` — small backward run against `data/sample_met.zarr`.
-- `configs/example_mhd_january.yaml` — Hanna scheme, FLEXPART-aligned grid for the comparison fixture in `data/FLEXPART/`.
+- `configs/example_mhd_january.yaml` — single-release Hanna run, FLEXPART-aligned grid for the comparison fixture in `data/FLEXPART/`.
+- `configs/example_mhd_january_periodic.yaml` — 744 hourly Mace Head releases (January 2024) in one process via the M5 multi-release path; produces a single 5D `footprints.zarr` indexed by `release_time`.
+
+The release schema supports three `kind` variants: `point` (single release, today's default), `periodic_point` (`n_releases` evenly-spaced from a `start_time`), and `point_schedule` (explicit `times: list[datetime]`). All three produce the same 5D output shape — single-release just has a length-1 `release_time` axis. See the M5 stage entries in [CHECKPOINT.md](CHECKPOINT.md) for the design and the `batch.max_releases_per_batch` knob.
 
 The CLI is intentionally tiny: `--config <path>` plus `--device`, `--output-uri`, `--start-time` overrides. Everything else is set in the YAML.
 
@@ -185,7 +188,7 @@ CLI overrides are intentionally limited to the three knobs that change between r
 	--start-time 2024-01-10T00:00:00Z
 ```
 
-YAML schema is defined by [src/lpdm/config.py](src/lpdm/config.py). The top-level sections are `io`, `simulation`, `release`, `turbulence`, `output_grid`, `met_domain`, and `memory`. Validation includes: `simulation.length_seconds > release.duration_seconds`, strictly ascending `output_grid.z_edges_m`, and the release point lying inside `met_domain`.
+YAML schema is defined by [src/lpdm/config.py](src/lpdm/config.py). The top-level sections are `io`, `simulation`, `release`, `turbulence`, `output_grid`, `met_domain`, `memory`, and `batch`. Validation includes: `simulation.length_seconds > release.duration_seconds`, strictly ascending `output_grid.z_edges_m`, and the release point lying inside `met_domain`. The `release` block is a discriminated union on `kind`; see the M5 stage entries in [CHECKPOINT.md](CHECKPOINT.md) for the variants.
 
 Memory controls live in the `memory:` section of the YAML — `met_cache_max_hours`, `log_every_steps`, `gc_every_steps`, and three optional guard thresholds (`guard_max_rss_gib`, `guard_max_device_allocated_gib`, `guard_max_device_reserved_gib`) plus `guard_check_every_steps`. If a guard fires the run exits with a `MemoryError` and writes diagnostic metadata to `run_metadata.json`.
 

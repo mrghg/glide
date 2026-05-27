@@ -7,7 +7,13 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from lpdm.config import RunConfig
+from lpdm.config import (
+    ConcreteRelease,
+    PeriodicPointReleaseConfig,
+    PointReleaseConfig,
+    PointScheduleReleaseConfig,
+    RunConfig,
+)
 from lpdm.main import _footprint_time_bin_index, _validate_meteorology_time_coverage
 
 
@@ -51,9 +57,15 @@ def _base_dict(**section_overrides: dict[str, object]) -> dict[str, object]:
             "gc_every_steps": 50,
             "guard_check_every_steps": 1,
         },
+        "batch": {"max_releases_per_batch": 24},
     }
     for section, overrides in section_overrides.items():
-        base[section] = {**base[section], **overrides}
+        # The release section is polymorphic — a different `kind` brings a
+        # disjoint field set, so don't merge against the point-release defaults.
+        if section == "release" and "kind" in overrides and overrides["kind"] != base[section].get("kind"):
+            base[section] = overrides
+        else:
+            base[section] = {**base[section], **overrides}
     return base
 
 
@@ -168,6 +180,179 @@ def test_run_config_rejects_empty_zarr_store_list() -> None:
 def test_run_config_rejects_blank_zarr_store_list_entry() -> None:
     with pytest.raises(ValidationError, match="non-empty"):
         RunConfig.model_validate(_base_dict(io={"zarr_store": ["gs://a.zarr", ""]}))
+
+
+def test_point_release_expands_to_single_batch_at_simulation_start_time() -> None:
+    """`kind: point` must produce one batch with one release at sim.start_time."""
+
+    cfg = RunConfig.model_validate(_base_dict())
+    batches = cfg.expand_to_batches()
+
+    assert len(batches) == 1
+    assert len(batches[0].releases) == 1
+    only = batches[0].releases[0]
+    assert isinstance(only, ConcreteRelease)
+    assert only.release_idx == 0
+    assert only.release_time == cfg.simulation.start_time
+    assert only.lon == cfg.release.lon
+    assert only.lat == cfg.release.lat
+    assert only.alt_agl_m == cfg.release.alt_agl_m
+    assert only.duration_seconds == cfg.release.duration_seconds
+    assert only.n_particles == cfg.release.n_particles
+    assert only.seed == cfg.release.seed
+
+
+def _periodic_release_dict(**overrides: object) -> dict[str, object]:
+    base: dict[str, object] = {
+        "kind": "periodic_point",
+        "point": {"lon": 1.0, "lat": 2.0, "alt_agl_m": 400.0},
+        "start_time": "2024-01-01T00:00:00Z",
+        "period_seconds": 3600,
+        "n_releases": 3,
+        "duration_seconds": 1800,
+        "n_particles_per_release": 100,
+        "seed": 10,
+    }
+    base.update(overrides)
+    return base
+
+
+def test_periodic_point_release_parses_and_validates() -> None:
+    cfg = RunConfig.model_validate(_base_dict(release=_periodic_release_dict()))
+    assert isinstance(cfg.release, PeriodicPointReleaseConfig)
+    assert cfg.release.n_releases == 3
+    assert cfg.release.point.lon == 1.0
+
+
+def test_periodic_point_expands_to_correct_times_and_seeds() -> None:
+    cfg = RunConfig.model_validate(
+        _base_dict(
+            release=_periodic_release_dict(n_releases=5, period_seconds=3600),
+            batch={"max_releases_per_batch": 24},
+        )
+    )
+    batches = cfg.expand_to_batches()
+
+    assert len(batches) == 1
+    assert len(batches[0].releases) == 5
+
+    expected_t0 = datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
+    for i, rel in enumerate(batches[0].releases):
+        assert rel.release_idx == i
+        assert rel.release_time == expected_t0 + timedelta(seconds=i * 3600)
+        assert rel.seed == 10 + i  # seed + release_idx derivation
+        assert rel.n_particles == 100
+
+
+def test_periodic_point_chunks_into_multiple_batches() -> None:
+    """24 releases @ max_per_batch=10 should produce 3 batches of 10/10/4."""
+
+    cfg = RunConfig.model_validate(
+        _base_dict(
+            release=_periodic_release_dict(n_releases=24),
+            batch={"max_releases_per_batch": 10},
+        )
+    )
+    batches = cfg.expand_to_batches()
+
+    assert [len(b.releases) for b in batches] == [10, 10, 4]
+    assert [b.batch_idx for b in batches] == [0, 1, 2]
+    # Release indices should be contiguous across batch boundaries.
+    flat_idxs = [r.release_idx for b in batches for r in b.releases]
+    assert flat_idxs == list(range(24))
+
+
+def test_periodic_point_with_null_seed_propagates_none() -> None:
+    cfg = RunConfig.model_validate(
+        _base_dict(release=_periodic_release_dict(seed=None, n_releases=3))
+    )
+    batches = cfg.expand_to_batches()
+    assert all(r.seed is None for r in batches[0].releases)
+
+
+def test_point_schedule_release_parses_and_expands() -> None:
+    times = ["2024-01-01T00:00:00Z", "2024-01-01T06:00:00Z", "2024-01-02T12:00:00Z"]
+    cfg = RunConfig.model_validate(
+        _base_dict(
+            release={
+                "kind": "point_schedule",
+                "point": {"lon": 1.0, "lat": 2.0, "alt_agl_m": 400.0},
+                "times": times,
+                "duration_seconds": 1800,
+                "n_particles_per_release": 100,
+                "seed": 5,
+            }
+        )
+    )
+    assert isinstance(cfg.release, PointScheduleReleaseConfig)
+
+    batches = cfg.expand_to_batches()
+    assert len(batches) == 1
+    actual = [r.release_time.isoformat() for r in batches[0].releases]
+    assert actual == [
+        "2024-01-01T00:00:00+00:00",
+        "2024-01-01T06:00:00+00:00",
+        "2024-01-02T12:00:00+00:00",
+    ]
+
+
+def test_release_rejects_unknown_kind() -> None:
+    with pytest.raises(ValidationError):
+        RunConfig.model_validate(_base_dict(release={"kind": "totally_bogus"}))
+
+
+def test_periodic_point_rejects_release_outside_met_domain() -> None:
+    """Cross-section validator must work for the periodic variant too."""
+
+    with pytest.raises(ValidationError, match="outside met_domain"):
+        RunConfig.model_validate(
+            _base_dict(
+                release=_periodic_release_dict(
+                    point={"lon": 99.0, "lat": 2.0, "alt_agl_m": 400.0}
+                )
+            )
+        )
+
+
+def test_periodic_point_rejects_release_longer_than_sim_length() -> None:
+    with pytest.raises(ValidationError, match="length_seconds must be > release"):
+        RunConfig.model_validate(
+            _base_dict(
+                simulation={"length_seconds": 1800},
+                release=_periodic_release_dict(duration_seconds=1800),
+            )
+        )
+
+
+def test_point_schedule_rejects_empty_times() -> None:
+    with pytest.raises(ValidationError):
+        RunConfig.model_validate(
+            _base_dict(
+                release={
+                    "kind": "point_schedule",
+                    "point": {"lon": 1.0, "lat": 2.0, "alt_agl_m": 400.0},
+                    "times": [],
+                    "duration_seconds": 1800,
+                    "n_particles_per_release": 100,
+                    "seed": 5,
+                }
+            )
+        )
+
+
+def test_batch_config_defaults_and_override() -> None:
+    cfg_default = RunConfig.model_validate(_base_dict())
+    assert cfg_default.batch.max_releases_per_batch == 24
+
+    cfg_override = RunConfig.model_validate(_base_dict(batch={"max_releases_per_batch": 7}))
+    assert cfg_override.batch.max_releases_per_batch == 7
+
+
+def test_point_release_back_compat_isinstance_check() -> None:
+    """Existing code paths that assume a PointReleaseConfig must keep working."""
+
+    cfg = RunConfig.model_validate(_base_dict())
+    assert isinstance(cfg.release, PointReleaseConfig)
 
 
 def test_footprint_time_bin_index_advances_each_hour() -> None:

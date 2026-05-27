@@ -50,10 +50,20 @@ def _write_bytes(path: str, payload: bytes) -> None:
 class OutputWriter:
 	"""Persist LPDM outputs to local or cloud storage."""
 
-	def write_particles_parquet(self, path: str, particles: torch.Tensor) -> None:
+	def write_particles_parquet(
+		self,
+		path: str,
+		particles: torch.Tensor,
+		*,
+		release_idx: torch.Tensor | None = None,
+	) -> None:
 		"""Write particle tensor shaped (N, 4) to Parquet.
 
-		Expected column order is [lon, lat, alt, weight].
+		Expected column order is ``[lon, lat, alt, weight]``. When ``release_idx``
+		is provided (M5 stage 5+ multi-release runs), it is added as a fifth
+		``release_idx`` int64 column aligned with the leading dimension; consumers
+		group endpoint particles by release via this column. Single-release runs
+		omit the argument and the column.
 		"""
 
 		arr = particles.detach().to(device="cpu").numpy()
@@ -61,6 +71,14 @@ class OutputWriter:
 			raise ValueError("particles must have shape (N, 4)")
 
 		df = pd.DataFrame(arr, columns=["lon", "lat", "alt", "weight"])
+		if release_idx is not None:
+			ridx = release_idx.detach().to(device="cpu").numpy().astype(np.int64)
+			if ridx.shape != (arr.shape[0],):
+				raise ValueError(
+					f"release_idx shape {ridx.shape} does not match particles ({arr.shape[0]},)"
+				)
+			df["release_idx"] = ridx
+
 		buf = BytesIO()
 		df.to_parquet(buf, index=False)
 		_write_bytes(path, buf.getvalue())
@@ -92,15 +110,26 @@ class OutputWriter:
 		path: str,
 		footprint: torch.Tensor,
 		*,
-		dims: tuple[str, str, str, str] = ("time_ago", "z_bin", "latitude", "longitude"),
+		dims: tuple[str, str, str, str, str] = (
+			"release_time",
+			"time_ago",
+			"z_bin",
+			"latitude",
+			"longitude",
+		),
 		coords: Mapping[str, Any] | None = None,
 		attrs: Mapping[str, Any] | None = None,
 	) -> None:
-		"""Write footprint tensor shaped (T, Z, Y, X) to Zarr store."""
+		"""Write 5D footprint tensor (R, T, Z, Y, X) to Zarr store.
+
+		The leading ``release_time`` axis was added in M5 stage 4 so multi-release
+		batches can share a single output file. Single-release runs have a size-1
+		leading axis; downstream tools squeeze or select it.
+		"""
 
 		arr = footprint.detach().to(device="cpu").numpy()
-		if arr.ndim != 4:
-			raise ValueError("footprint must have shape (T, Z, Y, X)")
+		if arr.ndim != 5:
+			raise ValueError("footprint must have shape (R, T, Z, Y, X)")
 
 		array_coords: dict[str, Any] = {}
 		dataset_coords: dict[str, Any] = {}
