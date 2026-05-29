@@ -189,16 +189,39 @@ T_Lu = T_Lv = 0.15 h / σ_u
 
 Constants reproduced from Hanna 1982 (Table 1 / Eqs. 11–24) and FLEXPART's manual sections 4.3.1–4.3.3. **Implementation MUST cross-check exact constants against the FLEXPART source tree before merging**, since secondary references occasionally diverge by ~10% on minor coefficients.
 
-#### 3.2.3 Above-BL (z > h)
+#### 3.2.3 Above-BL (z > h) — gradient-Richardson closure
 
-For day-1 simplicity, constant-diffusivity:
+**Superseded the day-1 constant-diffusivity placeholder (2026-05-29).** The old
+`σ = 0.1 m/s, T_L = 100 s` constant was a one-way trap: once a particle left the
+BL it was effectively frozen (`K ≈ 1 m²/s`) and could not mix back to the
+surface, starving the surface footprint. The free troposphere now uses a
+first-order gradient-Richardson closure computed from model-level fields:
 
 ```
-σ_u = σ_v = σ_w = 0.1 m/s
-T_L = 100 s
+θ   = T (p0/p)^κ                         (κ = R_d/c_p)
+N²  = (g/θ) ∂θ/∂z                        (Brunt–Väisälä)
+S²  = (∂u/∂z)² + (∂v/∂z)²                (wind shear)
+Ri  = N² / S²
+l   = κ_vk z / (1 + κ_vk z / λ)          (Blackadar mixing length, λ = 100 m)
+f(Ri) = (1 - Ri/Ri_c)²   for 0 ≤ Ri < Ri_c (Ri_c = 0.25)
+      = √(1 - 16 Ri)     for Ri < 0
+      = 0                for Ri ≥ Ri_c
+K_z = clamp(l² |∂U/∂z| f(Ri),  K_floor=0.1,  K_ceil=50 m²/s)
+T_Lw = clamp(0.5/N, T_L_min, 1000 s)     (buoyancy timescale; fallback where N²≤0)
+σ_w  = √(K_z / T_Lw)
 ```
 
-This corresponds to `K ≈ σ² T_L = 1 m²/s` (small, consistent with FLEXPART free-troposphere defaults). It is intentionally crude: real free-troposphere turbulence depends on N², gradient Richardson number, and shear. M1.x can refine using model-level potential temperature gradients (`∂θ/∂z`) and stability number once we see how much it matters in validation. The crude version is documented in `VALIDATION.md` as a known limitation.
+The vertical gradients `∂θ/∂z`, `∂u/∂z`, `∂v/∂z` are central differences over the
+model levels using the **true 3-D geopotential heights** (`HourlyMetTensors.height_agl_m`,
+exposed by the met reader), not the bbox-averaged `metadata.level`. The resulting
+σ/T_L fields are built once per step on the met grid and interpolated trilinearly
+at each above-BL particle (reusing the advection's coordinate normalisation). The
+`K_floor` guarantees the FT is never fully frozen. Horizontal FT turbulence is
+treated as isotropic (`σ_u = σ_v = σ_w`) for now; the unresolved-mesoscale
+"meander" horizontal term (NAME-style, resolution-dependent) is a separate,
+deferred item. Implemented as free functions `potential_temperature`,
+`brunt_vaisala_squared`, `gradient_richardson`, `free_trop_diffusivity`,
+`free_trop_sigma_TL` in `hanna.py`.
 
 #### 3.2.4 Surface-layer treatment
 
@@ -213,11 +236,38 @@ T_L  = κ z / σ
 
 Implementation will match FLEXPART `mod_par_var_pbl.f90` / `hanna.f90` (or equivalent) so the surface layer behaves consistently with the reference.
 
-#### 3.2.5 Drift handling
+#### 3.2.5 Drift handling — Thomson well-mixed term
 
-We use the FLEXPART piecewise-homogeneous treatment: each step treats the particle's local layer as homogeneous; no explicit Thomson 1987 drift term is added. The exact-OU discrete update already in `engine.update_langevin_velocity` is correct for piecewise-homogeneous σ.
+**Added 2026-05-29** (the original piecewise-homogeneous no-drift treatment
+under-dispersed the surface footprint badly — particles drifted up the σ_w
+gradient, accumulated above the BL, and stopped recycling to the surface).
 
-In regions of strong σ-gradient (e.g. across the BL top), particles do not feel an explicit drift, but the σ change as they cross is captured by re-evaluating σ at every step from the local met. This is adequate for the FLEXPART/STILT cross-validation case; a Thomson-explicit drift would only matter for very high vertical resolution / large σ-gradient regimes that this prototype does not target.
+The vertical OU update now carries the Thomson (1987) well-mixed drift:
+
+```
+a_drift = ½ (1 + w'²/σ_w²) ∂σ_w²/∂z
+```
+
+`∂σ_w²/∂z` is a central finite difference of the *full* column σ_w profile
+(in-BL → surface-layer → free-troposphere), so it spans the regime transitions.
+`engine.update_langevin_velocity` takes a `drift` argument and applies it as a
+forward-Euler increment on top of the exact-OU homogeneous part (which still
+preserves the stationary variance σ²). The increment is capped at one σ_w per
+step so the sharp σ_w kink at the BL top can't blow the velocity up.
+
+**Backward-Langevin sign.** GLIDE runs backward in time; the displacement
+negates w'·dt. The random forcing is symmetric so that's harmless, but the drift
+is *deterministic* and must enter with reversed sign for the adjoint/backward
+Langevin (Thomson 1987 §5 reciprocity; Flesch, Wilson & Yee 1995) so the
+*physical* position drift still points down-gradient (toward the BL). Getting
+this sign wrong inverts the correction into a one-way upward pump — empirically
+it lofted the entire MHD population to ~2 km and held it there. The scheme
+pre-negates the drift before the backward displacement; covered by
+`test_hanna_well_mixed_no_runaway_lofting` and the engine-level
+`test_well_mixed_condition_drift_keeps_uniform_distribution`.
+
+Horizontal components (u', v') do not carry a drift — the inhomogeneity is in z,
+and FLEXPART applies the well-mixed correction to the vertical only.
 
 #### 3.2.6 State
 

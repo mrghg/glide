@@ -18,11 +18,19 @@ from lpdm.turbulence.hanna import (
     ABOVE_BL_SIGMA_M_S,
     ABOVE_BL_T_L_S,
     EARTH_ROTATION_RATE_S,
+    FT_KZ_CEIL_M2_S,
+    FT_KZ_FLOOR_M2_S,
+    FT_RICHARDSON_CRIT,
     air_density,
+    brunt_vaisala_squared,
     convective_velocity,
     coriolis_parameter,
+    free_trop_diffusivity,
+    free_trop_sigma_TL,
+    gradient_richardson,
     in_bl_sigma_TL,
     obukhov_length,
+    potential_temperature,
     surface_layer_sigma_w,
 )
 
@@ -189,7 +197,67 @@ def test_surface_layer_sigma_w_caps_in_very_stable() -> None:
 
 
 def test_hanna_above_bl_constants_used() -> None:
-    """The above-BL constants exposed by the module match the spec."""
+    """The above-BL fallback constants exposed by the module are unchanged."""
 
     assert ABOVE_BL_SIGMA_M_S == 0.1
     assert ABOVE_BL_T_L_S == 100.0
+
+
+# ---- Free-troposphere gradient-Richardson closure --------------------------
+
+
+def test_potential_temperature_reference_level() -> None:
+    """At p = p0 = 1000 hPa, θ == T; aloft (lower p) θ > T."""
+
+    t = torch.tensor([280.0, 250.0], dtype=torch.float64)
+    p = torch.tensor([100000.0, 50000.0], dtype=torch.float64)
+    kappa = 287.05 / 1005.0  # R_d / c_p, matching the module constant
+    theta = potential_temperature(t, p)
+    assert abs(float(theta[0]) - 280.0) < 1e-9
+    assert float(theta[1]) > float(t[1])  # 500 hPa: θ ≈ 250 * 2^κ ≈ 305 K
+    assert abs(float(theta[1]) - 250.0 * 2.0 ** kappa) < 1e-6
+
+
+def test_brunt_vaisala_sign_follows_stratification() -> None:
+    """N² > 0 for stable (θ increasing with height), < 0 for unstable."""
+
+    theta = torch.tensor([300.0, 300.0], dtype=torch.float64)
+    dtheta_dz_stable = torch.tensor([0.005, 0.005], dtype=torch.float64)
+    dtheta_dz_unstable = torch.tensor([-0.005, -0.005], dtype=torch.float64)
+    assert float(brunt_vaisala_squared(theta, dtheta_dz_stable)[0]) > 0
+    assert float(brunt_vaisala_squared(theta, dtheta_dz_unstable)[0]) < 0
+
+
+def test_gradient_richardson_and_diffusivity_shutoff() -> None:
+    """K_z decays to the background floor as Ri crosses the critical value."""
+
+    z = torch.tensor([1000.0, 1000.0, 1000.0], dtype=torch.float64)
+    shear = torch.tensor([0.01, 0.01, 0.01], dtype=torch.float64)  # |dU/dz|
+    # Ri well below, near, and above critical (0.25).
+    n2 = torch.tensor([0.0, 1e-5, 1e-3], dtype=torch.float64)
+    ri = gradient_richardson(n2, shear.pow(2))
+    k_z = free_trop_diffusivity(z, shear, ri)
+    # Strongly sub-critical (Ri=0) → highest K; super-critical → floor.
+    assert float(k_z[0]) > float(k_z[1]) >= float(k_z[2])
+    assert abs(float(k_z[2]) - FT_KZ_FLOOR_M2_S) < 1e-9
+    assert float(k_z[0]) <= FT_KZ_CEIL_M2_S
+
+
+def test_free_trop_sigma_TL_satisfies_diffusivity_identity() -> None:
+    """σ_w² · T_Lw must reconstruct K_z (the closure's defining relation)."""
+
+    k_z = torch.tensor([0.1, 1.0, 10.0], dtype=torch.float64)
+    n2 = torch.tensor([1e-4, 1e-4, 1e-4], dtype=torch.float64)
+    sigma_w, t_lw = free_trop_sigma_TL(k_z, n2)
+    assert torch.allclose(sigma_w.pow(2) * t_lw, k_z, rtol=1e-5)
+
+
+def test_free_trop_diffusivity_never_zero() -> None:
+    """Even at very high Ri the diffusivity stays at the floor (particles aloft
+    must never be fully frozen — the failure mode of the old σ=0.1 placeholder)."""
+
+    z = torch.tensor([2000.0], dtype=torch.float64)
+    shear = torch.tensor([0.001], dtype=torch.float64)
+    ri = torch.tensor([100.0], dtype=torch.float64)  # extremely stable
+    k_z = free_trop_diffusivity(z, shear, ri)
+    assert float(k_z[0]) >= FT_KZ_FLOOR_M2_S

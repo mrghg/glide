@@ -134,6 +134,14 @@ def test_fetch_hourly_window_includes_surface_pressure_and_converts_w() -> None:
     assert np.allclose(result.metadata.level, np.array([900.0, 1000.0]))
     assert np.allclose(result.metadata.pressure_level_hpa, np.array([900.0, 1000.0]))
 
+    # 3D AGL height field exposed and shaped [Z, Y, X], matching the channel grid.
+    assert result.height_agl_m is not None
+    assert result.height_agl_m.shape == result.hour_start.shape[1:]
+    # The mock builds AGL = [900, 1000] m at every column; per-level mean matches metadata.level.
+    height = result.height_agl_m
+    assert torch.allclose(height[0], torch.full_like(height[0], 900.0))
+    assert torch.allclose(height[1], torch.full_like(height[1], 1000.0))
+
 
 def test_fetch_hourly_window_rejects_unknown_w_units() -> None:
     ds = _build_mock_era5_dataset()

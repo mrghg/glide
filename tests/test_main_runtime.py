@@ -97,11 +97,19 @@ class AnalyticMetReader(MetReader):
             },
         )
 
+        # 3D AGL height: per-level height broadcast over the (lat, lon) grid.
+        level_agl = torch.linspace(
+            self.z_bounds_agl_m[0], self.z_bounds_agl_m[1], self.n_lev,
+            dtype=self.dtype, device=self.device,
+        )
+        height_agl_m = level_agl.view(self.n_lev, 1, 1).expand(self.n_lev, self.n_lat, self.n_lon).contiguous()
+
         return HourlyMetTensors(
             hour_start=_build(u0, v0, w0),
             hour_end=_build(u1, v1, w1),
             metadata=metadata,
             channel_names=tuple(self.channel_names),
+            height_agl_m=height_agl_m,
         )
 
 
@@ -371,6 +379,53 @@ def test_hanna_produces_nontrivial_vertical_spread(tmp_path: Path) -> None:
     assert alt_std > 50.0
     # Surface reflection should keep all particles non-negative.
     assert float(endpoints["alt"].min()) >= 0.0
+
+
+def test_hanna_well_mixed_no_runaway_lofting(tmp_path: Path) -> None:
+    """Regression for the backward-Langevin drift sign. From a mid-BL release the
+    well-mixed drift must keep particles cycling through the BL — a good fraction
+    should end up *below* the release height. The earlier wrong-sign drift lofted
+    essentially the whole population upward (one-way valve out of the BL), which
+    this test would catch (fraction-below → ~0, mean → above BLH)."""
+
+    blh = 1200.0
+    release_alt = 600.0  # mid-BL
+    cfg = _make_run_config(
+        release_duration_seconds=60,
+        simulation_length_seconds=21600,  # 6 h backward, long enough to equilibrate
+        dt_seconds=120,
+        release_alt_agl_m=release_alt,
+        n_particles=2000,
+        release_seed=7,
+        output_uri=str(tmp_path / "out"),
+        turbulence_scheme="hanna_1982",
+        n_time_bins=1,
+        met_alt_max_m=10000.0,
+    )
+    # Near-neutral BL (no convection), so σ_w is set by u* and decays toward the
+    # BL top — the inhomogeneity the well-mixed drift must handle.
+    reader = _make_hanna_reader(
+        cfg, wind_fn=lambda _: (0.0, 0.0, 0.0), ustar_m_s=0.4, shf_w_m2=0.0,
+    )
+    # Override the synthetic BLH to a defined value for a clean expectation.
+    reader.blh_m = blh
+
+    _run(cfg, reader=reader)
+
+    alt = pd.read_parquet(tmp_path / "out" / "endpoint_particles.parquet")["alt"].values
+    mean_alt = float(alt.mean())
+    frac_below_blh = float((alt < blh).mean())
+
+    # The population stays BL-confined on average rather than running away upward
+    # (the wrong-sign drift drove the whole population above the BLH: mean ≈ 2000 m,
+    # p10 ≈ 1660 m for this setup).
+    assert mean_alt < blh
+    # A meaningful fraction recycles down into / below the BL, and particles reach
+    # the near-surface layer — both ≈ impossible under the one-way upward lofting.
+    assert frac_below_blh > 0.1
+    assert float(alt.min()) < 0.5 * release_alt
+    # No spurious escape to the top of the domain.
+    assert float(alt.max()) < 0.9 * cfg.met_domain.alt_max_m
 
 
 def test_footprint_total_matches_active_particle_time(tmp_path: Path) -> None:

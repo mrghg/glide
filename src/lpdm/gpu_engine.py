@@ -152,8 +152,20 @@ class GPUEngine:
 		sigma_w2: torch.Tensor | float,
 		dt_seconds: float,
 		noise: torch.Tensor | None = None,
+		drift: torch.Tensor | float = 0.0,
 	) -> torch.Tensor:
-		"""Update turbulent vertical velocity using a discrete OU/Langevin step."""
+		"""Update turbulent velocity using a discrete OU/Langevin step.
+
+		`drift` is an optional deterministic acceleration (m/s²) added as
+		`drift * dt`. For the vertical component it carries the Thomson (1987)
+		well-mixed correction `½(1 + w²/σ²)·∂σ²/∂z`, which keeps an initially
+		well-mixed tracer well-mixed in inhomogeneous turbulence (σ varying with
+		height). Omitting it (the default `drift=0`) lets particles spuriously
+		accumulate in low-turbulence regions — the cause of GLIDE's surface
+		footprint under-dispersion. The homogeneous part stays the exact-OU form
+		(stationary variance σ²); the drift is applied with a forward-Euler
+		increment, matching the FLEXPART discretization.
+		"""
 
 		if dt_seconds <= 0:
 			raise ValueError("dt_seconds must be > 0")
@@ -181,7 +193,8 @@ class GPUEngine:
 		# Var[z(t)] = 2*sigma_w^2*T_L*(t - T_L*(1 - exp(-t/T_L))).
 		variance = torch.clamp(sigma2 * (1.0 - a * a), min=0.0)
 		std = torch.sqrt(variance)
-		return a * w_prev + std * eta
+		drift_term = torch.as_tensor(drift, device=self.device, dtype=self.dtype) * float(dt_seconds)
+		return a * w_prev + drift_term + std * eta
 
 	def apply_vertical_turbulence(
 		self,

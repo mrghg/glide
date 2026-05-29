@@ -99,12 +99,21 @@ class HourlyMetTensors:
     `channel_names[i]` identifies the logical variable at axis 0 index `i` (for
     example `("u", "v", "w", "blh", "sp")`). Use `channel(name)` or
     `channels(*names)` to slice by name rather than position.
+
+    `height_agl_m` is the full 3D geopotential-derived height above ground level
+    in metres, shape `[z, y, x]` (per-window average of the hour-start/end
+    geopotential, which changes negligibly within an hour). It gives true
+    per-column layer heights for vertical-gradient schemes (e.g. the Hanna
+    free-troposphere N²/Richardson branch), as opposed to the bbox-averaged
+    `metadata.level`. May be `None` for synthetic readers that don't model
+    geopotential; schemes that need it must check and raise a clear error.
     """
 
     hour_start: torch.Tensor
     hour_end: torch.Tensor
     metadata: MetFieldMetadata
     channel_names: tuple[str, ...]
+    height_agl_m: torch.Tensor | None = None
 
     def _channel_index(self, name: str) -> int:
         try:
@@ -313,7 +322,7 @@ class ArcoEra5ZarrReader(MetReader):
             ds_end_lazy = ds_end_lazy.sel({self.time_name: t1_sel})
 
             # Subset vertical levels using lazy Dask arrays (only reads Z/Z_SFC into memory to evaluate the bound)
-            ds_start_sub, ds_end_sub, level_agl_m = self._subset_vertical_levels_by_agl(
+            ds_start_sub, ds_end_sub, level_agl_m, height_agl_3d = self._subset_vertical_levels_by_agl(
                 ds_start=ds_start_lazy,
                 ds_end=ds_end_lazy,
                 spatial=request.spatial,
@@ -340,11 +349,14 @@ class ArcoEra5ZarrReader(MetReader):
             variable_units=self._read_variable_units(ds_start),
         )
 
+        height_agl_m = torch.as_tensor(height_agl_3d, dtype=self.dtype, device=self.device)
+
         return HourlyMetTensors(
             hour_start=hour_start,
             hour_end=hour_end,
             metadata=metadata,
             channel_names=self.channel_names,
+            height_agl_m=height_agl_m,
         )
 
     def get_time_coverage(self) -> tuple[datetime, datetime]:
@@ -598,8 +610,14 @@ class ArcoEra5ZarrReader(MetReader):
         ds_start: xr.Dataset,
         ds_end: xr.Dataset,
         spatial: SpatialBounds,
-    ) -> tuple[xr.Dataset, xr.Dataset, np.ndarray]:
-        """Subset pressure levels using geopotential-derived geometric AGL bounds."""
+    ) -> tuple[xr.Dataset, xr.Dataset, np.ndarray, np.ndarray]:
+        """Subset pressure levels using geopotential-derived geometric AGL bounds.
+
+        Returns ``(ds_start_sub, ds_end_sub, level_agl_mean, height_agl_3d)`` where
+        ``level_agl_mean`` is the per-level spatial-mean AGL (1D, for metadata) and
+        ``height_agl_3d`` is the full ``[Z, Y, X]`` AGL height (per-window average
+        of start/end), for per-column vertical-gradient schemes.
+        """
 
         if int(ds_start.sizes.get(self.lon_name, 0)) == 0 or int(ds_start.sizes.get(self.lat_name, 0)) == 0:
             raise ValueError(
@@ -652,11 +670,14 @@ class ArcoEra5ZarrReader(MetReader):
 
         level_agl_start_sub = self._compute_level_agl_m(ds_start_sub)
         level_agl_end_sub = self._compute_level_agl_m(ds_end_sub)
+        # Per-window average 3D height [Z, Y, X]; geopotential barely shifts within
+        # an hour so a single averaged field is sufficient for gradient schemes.
+        height_agl_3d = 0.5 * (level_agl_start_sub + level_agl_end_sub)
         level_agl_m = 0.5 * (
             np.mean(level_agl_start_sub, axis=(1, 2)) + np.mean(level_agl_end_sub, axis=(1, 2))
         )
 
-        return ds_start_sub, ds_end_sub, level_agl_m
+        return ds_start_sub, ds_end_sub, level_agl_m, height_agl_3d
 
     def _compute_level_agl_m(self, ds_time_slice: xr.Dataset) -> np.ndarray:
         """Compute geometric height above ground level in meters for each level."""

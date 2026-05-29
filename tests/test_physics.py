@@ -249,6 +249,76 @@ def test_zero_wind_diffusion_langevin_gaussian_spread() -> None:
     assert torch.allclose(initial_mass, final_mass, atol=0.0, rtol=0.0)
 
 
+def test_langevin_drift_term_is_deterministic_increment() -> None:
+    """With zero noise, the OU update is a*w_prev + drift*dt; drift=0 is the
+    legacy behaviour (guards backward compatibility)."""
+
+    engine = GPUEngine(device="cpu", dtype=torch.float64)
+    w_prev = torch.tensor([0.2, -0.1, 0.0], dtype=torch.float64)
+    zero_noise = torch.zeros_like(w_prev)
+    tl, sig2, dt = 100.0, 1.0, 10.0
+    a = math.exp(-dt / tl)
+
+    no_drift = engine.update_langevin_velocity(
+        w_prev, t_lagrangian=tl, sigma_w2=sig2, dt_seconds=dt, noise=zero_noise,
+    )
+    assert torch.allclose(no_drift, a * w_prev, atol=1e-12)
+
+    drift = torch.tensor([0.01, 0.02, -0.03], dtype=torch.float64)
+    with_drift = engine.update_langevin_velocity(
+        w_prev, t_lagrangian=tl, sigma_w2=sig2, dt_seconds=dt, noise=zero_noise, drift=drift,
+    )
+    assert torch.allclose(with_drift, a * w_prev + drift * dt, atol=1e-12)
+
+
+def test_well_mixed_condition_drift_keeps_uniform_distribution() -> None:
+    """Thomson well-mixed test: in inhomogeneous turbulence (σ_w² varying with
+    height) an initially-uniform tracer must stay uniform WITH the drift term,
+    and must spuriously accumulate in the low-σ region WITHOUT it."""
+
+    import math as _math
+
+    torch.manual_seed(7)
+    engine = GPUEngine(device="cpu", dtype=torch.float64)
+
+    H = 1000.0
+    n = 60000
+    tl = 100.0
+    dt = 1.0
+    n_steps = 4000
+    # σ_w²(z) linear: 0.5 at surface → 2.0 at top. ∂σ²/∂z constant.
+    sig2_base, sig2_top = 0.5, 2.0
+    dsig2_dz = (sig2_top - sig2_base) / H
+
+    def evolve(use_drift: bool) -> torch.Tensor:
+        z = torch.rand(n, dtype=torch.float64) * H  # uniform initial (well-mixed)
+        w = torch.zeros(n, dtype=torch.float64)
+        for _ in range(n_steps):
+            sig2 = sig2_base + (sig2_top - sig2_base) * (z / H)
+            drift = (
+                0.5 * (1.0 + w.pow(2) / sig2) * dsig2_dz if use_drift else 0.0
+            )
+            w = engine.update_langevin_velocity(
+                w, t_lagrangian=tl, sigma_w2=sig2, dt_seconds=dt, drift=drift,
+            )
+            z = z + w * dt
+            # Reflect at both boundaries (displacement << H each step).
+            z = torch.where(z < 0.0, -z, z)
+            z = torch.where(z > H, 2.0 * H - z, z)
+        return z
+
+    # Fraction of particles in the low-σ bottom third of the column.
+    z_drift = evolve(use_drift=True)
+    z_nodrift = evolve(use_drift=False)
+    bottom_drift = float((z_drift < H / 3.0).float().mean())
+    bottom_nodrift = float((z_nodrift < H / 3.0).float().mean())
+
+    # With drift: stays ~uniform → ~1/3 in the bottom third.
+    assert abs(bottom_drift - 1.0 / 3.0) < 0.05
+    # Without drift: spurious accumulation in the low-σ bottom third.
+    assert bottom_nodrift > bottom_drift + 0.08
+
+
 def test_well_mixed_uniformity_in_periodic_turbulence() -> None:
     """Uniform particles in a periodic domain should remain close to uniform."""
 
