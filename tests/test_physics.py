@@ -156,6 +156,82 @@ def test_reflect_surface_nonzero_z() -> None:
     assert torch.allclose(wp_reflected, expected_w)
 
 
+def test_normalize_coordinates_uses_level_lookup_for_pressure_levels() -> None:
+    """F9 (audit 2026-05-30): the vertical normalisation must use a piecewise-
+    linear level-index lookup against ``level_agl_m`` rather than a linear-in-
+    AGL mapping. Pressure levels are roughly log-linear in altitude, so the
+    levels are unevenly spaced in z. The linear-in-AGL fallback is wrong; this
+    test pins the correct lookup behaviour."""
+
+    from lpdm.gpu_engine import GridInterpolationBounds
+
+    engine = GPUEngine(device="cpu", dtype=torch.float64)
+    # Pressure-level-like AGL spacing: dense near surface, sparse aloft.
+    # 6 levels at [0, 100, 300, 700, 1500, 3000] m.
+    levels = (0.0, 100.0, 300.0, 700.0, 1500.0, 3000.0)
+    bounds_with_levels = GridInterpolationBounds(
+        lon_first=-1.0, lon_last=1.0,
+        lat_first=-1.0, lat_last=1.0,
+        alt_first=0.0, alt_last=3000.0,
+        level_agl_m=levels,
+    )
+    bounds_linear_legacy = GridInterpolationBounds(
+        lon_first=-1.0, lon_last=1.0,
+        lat_first=-1.0, lat_last=1.0,
+        alt_first=0.0, alt_last=3000.0,
+        level_agl_m=None,
+    )
+
+    # A particle at z=300 m sits exactly on level index 2 of 5 (0-indexed),
+    # so the fractional index is 2.0 and the normalised z is 2*(2/5) - 1 = -0.2.
+    p = torch.tensor([[0.0, 0.0, 300.0]], dtype=torch.float64)
+    norm_lookup = engine.normalize_particle_coordinates(p, bounds_with_levels)
+    assert abs(float(norm_lookup[0, 2]) - (-0.2)) < 1e-6, (
+        f"level-lookup norm z at z=300 m should be -0.2 (exactly on level 2/5), "
+        f"got {float(norm_lookup[0, 2])}"
+    )
+
+    # The legacy linear-in-AGL mapping would give z=300/3000*2 - 1 = -0.8.
+    # The two should disagree substantially for this non-uniform level spacing.
+    norm_linear = engine.normalize_particle_coordinates(p, bounds_linear_legacy)
+    assert abs(float(norm_linear[0, 2]) - (-0.8)) < 1e-6
+    assert abs(float(norm_lookup[0, 2]) - float(norm_linear[0, 2])) > 0.5, (
+        "level-lookup and linear-in-AGL norms should differ markedly for "
+        "non-uniform pressure-level spacing"
+    )
+
+    # A particle at z=200 m sits halfway between levels 1 (z=100) and 2 (z=300),
+    # so the fractional index is 1.5 and the normalised z is 2*(1.5/5) - 1 = -0.4.
+    p2 = torch.tensor([[0.0, 0.0, 200.0]], dtype=torch.float64)
+    norm2 = engine.normalize_particle_coordinates(p2, bounds_with_levels)
+    assert abs(float(norm2[0, 2]) - (-0.4)) < 1e-6
+
+
+def test_normalize_coordinates_handles_descending_level_order() -> None:
+    """ARCO ERA5 sometimes presents level arrays in descending altitude
+    (pressure-coordinate convention). The F9 lookup must handle that orientation
+    too."""
+
+    from lpdm.gpu_engine import GridInterpolationBounds
+
+    engine = GPUEngine(device="cpu", dtype=torch.float64)
+    # Descending order: index 0 is the highest altitude.
+    levels = (3000.0, 1500.0, 700.0, 300.0, 100.0, 0.0)
+    bounds = GridInterpolationBounds(
+        lon_first=-1.0, lon_last=1.0,
+        lat_first=-1.0, lat_last=1.0,
+        alt_first=3000.0, alt_last=0.0,
+        level_agl_m=levels,
+    )
+
+    # z=300 m is at level index 3 in this orientation; normalised z = 2*(3/5)-1 = 0.2.
+    p = torch.tensor([[0.0, 0.0, 300.0]], dtype=torch.float64)
+    norm = engine.normalize_particle_coordinates(p, bounds)
+    assert abs(float(norm[0, 2]) - 0.2) < 1e-6, (
+        f"descending-order level-lookup norm z at z=300 m should be +0.2, got {float(norm[0, 2])}"
+    )
+
+
 def test_reflect_surface_w_flip_resolves_one_way_downward_drift() -> None:
     """Regression for F1. A particle reflected with `w' < 0` MUST come out with
     `w' > 0`; otherwise on the next displacement step `z + w'·dt` pushes it back

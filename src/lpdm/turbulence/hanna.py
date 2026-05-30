@@ -70,6 +70,39 @@ MEANDER_COEFFICIENT_DEFAULT = 0.16    # FLEXPART `turbmesoscale`
 MEANDER_STENCIL_RADIUS_DEFAULT = 1    # 3x3 neighbourhood
 MEANDER_TIMESCALE_S_DEFAULT = 1800.0  # half of the hourly ERA5 field interval
 
+# F4 Tier 2 — per-particle substepping. When the outer dt is large vs T_Lw, the
+# discrete OU integration accumulates a Δt/τ bias (Wilson & Flesch 1993 App.,
+# Stohl & Thomson 1999). We substep so each particle's effective sub-dt satisfies
+# `sub_dt < SUBSTEP_C · T_Lw`. SUBSTEP_C defaults to 0.5 (≈25% bias bound per
+# W&F's linear bias formula) rather than S&T's c=0.05 because we cap the substep
+# count at MAX_SUBSTEPS_DEFAULT to keep the per-step cost bounded — the cap is
+# the binding constraint for the near-surface particles where T_Lw can drop to a
+# few seconds.
+SUBSTEP_C_DEFAULT = 0.5
+MAX_SUBSTEPS_DEFAULT = 50
+
+# F5/F15 — "unresolved basal layer" (W&F 1993 §7b). Hold σ_w, T_L (and the
+# density-gradient piece) CONSTANT for any particle below this height by
+# evaluating the turbulence profile at z=max(z_particle, Z_UBL_DEFAULT). The
+# constant-σ basal layer makes smooth-wall reflection WMC-exact (W&F §7b) and
+# also caps the |∂σ²/∂z| spike at the very-near-surface that drives the
+# F4 Tier 2 substep cap to bind for some particles. Set to a small value
+# (default 2 m) so the layer is thinner than any practical particle release
+# altitude — it only intercepts the post-reflection bounce. Particle position
+# is NOT clamped; only the σ/T_L *sampling* uses the clamped z.
+Z_UBL_DEFAULT_M = 2.0
+
+
+# Rogue-trajectory safeguard for the F4 Tier 2 substep loop. Spec §T:
+# "Watch for unbounded velocities when Δt is too large relative to rapidly
+# varying statistics. Check for velocity caps." When the substep cap binds
+# (sub_dt > T_L) and a particle's σ_w drops near the floor (e.g. at the BL
+# top), the (1 + w'²/σ_w²) drift factor can blow up. We clip |w'/σ| at a
+# physically generous 4× (≈ 6e-5 probability for a true Gaussian) at the end
+# of each substep OU update. FLEXPART has the same kind of clip in its OU
+# implementation (see flexpart.f90 in their turbulence routines).
+W_PRIME_SIGMA_RATIO_MAX = 4.0
+
 
 # ---------------------------------------------------------------------------
 # Free physics functions (testable in isolation)
@@ -332,12 +365,21 @@ class HannaScheme(TurbulenceScheme):
 		meander_coefficient: float = MEANDER_COEFFICIENT_DEFAULT,
 		meander_stencil_radius: int = MEANDER_STENCIL_RADIUS_DEFAULT,
 		meander_timescale_seconds: float = MEANDER_TIMESCALE_S_DEFAULT,
+		substep_c: float = SUBSTEP_C_DEFAULT,
+		max_substeps: int = MAX_SUBSTEPS_DEFAULT,
+		z_ubl_m: float = Z_UBL_DEFAULT_M,
 	) -> None:
 		"""Construct the scheme.
 
 		Meander (unresolved-mesoscale horizontal turbulence) is off by default so
 		existing runs stay bit-identical; enable it via the YAML ``turbulence.meander``
 		block. See ``docs/turbulence.md`` §3.2.8.
+
+		``substep_c`` and ``max_substeps`` control the F4 Tier 2 adaptive substepping
+		(audit 2026-05-30). Each particle's OU + displacement + reflection is
+		substepped so its effective sub-dt satisfies ``sub_dt < substep_c · T_Lw``,
+		capped at ``max_substeps`` per outer step to bound the cost for very-near-
+		surface particles. Meander has τ ≈ 1800 s so always runs at the outer dt.
 		"""
 
 		if meander_coefficient <= 0:
@@ -346,16 +388,24 @@ class HannaScheme(TurbulenceScheme):
 			raise ValueError("meander_stencil_radius must be >= 1")
 		if meander_timescale_seconds <= 0:
 			raise ValueError("meander_timescale_seconds must be > 0")
+		if substep_c <= 0:
+			raise ValueError("substep_c must be > 0")
+		if max_substeps < 1:
+			raise ValueError("max_substeps must be >= 1")
+		if z_ubl_m < 0:
+			raise ValueError("z_ubl_m must be >= 0")
+		self.z_ubl_m = float(z_ubl_m)
 		self.meander_enabled = bool(meander_enabled)
 		self.meander_coefficient = float(meander_coefficient)
 		self.meander_stencil_radius = int(meander_stencil_radius)
 		self.meander_timescale_seconds = float(meander_timescale_seconds)
+		self.substep_c = float(substep_c)
+		self.max_substeps = int(max_substeps)
 		# F4 Tier 1 (audit 2026-05-30): once-per-instance warning when dt is large
-		# vs the smallest active T_L. Per Stohl & Thomson 1999 the recommended
-		# constant is c=0.05 (so dt < 0.05·T_L); the OU integration noticeably
-		# degrades once dt > T_L/5 (Wilson & Flesch 1993 Appendix). Warn at the
-		# looser threshold to alert users before the bias dominates.
-		self._warned_dt: bool = False
+		# vs the smallest active T_L. After F4 Tier 2 substepping, this warning
+		# now fires when the *effective* sub-dt is still large vs T_L — i.e. when
+		# `max_substeps` is the binding constraint (the substep cap saturates).
+		self._warned_substep_cap: bool = False
 
 	def required_met_keys(self) -> tuple[str, ...]:
 		# Baseline (u, v, w, blh, sp) is added by the runtime; declare scheme-specific extras.
@@ -433,76 +483,77 @@ class HannaScheme(TurbulenceScheme):
 			engine=engine,
 		)
 
+		# F5/F15 (audit 2026-05-30): "unresolved basal layer" per W&F §7b. For
+		# the σ/T_L/drift/density sampling we clamp z at z_ubl_m (default 2 m),
+		# so anything below the UBL gets the same turbulence parameters as the
+		# UBL top. This makes smooth-wall reflection WMC-exact in the basal
+		# layer (W&F prove perfect reflection requires constant σ over the
+		# largest distance a particle can traverse in one step). Particle
+		# *position* is NOT clamped — only the SAMPLING height for σ/T_L.
+		z_eval = z_agl.clamp(min=self.z_ubl_m)
+
 		# σ/T_L at the particle height (in-BL + surface-layer + free-troposphere).
-		sigma_u, sigma_v, sigma_w, T_Lu, T_Lv, T_Lw = self._column_turbulence(z_agl, **col_kwargs)
-		self._warn_if_dt_too_large(T_Lu, T_Lv, T_Lw, dt_seconds=dt_seconds)
+		sigma_u, sigma_v, sigma_w, T_Lu, T_Lv, T_Lw = self._column_turbulence(z_eval, **col_kwargs)
 
 		# Thomson (1987) well-mixed drift for the vertical component:
 		# a = ½(1 + w'²/σ_w²) ∂σ_w²/∂z. ∂σ_w²/∂z is a central finite difference of
 		# the *full* column profile (so it spans the in-BL → free-trop transition),
-		# evaluated holding the per-column scalars (blh, u*, …) fixed.
+		# evaluated holding the per-column scalars (blh, u*, …) fixed. The
+		# finite-difference probes also use z_eval so the UBL clamping gives
+		# ∂σ²/∂z = 0 inside the basal layer (consistent with constant σ).
 		w_prev = state["w_prime"][active_mask]
-		z_hi = z_agl + self.DRIFT_FD_DELTA_M
-		z_lo = (z_agl - self.DRIFT_FD_DELTA_M).clamp(min=0.0)
+		z_hi = z_eval + self.DRIFT_FD_DELTA_M
+		z_lo = (z_eval - self.DRIFT_FD_DELTA_M).clamp(min=self.z_ubl_m)
 		sw_hi = self._column_turbulence(z_hi, **col_kwargs)[2]
 		sw_lo = self._column_turbulence(z_lo, **col_kwargs)[2]
 		dsig2_dz = (sw_hi.pow(2) - sw_lo.pow(2)) / (z_hi - z_lo).clamp(min=self.DRIFT_FD_DELTA_M)
 		sigma_w_sq = sigma_w.pow(2).clamp(min=SIGMA_MIN_M_S ** 2)
-		drift_w = 0.5 * (1.0 + w_prev.pow(2) / sigma_w_sq) * dsig2_dz
 
 		# Density-correction term (Stohl & Thomson 1999 Eq 3, raw-w form):
 		# `+ (σ_w²/ρ)·∂ρ/∂z`. Required for WMC in ρ-weighted coordinates — air
 		# density drops 20%+ across a deep BL and the term suppresses spurious
 		# accumulation of particles aloft (S&T's CAPTEX runs: +5.5% mean on
 		# surface concentrations, +1–15% range). Sampled per-particle from the
-		# stack built in `_density_fields` above. The same backward-sign
-		# pre-negation that handles the σ-gradient drift handles this term too,
-		# because Flesch et al. 1995 give `a_b = -a_f - 2w/τ` which flips both
-		# inhomogeneity terms in lockstep for Gaussian symmetric g_a.
+		# stack built in `_density_fields` above.
 		density_at_p = self._interp_3d_field(
-			density_fields, grid_bounds, lon_deg, lat_deg, z_agl, engine,
+			density_fields, grid_bounds, lon_deg, lat_deg, z_eval, engine,
 		)
 		rho_at_p = density_at_p[0].clamp(min=1e-3)
 		drho_dz_at_p = density_at_p[1]
-		drift_w = drift_w + sigma_w_sq * drho_dz_at_p / rho_at_p
+		density_drift_forward = sigma_w_sq * drho_dz_at_p / rho_at_p
 
-		# Backward-Langevin sign. The vertical displacement is applied
-		# backward-in-time (apply_vertical_turbulence below uses backward=True,
-		# which negates w'·dt). The random forcing is symmetric so that negation
-		# is harmless, but the well-mixed drift is a *deterministic* correction:
-		# for the adjoint/backward Langevin both the σ-gradient and density terms
-		# must enter with reversed sign (Thomson 1987 §3.4; Flesch, Wilson & Yee
-		# 1995: a_b = -a_f - 2w/τ flips both inhomogeneity terms in lockstep for
-		# symmetric Gaussian g_a) so that the *physical* position drift still
-		# points down the σ_w² gradient (toward higher turbulence) and down the
-		# density gradient (toward the surface in a typical PBL). Pre-negate here
-		# so the subsequent backward displacement restores the correct physical
-		# direction.
-		drift_w = -drift_w
-		# Safeguard: cap the drift increment at one σ_w per step so sharp σ_w kinks
-		# (surface-layer / BL top) can't blow the velocity up between substeps.
-		max_accel = sigma_w / float(dt_seconds)
-		drift_w = torch.maximum(torch.minimum(drift_w, max_accel), -max_accel)
+		# Backward-Langevin sign pieces (Flesch et al. 1995: a_b = -a_f - 2w/τ
+		# flips both inhomogeneity terms in lockstep for symmetric Gaussian g_a;
+		# the homogeneous -w/τ is handled inside the OU exp(-dt/τ) factor).
+		# Pre-negate here so the subsequent backward displacement gives the
+		# correct physical direction. The (1 + w'²/σ²) factor is RECOMPUTED
+		# inside _integrate_vertical_substeps per substep using the current w',
+		# so we pass the w-independent pieces (`half_dsig2_dz_backward` and
+		# `density_drift_backward`) and the σ² needed to form the factor.
+		half_dsig2_dz_backward = -0.5 * dsig2_dz
+		density_drift_backward = -density_drift_forward
 
-		# OU velocity update (per-particle T_L and σ²). Drift on the vertical only.
-		u_prime_active = engine.update_langevin_velocity(
-			state["u_prime"][active_mask],
-			t_lagrangian=T_Lu, sigma_w2=sigma_u.pow(2), dt_seconds=dt_seconds,
-		)
-		v_prime_active = engine.update_langevin_velocity(
-			state["v_prime"][active_mask],
-			t_lagrangian=T_Lv, sigma_w2=sigma_v.pow(2), dt_seconds=dt_seconds,
-		)
-		w_prime_active = engine.update_langevin_velocity(
-			state["w_prime"][active_mask],
-			t_lagrangian=T_Lw, sigma_w2=sigma_w.pow(2), dt_seconds=dt_seconds, drift=drift_w,
-		)
+		# F3 (audit 2026-05-30): drift cap removed. The cap (`±σ_w/Δt`) was an
+		# ad-hoc safeguard for sharp σ_w kinks under too-large Δt; F4 Tier 2
+		# substepping below addresses the root cause (Δt/τ bias) without
+		# silently violating the WMC formula at the BL-top / SL seam.
 
-		moved = engine.apply_vertical_turbulence(
-			active_xyz, w_prime_active, dt_seconds=dt_seconds, backward=True,
-		)
-		moved = engine.apply_horizontal_turbulence(
-			moved, u_prime_active, v_prime_active, dt_seconds=dt_seconds, backward=True,
+		# F4 Tier 2 (audit 2026-05-30): per-particle substepping. Each particle's
+		# OU + displacement + reflection runs `k_i = ceil(dt / (substep_c · T_Lw_i))`
+		# internal steps so its effective sub-dt satisfies the Δt/τ bias bound.
+		# Capped at `max_substeps`; warning fires (once per instance) if the cap
+		# saturates. Meander uses τ ≈ 1800 s and stays at the outer dt.
+		moved, u_prime_active, v_prime_active, w_prime_active = self._integrate_vertical_substeps(
+			active_xyz=active_xyz,
+			u_prime_in=state["u_prime"][active_mask],
+			v_prime_in=state["v_prime"][active_mask],
+			w_prime_in=state["w_prime"][active_mask],
+			sigma_u=sigma_u, sigma_v=sigma_v, sigma_w=sigma_w, sigma_w_sq=sigma_w_sq,
+			T_Lu=T_Lu, T_Lv=T_Lv, T_Lw=T_Lw,
+			half_dsig2_dz_backward=half_dsig2_dz_backward,
+			density_drift_backward=density_drift_backward,
+			dt_seconds=dt_seconds,
+			engine=engine,
 		)
 
 		# Meander (unresolved-mesoscale) horizontal turbulence: an independent
@@ -516,7 +567,7 @@ class HannaScheme(TurbulenceScheme):
 				met_window, t_alpha, device, dtype,
 			)
 			sm = self._interp_3d_field(
-				meander_fields, meander_bounds, lon_deg, lat_deg, z_agl, engine,
+				meander_fields, meander_bounds, lon_deg, lat_deg, z_eval, engine,
 			)
 			sigma_mu, sigma_mv = sm[0], sm[1]
 			u_meander_active = engine.update_langevin_velocity(
@@ -533,8 +584,9 @@ class HannaScheme(TurbulenceScheme):
 				moved, u_meander_active, v_meander_active, dt_seconds=dt_seconds, backward=True,
 			)
 
-		# Smooth-wall reflection flips BOTH z and w' (Wilson & Flesch 1993 §6).
-		moved, w_prime_active = engine.reflect_surface(moved, w_prime_active, z_surface=0.0)
+		# Reflection (with w'-flip) is now applied inside the substep loop above;
+		# no additional reflection here. Meander has no boundary semantics
+		# (horizontal-only displacement) so it doesn't need an extra reflection.
 
 		particles[active_mask] = moved
 		state["u_prime"][active_mask] = u_prime_active
@@ -553,32 +605,145 @@ class HannaScheme(TurbulenceScheme):
 		*,
 		dt_seconds: float,
 	) -> None:
-		"""Emit a once-per-instance warning when ``dt`` is large vs the smallest
-		active Lagrangian timescale (F4 in the 2026-05-30 physics audit).
+		"""Reserved for back-compat — no-op now that F4 Tier 2 substepping
+		(audit 2026-05-30) handles the Δt/τ bias automatically. The cap-saturation
+		warning has moved into ``_integrate_vertical_substeps``."""
+		del T_Lu, T_Lv, T_Lw, dt_seconds  # unused
 
-		Stohl & Thomson (1999) use ``Δt ≤ 0.05·T_L``; Wilson & Flesch (1993,
-		Appendix) derive an explicit "Δt-bias velocity" that scales linearly in
-		``Δt/T_L``. The OU discretisation is *stable* for any ``Δt`` (the exact-OU
-		form preserves stationary variance) but the inhomogeneous-drift increment
-		is forward-Euler, so a too-large ``Δt`` near the surface degrades the
-		well-mixed condition empirically. We warn at the looser ``T_L > 5·Δt``
-		threshold so the user is told before the bias becomes severe.
+	def _integrate_vertical_substeps(
+		self,
+		*,
+		active_xyz: torch.Tensor,
+		u_prime_in: torch.Tensor,
+		v_prime_in: torch.Tensor,
+		w_prime_in: torch.Tensor,
+		sigma_u: torch.Tensor,
+		sigma_v: torch.Tensor,
+		sigma_w: torch.Tensor,
+		sigma_w_sq: torch.Tensor,
+		T_Lu: torch.Tensor,
+		T_Lv: torch.Tensor,
+		T_Lw: torch.Tensor,
+		half_dsig2_dz_backward: torch.Tensor,
+		density_drift_backward: torch.Tensor,
+		dt_seconds: float,
+		engine: GPUEngine,
+	) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+		"""Per-particle adaptive substepping of the OU + displacement + reflection.
+
+		Each particle gets ``k_i = ceil(dt / (substep_c · T_Lw_i))`` substeps
+		(capped at ``self.max_substeps``); inside the loop only particles still
+		owing substeps are touched (vectorised via boolean masking). σ², T_L,
+		``∂σ²/∂z`` and the density-gradient piece remain fixed at their
+		outer-step values — a deliberate simplification (FLEXPART re-evaluates
+		per substep, but the cost of per-substep ``_column_turbulence`` calls is
+		significant and the σ change across one outer dt is moderate). Documented
+		as a known approximation.
+
+		BUT the well-mixed drift's ``(1 + w'²/σ_w²)`` factor IS recomputed each
+		substep using the current ``w'`` — holding it fixed at the outer-step
+		``w'`` (which is often ≈ 0 for newly-released particles) systematically
+		under-drifts particles, biasing them upward (this was caught by
+		``test_hanna_well_mixed_no_runaway_lofting`` during F4 Tier 2 development).
+
+		Returns ``(xyz, u', v', w')`` after all substeps; reflection (with
+		w'-flip per W&F §6) is applied at the end of each substep so a particle
+		that crosses z=0 within a substep is reflected before the next substep.
 		"""
 
-		if self._warned_dt:
-			return
-		min_TL = float(torch.minimum(torch.minimum(T_Lu.min(), T_Lv.min()), T_Lw.min()))
-		if min_TL >= 5.0 * float(dt_seconds):
-			return
-		LOGGER.warning(
-			"Hanna turbulence: min active T_L = %.1f s vs dt = %.1f s "
-			"(dt/T_L = %.1f). The OU integration's well-mixed accuracy degrades "
-			"once dt > T_L/5 (Wilson & Flesch 1993 App.; Stohl & Thomson 1999 use "
-			"c=0.05). Consider reducing simulation.dt_seconds or accept a "
-			"near-surface footprint bias proportional to dt/T_L.",
-			min_TL, float(dt_seconds), float(dt_seconds) / max(min_TL, 1e-6),
-		)
-		self._warned_dt = True
+		c = self.substep_c
+		k_cap = self.max_substeps
+		# Per-particle required substep count. T_Lw is floored elsewhere (>=1 s)
+		# but we add an extra safety clamp here so a pathological floor change
+		# doesn't divide by zero.
+		k_required = torch.ceil(dt_seconds / (c * T_Lw.clamp(min=1e-3))).long().clamp(min=1, max=k_cap)
+		max_k = int(k_required.max().item())
+
+		# Per-particle sub-dt (each particle distributes the outer dt across
+		# its k_i substeps).
+		sub_dt = (float(dt_seconds) / k_required.to(dtype=sigma_w.dtype))  # [N_active]
+
+		# F4 Tier 1 warning: fires (once per instance) when the cap is binding
+		# for any active particle — i.e. the substepping isn't keeping the Δt/τ
+		# bias small even at max_substeps.
+		if not self._warned_substep_cap:
+			at_cap = k_required >= k_cap
+			if bool(at_cap.any()):
+				# Particles at cap have effective dt/T_L ≥ 1/c; report worst.
+				ratio_at_cap = (sub_dt[at_cap] / T_Lw[at_cap]).max().item()
+				LOGGER.warning(
+					"Hanna turbulence: %d active particles hit max_substeps=%d "
+					"(worst sub_dt/T_Lw=%.2f, target < %.2f). The Δt/τ bias is "
+					"only partially controlled for these particles. Reduce "
+					"simulation.dt_seconds or raise max_substeps.",
+					int(at_cap.sum().item()), k_cap, float(ratio_at_cap), float(c),
+				)
+				self._warned_substep_cap = True
+
+		# Working tensors. Clone so we don't mutate the input subsets.
+		xyz = active_xyz.clone()
+		u_p = u_prime_in.clone()
+		v_p = v_prime_in.clone()
+		w_p = w_prime_in.clone()
+
+		for i in range(max_k):
+			mask = k_required > i
+			if not bool(mask.any()):
+				break
+			sub_dt_m = sub_dt[mask]
+			T_Lu_m, T_Lv_m, T_Lw_m = T_Lu[mask], T_Lv[mask], T_Lw[mask]
+			sigma_u_m, sigma_v_m, sigma_w_m = sigma_u[mask], sigma_v[mask], sigma_w[mask]
+			sigma_w_sq_m = sigma_w_sq[mask]
+
+			# Re-assemble backward drift each substep with the CURRENT w':
+			#   drift_b = -½(1 + w'²/σ_w²)·∂σ²/∂z  -  (σ_w²/ρ)·∂ρ/∂z
+			# Pieces are pre-negated for the backward sign; the only thing that
+			# updates per substep is the (1 + w'²/σ_w²) velocity factor.
+			factor = 1.0 + w_p[mask].pow(2) / sigma_w_sq_m
+			drift_w_m = factor * half_dsig2_dz_backward[mask] + density_drift_backward[mask]
+
+			u_new = engine.update_langevin_velocity(
+				u_p[mask], t_lagrangian=T_Lu_m, sigma_w2=sigma_u_m.pow(2),
+				dt_seconds=sub_dt_m,
+			)
+			v_new = engine.update_langevin_velocity(
+				v_p[mask], t_lagrangian=T_Lv_m, sigma_w2=sigma_v_m.pow(2),
+				dt_seconds=sub_dt_m,
+			)
+			w_new = engine.update_langevin_velocity(
+				w_p[mask], t_lagrangian=T_Lw_m, sigma_w2=sigma_w_m.pow(2),
+				dt_seconds=sub_dt_m, drift=drift_w_m,
+			)
+			# Rogue-trajectory safeguard (spec §T): clip |w'/σ| at 4× to prevent
+			# the (1+w'²/σ²) factor from snowballing the drift when σ_w hits its
+			# numerical floor (e.g. at the BL top where stable σ_w → 0) and the
+			# substep cap is binding. Without this, particles can NaN out at the
+			# BL-top seam under the F4 Tier 2 substepping. FLEXPART has the
+			# equivalent clip in its OU implementation.
+			w_max = W_PRIME_SIGMA_RATIO_MAX * sigma_w_m
+			u_max = W_PRIME_SIGMA_RATIO_MAX * sigma_u_m
+			v_max = W_PRIME_SIGMA_RATIO_MAX * sigma_v_m
+			w_new = torch.clamp(w_new, min=-w_max, max=w_max)
+			u_new = torch.clamp(u_new, min=-u_max, max=u_max)
+			v_new = torch.clamp(v_new, min=-v_max, max=v_max)
+
+			xyz_m = xyz[mask]
+			xyz_m = engine.apply_vertical_turbulence(
+				xyz_m, w_new, dt_seconds=sub_dt_m, backward=True,
+			)
+			xyz_m = engine.apply_horizontal_turbulence(
+				xyz_m, u_new, v_new, dt_seconds=sub_dt_m, backward=True,
+			)
+			# W&F §6 smooth-wall reflection: joint (z, w') flip on those that
+			# crossed the surface within this substep.
+			xyz_m, w_new = engine.reflect_surface(xyz_m, w_new, z_surface=0.0)
+
+			xyz[mask] = xyz_m
+			u_p[mask] = u_new
+			v_p[mask] = v_new
+			w_p[mask] = w_new
+
+		return xyz, u_p, v_p, w_p
 
 	# ---- Turbulence profile assembly ----
 
@@ -783,7 +948,13 @@ class HannaScheme(TurbulenceScheme):
 
 	@staticmethod
 	def _grid_bounds(met_window: HourlyMetTensors) -> "GridInterpolationBounds":
-		"""Interpolation bounds for sampling met-grid fields per-particle."""
+		"""Interpolation bounds for sampling met-grid fields per-particle.
+
+		Passes the per-level AGL array (F9 fix, audit 2026-05-30) so the
+		vertical normalisation done by ``GPUEngine.normalize_particle_coordinates``
+		uses a proper piecewise-linear level-index lookup rather than the
+		linear-in-AGL approximation that was biased for pressure-level data.
+		"""
 
 		from lpdm.gpu_engine import GridInterpolationBounds
 
@@ -797,6 +968,7 @@ class HannaScheme(TurbulenceScheme):
 			lat_last=float(lat_arr[-1]),
 			alt_first=float(level_arr[0]),
 			alt_last=float(level_arr[-1]),
+			level_agl_m=tuple(float(v) for v in level_arr),
 		)
 
 	@staticmethod

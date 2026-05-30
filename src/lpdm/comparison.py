@@ -1,19 +1,25 @@
 """Footprint comparison utilities.
 
 Post-processing helpers for putting GLIDE footprints onto common ground with
-external references (FLEXPART, NAME, STILT). Two pieces:
+external references (FLEXPART, NAME, STILT). Three pieces:
 
 - `to_stilt_surface_footprint`: convert raw GLIDE residence-time footprint
   (units of `s` per cell, see `src/lpdm/footprint_gridder.py`) to STILT-style
   surface sensitivity in `m**2 s mol**-1`, equivalent to `(mol/mol)/(mol/m**2/s)`,
   per Lin et al. 2003 Eq. 5.
 
+- `surface_air_density_from_met`: build a spatially-varying surface air-density
+  field `ρ(lat, lon)` from a met store (`sp` and `t`) for use as the
+  `air_density_kg_m3` argument above. The S&F 2004 Eq. 8 footprint is
+  density-weighted at the source cell; using a scalar `ρ` is biased by ~few %
+  for deep-PBL receptors. (F10 in the 2026-05-30 physics audit.)
+
 - `regrid_conservative`: area-weighted mass-conservative regridding between
   rectangular lat/lon grids using `(sin(lat_top) - sin(lat_bottom)) × dlon`
   spherical-cell areas. Pure NumPy; no `xesmf` / `ESMPy` dependency. Limited to
   rectangular grids — sufficient for FLEXPART and NAME outputs.
 
-Neither function runs in the main runtime; both are intended for comparison
+None of these run in the main runtime; all are intended for comparison
 notebooks and validation scripts.
 """
 
@@ -27,6 +33,8 @@ import xarray as xr
 
 # Standard dry-air mean molar mass (kg/mol).
 DRY_AIR_M_KG_MOL = 0.02897
+# Dry-air gas constant (J/(kg·K)) — for the ideal-gas density helper.
+R_DRY_AIR_J_KG_K = 287.05
 
 
 # ---------------------------------------------------------------------------
@@ -121,6 +129,82 @@ def to_stilt_surface_footprint(
 	result.attrs["conversion_reference"] = "Lin et al. 2003 J. Geophys. Res. Eq. 5"
 	result.name = "footprint_stilt"
 	return result
+
+
+# ---------------------------------------------------------------------------
+# (b) Surface air-density field from met
+# ---------------------------------------------------------------------------
+
+
+def surface_air_density_from_met(
+	met_ds: xr.Dataset,
+	*,
+	sp_var: str = "surface_pressure",
+	t_var: str = "temperature",
+	t_lowest_level_kwargs: dict | None = None,
+	time_reduce: str | None = "mean",
+) -> xr.DataArray:
+	"""Build a spatially-varying surface air-density field `ρ(lat, lon)` from a
+	met store, for use as ``air_density_kg_m3`` in :func:`to_stilt_surface_footprint`.
+
+	Implements ``ρ = sp / (R_d · T_surface)`` using the ideal gas law. Temperature
+	is sampled at the lowest model level (or by the `t_lowest_level_kwargs`
+	override) as a surface proxy. The result is a 2D field on the met's
+	`(latitude, longitude)` grid; if the met has a time dim it's reduced by
+	`time_reduce` (default `"mean"`), since the footprint conversion is normally
+	a single-time operation. Set `time_reduce=None` to preserve time.
+
+	Per Seibert & Frank (2004) Eq. 8 the source-receptor footprint is
+	density-weighted at the source cell; using a scalar ρ in
+	:func:`to_stilt_surface_footprint` biases the result by a few percent for
+	deep-PBL receptors. Pass the output of this helper instead. (F10 in the
+	2026-05-30 physics audit.)
+
+	Args:
+		met_ds: xarray Dataset opened from an ARCO ERA5 Zarr store (or any
+			store with surface-pressure and 3D temperature variables on
+			`(latitude, longitude)` and optionally `(level, time)`).
+		sp_var: surface-pressure variable name. Default matches ARCO ERA5.
+		t_var: temperature variable name (must have a `level` dim).
+		t_lowest_level_kwargs: optional `xr.DataArray.isel(...)` kwargs to pick
+			a specific temperature level (e.g. `{"level": -1}`). Default selects
+			the lowest level present in the dataset.
+		time_reduce: `"mean"` (default) reduces the `time` dim by averaging;
+			`None` preserves it.
+
+	Returns:
+		`xarray.DataArray` named ``air_density_kg_m3`` with dims
+		`(latitude, longitude)` (and `time` if `time_reduce` is None).
+	"""
+
+	if sp_var not in met_ds.variables:
+		raise KeyError(f"met_ds missing surface-pressure variable {sp_var!r}")
+	if t_var not in met_ds.variables:
+		raise KeyError(f"met_ds missing temperature variable {t_var!r}")
+
+	sp = met_ds[sp_var]  # Pa (or kPa — let units validation happen at use)
+	t_field = met_ds[t_var]
+	if "level" not in t_field.dims:
+		raise ValueError(f"{t_var!r} must have a 'level' dim for the lowest-level selection")
+	if t_lowest_level_kwargs is None:
+		# Pick the lowest level (largest pressure ≈ surface). In ARCO ERA5 the
+		# level coord is in hPa and stored in descending altitude order (so
+		# the lowest altitude is at the *end* of the level array).
+		t_surface = t_field.isel(level=int(t_field["level"].argmax()))
+	else:
+		t_surface = t_field.isel(**t_lowest_level_kwargs)
+
+	rho = sp / (R_DRY_AIR_J_KG_K * t_surface)
+	rho.name = "air_density_kg_m3"
+	rho.attrs["units"] = "kg m**-3"
+	rho.attrs["formula"] = "sp / (R_d · T_lowest_level)"
+	rho.attrs["R_d_J_kg_K"] = float(R_DRY_AIR_J_KG_K)
+	if time_reduce == "mean" and "time" in rho.dims:
+		rho = rho.mean(dim="time")
+		rho.attrs["time_reduce"] = "mean"
+	elif time_reduce is not None and time_reduce != "mean":
+		raise ValueError(f"time_reduce must be 'mean' or None; got {time_reduce!r}")
+	return rho
 
 
 # ---------------------------------------------------------------------------
