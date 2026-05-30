@@ -33,6 +33,9 @@ release:
 
 turbulence:
   scheme: hanna_1982
+  meander:                              # unresolved-mesoscale horizontal turbulence
+    enabled: true                       #   (Maryon 1998 / FLEXPART §4.5)
+    coefficient: 0.16                   # FLEXPART `turbmesoscale`; σ = 0.16 × local grid-wind std
 
 # Output footprint grid: matches the FLEXPART reference grid cell-for-cell.
 # Bounds are *outer cell edges* (gridder treats lon_bounds[0]/[1] as the outermost

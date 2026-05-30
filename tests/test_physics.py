@@ -101,7 +101,8 @@ def test_rk2_advection_second_order_in_dt() -> None:
 
 
 def test_reflect_surface_handles_boundary_cases() -> None:
-    """Surface reflection should mirror below-surface particles around z_surface."""
+    """Surface reflection mirrors below-surface particles around z_surface AND
+    flips the sign of w' for reflected entries (Wilson & Flesch 1993 §6)."""
 
     engine = GPUEngine(device="cpu", dtype=torch.float64)
 
@@ -114,17 +115,22 @@ def test_reflect_surface_handles_boundary_cases() -> None:
         ],
         dtype=torch.float64,
     )
+    w_prime = torch.tensor([0.5, -0.3, -1.2, -2.0], dtype=torch.float64)
     initial_mass = particles[:, 3].sum()
 
-    reflected = engine.reflect_surface(particles, z_surface=0.0)
+    reflected, wp_reflected = engine.reflect_surface(particles, w_prime, z_surface=0.0)
 
     expected_z = torch.tensor([200.0, 0.0, 100.0, 1500.0], dtype=torch.float64)
+    # w' flips ONLY for entries whose z went below the surface (last two).
+    expected_w = torch.tensor([0.5, -0.3, 1.2, 2.0], dtype=torch.float64)
     assert torch.allclose(reflected[:, 2], expected_z)
+    assert torch.allclose(wp_reflected, expected_w)
     assert torch.allclose(initial_mass, reflected[:, 3].sum())
 
 
 def test_reflect_surface_nonzero_z() -> None:
-    """Reflection must use z_surface as the mirror plane, not z=0."""
+    """Reflection must use z_surface as the mirror plane, not z=0; w' flips for
+    reflected entries (Wilson & Flesch 1993 §6)."""
 
     engine = GPUEngine(device="cpu", dtype=torch.float64)
 
@@ -138,11 +144,35 @@ def test_reflect_surface_nonzero_z() -> None:
         ],
         dtype=torch.float64,
     )
+    w_prime = torch.tensor([-1.0, -0.5, 0.0, 0.7], dtype=torch.float64)
 
-    reflected = engine.reflect_surface(particles, z_surface=z_surf)
+    reflected, wp_reflected = engine.reflect_surface(particles, w_prime, z_surface=z_surf)
 
     expected_z = torch.tensor([150.0, 110.0, 100.0, 200.0], dtype=torch.float64)
+    # The first two were below z_surf and reflected; their w' flips. The third is
+    # exactly at z_surf (not strictly below) and the fourth is above, so neither flips.
+    expected_w = torch.tensor([1.0, 0.5, 0.0, 0.7], dtype=torch.float64)
     assert torch.allclose(reflected[:, 2], expected_z)
+    assert torch.allclose(wp_reflected, expected_w)
+
+
+def test_reflect_surface_w_flip_resolves_one_way_downward_drift() -> None:
+    """Regression for F1. A particle reflected with `w' < 0` MUST come out with
+    `w' > 0`; otherwise on the next displacement step `z + w'·dt` pushes it back
+    below the surface and the particle is trapped in a downward-drift bounce until
+    the OU relaxes w' to ~0 (~τ_L worth of steps). That bounce inflates near-surface
+    residence time and biases the surface footprint (Wilson & Flesch 1993 §6)."""
+
+    engine = GPUEngine(device="cpu", dtype=torch.float64)
+    particles = torch.tensor([[0.0, 0.0, -10.0, 1.0]], dtype=torch.float64)
+    w_prime = torch.tensor([-2.0], dtype=torch.float64)
+
+    _, wp_out = engine.reflect_surface(particles, w_prime, z_surface=0.0)
+
+    assert float(wp_out[0]) > 0, (
+        "reflected particle still has downward w'; next displacement step will "
+        "push it back through the surface"
+    )
 
 
 def test_apply_horizontal_turbulence_displaces_with_cos_lat_correction() -> None:
@@ -302,9 +332,16 @@ def test_well_mixed_condition_drift_keeps_uniform_distribution() -> None:
                 w, t_lagrangian=tl, sigma_w2=sig2, dt_seconds=dt, drift=drift,
             )
             z = z + w * dt
-            # Reflect at both boundaries (displacement << H each step).
-            z = torch.where(z < 0.0, -z, z)
-            z = torch.where(z > H, 2.0 * H - z, z)
+            # Reflect at both boundaries AND flip w (Wilson & Flesch 1993 §6 —
+            # smooth-wall reflection is the joint mapping `(z, w) → (2B − z, −w)`).
+            # Reflecting only z would let reflected particles keep their inward
+            # velocity for ~τ_L worth of steps and bias near-boundary residence,
+            # masking F1 the same way as the production bug.
+            below = z < 0.0
+            above = z > H
+            z = torch.where(below, -z, z)
+            z = torch.where(above, 2.0 * H - z, z)
+            w = torch.where(below | above, -w, w)
         return z
 
     # Fraction of particles in the low-σ bottom third of the column.

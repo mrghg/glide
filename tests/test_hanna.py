@@ -261,3 +261,140 @@ def test_free_trop_diffusivity_never_zero() -> None:
     ri = torch.tensor([100.0], dtype=torch.float64)  # extremely stable
     k_z = free_trop_diffusivity(z, shear, ri)
     assert float(k_z[0]) >= FT_KZ_FLOOR_M2_S
+
+
+# ---------------------------------------------------------------------------
+# Meander (unresolved-mesoscale) horizontal turbulence
+# ---------------------------------------------------------------------------
+
+
+def test_meander_windowed_std_uniform_field_is_zero() -> None:
+    """A spatially-uniform wind field has no local variability → σ_meander = 0."""
+
+    field = torch.full((3, 5, 5), 7.0, dtype=torch.float64)
+    std = HannaScheme._windowed_std(field, radius=1)
+    assert std.shape == field.shape
+    assert torch.allclose(std, torch.zeros_like(std), atol=1e-6)
+
+
+def test_meander_windowed_std_matches_numpy_population_std() -> None:
+    """The windowed std matches a per-cell numpy population std over the clipped
+    (2r+1)² neighbourhood (edge cells use only the valid neighbours)."""
+
+    rng = np.random.default_rng(0)
+    arr = rng.standard_normal((1, 6, 7))
+    field = torch.as_tensor(arr, dtype=torch.float64)
+    radius = 1
+    got = HannaScheme._windowed_std(field, radius=radius).numpy()
+
+    z, ny, nx = arr.shape
+    want = np.empty_like(arr)
+    for k in range(z):
+        for j in range(ny):
+            for i in range(nx):
+                window = arr[
+                    k,
+                    max(0, j - radius) : j + radius + 1,
+                    max(0, i - radius) : i + radius + 1,
+                ]
+                want[k, j, i] = window.std()  # population (ddof=0)
+    np.testing.assert_allclose(got, want, atol=1e-10)
+
+
+def test_meander_constructor_validates_params() -> None:
+    """Out-of-range meander parameters are rejected at construction."""
+
+    import pytest
+
+    with pytest.raises(ValueError):
+        HannaScheme(meander_coefficient=0.0)
+    with pytest.raises(ValueError):
+        HannaScheme(meander_stencil_radius=0)
+    with pytest.raises(ValueError):
+        HannaScheme(meander_timescale_seconds=0.0)
+
+
+def test_dt_too_large_warning_fires_once(caplog) -> None:
+    """F4 Tier 1: HannaScheme.step logs a single WARNING when min(T_L) < 5·Δt
+    (Stohl & Thomson 1999 use c=0.05; Wilson & Flesch 1993 App. derive the linear
+    Δt/T_L bias). The warning is rate-limited to once per scheme instance so a
+    multi-month run doesn't drown its log in repeats."""
+
+    import logging
+    import math
+    from datetime import datetime, timedelta, timezone
+
+    from lpdm.gpu_engine import GPUEngine
+    from lpdm.met_reader import HourlyMetTensors, MetFieldMetadata
+
+    # Build a tiny met window with uniform fields. ustar=0.4, near-surface release
+    # → T_Lw drops to O(seconds), so dt=300 s comfortably trips the warning.
+    n_lev, n_lat, n_lon = 4, 4, 4
+    shape = (n_lev, n_lat, n_lon)
+    chans = {
+        "u": torch.zeros(shape), "v": torch.zeros(shape), "w": torch.zeros(shape),
+        "blh": torch.full(shape, 1500.0), "sp": torch.full(shape, 101325.0),
+        "t": torch.full(shape, 280.0), "ustar": torch.full(shape, 0.4),
+        "shf": torch.zeros(shape),
+    }
+    names = ("u", "v", "w", "blh", "sp", "t", "ustar", "shf")
+    fields = torch.stack([chans[n] for n in names], dim=0)
+    level = np.linspace(0.0, 4000.0, n_lev)
+    t0 = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    metadata = MetFieldMetadata(
+        lon=np.linspace(-2.0, 2.0, n_lon), lat=np.linspace(-2.0, 2.0, n_lat),
+        level=level, pressure_level_hpa=np.linspace(1000.0, 600.0, n_lev),
+        time_start=t0, time_end=t0 + timedelta(hours=1),
+        variable_units={n: "m/s" for n in names},
+    )
+    height = torch.as_tensor(level, dtype=torch.float32).view(n_lev, 1, 1).expand(shape).contiguous()
+    met = HourlyMetTensors(
+        hour_start=fields, hour_end=fields, metadata=metadata,
+        channel_names=names, height_agl_m=height,
+    )
+
+    engine = GPUEngine(device="cpu")
+    scheme = HannaScheme()
+    n = 8
+    particles = torch.zeros(n, 4, dtype=torch.float32)
+    particles[:, 2] = 1.0  # release at z=1 m → T_Lw ~ κ·z/σ_w ~ 1 s, far below 5·dt
+    particles[:, 3] = 1.0
+    state = scheme.initialize_state(n, device=torch.device("cpu"), dtype=torch.float32)
+    active = torch.ones(n, dtype=torch.bool)
+
+    with caplog.at_level(logging.WARNING, logger="lpdm.turbulence.hanna"):
+        for _ in range(3):
+            particles, state = scheme.step(
+                particles, state, met, t_alpha=0.5, dt_seconds=300.0,
+                active_mask=active, engine=engine,
+            )
+
+    warnings = [r for r in caplog.records if "dt" in r.getMessage() and "T_L" in r.getMessage()]
+    assert len(warnings) == 1, f"expected exactly one dt-vs-T_L warning, got {len(warnings)}"
+    assert "Hanna turbulence" in warnings[0].getMessage()
+
+
+def test_dt_too_large_warning_silent_when_dt_is_small() -> None:
+    """No warning when dt is comfortably smaller than min(T_L) (i.e. the
+    integration is already in the recommended regime)."""
+
+    scheme = HannaScheme()
+    # Large T_L (1000 s) vs tiny dt (1 s) → no warning.
+    T_L = torch.tensor([1000.0, 500.0, 800.0])
+    scheme._warn_if_dt_too_large(T_L, T_L, T_L, dt_seconds=1.0)
+    assert scheme._warned_dt is False
+
+
+def test_meander_state_keys_only_when_enabled() -> None:
+    """Meander state (u_meander, v_meander) is allocated only when enabled, so
+    the disabled default keeps the original {u,v,w}_prime state layout."""
+
+    off = HannaScheme(meander_enabled=False).initialize_state(
+        4, device=torch.device("cpu"), dtype=torch.float32
+    )
+    assert set(off) == {"u_prime", "v_prime", "w_prime"}
+
+    on = HannaScheme(meander_enabled=True).initialize_state(
+        4, device=torch.device("cpu"), dtype=torch.float32
+    )
+    assert set(on) == {"u_prime", "v_prime", "w_prime", "u_meander", "v_meander"}

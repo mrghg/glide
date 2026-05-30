@@ -260,17 +260,41 @@ class GPUEngine:
 		out[:, 1] = out[:, 1] + direction * vp * float(dt_seconds) / meters_per_deg_lat
 		return out
 
-	def reflect_surface(self, particles: torch.Tensor, *, z_surface: float = 0.0) -> torch.Tensor:
-		"""Reflect particles crossing below the lower boundary back into domain."""
+	def reflect_surface(
+		self,
+		particles: torch.Tensor,
+		w_prime: torch.Tensor,
+		*,
+		z_surface: float = 0.0,
+	) -> tuple[torch.Tensor, torch.Tensor]:
+		"""Reflect particles crossing below the lower boundary back into domain.
+
+		Per Wilson & Flesch (1993) §6, smooth-wall reflection is the joint mapping
+		``(z, w) → (2·z_surface − z, −w)`` — both position AND vertical perturbation
+		velocity must be reversed. Reflecting only `z` (the older behaviour) leaves
+		each reflected particle pointing downward into the boundary for ~τ_L worth
+		of steps, biasing near-surface residence time and inflating the surface
+		footprint. See `docs/turbulence.md` §3.2.4 and `docs/LPDM_physics_spec.md`
+		§B for the derivation and the WMC consequence.
+
+		Returns ``(particles, w_prime)`` with the same shapes as inputs; entries
+		that did not reflect are unchanged.
+		"""
 
 		if particles.ndim != 2 or particles.shape[1] != 4:
 			raise ValueError("particles must have shape (N, 4)")
+		if w_prime.ndim != 1 or w_prime.shape[0] != particles.shape[0]:
+			raise ValueError("w_prime must have shape (N,) matching particles")
 
 		state = particles.to(device=self.device, dtype=self.dtype)
+		wp = w_prime.to(device=self.device, dtype=self.dtype)
+
 		out = state.clone()
+		wp_out = wp.clone()
 		below = out[:, 2] < float(z_surface)
 		out[below, 2] = 2.0 * float(z_surface) - out[below, 2]
-		return out
+		wp_out[below] = -wp_out[below]
+		return out, wp_out
 
 	def diffuse_positions_periodic(
 		self,

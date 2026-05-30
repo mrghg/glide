@@ -217,11 +217,11 @@ exposed by the met reader), not the bbox-averaged `metadata.level`. The resultin
 σ/T_L fields are built once per step on the met grid and interpolated trilinearly
 at each above-BL particle (reusing the advection's coordinate normalisation). The
 `K_floor` guarantees the FT is never fully frozen. Horizontal FT turbulence is
-treated as isotropic (`σ_u = σ_v = σ_w`) for now; the unresolved-mesoscale
-"meander" horizontal term (NAME-style, resolution-dependent) is a separate,
-deferred item. Implemented as free functions `potential_temperature`,
-`brunt_vaisala_squared`, `gradient_richardson`, `free_trop_diffusivity`,
-`free_trop_sigma_TL` in `hanna.py`.
+treated as isotropic (`σ_u = σ_v = σ_w`); the unresolved-mesoscale "meander"
+horizontal term (which adds horizontal spread at all altitudes, BL and FT alike)
+is handled by a separate process — see §3.2.8. Implemented as free functions
+`potential_temperature`, `brunt_vaisala_squared`, `gradient_richardson`,
+`free_trop_diffusivity`, `free_trop_sigma_TL` in `hanna.py`.
 
 #### 3.2.4 Surface-layer treatment
 
@@ -234,50 +234,137 @@ When `z < z_sl` (surface-layer top, taken as `0.1 h` in FLEXPART), use Monin-Obu
 T_L  = κ z / σ
 ```
 
-Implementation will match FLEXPART `mod_par_var_pbl.f90` / `hanna.f90` (or equivalent) so the surface layer behaves consistently with the reference.
+Implementation matches FLEXPART `mod_par_var_pbl.f90` / `hanna.f90` (or equivalent) so the surface layer behaves consistently with the reference.
 
-#### 3.2.5 Drift handling — Thomson well-mixed term
+**Reflection (Wilson & Flesch 1993 §6).** Smooth-wall reflection at `z = 0` is the
+joint mapping `(z, w) → (2·z_surf − z, −w)` — **both** position and vertical
+perturbation velocity must reverse. Reflecting only `z` (the pre-audit behaviour,
+F1 in the 2026-05-30 physics audit) leaves the reflected particle pointing
+downward into the boundary for ~τ_L worth of steps, biasing near-surface
+residence and inflating the surface footprint. `engine.reflect_surface` returns
+`(particles, w_prime)` to make the joint reversal hard to omit. W&F §7b show
+even correctly-implemented smooth-wall reflection is only WMC-exact for
+*homogeneous* Gaussian turbulence; in the inhomogeneous NSL it is approximate and
+the bias scales with `Δt/τ` (see §3.2.7).
 
-**Added 2026-05-29** (the original piecewise-homogeneous no-drift treatment
-under-dispersed the surface footprint badly — particles drifted up the σ_w
-gradient, accumulated above the BL, and stopped recycling to the surface).
+#### 3.2.5 Drift handling — Thomson well-mixed term + Stohl-Thomson density correction
 
-The vertical OU update now carries the Thomson (1987) well-mixed drift:
+**Added 2026-05-29** (well-mixed drift) and **2026-05-30** (density correction).
+The original piecewise-homogeneous no-drift treatment under-dispersed the
+surface footprint badly — particles drifted up the σ_w gradient, accumulated
+above the BL, and stopped recycling to the surface.
+
+The vertical OU update carries the full Thomson (1987) / Stohl-Thomson (1999)
+WMC drift for a ρ-weighted Gaussian `g_a`:
 
 ```
-a_drift = ½ (1 + w'²/σ_w²) ∂σ_w²/∂z
+a_drift = ½ (1 + w'²/σ_w²) ∂σ_w²/∂z   +   (σ_w² / ρ) · ∂ρ/∂z
+          └─── σ-gradient term ───┘       └── density term ──┘
+                (Thomson 1987)              (Stohl & Thomson 1999 Eq 3)
 ```
 
-`∂σ_w²/∂z` is a central finite difference of the *full* column σ_w profile
-(in-BL → surface-layer → free-troposphere), so it spans the regime transitions.
-`engine.update_langevin_velocity` takes a `drift` argument and applies it as a
-forward-Euler increment on top of the exact-OU homogeneous part (which still
-preserves the stationary variance σ²). The increment is capped at one σ_w per
-step so the sharp σ_w kink at the BL top can't blow the velocity up.
+- `∂σ_w²/∂z` is a central finite difference of the *full* column σ_w profile
+  (in-BL → surface-layer → free-troposphere), so it spans the regime transitions.
+- `ρ = p/(R_d·T)` and `∂ρ/∂z` are computed once per step on the met grid
+  (`_density_fields`, mirroring the FT-closure machinery) using model-level
+  pressure, temperature, and the per-column geopotential height; trilinearly
+  sampled per particle.
+- The density term is the WMC-required correction for the fact that air density
+  falls with height: without it, an initially ρ-weighted distribution relaxes
+  toward flat, biasing surface concentrations downward (Stohl & Thomson 1999;
+  their CAPTEX runs measured +5.5% mean / +1–15% range on surface concentrations).
+- `engine.update_langevin_velocity` applies both pieces as a forward-Euler
+  `drift·dt` increment on top of the exact-OU homogeneous part. The increment is
+  capped at one σ_w per step so the sharp σ_w kink at the BL top can't blow the
+  velocity up between substeps (a tracking artefact that goes away if `dt` is
+  small enough per §3.2.7).
 
 **Backward-Langevin sign.** GLIDE runs backward in time; the displacement
 negates w'·dt. The random forcing is symmetric so that's harmless, but the drift
 is *deterministic* and must enter with reversed sign for the adjoint/backward
-Langevin (Thomson 1987 §5 reciprocity; Flesch, Wilson & Yee 1995) so the
-*physical* position drift still points down-gradient (toward the BL). Getting
-this sign wrong inverts the correction into a one-way upward pump — empirically
-it lofted the entire MHD population to ~2 km and held it there. The scheme
-pre-negates the drift before the backward displacement; covered by
-`test_hanna_well_mixed_no_runaway_lofting` and the engine-level
-`test_well_mixed_condition_drift_keeps_uniform_distribution`.
+Langevin. From Flesch, Wilson & Yee (1995) the backward drift is
+`a_b = −a_f + b² · ∂ln g_a/∂w = −a_f − 2w/τ`, which for symmetric Gaussian `g_a`
+flips **both** the σ-gradient and density inhomogeneity terms in lockstep while
+leaving the `−w/τ` relaxation unchanged. So `drift_w = −drift_w` after assembling
+the forward formula gives the correct backward drift for both terms.
+
+Getting this sign wrong inverts the σ-gradient correction into a one-way upward
+pump — empirically it lofted the entire MHD population to ~2 km and held it
+there. Covered by `test_v1_well_mixed_hanna_backward_path` (constant ρ, flat
+distribution preserved) and `test_v1_density_weighted_well_mixed_with_F2`
+(varying ρ, ρ-weighted distribution preserved).
 
 Horizontal components (u', v') do not carry a drift — the inhomogeneity is in z,
 and FLEXPART applies the well-mixed correction to the vertical only.
 
 #### 3.2.6 State
 
-`{"w_prime": (N,), "u_prime": (N,), "v_prime": (N,)}`.
+`{"w_prime": (N,), "u_prime": (N,), "v_prime": (N,)}`, plus
+`{"u_meander": (N,), "v_meander": (N,)}` when meander is enabled (§3.2.8).
 
 Initial state: zeros. A strictly correct Thomson formulation would initialise from the local σ distribution; this is a deliberate simplification because particles equilibrate to the local σ within ~`T_L` (typically 100 s) and the release window itself is usually longer.
 
 #### 3.2.7 Time-step constraint
 
-The exact-OU update is unconditionally stable, but accuracy degrades when `dt > T_L / 5` (standard rule-of-thumb). The runtime currently uses `dt = 300 s`; near-surface unstable `T_Lw` can drop to 10–30 s. M1 adds a runtime warning when `min(T_L) < 5 dt`, with a recommendation to reduce `--dt-seconds`. We do not auto-substep.
+The exact-OU update is unconditionally stable (the homogeneous part preserves
+the stationary variance for any `dt`), but accuracy of the inhomogeneous-drift
+increment degrades when `dt > T_L / 5` (Wilson & Flesch 1993 Appendix derive
+an explicit "Δt-bias velocity" `wB/σ_w ≈ −α·β·(Δt/τ)` for the NSL; α ≈ β ≈ 0.5).
+Stohl & Thomson (1999) use the stricter `Δt ≤ 0.05·T_L`. The runtime uses
+`dt = 60–300 s` in current configs; near-surface near-floor `T_Lw` can drop to
+1–30 s. `HannaScheme.step` logs a `WARNING` (once per scheme instance) when
+`min(active T_L) < 5·dt`, citing the dt/T_L ratio. We do not auto-substep
+(Tier 2 follow-up). The reflection-related part of this same numerical concern
+(W&F §7b's reflection-with-finite-Δt/τ bias) is bounded by the same Δt rule.
+
+#### 3.2.8 Meander — unresolved-mesoscale horizontal turbulence
+
+**Added 2026-05-29.** The Hanna/FT scheme above parameterizes 3-D turbulence
+(small eddies) and grid-scale advection (the resolved wind), but leaves a gap:
+quasi-2-D mesoscale motions *larger* than turbulent eddies yet *smaller* than the
+met grid can resolve. Neglecting them under-disperses the plume horizontally — the
+residual seen in the GLIDE↔FLEXPART comparison after the FT/drift fixes.
+
+GLIDE follows the **Maryon (1998) "meandering" scheme** that NAME originated and
+FLEXPART adopted (Stohl et al. 2005, §4.5): an *independent* horizontal Langevin
+(OU) process added on top of the Hanna `u'/v'` turbulence, applied at **all
+altitudes**:
+
+```
+σ_meander,i = C_meander · stddev_local(U_i)        i ∈ {u, v}
+τ_meander   = ½ · (met field interval)             (≈ 1800 s for hourly ERA5)
+```
+
+- `stddev_local(U_i)` is the standard deviation of the grid-scale wind component
+  over the `(2r+1)²` horizontal neighbourhood of the particle (`r =
+  meander.stencil_radius`, default 1 → 3×3), computed per model level and
+  interpolated trilinearly to the particle. The assumption (Maryon; Stohl et al.
+  1995) is that the *grid-scale* wind variability carries information about the
+  *sub-grid* variability.
+- `C_meander` is FLEXPART's `turbmesoscale` constant, default **0.16**
+  (`meander.coefficient`).
+- The timescale is half the input-field interval, on the reasoning that linear
+  interpolation between fields already recovers about half the sub-interval
+  variability.
+
+**Resolution dependence** falls out for free: a finer met grid has smaller wind
+differences between neighbouring cells → smaller `stddev_local` → smaller meander,
+because more of the mesoscale is already resolved. This is the behaviour expected
+of NAME's resolution-dependent meander, without a hand-tuned per-resolution
+constant.
+
+The process has **no drift** (the well-mixed inhomogeneity is vertical) and uses
+symmetric random forcing, so the backward displacement needs no sign flip (unlike
+the vertical well-mixed term, §3.2.5). State: `{u_meander, v_meander}`, zeros at
+release. Built once per step on the met grid (`_meander_sigma_fields`,
+`_windowed_std`) and sampled per-particle.
+
+Config (`turbulence.meander`): `enabled` (default **off** so existing baselines
+are bit-identical), `coefficient`, `stencil_radius`, `timescale_seconds` (null →
+the half-interval default). Enabled in the shipped `example_mhd_january*.yaml`.
+Hanna-only; ignored by other schemes. Covered by
+`test_hanna_meander_increases_horizontal_spread` and the `_windowed_std` unit
+tests.
 
 ## 4. Implementation plan
 

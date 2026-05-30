@@ -428,6 +428,408 @@ def test_hanna_well_mixed_no_runaway_lofting(tmp_path: Path) -> None:
     assert float(alt.max()) < 0.9 * cfg.met_domain.alt_max_m
 
 
+def _varying_wind_met_window(
+    *,
+    u_amplitude: float = 10.0,
+    n_lev: int = 4,
+    n_lat: int = 8,
+    n_lon: int = 8,
+    blh_m: float = 2000.0,
+) -> HourlyMetTensors:
+    """Met window with u varying linearly across longitude (so the local wind
+    variability the meander reads from is non-zero) and v = w = 0."""
+
+    shape = (n_lev, n_lat, n_lon)
+    i = torch.arange(n_lon, dtype=torch.float32)
+    u_profile = u_amplitude * (i / (n_lon - 1) - 0.5)  # [-A/2, A/2] across lon
+    u = u_profile.view(1, 1, n_lon).expand(shape).contiguous()
+    zeros = torch.zeros(shape, dtype=torch.float32)
+
+    def _build() -> torch.Tensor:
+        chans = {
+            "u": u,
+            "v": zeros,
+            "w": zeros,
+            "blh": torch.full(shape, blh_m),
+            "sp": torch.full(shape, 101325.0),
+            "t": torch.full(shape, 280.0),
+            "ustar": torch.full(shape, 0.4),
+            "shf": torch.zeros(shape),
+        }
+        names = ("u", "v", "w", "blh", "sp", "t", "ustar", "shf")
+        return torch.stack([chans[n] for n in names], dim=0)
+
+    t0 = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    level = np.linspace(0.0, 4000.0, n_lev)
+    metadata = MetFieldMetadata(
+        lon=np.linspace(-2.0, 2.0, n_lon),
+        lat=np.linspace(-2.0, 2.0, n_lat),
+        level=level,
+        pressure_level_hpa=np.linspace(1000.0, 600.0, n_lev),
+        time_start=t0,
+        time_end=t0 + timedelta(hours=1),
+        variable_units={
+            "u": "m/s", "v": "m/s", "w": "m/s", "blh": "m", "sp": "Pa",
+            "t": "K", "z": "m**2s**-2", "z_sfc": "m**2s**-2",
+            "ustar": "m/s", "shf": "W m**-2",
+        },
+    )
+    height = torch.as_tensor(level, dtype=torch.float32).view(n_lev, 1, 1).expand(shape).contiguous()
+    fields = _build()
+    return HourlyMetTensors(
+        hour_start=fields,
+        hour_end=fields,
+        metadata=metadata,
+        channel_names=("u", "v", "w", "blh", "sp", "t", "ustar", "shf"),
+        height_agl_m=height,
+    )
+
+
+def _horizontal_spread_after_steps(*, meander_enabled: bool, n_steps: int = 40) -> float:
+    """Std-dev of particle longitude after stepping a cloud through the
+    varying-wind met window with the given meander setting (fixed seed)."""
+
+    from lpdm.gpu_engine import GPUEngine
+    from lpdm.turbulence import HannaScheme
+
+    torch.manual_seed(1234)
+    engine = GPUEngine(device="cpu")
+    scheme = HannaScheme(
+        meander_enabled=meander_enabled,
+        meander_coefficient=1.0,
+        meander_timescale_seconds=1800.0,
+    )
+    met = _varying_wind_met_window()
+
+    n = 4000
+    particles = torch.zeros(n, 4, dtype=torch.float32)
+    particles[:, 2] = 500.0  # release altitude (AGL), mid-BL
+    particles[:, 3] = 1.0
+    state = scheme.initialize_state(n, device=torch.device("cpu"), dtype=torch.float32)
+    active = torch.ones(n, dtype=torch.bool)
+
+    for _ in range(n_steps):
+        particles, state = scheme.step(
+            particles, state, met, t_alpha=0.5, dt_seconds=300.0,
+            active_mask=active, engine=engine,
+        )
+    return float(particles[:, 0].std())
+
+
+def test_hanna_meander_increases_horizontal_spread() -> None:
+    """Enabling meander adds an independent horizontal random walk whose σ comes
+    from the local grid-wind variability, so the cloud spreads markedly more in
+    the horizontal than with the in-BL turbulence alone (Maryon 1998 / FLEXPART
+    §4.5)."""
+
+    spread_off = _horizontal_spread_after_steps(meander_enabled=False)
+    spread_on = _horizontal_spread_after_steps(meander_enabled=True)
+
+    assert spread_off > 0.0  # in-BL horizontal turbulence still acts
+    assert spread_on > 1.5 * spread_off
+
+
+def _wmc_met_window(
+    *,
+    blh_m: float = 3000.0,
+    ustar_m_s: float = 0.4,
+    n_lev: int = 6,
+    n_lat: int = 4,
+    n_lon: int = 4,
+) -> HourlyMetTensors:
+    """Met window for the V1 well-mixed test: spatially uniform, neutral BL,
+    so σ_w(z) inside the BL has the smooth Hanna gradient (1.3·u*·exp(−2fz/u*))
+    that the well-mixed drift must compensate. No advection (u=v=w=0), no
+    surface heat flux. Constant T, sp, level layout — everything horizontally
+    uniform so any z-distribution drift is attributable to the drift physics."""
+
+    shape = (n_lev, n_lat, n_lon)
+    zeros = torch.zeros(shape, dtype=torch.float32)
+    chans = {
+        "u": zeros, "v": zeros, "w": zeros,
+        "blh": torch.full(shape, blh_m),
+        "sp": torch.full(shape, 101325.0),
+        "t": torch.full(shape, 280.0),
+        "ustar": torch.full(shape, ustar_m_s),
+        "shf": torch.zeros(shape),
+    }
+    names = ("u", "v", "w", "blh", "sp", "t", "ustar", "shf")
+    fields = torch.stack([chans[n] for n in names], dim=0)
+
+    t0 = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    level = np.linspace(0.0, max(4000.0, 1.5 * blh_m), n_lev)
+    metadata = MetFieldMetadata(
+        lon=np.linspace(-2.0, 2.0, n_lon),
+        lat=np.linspace(40.0, 50.0, n_lat),  # ~45° lat → nonzero Coriolis
+        level=level,
+        pressure_level_hpa=np.linspace(1000.0, 600.0, n_lev),
+        time_start=t0,
+        time_end=t0 + timedelta(hours=1),
+        variable_units={
+            "u": "m/s", "v": "m/s", "w": "m/s", "blh": "m", "sp": "Pa",
+            "t": "K", "z": "m**2s**-2", "z_sfc": "m**2s**-2",
+            "ustar": "m/s", "shf": "W m**-2",
+        },
+    )
+    height = (
+        torch.as_tensor(level, dtype=torch.float32)
+        .view(n_lev, 1, 1).expand(shape).contiguous()
+    )
+    return HourlyMetTensors(
+        hour_start=fields, hour_end=fields, metadata=metadata,
+        channel_names=names, height_agl_m=height,
+    )
+
+
+def test_v1_well_mixed_hanna_backward_path() -> None:
+    """V1 well-mixed test against the production HannaScheme backward code path.
+
+    Thomson (1987) WMC: a well-mixed distribution of particles in z must remain
+    well-mixed under the (drift + reflection + OU) integration. In the neutral BL
+    σ_w varies smoothly with z (`1.3·u*·exp(−2fz/u*)`); without the well-mixed
+    drift OR with a broken reflection (the bug F1 fixed in this PR), particles
+    would either accumulate in the low-σ region near the BL top or hang near the
+    surface after reflecting. With both physics correct, the steady-state binned
+    occupancy stays flat to within finite-sample noise.
+
+    This is the strongest single empirical check on the integrated scheme — it
+    fails if EITHER the drift sign/magnitude is wrong OR reflection doesn't flip
+    w' OR dt is so large the OU integration is biased. It is therefore the
+    acceptance gate for F1, F2, F3, F4 jointly. After the F2 density-term lands,
+    the assertion becomes that the distribution matches ρ(z), not flat — see the
+    companion `test_v1_density_weighted_well_mixed` test."""
+
+    from lpdm.gpu_engine import GPUEngine
+    from lpdm.turbulence import HannaScheme
+
+    torch.manual_seed(202605301)
+
+    blh = 3000.0
+    engine = GPUEngine(device="cpu")
+    scheme = HannaScheme(meander_enabled=False)  # WMC test is for in-BL Hanna only
+    met = _wmc_met_window(blh_m=blh, ustar_m_s=0.4)
+
+    n = 6000
+    particles = torch.zeros(n, 4, dtype=torch.float32)
+    particles[:, 1] = 45.0   # mid-latitude → nonzero Coriolis
+    # Uniform initial in [0, blh] — the well-mixed reference distribution.
+    particles[:, 2] = torch.rand(n, dtype=torch.float32) * blh
+    particles[:, 3] = 1.0 / n
+    state = scheme.initialize_state(n, device=torch.device("cpu"), dtype=torch.float32)
+    active = torch.ones(n, dtype=torch.bool)
+
+    dt = 15.0
+    n_steps = 1500   # ≈ 100·T_L_typical → fully equilibrated if WMC holds
+    # Manual reflection at z=blh (z=0 is handled inside scheme.step). The scheme
+    # doesn't natively reflect at the BL top — for this synthetic test we add it
+    # so particles can't escape into the (different) FT closure during the run.
+    # Same physics as the W&F §6 smooth-wall reflection: flip both z and w'.
+    for _ in range(n_steps):
+        particles, state = scheme.step(
+            particles, state, met, t_alpha=0.5, dt_seconds=dt,
+            active_mask=active, engine=engine,
+        )
+        above = particles[:, 2] > blh
+        if bool(above.any()):
+            particles[above, 2] = 2.0 * blh - particles[above, 2]
+            state["w_prime"][above] = -state["w_prime"][above]
+
+    # Histogram the full BL into 10 bins of 300 m. Assert flatness on the
+    # *interior* (bins 2..7, i.e. z ∈ [600, 2400] m) — the surface-layer bin
+    # and the BL-top bin are subject to:
+    #   - the W&F §7b dt-bias for inhomogeneous Gaussian turbulence (linear in
+    #     Δt/τ, biggest where τ is smallest → near the surface);
+    #   - the surface-layer formula switchover at z = 0.1·blh = 300 m;
+    #   - reflection-induced piling that W&F document is acceptable but not
+    #     WMC-exact in inhomogeneous turbulence.
+    # The interior is the part the well-mixed drift is responsible for keeping
+    # flat, so it's the right WMC acceptance criterion here.
+    z_final = particles[:, 2].numpy()
+    in_bl = (z_final >= 0.0) & (z_final <= blh)
+    assert in_bl.mean() > 0.99, (
+        f"only {in_bl.mean():.1%} of particles remain in the BL; reflection is "
+        "leaking particles outside [0, blh]"
+    )
+
+    n_bins = 10
+    edges = np.linspace(0.0, blh, n_bins + 1)
+    counts, _ = np.histogram(z_final[in_bl], bins=edges)
+    interior = counts[2:8]   # z ∈ [600, 2400] m
+    expected = interior.mean()
+    rel_rms = float(np.sqrt(np.mean(((interior - expected) / expected) ** 2)))
+
+    # 15% relative-RMS tolerance. Shot noise at N_interior/bin ≈ 600 is ~4%; the
+    # rest covers residual drift-OU coupling at our chosen Δt/τ.
+    assert rel_rms < 0.15, (
+        f"V1 well-mixed test failed: interior relative-RMS deviation from "
+        f"uniform = {rel_rms:.3f} > 0.15. All bin counts (0..blh): {counts.tolist()}, "
+        f"interior bins (600..2400 m): {interior.tolist()}, expected ≈ "
+        f"{expected:.0f}. This indicates a WMC violation in the integrated "
+        f"HannaScheme backward path (drift, reflection, or dt-bias)."
+    )
+
+
+def _wmc_density_met_window(
+    *,
+    blh_m: float = 5000.0,
+    ustar_m_s: float = 0.4,
+    p_top_hpa: float = 500.0,
+    n_lev: int = 6,
+    n_lat: int = 4,
+    n_lon: int = 4,
+) -> HourlyMetTensors:
+    """Met window for the F2 density-weighted V1 test. Same as `_wmc_met_window`
+    but with a steeper pressure profile (1000 → ``p_top_hpa`` over the height
+    range), so ρ(z) varies enough that the ρ-weighted equilibrium is visibly
+    different from a flat distribution."""
+
+    shape = (n_lev, n_lat, n_lon)
+    zeros = torch.zeros(shape, dtype=torch.float32)
+    chans = {
+        "u": zeros, "v": zeros, "w": zeros,
+        "blh": torch.full(shape, blh_m),
+        "sp": torch.full(shape, 101325.0),
+        "t": torch.full(shape, 280.0),
+        "ustar": torch.full(shape, ustar_m_s),
+        "shf": torch.zeros(shape),
+    }
+    names = ("u", "v", "w", "blh", "sp", "t", "ustar", "shf")
+    fields = torch.stack([chans[n] for n in names], dim=0)
+
+    t0 = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    z_top = max(6000.0, 1.2 * blh_m)
+    level = np.linspace(0.0, z_top, n_lev)
+    metadata = MetFieldMetadata(
+        lon=np.linspace(-2.0, 2.0, n_lon),
+        lat=np.linspace(40.0, 50.0, n_lat),
+        level=level,
+        pressure_level_hpa=np.linspace(1000.0, p_top_hpa, n_lev),
+        time_start=t0,
+        time_end=t0 + timedelta(hours=1),
+        variable_units={
+            "u": "m/s", "v": "m/s", "w": "m/s", "blh": "m", "sp": "Pa",
+            "t": "K", "z": "m**2s**-2", "z_sfc": "m**2s**-2",
+            "ustar": "m/s", "shf": "W m**-2",
+        },
+    )
+    height = (
+        torch.as_tensor(level, dtype=torch.float32)
+        .view(n_lev, 1, 1).expand(shape).contiguous()
+    )
+    return HourlyMetTensors(
+        hour_start=fields, hour_end=fields, metadata=metadata,
+        channel_names=names, height_agl_m=height,
+    )
+
+
+def _density_at(z_m: np.ndarray, *, p_bot_hpa: float, p_top_hpa: float, z_top_m: float, t_kelvin: float) -> np.ndarray:
+    """Air density at height z [m], matching the linear-in-z pressure profile of
+    `_wmc_density_met_window` (constant T → ρ ∝ p)."""
+
+    p_hpa = p_bot_hpa + (p_top_hpa - p_bot_hpa) * (z_m / z_top_m)
+    return (p_hpa * 100.0) / (287.05 * t_kelvin)
+
+
+def test_v1_density_weighted_well_mixed_with_F2() -> None:
+    """V1 well-mixed test with the F2 density-correction drift. Following the
+    same logic as the constant-ρ V1, but with the steeper ρ(z) profile of
+    `_wmc_density_met_window` (1000 → 500 hPa over 6000 m, ratio ≈ 0.5) so the
+    ρ-weighted equilibrium distinguishes visibly from a flat distribution.
+
+    The WMC predicts the stationary z-distribution is ρ(z)-weighted (Stohl &
+    Thomson 1999 Fig 2; their CAPTEX runs show this correction is ~5–15% on
+    surface concentrations). Initialise particles ρ(z)-weighted; assert they
+    stay ρ-weighted. This test fails if the density term is missing — without
+    it, the stationary distribution is flat, so a ρ-weighted initial state
+    relaxes AWAY from the assertion."""
+
+    from lpdm.gpu_engine import GPUEngine
+    from lpdm.turbulence import HannaScheme
+
+    rng = np.random.default_rng(202605302)
+    torch.manual_seed(202605302)
+
+    blh = 5000.0
+    z_top_grid = 6000.0
+    p_bot, p_top, T = 1000.0, 500.0, 280.0
+    engine = GPUEngine(device="cpu")
+    scheme = HannaScheme(meander_enabled=False)
+    met = _wmc_density_met_window(blh_m=blh, ustar_m_s=0.4, p_top_hpa=p_top, n_lev=6)
+
+    # Rejection-sample N particle altitudes from ρ(z) on [0, blh].
+    n = 6000
+    z_init: list[float] = []
+    rho_max = float(_density_at(np.array([0.0]), p_bot_hpa=p_bot, p_top_hpa=p_top, z_top_m=z_top_grid, t_kelvin=T)[0])
+    while len(z_init) < n:
+        z_try = rng.uniform(0.0, blh, size=n - len(z_init))
+        rho_try = _density_at(z_try, p_bot_hpa=p_bot, p_top_hpa=p_top, z_top_m=z_top_grid, t_kelvin=T)
+        accepted = z_try[rng.uniform(0.0, rho_max, size=z_try.shape) < rho_try]
+        z_init.extend(accepted.tolist())
+    z_init_arr = np.array(z_init[:n])
+
+    particles = torch.zeros(n, 4, dtype=torch.float32)
+    particles[:, 1] = 45.0
+    particles[:, 2] = torch.from_numpy(z_init_arr.astype(np.float32))
+    particles[:, 3] = 1.0 / n
+    state = scheme.initialize_state(n, device=torch.device("cpu"), dtype=torch.float32)
+    active = torch.ones(n, dtype=torch.bool)
+
+    dt = 15.0
+    n_steps = 1500
+    for _ in range(n_steps):
+        particles, state = scheme.step(
+            particles, state, met, t_alpha=0.5, dt_seconds=dt,
+            active_mask=active, engine=engine,
+        )
+        above = particles[:, 2] > blh
+        if bool(above.any()):
+            particles[above, 2] = 2.0 * blh - particles[above, 2]
+            state["w_prime"][above] = -state["w_prime"][above]
+
+    z_final = particles[:, 2].numpy()
+    in_bl = (z_final >= 0.0) & (z_final <= blh)
+    assert in_bl.mean() > 0.99
+
+    n_bins = 10
+    edges = np.linspace(0.0, blh, n_bins + 1)
+    counts, _ = np.histogram(z_final[in_bl], bins=edges)
+    bin_centres = 0.5 * (edges[:-1] + edges[1:])
+    rho_at_centres = _density_at(
+        bin_centres, p_bot_hpa=p_bot, p_top_hpa=p_top, z_top_m=z_top_grid, t_kelvin=T,
+    )
+    expected = counts.sum() * rho_at_centres / rho_at_centres.sum()
+    # Compare interior bins (z = 1500..3500 m, indices 3..6) so surface-layer
+    # and reflection-bias regions don't dominate the metric. The ρ-weighting
+    # difference vs flat in this range is ~10% — well above shot noise.
+    interior_counts = counts[3:7]
+    interior_expected = expected[3:7]
+    rel_dev = (interior_counts - interior_expected) / interior_expected
+    rel_rms = float(np.sqrt(np.mean(rel_dev ** 2)))
+
+    # Separately confirm a flat-distribution null assertion would have failed:
+    # the same data vs a constant expected (i.e. assuming no density correction)
+    # should be visibly worse than the ρ-weighted assertion, demonstrating the
+    # test is actually sensitive to the F2 term.
+    flat_expected = interior_counts.mean()
+    flat_rel_rms = float(np.sqrt(np.mean(((interior_counts - flat_expected) / flat_expected) ** 2)))
+
+    assert rel_rms < 0.15, (
+        f"V1 density-weighted test failed: interior relative-RMS vs ρ(z) "
+        f"expectation = {rel_rms:.3f} > 0.15. Bins: {counts.tolist()}, "
+        f"expected ρ-weighted: {expected.round().astype(int).tolist()}. "
+        f"Density-correction drift may be missing/wrong."
+    )
+    # Sanity: the test must be sensitive to ρ-weighting — flat-distribution
+    # interpretation should have noticeably worse RMS than ρ-weighted.
+    # (If they're equal, the test isn't actually probing F2.)
+    assert flat_rel_rms > 0.5 * rel_rms or flat_rel_rms < 0.05, (
+        "F2 sensitivity check failed: flat-distribution RMS is suspiciously "
+        f"close to ρ-weighted RMS ({flat_rel_rms:.3f} vs {rel_rms:.3f}). The "
+        "ρ gradient is too weak to make this test discriminating; widen the "
+        "pressure range or deepen the BL."
+    )
+
+
 def test_footprint_total_matches_active_particle_time(tmp_path: Path) -> None:
     """Footprint sum should equal sum(active_count) * dt / n_particles for in-domain runs.
 

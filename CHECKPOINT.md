@@ -34,7 +34,14 @@ Build a modern, highly optimized, backward-in-time LPDM for greenhouse-gas footp
 
 - Pure PyTorch backward-in-time stepping on batched particle tensors.
 - Uses normalized coordinates for interpolation space.
-- Core methods include RK2 advection, Langevin turbulence updates, and boundary reflection.
+- Core methods: RK2 backward advection, Langevin OU update (with `drift` arg for the Thomson well-mixed term), horizontal/vertical turbulent displacement (backward by default), surface reflection.
+
+### `src/lpdm/turbulence/`
+
+- `base.py` — `TurbulenceScheme` ABC + name-keyed registry (`register_scheme` / `get_scheme`).
+- `placeholder.py` — `PlaceholderConstantOU` M0 baseline (constant `T_L=300 s, σ²=1`, no horizontal, no drift). Kept as a regression pin only.
+- `hanna.py` — `HannaScheme` (production): Hanna 1982 / FLEXPART in-BL formulae (stable/neutral/unstable from `h/L`), surface-layer override (`z < 0.1 h`), free-troposphere Richardson closure (`K_z` from `N²`/Ri with Blackadar `l`), Thomson well-mixed drift `½(1+w'²/σ_w²)·∂σ_w²/∂z` (sign-flipped for backward Langevin per Flesch et al. 1995), optional Maryon (1998) / FLEXPART meander (independent horizontal OU with σ from local grid-wind std-dev).
+- See `docs/turbulence.md` for the assembled formulation and `docs/LPDM_physics_spec.md` for the source-of-truth physics spec used for audits.
 
 ### `src/lpdm/footprint_gridder.py`
 
@@ -52,6 +59,61 @@ Build a modern, highly optimized, backward-in-time LPDM for greenhouse-gas footp
 - Includes uniform wind advection and stochastic diffusion checks.
 
 ## Milestone timeline
+
+### 2026-05-30 Audit fixes landed: reflection w'-flip, Δt warning, density term, V1 well-mixed tests
+
+Closed the four highest-priority gaps from the same-day physics audit (entry below). All in one PR `physics-audit-may30` (5 new tests, 174 passing). The two V1 well-mixed tests are now the primary acceptance gate for the integrated backward HannaScheme path; both pass with the production code and provide regression coverage for F1/F2/F3/F4 jointly.
+
+- **F1 — `engine.reflect_surface` now flips `w'` along with `z` (Wilson & Flesch 1993 §6).** Signature changed to `reflect_surface(particles, w_prime, *, z_surface) -> (particles, w_prime)` — mandatory `w_prime` argument so callers can't silently regress. Both `HannaScheme` and `PlaceholderConstantOU` updated. The pre-audit behaviour (reflecting only `z`) left each reflected particle pointing downward into the boundary for ~τ_L worth of steps, biasing near-surface residence and inflating the surface footprint near the receptor. New regression `test_reflect_surface_w_flip_resolves_one_way_downward_drift` asserts the joint reversal directly. Existing reflect tests updated to the new signature and to assert the w'-flip on reflected entries.
+- **F4 Tier 1 — `HannaScheme` warns once per instance when `min(active T_L) < 5·Δt`.** Cites the W&F 1993 Appendix bias formula and S&T 1999's stricter `c = 0.05` constant. Rate-limited via an `_warned_dt` flag so long runs don't drown their log in repeats. Tested with `test_dt_too_large_warning_fires_once` (deliberately small-T_L config — release at z = 1 m → `T_Lw ~ 1 s` vs `dt = 300 s` → ratio 300, fires once) and `test_dt_too_large_warning_silent_when_dt_is_small` (`T_L = 1000 s, dt = 1 s` → silent). Tier 2 (per-particle substepping) is the next step if/when this becomes the dominant error.
+- **F2 — Stohl-Thomson 1999 density correction `+ (σ_w²/ρ)·∂ρ/∂z` added to the vertical drift.** New `_density_fields` helper computes `ρ = p/(R_d·T)` and `∂ρ/∂z` on the met grid (same machinery as `_free_trop_fields`), trilinearly sampled per particle. Added to `drift_w` *before* the existing `drift_w = -drift_w` line, so the backward sign flip carries the term correctly (Flesch et al. 1995: `a_b = -a_f - 2w/τ` flips both inhomogeneity terms in lockstep for symmetric Gaussian `g_a`). Expected magnitude per S&T's CAPTEX runs (PBL ≈ 1700 m): +5.5% mean on surface concentrations, +1–15% range — modest but biased, exactly what goes into an inversion's flux estimate.
+- **F6 — V1 well-mixed tests against the production code path.** Two new tests in `tests/test_main_runtime.py`:
+  - `test_v1_well_mixed_hanna_backward_path` — synthetic uniform met window (neutral BL, ustar = 0.4, BLH = 3000 m), 6000 particles initialised uniform in [0, BLH], 1500 steps × dt = 15 s through `HannaScheme.step` (backward) with reflection at z=0 (built into scheme) and z=BLH (added manually with w'-flip). Assertion: interior bins (z ∈ [600, 2400] m, excluding surface-layer and reflection-bias regions per W&F §7b) have relative-RMS deviation from uniform < 15%. Measured: 4.7% (just above the ~4% shot-noise floor at N/bin ≈ 600).
+  - `test_v1_density_weighted_well_mixed_with_F2` — same setup but with the steeper pressure profile (1000 → 500 hPa over 6000 m → `ρ_top/ρ_bot ≈ 0.5`), and particles initialised ρ(z)-weighted via rejection sampling. Assertion: interior z-distribution stays ρ-weighted (relative-RMS vs ρ-weighted expected < 15%; sanity-checked that the flat-null assertion would fail). Measured: 4.0% vs ρ-weighted, 8.1% vs flat-null — test discriminates 2×, would catch a regression of F2.
+- **Tests added: 5** (1 reflection regression, 2 dt-warning, 2 V1 well-mixed). Total: **174** (was 169). Suite runtime: ~91 s (the two V1 tests add ~45 s combined; they exercise the full production loop at scale).
+- **`docs/turbulence.md` §3.2.4 / §3.2.5 / §3.2.7 updated** to reflect the W&F-grounded reflection definition, the full S&T 1999 drift formula (σ-gradient + density), and the actual implemented Δt warning (replacing the previously-aspirational "M1 adds a runtime warning…" claim that was the F4 finding).
+- **Backward sign for the density term**: derived afresh from Flesch et al. 1995 `a_b = -a_f - 2w/τ`. The σ-gradient and density terms both flip; the `-w/τ` relaxation does not. The single `drift_w = -drift_w` line correctly handles both — no special-casing needed, but the comment in `hanna.py` now cites this derivation explicitly so a future reader doesn't "fix" it back.
+
+What's NOT done in this PR (deferred):
+- F3 (drift cap `±σ_w/Δt`) — still present, but the F4 Tier 2 substepping fix would remove the need; left for now.
+- F4 Tier 2 (per-particle substepping when `dt > c·T_Lw`) — bigger change; not needed before the next FLEXPART comparison run.
+- F5/F15 (W&F UBL — constant-σ basal layer near z=0) — FLEXPART has the same simplification; documented modelling cost, not a fix.
+- F9 (vertical interpolation on bbox-mean `metadata.level`) — M3 milestone item.
+- F10 (STILT conversion uses scalar `air_density`) — matters for satellite columns, not site releases.
+
+### 2026-05-30 Physics audit against `docs/LPDM_physics_spec.md` (Wilson & Flesch 1993; Stohl & Thomson 1999)
+
+End-to-end audit of the turbulence + advection + boundary code against the literature physics spec the user assembled (`docs/LPDM_physics_spec.md`), cross-checked against Wilson & Flesch (1993) and Stohl & Thomson (1999) read in full. Drift formula (P3) and finite-dt OU machinery (P1, P2) check out. Three real WMC-violating gaps stand out, in priority order.
+
+- **F1 — `engine.reflect_surface` flips only `z`, not `w'`.** Wilson & Flesch §6 *defines* smooth-wall reflection as `(z → 2B − z, w → −w)`; doing only the `z` half is a different, unsupported scheme. Effect: after a reflection the particle keeps its downward `w'` for ~τ_L worth of steps, biases the near-surface residence time upward, and inflates the surface footprint near the receptor. One-line fix: thread `w_prime` through `reflect_surface` (or return a `(particles, w_prime)` pair) and negate the flipped entries. The Hanna scheme and the placeholder scheme both consume the fix the same way. Existing `test_reflect_surface_handles_boundary_cases` only checks positions; needs a companion that asserts `w' > 0` after reflection from a downward-moving state.
+- **F2 — drift is missing the Stohl–Thomson 1999 density term `+ (σ_w²/ρ)·∂ρ/∂z`.** Derived from the WMC for a ρ-weighted Gaussian `g_a` (S&T 1999 Eq 3). Implementation matches the FT closure already in place: build ρ on model levels (`ρ = sp / (R_d · T)`, both already in `HourlyMetTensors`), `∂ρ/∂z` via `_vertical_gradient` on `height_agl_m`, interpolate trilinearly per particle, add to `drift_w`. The existing `drift_w = -drift_w` line correctly carries the term into the backward adjoint (Flesch et al. 1995: `a_b = -a_f - 2w/τ` flips both inhomogeneity terms in lockstep). Empirical magnitude per S&T's CAPTEX runs (max PBL ≈ 1700 m): mean +5.5% on surface concentrations, range +1–15%, larger at longer travel times. Real, biased, quantifiable — exactly the bias signal that goes into an inversion's flux estimate.
+- **F4 — fixed Δt with no T_L-aware floor.** `T_L_MIN_S=1 s` floor + 60–300 s configured dt means `Δt/τ` can hit 60+ in unstable surface-layer regimes. Stohl & Thomson use `Δt = min(c·τ_Lw, c/|∂σ_w/∂z|, c·z_i/|w|)` with **c=0.05**, plus floors `Δt ≥ 1 s, τ_L ≥ 10 s`. The W&F Appendix bias formula shows the resulting "Δt-bias velocity" `wB/σ_w ≈ -α·β·μ` (α≈0.5, β≈0.5, μ=Δt/τ) — at our current ratios that's many-percent bias in the near-surface position distribution. Tier 1 fix (≤10 lines): per-step log a warning when `min(T_L) < 5·Δt` over active particles, as `docs/turbulence.md §3.2.7` already promised. Tier 2 (more work): per-particle substep `k = ceil(Δt / (c·T_Lw))`.
+
+Other audit outputs:
+
+- **F3 (drift cap `±σ_w/Δt`) — keep, but mark as "papers over F4".** A direct WMC formula violation wherever it bites, present specifically because Δt is too large to handle sharp σ-gradients at the BL top. Fixing F4 makes this cap stop firing.
+- **F5/F15 (surface-layer σ_w varying right down to z=0).** W&F §7b's "unresolved basal layer" recipe (constant σ_w near z=0 so reflection becomes WMC-exact) is *not* applied; the Hanna SL formula extrapolates a varying σ_w to z=0. FLEXPART makes the same simplification, so this is a documented modelling cost rather than a unique GLIDE bug. Lower priority.
+- **F6 — no end-to-end V1 well-mixed test for the production code path.** The forward, engine-only `test_well_mixed_condition_drift_keeps_uniform_distribution` validates the OU+drift in isolation; the existing `test_hanna_well_mixed_no_runaway_lofting` is a qualitative regression, not a WMC test. The single most valuable test to add is a V1 that drives `HannaScheme.step` (backward, with reflection) on a synthetic σ_w(z) column and asserts the end-state z-histogram stays flat (and, after F2, asserts it matches the ρ(z) profile).
+- **F7 — the forward WMC test also doesn't flip w on reflection.** It passes despite this, because the test is integrated forward; it won't catch a regression of F1. Belt-and-braces, but worth noting in a comment.
+- **F8/F14 — backward drift sign is correctly handled** (matches Flesch et al. 1995 `a' = -a - 2w/τ` reducing to the inhomogeneity-flip for Gaussian symmetric `g_a`). The code comment's informal "displacement negates w'·dt so we negate drift" derivation is the right answer for the wrong reason; should be updated to cite Flesch directly.
+- **F9 — vertical interpolation on the bbox-mean `metadata.level` axis** (linear-in-AGL-metres against pressure-level data) remains a known approximation flagged in the M3 milestone. Second-order for surface footprints.
+- **F10 — STILT-style conversion uses scalar `air_density`.** Sound for site-level releases, biased for satellite columns or deep PBLs. Flagged for the satellite work.
+- **F11 (`∂σ²/∂z` consistency)** ✓ — the drift derivative is a finite difference of the same `_column_turbulence` profile used elsewhere; P4 holds.
+- **F12 (Gaussian-only PDF)** ✓ — defensible per spec §P3 / Thomson 1987 §5.2 (surface concentration is insensitive to skewness even though aloft dispersion isn't); flagged as a modelling choice, not a bug.
+
+Outcome: full findings + per-finding location/severity/proposed-fix table delivered in the audit response. Implementation queue (proposed): F1 (one-line) → F4 Tier 1 (warning) → F6 (V1 well-mixed test against the post-F1 production path) → F2 (density term + V1 ρ-weighted variant). All four can be landed in one PR with the V1 test as the acceptance gate.
+
+
+
+### 2026-05-29 Meander: unresolved-mesoscale horizontal turbulence (Maryon/FLEXPART §4.5)
+
+After the well-mixed-drift + FT fixes restored vertical recycling, the FLEXPART comparison looked much better but still left a horizontal-spread gap — the classic *unresolved-mesoscale* ("meander") motions: quasi-2-D eddies larger than 3-D turbulence yet smaller than the met grid can resolve. Implemented the state-of-the-art portable scheme (Maryon 1998, which NAME originated and FLEXPART adopted; Stohl et al. 2005 §4.5), confirmed by reading the Stohl 2005 technical note directly.
+
+- **Physics.** An *independent* horizontal OU process added on top of the Hanna `u'/v'` turbulence, applied at **all altitudes**: `σ_meander,i = C · stddev_local(U_i)`, `τ = ½·(met interval) ≈ 1800 s` for hourly ERA5. `stddev_local` is the std-dev of the grid-scale wind component over the `(2r+1)²` neighbourhood (per level), interpolated per-particle. `C = turbmesoscale = 0.16` (FLEXPART default). **No drift** (inhomogeneity is vertical), symmetric forcing → backward displacement needs no sign flip.
+- **Answers the user's resolution-dependence question.** σ is *derived from local grid-wind variability*, not a hand-tuned constant — so a finer met grid automatically yields a smaller meander (more mesoscale already resolved). This is exactly NAME's resolution-dependent behaviour, for free.
+- **Code.** `HannaScheme.__init__` gains `meander_{enabled,coefficient,stencil_radius,timescale_seconds}` (default **off** → existing baselines bit-identical). New `_meander_sigma_fields` + `_windowed_std` (windowed std via `avg_pool2d`, `count_include_pad=False` for valid edge handling); shared `_grid_bounds` helper factored out of `_free_trop_fields`. State adds `{u_meander, v_meander}` only when enabled (preserves the `{u,v,w}_prime`-only layout otherwise). Config: `turbulence.meander` block (`config.MeanderConfig`); `main._scheme_kwargs` forwards it for Hanna only (other schemes take no kwargs). Enabled in both shipped `example_mhd_january*.yaml`.
+- **Tests** (+7, total 169): `_windowed_std` vs numpy population-std + uniform→0; constructor validation; state-key gating; `_scheme_kwargs` Hanna-only forwarding + config defaults; end-to-end `test_hanna_meander_increases_horizontal_spread` (varying-wind met window, meander-on horizontal spread 3.2× the meander-off spread). Full suite green, ~40 s.
+- **Next (user action):** re-run `configs/example_mhd_january_periodic.yaml` (now meander-enabled) and redo `notebooks/flexpart_comparison.ipynb` to quantify the remaining dispersion gap. If horizontal spread is now over-shooting, lower `coefficient`; if still short, raise it or the `stencil_radius`.
 
 ### 2026-04-02 baseline
 
@@ -423,21 +485,20 @@ First multi-month EUROPE comparison run consumed >200 GB of RAM. Two distinct bu
 
 ## Immediate recommendation
 
-- **Milestone status:** M0 complete. M1 implementation-complete; the Hanna scheme now has the well-mixed drift + N²/Ri free-troposphere closure (2026-05-29), validated qualitatively against FLEXPART (surface recycling restored) but the full quantitative comparison re-run is still pending. Default scheme is still `placeholder_constant_ou` — flip to `hanna_1982` once the comparison agrees within tolerance. M4 nearly complete — schema, output_grid/met_domain split, CLI shrink, and out-of-domain particle handling (drop-and-count, 2026-05-27) all landed; the only remaining gap is the `schema_version` field. **M5 stages 1–5 complete (2026-05-26 + 2026-05-27)**: multi-release configs now execute end-to-end, producing a single 5D `footprints.zarr` indexed by `release_time`, streamed per-batch. `configs/example_mhd_january_periodic.yaml` is the reference periodic run.
-- **Closing M1 — next step is the FLEXPART comparison run, now via M5 multi-release execution:**
-  1. ✅ Downloaded `EUROPE_202312.zarr` + `EUROPE_202401.zarr` to `~/data/arco-era5/` (~58 GB each).
-  2. ✅ `ArcoEra5ZarrReader` consumes multiple monthly stores via glob or explicit list (2026-05-24 multi-store reader entry).
-  3. ✅ Memory blow-up resolved (2026-05-25 entry); steady-state RSS for the EUROPE stitch is ~3.4 GB.
-  4. ✅ M5 multi-release execution landed 2026-05-27. A 744-release Mace Head schedule fits in one process via `configs/example_mhd_january_periodic.yaml`.
-  5. Execute the 744-release MHD run against the local met stores. Compare the 96 release_time slices that align with `data/FLEXPART/FLEXPART_MHD_test_202401.nc` (days 1, 10, 20, 30 × 24 h). Workflow in `VALIDATION.md` § "Comparing against FLEXPART / NAME / STILT".
-  6. Once Hanna agrees with FLEXPART within a documented tolerance on this case, flip the default scheme to `hanna_1982` and update `README.md`.
-- **M5 follow-ups:**
-  - ✅ Streaming per-batch Zarr writes — landed 2026-05-27 (see entry). Peak footprint memory is now one batch's tensor, not the whole schedule's.
-  - Satellite multi-point-per-time case: add a `points: list[PointSpec]` field on `PointScheduleReleaseConfig`. Same runtime plumbing; `release_idx` already discriminates per release row.
-  - (Only if a pathological config needs it) sparse / chunked-within-batch footprint accumulation to shrink the remaining dense per-batch tensor term.
-- **Closing M4:** ✅ out-of-domain particle handling landed 2026-05-27 (drop-and-count: kill on `met_domain` exit, `escaped_this_step`/`alive_particles` in `trajectory_diagnostics.parquet`, `escaped_met_domain_total` in run metadata). Remaining: add `schema_version: 1` to the YAML once we're ready to commit to a breaking-change discipline. Optional safeguard: abort/warn if the escaped fraction exceeds a configurable threshold (undersized-domain signal).
-- **M1.x done (2026-05-29):** the constant-K above-BL placeholder is replaced by the N²/Richardson free-troposphere closure, and the Thomson well-mixed drift is added — both motivated by the FLEXPART under-dispersion finding. Remaining turbulence item: the NAME-style unresolved-mesoscale "meander" horizontal term (resolution-dependent), deferred until the full comparison re-run shows how much horizontal spread is still missing.
-- After M1 validation lands, prioritize M2 (particle aggregation). Defer substantial GPU tuning until the turbulence and aggregation interfaces are stable enough to benchmark meaningfully.
+**Milestone status (as of 2026-05-30):**
+- **M0 / M1 / M4 / M5: code-complete.** Hanna scheme has Thomson well-mixed drift, N²/Ri free-troposphere closure, and Maryon/FLEXPART meander (2026-05-29 entries). Multi-release execution, streaming per-batch Zarr writes, drop-and-count out-of-domain handling all landed (2026-05-27 entries). Example configs use `hanna_1982` directly (the old `placeholder_constant_ou` default is obsolete — schema requires an explicit scheme choice; placeholder is a regression-pin only).
+- **Physics audit + fixes (2026-05-30 entries):** WMC-violating gaps identified against Wilson & Flesch 1993 and Stohl & Thomson 1999, then closed in the `physics-audit-may30` PR. **F1 (reflect_surface flips w'), F4 Tier 1 (Δt vs T_L warning), F2 (Stohl-Thomson density term)** all landed; two V1 well-mixed tests (one constant-ρ, one ρ-weighted) added as the integrated-path acceptance gate. 174 tests passing.
+- **Open M4 item:** `schema_version` field on the YAML, once the schema is stable enough to commit to a breaking-change discipline.
+- **Open M5 item:** satellite multi-point-per-time releases (`points: list[PointSpec]` on `PointScheduleReleaseConfig`); plumbing already supports it via `release_idx`.
+
+**Next user step:** re-run `configs/example_mhd_january_periodic.yaml` and update `notebooks/flexpart_comparison.ipynb` to quantify the change in surface magnitude (expected ~5% per S&T CAPTEX) and near-surface residence-time distribution now that F1 + F2 are in place. Then prioritize M2 (particle aggregation).
+
+**Lower-priority follow-ups (documented in the audit, deferred past this PR):**
+- F4 Tier 2 — per-particle substepping when `dt > c·T_Lw`. Tier 1 warning landed; substepping is the proper fix but a bigger change.
+- F3 (drift cap `±σ_w/Δt`) — papers over F4; can be removed once Tier 2 lands.
+- F5/F15 — surface-layer σ_w extrapolated to z=0 (no constant-σ UBL per W&F §7b). FLEXPART has the same simplification; documented limitation, not a fix.
+- F9 — vertical interpolation on bbox-mean `metadata.level` (M3 milestone item).
+- F10 — STILT conversion uses scalar `air_density` (matters for satellite columns / deep PBLs).
 
 ## Operational notes
 
