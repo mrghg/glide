@@ -57,6 +57,11 @@ release:
 
 turbulence:
   scheme: hanna_1982
+  meander:                              # unresolved-mesoscale horizontal turbulence
+    enabled: true                       #   (Maryon 1998 / FLEXPART §4.5)
+    coefficient: 0.16                   # FLEXPART `turbmesoscale`; σ = 0.16 × local grid-wind std
+    # stencil_radius: 1                 # 3x3 neighbourhood for the local wind variability
+    # timescale_seconds: 1800           # default: half the hourly met interval
 
 # Output footprint grid: aligned cell-for-cell with the FLEXPART reference fixture.
 # Bounds are *outer cell edges*; n_x equal cells fill the interval.

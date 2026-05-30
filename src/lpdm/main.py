@@ -525,6 +525,26 @@ def _advect_active_particles(
 	return advected_active, alpha, diag_means
 
 
+def _scheme_kwargs(cfg: RunConfig) -> dict[str, object]:
+	"""Constructor kwargs for the configured turbulence scheme.
+
+	Meander config is Hanna-specific; other schemes take no kwargs and would
+	reject it, so it is only forwarded for ``hanna_1982``.
+	"""
+
+	if cfg.turbulence.scheme != "hanna_1982":
+		return {}
+	m = cfg.turbulence.meander
+	kwargs: dict[str, object] = {
+		"meander_enabled": m.enabled,
+		"meander_coefficient": m.coefficient,
+		"meander_stencil_radius": m.stencil_radius,
+	}
+	if m.timescale_seconds is not None:
+		kwargs["meander_timescale_seconds"] = m.timescale_seconds
+	return kwargs
+
+
 def _run(
 	cfg: RunConfig,
 	*,
@@ -537,7 +557,7 @@ def _run(
 	device_str = _resolve_device(sim.device)
 
 	if scheme is None:
-		scheme = get_scheme(cfg.turbulence.scheme)
+		scheme = get_scheme(cfg.turbulence.scheme, **_scheme_kwargs(cfg))
 	if reader is None:
 		# Channels = baseline (advection needs u/v/w; runtime telemetry uses blh/sp)
 		# unioned with whatever the chosen turbulence scheme declares it needs.

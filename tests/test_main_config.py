@@ -348,6 +348,37 @@ def test_batch_config_defaults_and_override() -> None:
     assert cfg_override.batch.max_releases_per_batch == 7
 
 
+def test_turbulence_meander_defaults_off() -> None:
+    cfg = RunConfig.model_validate(_base_dict())
+    assert cfg.turbulence.meander.enabled is False
+    assert cfg.turbulence.meander.coefficient == 0.16
+    assert cfg.turbulence.meander.timescale_seconds is None
+
+
+def test_scheme_kwargs_forwards_meander_only_for_hanna() -> None:
+    from lpdm.main import _scheme_kwargs
+
+    cfg_hanna = RunConfig.model_validate(
+        _base_dict(turbulence={
+            "scheme": "hanna_1982",
+            "meander": {"enabled": True, "coefficient": 0.2, "stencil_radius": 2, "timescale_seconds": 900.0},
+        })
+    )
+    kw = _scheme_kwargs(cfg_hanna)
+    assert kw == {
+        "meander_enabled": True,
+        "meander_coefficient": 0.2,
+        "meander_stencil_radius": 2,
+        "meander_timescale_seconds": 900.0,
+    }
+
+    # Non-Hanna schemes take no kwargs (would reject meander), so forward nothing.
+    cfg_placeholder = RunConfig.model_validate(
+        _base_dict(turbulence={"scheme": "placeholder_constant_ou", "meander": {"enabled": True}})
+    )
+    assert _scheme_kwargs(cfg_placeholder) == {}
+
+
 def test_point_release_back_compat_isinstance_check() -> None:
     """Existing code paths that assume a PointReleaseConfig must keep working."""
 

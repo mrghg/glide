@@ -204,8 +204,39 @@ def _release_point(release: Any) -> tuple[float, float, float]:
     raise TypeError(f"Unsupported release variant: {type(release).__name__}")
 
 
+class MeanderConfig(_Frozen):
+    """Unresolved-mesoscale ("meander") horizontal turbulence.
+
+    Maryon (1998) "meandering" as adopted by FLEXPART (Stohl et al. 2005, §4.5):
+    an independent horizontal Langevin process whose velocity standard deviation
+    is the local grid-scale wind variability (std-dev over the surrounding grid
+    points) times ``coefficient``, with a Lagrangian timescale of roughly half
+    the met-field interval. Resolution-dependent by construction. Hanna-scheme
+    only; ignored by other schemes. Default off so existing baselines are
+    unchanged.
+    """
+
+    enabled: bool = False
+    coefficient: float = Field(
+        0.16,
+        gt=0,
+        description="FLEXPART `turbmesoscale`: σ_meander = coefficient × local grid-wind std-dev.",
+    )
+    stencil_radius: int = Field(
+        1,
+        gt=0,
+        description="Half-width (grid cells) of the neighbourhood used for the local wind std-dev.",
+    )
+    timescale_seconds: float | None = Field(
+        None,
+        gt=0,
+        description="Lagrangian timescale of the meander process. None → scheme default (half the hourly met interval, 1800 s).",
+    )
+
+
 class TurbulenceConfig(_Frozen):
     scheme: str = Field(..., min_length=1)
+    meander: MeanderConfig = MeanderConfig()
 
 
 class OutputGridConfig(_Frozen):

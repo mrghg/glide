@@ -12,6 +12,7 @@ run; secondary references occasionally diverge by ~10% on minor coefficients.
 
 from __future__ import annotations
 
+import logging
 from typing import ClassVar
 
 import numpy as np
@@ -20,6 +21,9 @@ import torch
 from lpdm.gpu_engine import GPUEngine
 from lpdm.met_reader import HourlyMetTensors
 from lpdm.turbulence.base import TurbulenceScheme, TurbulenceState, register_scheme
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 # Physical constants
@@ -57,6 +61,14 @@ FT_SHEAR_SQ_FLOOR_S2 = 1e-8       # floor on |dU/dz|^2 to avoid div-by-zero in R
 FT_N2_FLOOR_S2 = 1e-6             # floor on N^2 for the buoyancy timescale
 FT_T_L_DEFAULT_S = 100.0          # fallback Lagrangian timescale where N^2 <= 0
 FT_T_L_MAX_S = 1000.0             # cap on the buoyancy-derived FT timescale
+
+# Meander (unresolved-mesoscale) horizontal turbulence — Maryon (1998)
+# "meandering" as adopted by FLEXPART (Stohl et al. 2005 §4.5). σ_meander is the
+# local grid-wind variability times a coefficient; the timescale is ~half the met
+# field interval. See docs/turbulence.md §3.2.8.
+MEANDER_COEFFICIENT_DEFAULT = 0.16    # FLEXPART `turbmesoscale`
+MEANDER_STENCIL_RADIUS_DEFAULT = 1    # 3x3 neighbourhood
+MEANDER_TIMESCALE_S_DEFAULT = 1800.0  # half of the hourly ERA5 field interval
 
 
 # ---------------------------------------------------------------------------
@@ -313,6 +325,38 @@ class HannaScheme(TurbulenceScheme):
 
 	name: ClassVar[str] = "hanna_1982"
 
+	def __init__(
+		self,
+		*,
+		meander_enabled: bool = False,
+		meander_coefficient: float = MEANDER_COEFFICIENT_DEFAULT,
+		meander_stencil_radius: int = MEANDER_STENCIL_RADIUS_DEFAULT,
+		meander_timescale_seconds: float = MEANDER_TIMESCALE_S_DEFAULT,
+	) -> None:
+		"""Construct the scheme.
+
+		Meander (unresolved-mesoscale horizontal turbulence) is off by default so
+		existing runs stay bit-identical; enable it via the YAML ``turbulence.meander``
+		block. See ``docs/turbulence.md`` §3.2.8.
+		"""
+
+		if meander_coefficient <= 0:
+			raise ValueError("meander_coefficient must be > 0")
+		if meander_stencil_radius < 1:
+			raise ValueError("meander_stencil_radius must be >= 1")
+		if meander_timescale_seconds <= 0:
+			raise ValueError("meander_timescale_seconds must be > 0")
+		self.meander_enabled = bool(meander_enabled)
+		self.meander_coefficient = float(meander_coefficient)
+		self.meander_stencil_radius = int(meander_stencil_radius)
+		self.meander_timescale_seconds = float(meander_timescale_seconds)
+		# F4 Tier 1 (audit 2026-05-30): once-per-instance warning when dt is large
+		# vs the smallest active T_L. Per Stohl & Thomson 1999 the recommended
+		# constant is c=0.05 (so dt < 0.05·T_L); the OU integration noticeably
+		# degrades once dt > T_L/5 (Wilson & Flesch 1993 Appendix). Warn at the
+		# looser threshold to alert users before the bias dominates.
+		self._warned_dt: bool = False
+
 	def required_met_keys(self) -> tuple[str, ...]:
 		# Baseline (u, v, w, blh, sp) is added by the runtime; declare scheme-specific extras.
 		return ("t", "ustar", "shf")
@@ -324,11 +368,15 @@ class HannaScheme(TurbulenceScheme):
 		device: torch.device,
 		dtype: torch.dtype,
 	) -> TurbulenceState:
-		return {
+		state = {
 			"u_prime": torch.zeros(n_particles, device=device, dtype=dtype),
 			"v_prime": torch.zeros(n_particles, device=device, dtype=dtype),
 			"w_prime": torch.zeros(n_particles, device=device, dtype=dtype),
 		}
+		if self.meander_enabled:
+			state["u_meander"] = torch.zeros(n_particles, device=device, dtype=dtype)
+			state["v_meander"] = torch.zeros(n_particles, device=device, dtype=dtype)
+		return state
 
 	# Finite-difference step (m) for the well-mixed drift's ∂σ_w²/∂z.
 	DRIFT_FD_DELTA_M: ClassVar[float] = 1.0
@@ -374,6 +422,11 @@ class HannaScheme(TurbulenceScheme):
 		# above-BL regime. Computed once per step (depends only on the met window).
 		ft_fields, grid_bounds = self._free_trop_fields(met_window, t_alpha, device, dtype)
 
+		# Density and ∂ρ/∂z on the met grid for the Stohl-Thomson (1999) density
+		# correction term in the well-mixed drift (F2, audit 2026-05-30). Built
+		# once per step from sp/T/height; sampled per-particle below.
+		density_fields = self._density_fields(met_window, t_alpha, device, dtype)
+
 		col_kwargs = dict(
 			blh=blh, ustar=ustar, w_star=w_star, h_over_L=h_over_L, L=L,
 			lat=lat_deg, lon=lon_deg, ft_fields=ft_fields, grid_bounds=grid_bounds,
@@ -382,6 +435,7 @@ class HannaScheme(TurbulenceScheme):
 
 		# σ/T_L at the particle height (in-BL + surface-layer + free-troposphere).
 		sigma_u, sigma_v, sigma_w, T_Lu, T_Lv, T_Lw = self._column_turbulence(z_agl, **col_kwargs)
+		self._warn_if_dt_too_large(T_Lu, T_Lv, T_Lw, dt_seconds=dt_seconds)
 
 		# Thomson (1987) well-mixed drift for the vertical component:
 		# a = ½(1 + w'²/σ_w²) ∂σ_w²/∂z. ∂σ_w²/∂z is a central finite difference of
@@ -395,15 +449,35 @@ class HannaScheme(TurbulenceScheme):
 		dsig2_dz = (sw_hi.pow(2) - sw_lo.pow(2)) / (z_hi - z_lo).clamp(min=self.DRIFT_FD_DELTA_M)
 		sigma_w_sq = sigma_w.pow(2).clamp(min=SIGMA_MIN_M_S ** 2)
 		drift_w = 0.5 * (1.0 + w_prev.pow(2) / sigma_w_sq) * dsig2_dz
+
+		# Density-correction term (Stohl & Thomson 1999 Eq 3, raw-w form):
+		# `+ (σ_w²/ρ)·∂ρ/∂z`. Required for WMC in ρ-weighted coordinates — air
+		# density drops 20%+ across a deep BL and the term suppresses spurious
+		# accumulation of particles aloft (S&T's CAPTEX runs: +5.5% mean on
+		# surface concentrations, +1–15% range). Sampled per-particle from the
+		# stack built in `_density_fields` above. The same backward-sign
+		# pre-negation that handles the σ-gradient drift handles this term too,
+		# because Flesch et al. 1995 give `a_b = -a_f - 2w/τ` which flips both
+		# inhomogeneity terms in lockstep for Gaussian symmetric g_a.
+		density_at_p = self._interp_3d_field(
+			density_fields, grid_bounds, lon_deg, lat_deg, z_agl, engine,
+		)
+		rho_at_p = density_at_p[0].clamp(min=1e-3)
+		drho_dz_at_p = density_at_p[1]
+		drift_w = drift_w + sigma_w_sq * drho_dz_at_p / rho_at_p
+
 		# Backward-Langevin sign. The vertical displacement is applied
 		# backward-in-time (apply_vertical_turbulence below uses backward=True,
 		# which negates w'·dt). The random forcing is symmetric so that negation
 		# is harmless, but the well-mixed drift is a *deterministic* correction:
-		# for the adjoint/backward Langevin it must enter with reversed sign
-		# (Thomson 1987 §5 reciprocity; Flesch, Wilson & Yee 1995) so that the
-		# *physical* position drift still points down the σ_w² gradient (toward
-		# the BL) rather than lofting particles out of it. Pre-negate here so the
-		# subsequent backward displacement restores the correct physical direction.
+		# for the adjoint/backward Langevin both the σ-gradient and density terms
+		# must enter with reversed sign (Thomson 1987 §3.4; Flesch, Wilson & Yee
+		# 1995: a_b = -a_f - 2w/τ flips both inhomogeneity terms in lockstep for
+		# symmetric Gaussian g_a) so that the *physical* position drift still
+		# points down the σ_w² gradient (toward higher turbulence) and down the
+		# density gradient (toward the surface in a typical PBL). Pre-negate here
+		# so the subsequent backward displacement restores the correct physical
+		# direction.
 		drift_w = -drift_w
 		# Safeguard: cap the drift increment at one σ_w per step so sharp σ_w kinks
 		# (surface-layer / BL top) can't blow the velocity up between substeps.
@@ -430,13 +504,81 @@ class HannaScheme(TurbulenceScheme):
 		moved = engine.apply_horizontal_turbulence(
 			moved, u_prime_active, v_prime_active, dt_seconds=dt_seconds, backward=True,
 		)
-		moved = engine.reflect_surface(moved, z_surface=0.0)
+
+		# Meander (unresolved-mesoscale) horizontal turbulence: an independent
+		# horizontal OU process whose σ is the local grid-wind variability (Maryon
+		# 1998 / FLEXPART §4.5). Applied at all altitudes. No drift (the
+		# inhomogeneity captured by the well-mixed term is vertical). Symmetric
+		# random forcing, so the backward displacement needs no sign change.
+		u_meander_active = v_meander_active = None
+		if self.meander_enabled:
+			meander_fields, meander_bounds = self._meander_sigma_fields(
+				met_window, t_alpha, device, dtype,
+			)
+			sm = self._interp_3d_field(
+				meander_fields, meander_bounds, lon_deg, lat_deg, z_agl, engine,
+			)
+			sigma_mu, sigma_mv = sm[0], sm[1]
+			u_meander_active = engine.update_langevin_velocity(
+				state["u_meander"][active_mask],
+				t_lagrangian=self.meander_timescale_seconds,
+				sigma_w2=sigma_mu.pow(2), dt_seconds=dt_seconds,
+			)
+			v_meander_active = engine.update_langevin_velocity(
+				state["v_meander"][active_mask],
+				t_lagrangian=self.meander_timescale_seconds,
+				sigma_w2=sigma_mv.pow(2), dt_seconds=dt_seconds,
+			)
+			moved = engine.apply_horizontal_turbulence(
+				moved, u_meander_active, v_meander_active, dt_seconds=dt_seconds, backward=True,
+			)
+
+		# Smooth-wall reflection flips BOTH z and w' (Wilson & Flesch 1993 §6).
+		moved, w_prime_active = engine.reflect_surface(moved, w_prime_active, z_surface=0.0)
 
 		particles[active_mask] = moved
 		state["u_prime"][active_mask] = u_prime_active
 		state["v_prime"][active_mask] = v_prime_active
 		state["w_prime"][active_mask] = w_prime_active
+		if self.meander_enabled:
+			state["u_meander"][active_mask] = u_meander_active
+			state["v_meander"][active_mask] = v_meander_active
 		return particles, state
+
+	def _warn_if_dt_too_large(
+		self,
+		T_Lu: torch.Tensor,
+		T_Lv: torch.Tensor,
+		T_Lw: torch.Tensor,
+		*,
+		dt_seconds: float,
+	) -> None:
+		"""Emit a once-per-instance warning when ``dt`` is large vs the smallest
+		active Lagrangian timescale (F4 in the 2026-05-30 physics audit).
+
+		Stohl & Thomson (1999) use ``Δt ≤ 0.05·T_L``; Wilson & Flesch (1993,
+		Appendix) derive an explicit "Δt-bias velocity" that scales linearly in
+		``Δt/T_L``. The OU discretisation is *stable* for any ``Δt`` (the exact-OU
+		form preserves stationary variance) but the inhomogeneous-drift increment
+		is forward-Euler, so a too-large ``Δt`` near the surface degrades the
+		well-mixed condition empirically. We warn at the looser ``T_L > 5·Δt``
+		threshold so the user is told before the bias becomes severe.
+		"""
+
+		if self._warned_dt:
+			return
+		min_TL = float(torch.minimum(torch.minimum(T_Lu.min(), T_Lv.min()), T_Lw.min()))
+		if min_TL >= 5.0 * float(dt_seconds):
+			return
+		LOGGER.warning(
+			"Hanna turbulence: min active T_L = %.1f s vs dt = %.1f s "
+			"(dt/T_L = %.1f). The OU integration's well-mixed accuracy degrades "
+			"once dt > T_L/5 (Wilson & Flesch 1993 App.; Stohl & Thomson 1999 use "
+			"c=0.05). Consider reducing simulation.dt_seconds or accept a "
+			"near-surface footprint bias proportional to dt/T_L.",
+			min_TL, float(dt_seconds), float(dt_seconds) / max(min_TL, 1e-6),
+		)
+		self._warned_dt = True
 
 	# ---- Turbulence profile assembly ----
 
@@ -517,8 +659,6 @@ class HannaScheme(TurbulenceScheme):
 		per-particle.
 		"""
 
-		from lpdm.gpu_engine import GridInterpolationBounds
-
 		if met_window.height_agl_m is None:
 			raise ValueError(
 				"HannaScheme free-troposphere turbulence requires HourlyMetTensors.height_agl_m "
@@ -557,11 +697,100 @@ class HannaScheme(TurbulenceScheme):
 		t_luv_ft = t_lw_ft
 
 		fields = torch.stack([sigma_w_ft, sigma_uv_ft, t_lw_ft, t_luv_ft], dim=0)
+		return fields, self._grid_bounds(met_window)
+
+	def _density_fields(
+		self,
+		met_window: HourlyMetTensors,
+		t_alpha: float,
+		device: torch.device,
+		dtype: torch.dtype,
+	) -> torch.Tensor:
+		"""Stack `[ρ, ∂ρ/∂z]` on the met grid `[2, Z, Y, X]` for the
+		Stohl-Thomson 1999 density-correction drift term (F2, audit 2026-05-30).
+
+		ρ = p / (R_d · T) per model level (the layer pressure varies with level
+		but is horizontally constant per ERA5's pressure-level convention; T
+		varies in all three dims). ∂ρ/∂z is a central finite difference of ρ
+		using the true per-column geopotential heights — same machinery as the
+		FT closure's wind/θ gradients. Returns the stack ready for trilinear
+		sampling per-particle (`_interp_3d_field`) using the shared `_grid_bounds`.
+		"""
+
+		if met_window.height_agl_m is None:
+			raise ValueError(
+				"HannaScheme density-correction drift requires HourlyMetTensors.height_agl_m "
+				"(3D geopotential height). The met reader provides it; synthetic readers must too."
+			)
+
+		t_start, t_end = met_window.channel("t")
+		t_field = (
+			t_start.to(device=device, dtype=dtype) * (1.0 - t_alpha)
+			+ t_end.to(device=device, dtype=dtype) * t_alpha
+		)
+		height = met_window.height_agl_m.to(device=device, dtype=dtype)  # [Z, Y, X]
+
+		pressure_pa = torch.as_tensor(
+			np.array(met_window.metadata.pressure_level_hpa), device=device, dtype=dtype
+		).view(-1, 1, 1) * 100.0
+		rho = pressure_pa / (R_DRY_AIR_J_KG_K * t_field.clamp(min=1.0))
+		drho_dz = self._vertical_gradient(rho, height)
+		return torch.stack([rho, drho_dz], dim=0)
+
+	def _meander_sigma_fields(
+		self,
+		met_window: HourlyMetTensors,
+		t_alpha: float,
+		device: torch.device,
+		dtype: torch.dtype,
+	) -> tuple[torch.Tensor, "GridInterpolationBounds"]:
+		"""Meander (σ_u, σ_v) on the met grid [2, Z, Y, X] from local wind variability.
+
+		Maryon (1998) "meandering" / FLEXPART (Stohl et al. 2005, §4.5): the
+		unresolved-mesoscale wind std-dev is the grid-scale wind variability in the
+		neighbourhood of each point times ``meander_coefficient``. Resolution-dependent
+		by construction — a finer met grid has smaller local wind variance, so less
+		mesoscale energy is left to parameterize.
+		"""
+
+		u_start, u_end = met_window.channel("u")  # [Z, Y, X] each
+		v_start, v_end = met_window.channel("v")
+		u_field = (u_start.to(device=device, dtype=dtype) * (1.0 - t_alpha)
+		           + u_end.to(device=device, dtype=dtype) * t_alpha)
+		v_field = (v_start.to(device=device, dtype=dtype) * (1.0 - t_alpha)
+		           + v_end.to(device=device, dtype=dtype) * t_alpha)
+
+		r = self.meander_stencil_radius
+		sigma_u = self.meander_coefficient * self._windowed_std(u_field, r)
+		sigma_v = self.meander_coefficient * self._windowed_std(v_field, r)
+		fields = torch.stack([sigma_u, sigma_v], dim=0)
+		return fields, self._grid_bounds(met_window)
+
+	@staticmethod
+	def _windowed_std(field: torch.Tensor, radius: int) -> torch.Tensor:
+		"""Local horizontal std-dev over a (2r+1)² stencil, per level.
+
+		``field`` is [Z, Y, X]; returns [Z, Y, X]. Edge cells average only the valid
+		(non-padded) neighbours, so the variance estimate is well-defined at the grid
+		boundary."""
+
+		k = 2 * radius + 1
+		x = field.unsqueeze(0)  # [1, Z, Y, X] -> treat Z as the channel axis
+		mean = torch.nn.functional.avg_pool2d(x, k, stride=1, padding=radius, count_include_pad=False)
+		mean_sq = torch.nn.functional.avg_pool2d(x * x, k, stride=1, padding=radius, count_include_pad=False)
+		var = (mean_sq - mean.pow(2)).clamp(min=0.0)
+		return var.sqrt().squeeze(0)
+
+	@staticmethod
+	def _grid_bounds(met_window: HourlyMetTensors) -> "GridInterpolationBounds":
+		"""Interpolation bounds for sampling met-grid fields per-particle."""
+
+		from lpdm.gpu_engine import GridInterpolationBounds
 
 		lon_arr = met_window.metadata.lon
 		lat_arr = met_window.metadata.lat
 		level_arr = met_window.metadata.level
-		grid_bounds = GridInterpolationBounds(
+		return GridInterpolationBounds(
 			lon_first=float(lon_arr[0]),
 			lon_last=float(lon_arr[-1]),
 			lat_first=float(lat_arr[0]),
@@ -569,7 +798,6 @@ class HannaScheme(TurbulenceScheme):
 			alt_first=float(level_arr[0]),
 			alt_last=float(level_arr[-1]),
 		)
-		return fields, grid_bounds
 
 	@staticmethod
 	def _vertical_gradient(field: torch.Tensor, height: torch.Tensor) -> torch.Tensor:

@@ -67,7 +67,10 @@ class PlaceholderConstantOU(TurbulenceScheme):
 			dt_seconds=dt_seconds,
 			backward=True,
 		)
-		active_particles_out = engine.reflect_surface(active_particles_out, z_surface=0.0)
+		# Smooth-wall reflection flips BOTH z and w' (Wilson & Flesch 1993 §6).
+		active_particles_out, w_prime_active = engine.reflect_surface(
+			active_particles_out, w_prime_active, z_surface=0.0,
+		)
 
 		particles[active_mask] = active_particles_out
 		w_prime[active_mask] = w_prime_active
