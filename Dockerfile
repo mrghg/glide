@@ -22,13 +22,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Keep a predictable python executable path
 RUN ln -sf /usr/bin/python3.11 /usr/local/bin/python
 
-# Install Python dependencies first for layer caching
-COPY requirements.txt /app/requirements.txt
-RUN python -m pip install --upgrade pip setuptools wheel && \
-    python -m pip install --extra-index-url https://download.pytorch.org/whl/cu124 -r /app/requirements.txt
-
-# Copy source last to maximize cache reuse
+# Install Python dependencies + the package. The runtime image installs the
+# core deps only (NO `[viz]` extras — cartopy / geoviews are notebook-only and
+# bring a C-extension build chain we don't want in this image). The pytorch
+# CUDA wheel is selected by `--extra-index-url`. Source is copied first so the
+# editable install resolves; layer-cache efficiency is sacrificed in exchange
+# for pyproject being the single source of truth for deps.
+COPY pyproject.toml README.md /app/
 COPY src /app/src
+RUN python -m pip install --upgrade pip setuptools wheel && \
+    python -m pip install --extra-index-url https://download.pytorch.org/whl/cu124 -e /app
 
 ENV PYTHONPATH=/app/src
 

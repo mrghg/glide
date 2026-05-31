@@ -8,16 +8,67 @@ version = "0.1.0"
 description = "GPU-accelerated backward LPDM"
 readme = "README.md"
 requires-python = ">=3.11"
-dynamic = ["dependencies"]
+
+# Core runtime deps — the bare minimum to run the simulation, load met, and
+# write outputs. NO visualisation libraries here: `cartopy` and its transitive
+# C-extension stack are notebook-only and live in the `[viz]` extras so a
+# compute node never has to compile them. See the 2026-05-31 entry in
+# CHECKPOINT.md for the rationale.
+dependencies = [
+    # Numerical
+    "numpy>=1.26",
+    "scipy>=1.13",
+    # GPU / tensor compute
+    "torch>=2.4",
+    # Met I/O (Zarr + dask + ARCO ERA5 on GCS)
+    "xarray>=2024.2",
+    "dask>=2024.2",
+    "zarr>=2.18",
+    "numcodecs>=0.13",
+    "gcsfs>=2024.3",
+    "fsspec>=2024.3",
+    # Tabular and columnar output
+    "pandas>=2.2",
+    "pyarrow>=16.0",
+    # Config
+    "pydantic>=2.7",
+    "PyYAML>=6.0",
+    # Misc
+    "typing-extensions>=4.12",
+]
+
+# Optional dependency groups. Install with e.g.:
+#     uv pip install -e ".[viz]"      # core + notebooks/plotting
+#     uv pip install -e ".[dev]"      # core + test harness
+#     uv pip install -e ".[viz,dev]"  # everything (interactive workstation)
+[project.optional-dependencies]
+# Notebook + map-plotting stack. Pulls in cartopy (transitive via geoviews),
+# which is C-extension heavy and may need `python3-dev` + `libgeos-dev` on the
+# system if no binary wheel is available for your (cpython × OS × arch). Skip
+# this group on headless compute nodes that never open the notebooks.
+# h5netcdf/h5py live here because they're only needed for loading FLEXPART .nc
+# reference fixtures inside notebooks/flexpart_comparison.ipynb.
+viz = [
+    "hvplot>=0.10",
+    "geoviews>=1.12",
+    "jupyter_bokeh>=4.0",
+    "matplotlib>=3.9",
+    "ipykernel>=6.25",
+    "ipywidgets>=8.1",
+    "nbformat>=5.10",
+    "h5netcdf>=1.3",
+    "h5py>=3.10",
+]
+# Test harness. Separate from `viz` so CI can install only what it needs.
+dev = [
+    "pytest>=8.2",
+]
 
 [tool.setuptools]
 package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
-
-[tool.setuptools.dynamic]
-dependencies = {file = ["requirements.txt"]}
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

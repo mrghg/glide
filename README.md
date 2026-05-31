@@ -32,9 +32,21 @@ If behavior or interfaces change, update both the implementation and the matchin
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -e .                  # core install (simulation only)
+# pip install -e ".[viz,dev]"     # add notebook plotting stack + pytest
 python -m lpdm.main --config configs/local_smoke_test.yaml
 ```
+
+The dependency surface is split into a small core (`numpy`, `torch`, `xarray`,
+`zarr`, `pydantic`, …) and two optional extras:
+
+- `[viz]` — `hvplot`, `geoviews`, `jupyter_bokeh`, `matplotlib`, `ipykernel`,
+  `nbformat`, plus `h5netcdf`/`h5py` for loading the FLEXPART `.nc` reference
+  fixtures. Pulls in `cartopy` (C-extension heavy); if no binary wheel is
+  available for your cpython / OS / arch you'll need `python3-dev` and
+  `libgeos-dev` (or the equivalent on your distro). Skip this on headless
+  compute nodes that never open the notebooks.
+- `[dev]` — `pytest`.
 
 Run configs are YAML; the schema lives in [src/lpdm/config.py](src/lpdm/config.py). Three examples ship with the repo:
 - `configs/local_smoke_test.yaml` — small backward run against `data/sample_met.zarr`.
@@ -51,13 +63,15 @@ After cloning on any machine:
 
 ```bash
 chmod +x scripts/setup.sh
-./scripts/setup.sh --run-tests
+./scripts/setup.sh --run-tests              # core + dev (pytest)
+./scripts/setup.sh --with-viz --run-tests   # full notebook workstation
 ```
 
 What this does:
 - Uses `uv` if available (falls back to `venv + pip` automatically).
 - Creates `.venv` with Python 3.11 by default.
-- Installs `requirements.txt`.
+- Installs the package via `pip install -e .` with the right extras for the
+  flags you pass (`--with-viz` adds `[viz]`; `--run-tests` adds `[dev]`).
 - Optionally runs `tests/test_physics.py` when `--run-tests` is passed.
 
 Custom Python executable:
@@ -74,13 +88,13 @@ Install UV (if not already installed):
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-Create a virtual environment and install dependencies from `requirements.txt`:
+Create a virtual environment and install:
 
 ```bash
 uv venv --python 3.11
 source .venv/bin/activate
-uv pip install -r requirements.txt
-uv pip install -e .
+uv pip install -e .                  # core (simulation only)
+# uv pip install -e ".[viz,dev]"     # full (notebooks + pytest)
 ```
 
 Run the model entrypoint:
