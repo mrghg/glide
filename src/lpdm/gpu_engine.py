@@ -34,7 +34,17 @@ class CoordinateBounds:
 @dataclass(frozen=True)
 class GridInterpolationBounds:
 	"""Physical bounds mapping grid index 0 to 1st element, index N-1 to 2nd element.
-	Values can be descending (e.g. lat_first > lat_last)."""
+	Values can be descending (e.g. lat_first > lat_last).
+
+	``level_agl_m`` is the per-level AGL height array (bbox-mean for the met
+	window) and is the source-of-truth for the vertical fractional-index
+	lookup used by ``normalize_particle_coordinates`` (F9 fix, audit 2026-05-30).
+	If ``None``, the vertical mapping falls back to a linear-in-AGL mapping
+	between ``alt_first`` and ``alt_last`` — historically used but biased for
+	pressure-level data (which is roughly log-linear in altitude). Always pass
+	the level array when it's available; the optional fallback is only kept
+	for in-place tests of the geometry helper itself.
+	"""
 
 	lon_first: float
 	lon_last: float
@@ -42,6 +52,7 @@ class GridInterpolationBounds:
 	lat_last: float
 	alt_first: float
 	alt_last: float
+	level_agl_m: tuple[float, ...] | None = None
 
 
 class GPUEngine:
@@ -77,6 +88,14 @@ class GPUEngine:
 		Args:
 			particle_xyz: Tensor shaped (N, 3) with [lon, lat, alt].
 			bounds: Exact boundary coordinates matching grid index endpoints.
+				When ``bounds.level_agl_m`` is provided, the vertical mapping is
+				a piecewise-linear lookup into the per-level AGL array (F9 fix,
+				audit 2026-05-30); otherwise it falls back to the legacy
+				linear-in-AGL mapping between ``alt_first`` and ``alt_last``.
+				The lookup matters because ERA5 pressure-level data is roughly
+				log-linear in altitude — the linear-in-metres approximation
+				silently warps the vertical wind shear (and σ_w / T_L sampling
+				for the Hanna scheme).
 		"""
 
 		if particle_xyz.ndim != 2 or particle_xyz.shape[1] != 3:
@@ -96,7 +115,45 @@ class GPUEngine:
 
 		x = scale(lon, bounds.lon_first, bounds.lon_last)
 		y = scale(lat, bounds.lat_first, bounds.lat_last)
-		z = scale(alt, bounds.alt_first, bounds.alt_last)
+
+		if bounds.level_agl_m is not None:
+			# F9: piecewise-linear fractional-level lookup against the per-level
+			# AGL array. This handles non-uniform-in-z pressure-level spacing
+			# correctly (the levels are roughly log-linear in altitude).
+			level_arr = torch.as_tensor(
+				bounds.level_agl_m, device=self.device, dtype=self.dtype,
+			)
+			n_levels = level_arr.numel()
+			if n_levels < 2:
+				raise ValueError("level_agl_m must have at least 2 entries for vertical interpolation")
+			# Determine sorting direction (ARCO ERA5 level arrays may come in
+			# descending altitude — pressure-coordinate convention).
+			ascending = bool(level_arr[-1] > level_arr[0])
+			if not ascending:
+				level_arr_sorted = level_arr.flip(0)
+			else:
+				level_arr_sorted = level_arr
+			# torch.searchsorted: returns insertion index i s.t. level[i-1] ≤ alt < level[i].
+			# alt is a column slice and may be non-contiguous; force contiguous to
+			# avoid the searchsorted perf warning and the implicit internal copy.
+			idx_upper = torch.searchsorted(
+				level_arr_sorted, alt.contiguous()
+			).clamp(min=1, max=n_levels - 1)
+			idx_lower = idx_upper - 1
+			L_lo = level_arr_sorted[idx_lower]
+			L_hi = level_arr_sorted[idx_upper]
+			frac_within = (alt - L_lo) / (L_hi - L_lo).clamp(min=1e-6)
+			frac_idx_ascending = idx_lower.to(dtype=self.dtype) + frac_within.clamp(0.0, 1.0)
+			# Map back to the original level ordering (the grid we sample lives
+			# in the original orientation).
+			if ascending:
+				frac_idx = frac_idx_ascending
+			else:
+				frac_idx = (n_levels - 1) - frac_idx_ascending
+			# Normalised to [-1, 1] for grid_sample.
+			z = 2.0 * frac_idx / float(n_levels - 1) - 1.0
+		else:
+			z = scale(alt, bounds.alt_first, bounds.alt_last)
 
 		# Clamp protects against small numerical drifts beyond interpolation range.
 		return torch.stack((x, y, z), dim=1).clamp(-1.0, 1.0)
@@ -150,7 +207,7 @@ class GPUEngine:
 		w_prime: torch.Tensor,
 		t_lagrangian: torch.Tensor | float,
 		sigma_w2: torch.Tensor | float,
-		dt_seconds: float,
+		dt_seconds: torch.Tensor | float,
 		noise: torch.Tensor | None = None,
 		drift: torch.Tensor | float = 0.0,
 	) -> torch.Tensor:
@@ -165,9 +222,16 @@ class GPUEngine:
 		footprint under-dispersion. The homogeneous part stays the exact-OU form
 		(stationary variance σ²); the drift is applied with a forward-Euler
 		increment, matching the FLEXPART discretization.
+
+		`dt_seconds` may be a scalar (uniform timestep) OR a per-particle tensor
+		(adaptive substepping, F4 Tier 2 / audit 2026-05-30). In the tensor case
+		each particle integrates its own sub-step length, which is needed when
+		particles in the active set have very different Lagrangian timescales
+		(near-surface T_L can drop to a few seconds while aloft T_L is hundreds).
 		"""
 
-		if dt_seconds <= 0:
+		dt = torch.as_tensor(dt_seconds, device=self.device, dtype=self.dtype)
+		if torch.any(dt <= 0):
 			raise ValueError("dt_seconds must be > 0")
 
 		w_prev = w_prime.to(device=self.device, dtype=self.dtype)
@@ -186,29 +250,36 @@ class GPUEngine:
 			if eta.shape != w_prev.shape:
 				raise ValueError("noise must have same shape as w_prime")
 
-		a = torch.exp(-float(dt_seconds) / tl)
+		a = torch.exp(-dt / tl)
 		# For the OU process dw = -(w/T_L)dt + sqrt(2*sigma_w^2/T_L)dW,
 		# this exact discrete form preserves the stationary variance sigma_w^2.
 		# The altitude test uses the integrated OU variance:
 		# Var[z(t)] = 2*sigma_w^2*T_L*(t - T_L*(1 - exp(-t/T_L))).
 		variance = torch.clamp(sigma2 * (1.0 - a * a), min=0.0)
 		std = torch.sqrt(variance)
-		drift_term = torch.as_tensor(drift, device=self.device, dtype=self.dtype) * float(dt_seconds)
+		drift_tensor = torch.as_tensor(drift, device=self.device, dtype=self.dtype)
+		drift_term = drift_tensor * dt
 		return a * w_prev + drift_term + std * eta
 
 	def apply_vertical_turbulence(
 		self,
 		particles: torch.Tensor,
 		w_prime: torch.Tensor,
-		dt_seconds: float,
+		dt_seconds: torch.Tensor | float,
 		*,
 		backward: bool = True,
 	) -> torch.Tensor:
-		"""Apply vertical displacement from turbulent velocity fluctuations."""
+		"""Apply vertical displacement from turbulent velocity fluctuations.
+
+		`dt_seconds` may be a scalar or a per-particle tensor (F4 Tier 2
+		substepping). When per-particle, each particle is displaced by its own
+		`w_prime * sub_dt`."""
 
 		if particles.ndim != 2 or particles.shape[1] != 4:
 			raise ValueError("particles must have shape (N, 4)")
-		if dt_seconds <= 0:
+
+		dt = torch.as_tensor(dt_seconds, device=self.device, dtype=self.dtype)
+		if torch.any(dt <= 0):
 			raise ValueError("dt_seconds must be > 0")
 
 		state = particles.to(device=self.device, dtype=self.dtype)
@@ -218,7 +289,7 @@ class GPUEngine:
 
 		direction = -1.0 if backward else 1.0
 		out = state.clone()
-		out[:, 2] = out[:, 2] + direction * wp * float(dt_seconds)
+		out[:, 2] = out[:, 2] + direction * wp * dt
 		return out
 
 	def apply_horizontal_turbulence(
@@ -226,7 +297,7 @@ class GPUEngine:
 		particles: torch.Tensor,
 		u_prime: torch.Tensor,
 		v_prime: torch.Tensor,
-		dt_seconds: float,
+		dt_seconds: torch.Tensor | float,
 		*,
 		backward: bool = True,
 	) -> torch.Tensor:
@@ -234,11 +305,14 @@ class GPUEngine:
 
 		Mirrors `apply_vertical_turbulence` but in lon/lat with the cos-lat correction
 		on lon. `u_prime` is the zonal perturbation in m/s, `v_prime` is meridional.
+		`dt_seconds` may be a scalar or a per-particle tensor (F4 Tier 2 substepping).
 		"""
 
 		if particles.ndim != 2 or particles.shape[1] != 4:
 			raise ValueError("particles must have shape (N, 4)")
-		if dt_seconds <= 0:
+
+		dt = torch.as_tensor(dt_seconds, device=self.device, dtype=self.dtype)
+		if torch.any(dt <= 0):
 			raise ValueError("dt_seconds must be > 0")
 
 		state = particles.to(device=self.device, dtype=self.dtype)
@@ -256,8 +330,8 @@ class GPUEngine:
 		meters_per_deg_lat = 110540.0
 		meters_per_deg_lon = 111320.0 * torch.cos(torch.deg2rad(lat_deg)).abs().clamp(min=0.05)
 
-		out[:, 0] = out[:, 0] + direction * up * float(dt_seconds) / meters_per_deg_lon
-		out[:, 1] = out[:, 1] + direction * vp * float(dt_seconds) / meters_per_deg_lat
+		out[:, 0] = out[:, 0] + direction * up * dt / meters_per_deg_lon
+		out[:, 1] = out[:, 1] + direction * vp * dt / meters_per_deg_lat
 		return out
 
 	def reflect_surface(

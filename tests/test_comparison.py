@@ -12,7 +12,9 @@ import xarray as xr
 
 from lpdm.comparison import (
     DRY_AIR_M_KG_MOL,
+    R_DRY_AIR_J_KG_K,
     regrid_conservative,
+    surface_air_density_from_met,
     to_stilt_surface_footprint,
 )
 
@@ -303,3 +305,92 @@ def test_regrid_rejects_non_ascending_centres() -> None:
             target_latitude=np.array([2.0, 1.0, 0.0]),
             target_longitude=np.array([0.0, 1.0, 2.0]),
         )
+
+
+# ---------------------------------------------------------------------------
+# (b) Surface air density helper (F10, audit 2026-05-30)
+# ---------------------------------------------------------------------------
+
+
+def _make_minimal_met(sp_pa: float = 101325.0, t_lowest_k: float = 280.0) -> xr.Dataset:
+    """Tiny met fixture with the variables `surface_air_density_from_met` needs."""
+
+    n_lat, n_lon, n_lev = 3, 4, 2
+    lat = np.linspace(45.0, 50.0, n_lat)
+    lon = np.linspace(-2.0, 2.0, n_lon)
+    # Level coord in hPa, descending altitude (ARCO ERA5 convention) — so
+    # argmax(level) picks the LOWEST altitude (highest pressure = surface).
+    level = np.array([500.0, 1000.0])  # 500 hPa (aloft), 1000 hPa (surface)
+    t = np.full((n_lev, n_lat, n_lon), 260.0)  # aloft default
+    t[1, :, :] = t_lowest_k  # lowest level = surface proxy
+    sp = np.full((n_lat, n_lon), sp_pa)
+    return xr.Dataset(
+        {
+            "surface_pressure": (("latitude", "longitude"), sp, {"units": "Pa"}),
+            "temperature": (("level", "latitude", "longitude"), t, {"units": "K"}),
+        },
+        coords={
+            "level": ("level", level, {"units": "hPa"}),
+            "latitude": ("latitude", lat),
+            "longitude": ("longitude", lon),
+        },
+    )
+
+
+def test_surface_air_density_matches_ideal_gas() -> None:
+    """ρ = sp / (R_d · T_surface) for the lowest level."""
+
+    sp_pa, t_k = 101325.0, 288.0
+    met = _make_minimal_met(sp_pa=sp_pa, t_lowest_k=t_k)
+    rho = surface_air_density_from_met(met)
+    expected = sp_pa / (R_DRY_AIR_J_KG_K * t_k)
+    assert rho.dims == ("latitude", "longitude")
+    assert np.allclose(rho.values, expected)
+    assert rho.attrs["units"] == "kg m**-3"
+
+
+def test_surface_air_density_spatial_variation() -> None:
+    """A spatially-varying surface pressure produces a varying ρ field."""
+
+    met = _make_minimal_met()
+    # Inject a 1% pressure gradient across longitude.
+    sp = met["surface_pressure"].values.copy()
+    sp[:, -1] *= 1.01  # last lon column = 1.01× the rest
+    met["surface_pressure"][:] = sp
+
+    rho = surface_air_density_from_met(met)
+    base = float(rho.values[0, 0])
+    edge = float(rho.values[0, -1])
+    assert abs(edge - 1.01 * base) / base < 1e-6
+
+
+def test_surface_air_density_rejects_missing_variable() -> None:
+    """Clear error if the requested variable name isn't in the dataset."""
+
+    met = _make_minimal_met()
+    with pytest.raises(KeyError, match="surface-pressure"):
+        surface_air_density_from_met(met, sp_var="not_a_variable")
+    with pytest.raises(KeyError, match="temperature"):
+        surface_air_density_from_met(met, t_var="not_a_variable")
+
+
+def test_surface_air_density_feeds_to_stilt_surface_footprint() -> None:
+    """End-to-end: the rho DataArray plugs into `to_stilt_surface_footprint`
+    without complaint and is recorded in the attrs as a DataArray."""
+
+    met = _make_minimal_met(sp_pa=101325.0, t_lowest_k=288.0)
+    rho = surface_air_density_from_met(met)
+
+    # Build a raw footprint matching rho's spatial grid (3x4).
+    raw = _make_raw_footprint(
+        z_edges_m=np.array([0.0, 40.0, 200.0]),
+        n_lat=rho.sizes["latitude"], n_lon=rho.sizes["longitude"],
+        fill=1.0,
+    )
+    raw = raw.assign_coords(latitude=rho["latitude"].values, longitude=rho["longitude"].values)
+
+    stilt = to_stilt_surface_footprint(
+        raw, surface_layer_depth_m=40.0, air_density_kg_m3=rho,
+    )
+    assert stilt.attrs["stilt_air_density_kg_m3"] == "DataArray"
+    assert stilt.dims == ("latitude", "longitude")

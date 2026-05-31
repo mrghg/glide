@@ -487,6 +487,10 @@ def _advect_active_particles(
 		lat_last=float(met_window.metadata.lat[-1]),
 		alt_first=float(met_window.metadata.level[0]),
 		alt_last=float(met_window.metadata.level[-1]),
+		# F9 (audit 2026-05-30): pass the per-level AGL array so the vertical
+		# normalisation uses a piecewise-linear lookup rather than a linear-in-z
+		# approximation. Matters because pressure levels are log-linear in z.
+		level_agl_m=tuple(float(v) for v in met_window.metadata.level),
 	)
 
 	m_start_uvw, m_end_uvw = met_window.channels("u", "v", "w")

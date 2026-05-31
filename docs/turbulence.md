@@ -247,6 +247,16 @@ even correctly-implemented smooth-wall reflection is only WMC-exact for
 *homogeneous* Gaussian turbulence; in the inhomogeneous NSL it is approximate and
 the bias scales with `Δt/τ` (see §3.2.7).
 
+**Unresolved basal layer (W&F §7b, "constant-σ basal layer").** To make
+smooth-wall reflection WMC-exact in the basal layer, the Hanna scheme holds
+σ_w / T_L / drift / density-gradient CONSTANT for any particle below
+`z_ubl_m` (default 2 m) by clamping the *sampling* height: `z_eval = max(z, z_ubl_m)`.
+The particle *position* is not clamped — only the σ/T_L evaluation. The default
+2 m is thin enough to only intercept post-reflection bounces and matches the
+FLEXPART/NAME convention of treating the very-near-surface layer as a UBL.
+Configurable via the `HannaScheme(z_ubl_m=…)` constructor argument; set to 0 to
+disable. F5/F15 in the 2026-05-30 physics audit.
+
 #### 3.2.5 Drift handling — Thomson well-mixed term + Stohl-Thomson density correction
 
 **Added 2026-05-29** (well-mixed drift) and **2026-05-30** (density correction).
@@ -312,10 +322,45 @@ increment degrades when `dt > T_L / 5` (Wilson & Flesch 1993 Appendix derive
 an explicit "Δt-bias velocity" `wB/σ_w ≈ −α·β·(Δt/τ)` for the NSL; α ≈ β ≈ 0.5).
 Stohl & Thomson (1999) use the stricter `Δt ≤ 0.05·T_L`. The runtime uses
 `dt = 60–300 s` in current configs; near-surface near-floor `T_Lw` can drop to
-1–30 s. `HannaScheme.step` logs a `WARNING` (once per scheme instance) when
-`min(active T_L) < 5·dt`, citing the dt/T_L ratio. We do not auto-substep
-(Tier 2 follow-up). The reflection-related part of this same numerical concern
-(W&F §7b's reflection-with-finite-Δt/τ bias) is bounded by the same Δt rule.
+1–30 s.
+
+**F4 Tier 2 (audit 2026-05-30) — per-particle adaptive substepping.**
+`HannaScheme.step` integrates the OU + displacement + reflection in
+`k_i = ceil(dt / (substep_c · T_Lw_i))` per-particle substeps (default
+`substep_c = 0.5`, capped at `max_substeps = 50`). The substepping is
+vectorised via masking — only particles still owing substeps are touched in
+each loop iteration. σ², T_L, density gradient, and the gradient piece of the
+drift are held FIXED at their outer-step values (a deliberate simplification;
+FLEXPART re-evaluates per substep, but the cost of per-substep
+`_column_turbulence` is significant for moderate σ_w gradients across one
+outer dt). The `(1 + w'²/σ_w²)` velocity factor inside the σ-gradient drift IS
+recomputed per substep using the current `w'` — holding it fixed would
+systematically under-drift newly-released particles (caught by
+`test_hanna_well_mixed_no_runaway_lofting`).
+
+Also inside the substep loop:
+- F1 reflection is applied at every substep so a particle that crosses z=0 in
+  a substep is reflected before the next substep (rather than only at the
+  outer-step end).
+- The OU velocity is clipped at `|w'/σ_w| ≤ 4` (W_PRIME_SIGMA_RATIO_MAX). This
+  is a rogue-trajectory safeguard for particles where the substep cap binds
+  and σ_w is near its floor (e.g. at the BL top); without it, the
+  `(1+w'²/σ_w²)` factor can snowball drift and produce NaNs. FLEXPART has the
+  equivalent clip in its OU implementation.
+
+**F3 (audit 2026-05-30) — drift cap removed.** The legacy cap `|drift| ≤ σ_w/Δt`
+was an ad-hoc safeguard for sharp σ_w kinks under too-large Δt; it silently
+violated the WMC formula at the SL / BL-top seams. Replaced by F4 Tier 2 +
+the rogue-trajectory clip, which address the root cause.
+
+**Cap-saturation warning.** When the per-particle `k_i` hits the `max_substeps`
+cap for any active particle, `HannaScheme` emits a `WARNING` (once per scheme
+instance) noting `sub_dt/T_Lw` is still above the target and pointing to
+`simulation.dt_seconds` / `max_substeps` as the remedies.
+
+The reflection-related part of this same numerical concern (W&F §7b's
+reflection-with-finite-Δt/τ bias) is bounded by the same Δt rule and further
+mitigated by the F5/F15 constant-σ UBL (§3.2.4) which makes reflection WMC-exact.
 
 #### 3.2.8 Meander — unresolved-mesoscale horizontal turbulence
 
