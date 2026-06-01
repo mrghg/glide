@@ -60,6 +60,26 @@ Build a modern, highly optimized, backward-in-time LPDM for greenhouse-gas footp
 
 ## Milestone timeline
 
+### 2026-06-01 Deep convection (Emanuel reduced port; Forster 2007 / Stohl 2005 §4.6)
+
+The biggest non-audit dispersion gap GLIDE had vs FLEXPART — deep cumulus convection that loft surface air through the entire troposphere in minutes-to-hours — is now implemented as a reduced faithful port of the FLEXPART Emanuel & Živković-Rothman scheme (Stohl 2005 §4.6; Forster, Stohl & Seibert 2007). See `docs/convection.md` for the full spec.
+
+- **Architecture.** New `src/lpdm/convection/` subpackage (mirrors `lpdm.turbulence/`'s ABC + registry pattern): `ConvectionScheme` ABC, name-keyed registry, `NoConvection` (default, pass-through), `EmanuelReducedConvection`. The convection scheme is a separate runtime stage from turbulence — called **once per met-update interval** (not per integration timestep), because the per-column mass-flux matrix depends only on temperature/humidity profiles which don't change inside a met window. The runtime tracks the met bracket's start time and fires convection exactly once when the cursor crosses into a new bracket.
+- **Algorithm.** Implements the five Forster (2007) steps in pure torch at a higher level of abstraction than FLEXPART's ~3000-line `convect43c.f`:
+  1. Parcel lift (LCL via Bolton 1980; dry adiabat below, moist pseudo-adiabat above via θ_e-conserving bisection — fixed-point/Newton both fail to converge under Clausius-Clapeyron's strong nonlinearity).
+  2. LCL/LNB/CAPE identification on the bbox-mean column profile.
+  3. Trigger (Forster 2007 Eq 34): `T_v_parcel(LCL+1) ≥ T_v_env(LCL+1) + T_threshold` with `T_threshold = 0.9 K`, plus CAPE floor (`min_cape_j_kg=50`) and deep-only filter (`min_cloud_depth_m=500`).
+  4. Cloud-base mass flux: `M_b = closure_c · ρ_LCL · min(√(2·CAPE), 5 m/s)`. The cap on the buoyancy velocity is essential — without it, CAPE > 500 J/kg gives an unphysically large M_b; the 5 m/s cap represents a typical updraft-cell peak.
+  5. Mass-flux matrix `MA[i, j]` with three groups of source rows: **sub-LCL** = surface-updraft path (BL → cloud at `MA[i, j] = M_b · profile(j)`); **in-cloud** = Emanuel buoyancy-sorting (Forster Eq 35-36 with mixing fraction ε from θ-profiles); **above-LNB** = zero. Particle redistribution probability is `MA[host, j] / m_host`, sampled via cumulative-sum + uniform random with sub-bin placement in the destination layer.
+- **Backward mode.** Same matrix used for forward + backward. Forster 2007 §3 + Fig 2 demonstrate the WMC holds under either time direction; the matrix is mass-conserving by construction.
+- **Documented departures from full Emanuel** (in `docs/convection.md`): (a) bbox-mean column rather than per-(lon,lat) — mirrors the F9 approximation; (b) `θ_l ≈ θ` (latent reservoir implicit in q_sat); (c) no explicit saturated-downdraft branch; (d) linear M-profile not the buoyancy-driven profile; (e) capped buoyancy velocity instead of the full quasi-equilibrium closure; (f) compensating subsidence implicit in mass conservation rather than as an explicit downward velocity for non-displaced particles.
+- **Met channel.** Added `q` (specific humidity) to `ArcoEra5ZarrReader.DEFAULT_VARIABLE_MAP`. Units validation accepts `kg kg**-1` (ARCO ERA5's published units) and the dimensionless variants.
+- **Config.** New `ConvectionConfig` in `lpdm.config`: `scheme: "none" | "emanuel_reduced"` (default `"none"` is bit-equivalent to no-convection), plus `emanuel:` block with the four tuning constants. YAMLs without a `convection:` block produce the same output as before. `main._convection_scheme_kwargs` mirrors `_scheme_kwargs` for the turbulence case. CLI rejects unknown convection schemes the same way it rejects unknown turbulence schemes.
+- **Tests added: +18 (total 200).** Free-function physics: q↔e round-trip, T_v, LCL temp/pressure, θ, θ_e, q_sat, moist-adiabat θ_e conservation. Column-level: CAPE/LCL/LNB on a moist-unstable sounding (CAPE > 100 J/kg) and a dry-stable sounding (CAPE ≈ 0). Matrix: zero-when-no-cloud, non-zero-confined-to-source-rows-≤-LNB-and-cols-in-[LCL,LNB], in-cloud row sums equal M-profile, BL row sums equal M_b. Scheme-level: NoConvection pass-through, end-to-end lofting (>500 m median rise on a synthetic convective column), no-fire on stable sounding, constructor validation.
+- **Example config.** `configs/example_mhd_january_periodic.yaml` now ships with `convection.scheme: emanuel_reduced` enabled by default. For January 2024 mid-latitude this will be a modest effect (winter, weak convection); the test in summer / tropics will be more meaningful.
+- **Test pass count: 169 → 200 across the two audit PRs + this convection PR**, suite runtime ~3 min (the V1 and convection tests are the slow ones).
+- **Next user step:** re-run `configs/example_mhd_january_periodic.yaml` (now convection-enabled in addition to all audit fixes) and update `notebooks/flexpart_comparison.ipynb`. If the FLEXPART gap is still meaningful, the next levers (in order) are per-column profiles for the parcel lift, the full Emanuel quasi-equilibrium closure, and the saturated-downdraft branch — all documented in `docs/convection.md` §4.
+
 ### 2026-05-31 Audit follow-up: F4T2 substepping + F3 cap removed + F9 vertical interp + F5/F15 UBL + F10 surface-ρ helper
 
 User re-ran FLEXPART comparison after the first audit-fixes PR (entry below);
@@ -505,18 +525,19 @@ First multi-month EUROPE comparison run consumed >200 GB of RAM. Two distinct bu
 ## Immediate recommendation
 
 **Milestone status (as of 2026-05-31):**
-- **M0 / M1 / M4 / M5: code-complete.** Hanna scheme has Thomson well-mixed drift, N²/Ri free-troposphere closure, Maryon/FLEXPART meander, and (now) full audit fixes: F1+F2+F3+F4 (Tier 1 and Tier 2)+F5/F15+F9+F10. Multi-release execution, streaming per-batch Zarr writes, drop-and-count out-of-domain handling all landed.
-- **Physics audit + fixes — all 10 audit items now closed** across two PRs (`physics-audit-may30` + `physics-audit-followup`). 182 tests passing. V1 well-mixed tests (constant-ρ and ρ-weighted) plus the new substep-cap and pressure-level-interp regressions provide integrated-path coverage.
+- **M0 / M1 / M4 / M5: code-complete.** Hanna turbulence (drift, FT closure, meander) + full audit fixes (F1+F2+F3+F4Tier1+F4Tier2+F5/F15+F9+F10) + **deep convection (Emanuel reduced port, 2026-06-01)**. Multi-release execution, streaming per-batch Zarr writes, drop-and-count out-of-domain handling all landed.
+- **Physics audit (all 10 items) + deep convection — closed.** Three PRs total: `physics-audit-may30`, `physics-audit-followup`, `deep-convection`. 200 tests passing.
 - **Open M4 item:** `schema_version` field on the YAML.
-- **Open M5 item:** satellite multi-point-per-time releases (`points: list[PointSpec]` on `PointScheduleReleaseConfig`).
+- **Open M5 item:** satellite multi-point-per-time releases.
 
-**Next user step:** re-run `configs/example_mhd_january_periodic.yaml` and update `notebooks/flexpart_comparison.ipynb` to quantify the change in surface magnitude and dispersion now that all audit fixes are in. If the FLEXPART gap is still meaningful, the most likely remaining lever is the deferred **deep convection (Emanuel & Živković-Rothman; Stohl 2005 §4.6)** scheme — see "Open follow-ups" below.
+**Next user step:** re-run `configs/example_mhd_january_periodic.yaml` (now convection-enabled by default in addition to all audit fixes) and update `notebooks/flexpart_comparison.ipynb`. January 2024 mid-latitude is winter so convection will be modest; the comparison will be more meaningful in summer / tropical cases.
 
-**Open follow-ups beyond the audit:**
-- **Deep convection (Emanuel & Živković-Rothman 1999).** Biggest known non-audit dispersion gap GLIDE has vs FLEXPART. Scoped as its own PR — needs ~500–1000 lines of new physics, a specific-humidity met channel (q from ARCO ERA5), a new runtime integration point (called per met-update interval, not per dt), and tests. Skipping this is a documented modelling cost; FLEXPART's well-validated convect scheme is what GLIDE would port from.
-- **M2 — particle aggregation.** After convection lands (or now, if the user wants to deprioritise convection in favour of compute savings).
-- **F9 follow-up — per-column heights for vertical interp.** The current F9 fix uses bbox-mean `metadata.level`. Replacing it with per-column `height_agl_m` would be even more accurate but requires a much bigger refactor of the 3D `grid_sample` machinery.
-- **F4 follow-up — per-substep σ re-evaluation.** GLIDE's substepping holds σ/T_L/drift fixed at outer-step values for speed; FLEXPART re-evaluates per substep. Could matter at the BL top in shallow boundary layers.
+**Open follow-ups (no longer including deep convection):**
+- **M2 — particle aggregation.** Compute savings; orthogonal to physics.
+- **Convection — full Emanuel quasi-equilibrium closure.** Our reduced port caps the buoyancy velocity at 5 m/s as a closure simplification; the full Emanuel scheme has a quasi-equilibrium balance. If the FLEXPART comparison shows under-convective transport, this is the next lever.
+- **Convection — per-(lon,lat) profiles.** We use the bbox-mean column for the parcel lift (mirrors the F9 advection approximation). Per-column would be more accurate for large met domains; same refactor of the 3D `grid_sample` machinery as the F9 per-column follow-up.
+- **F9 follow-up — per-column heights for vertical interp.** Replacing bbox-mean `metadata.level` with per-column `height_agl_m`.
+- **F4 follow-up — per-substep σ re-evaluation** in the turbulence substep loop.
 
 ## Operational notes
 

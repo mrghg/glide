@@ -239,6 +239,45 @@ class TurbulenceConfig(_Frozen):
     meander: MeanderConfig = MeanderConfig()
 
 
+class EmanuelConvectionConfig(_Frozen):
+    """Per-scheme tuning for the reduced Emanuel convection (Forster 2007)."""
+
+    closure_c: float = Field(
+        0.03,
+        gt=0,
+        description="Cloud-base mass-flux closure constant. M_b ∝ closure_c · ρ_LCL · √(2·CAPE).",
+    )
+    trigger_dtv_k: float = Field(
+        0.9,
+        ge=0,
+        description="Buoyancy excess at LCL+1 required to trigger convection (Forster 2007 Eq 34, default 0.9 K).",
+    )
+    min_cape_j_kg: float = Field(
+        50.0,
+        ge=0,
+        description="CAPE floor below which convection never fires regardless of trigger check.",
+    )
+    min_cloud_depth_m: float = Field(
+        500.0,
+        ge=0,
+        description="Skip shallow convection (cloud depth < this). This scheme is for DEEP convection.",
+    )
+
+
+class ConvectionConfig(_Frozen):
+    """Deep-convection configuration. Default ``scheme = "none"`` is bit-
+    equivalent to no-convection runs (the scheme is a pass-through). Switch to
+    ``"emanuel_reduced"`` and configure via the ``emanuel`` block to enable.
+    """
+
+    scheme: str = Field(
+        "none",
+        min_length=1,
+        description='Convection scheme name. "none" (default, pass-through) or "emanuel_reduced".',
+    )
+    emanuel: EmanuelConvectionConfig = EmanuelConvectionConfig()
+
+
 class OutputGridConfig(_Frozen):
     """Grid onto which residence-time footprints are accumulated."""
 
@@ -310,6 +349,9 @@ class RunConfig(_Frozen):
     met_domain: MetDomainConfig
     memory: MemoryConfig = MemoryConfig()
     batch: BatchConfig = BatchConfig()
+    # Deep-convection block. Defaulting to "none" makes existing YAMLs without a
+    # `convection:` block bit-equivalent to the no-convection runtime path.
+    convection: ConvectionConfig = ConvectionConfig()
 
     @model_validator(mode="after")
     def _check_simulation_length_vs_release(self) -> "RunConfig":

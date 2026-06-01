@@ -63,6 +63,14 @@ turbulence:
     # stencil_radius: 1                 # 3x3 neighbourhood for the local wind variability
     # timescale_seconds: 1800           # default: half the hourly met interval
 
+convection:                              # deep convection (Emanuel & Živković-Rothman 1999)
+  scheme: emanuel_reduced                #   reduced port of FLEXPART convect43c.f, per Forster 2007
+  emanuel:                               #   reduced port of FLEXPART convect43c.f, per Forster 2007
+    closure_c: 0.03                      # cloud-base mass-flux closure constant (gives M_b ~ 0.05-0.5 kg/m²/s)
+    # trigger_dtv_k: 0.9                 # Forster 2007 Eq 34 buoyancy threshold (default)
+    # min_cape_j_kg: 50.0                # skip if CAPE < this
+    # min_cloud_depth_m: 500.0           # skip shallow convection (this scheme is for DEEP convection)
+
 # Output footprint grid: aligned cell-for-cell with the FLEXPART reference fixture.
 # Bounds are *outer cell edges*; n_x equal cells fill the interval.
 output_grid:
