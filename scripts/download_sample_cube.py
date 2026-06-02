@@ -32,10 +32,15 @@ import xarray as xr
 
 
 # Logical to ERA5 physical mapping required by the runtime.
-# friction_velocity and surface_sensible_heat_flux are required by the Hanna
-# turbulence scheme (see docs/turbulence.md). They are surface fields so adding
-# them is cheap; downloading them keeps the local cube ready for either
-# placeholder or Hanna runs.
+# - friction_velocity and surface_sensible_heat_flux are required by the Hanna
+#   turbulence scheme (see docs/turbulence.md). They are surface fields so
+#   adding them is cheap.
+# - specific_humidity is required by the Emanuel deep-convection scheme (see
+#   docs/convection.md). It is a 3D pressure-level field, so it adds roughly as
+#   much volume as temperature/geopotential — but the example periodic config
+#   enables convection by default, so a cube without it cannot run that config.
+# Downloading all of them keeps the local cube ready for placeholder, Hanna,
+# and convection-enabled runs alike.
 REQUIRED_VARS = [
     "u_component_of_wind",
     "v_component_of_wind",
@@ -43,6 +48,7 @@ REQUIRED_VARS = [
     "boundary_layer_height",
     "surface_pressure",
     "temperature",
+    "specific_humidity",
     "geopotential",
     "geopotential_at_surface",
     "friction_velocity",
