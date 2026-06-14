@@ -192,6 +192,10 @@ class ArcoEra5ZarrReader(MetReader):
         # to "instantaneous_surface_sensible_heat_flux" if the dataset provides it.
         "ustar": "friction_velocity",
         "shf": "surface_sensible_heat_flux",
+        # 3D moisture field used by the deep-convection scheme
+        # (EmanuelReducedConvection). Added when the convection scheme requests
+        # "q" via required_met_keys().
+        "q": "specific_humidity",
     }
 
     # Default channel order packed into the [C, Z, Y, X] tensors returned by
@@ -841,6 +845,13 @@ class ArcoEra5ZarrReader(MetReader):
 
         if logical_key in ("shf",):
             if self._is_flux_density_units(norm) or self._is_flux_accumulated_units(norm):
+                return
+            raise ValueError(f"Unsupported units {units!r} for variable {logical_key!r}")
+
+        if logical_key in ("q",):
+            # Specific humidity is dimensionless (kg/kg). ARCO ERA5 publishes
+            # it with units "kg kg**-1" or sometimes empty. Accept both.
+            if norm in {"kg/kg", "kgkg-1", "kgkg**-1", "kg*kg-1", "kg*kg**-1", "1", ""}:
                 return
             raise ValueError(f"Unsupported units {units!r} for variable {logical_key!r}")
 

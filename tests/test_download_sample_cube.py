@@ -18,6 +18,34 @@ def _load_download_sample_cube_module():
     return module
 
 
+def test_required_vars_cover_all_scheme_dependencies() -> None:
+    """The downloaded cube must contain every ERA5 variable the runtime's
+    schemes can ask for, so a locally-downloaded cube can run the shipped
+    example configs. Pins the contract against silent drift: if a scheme adds
+    a new met dependency, this test fails until the download script fetches it.
+
+    Maps the logical keys from the reader's DEFAULT_VARIABLE_MAP that the
+    turbulence (Hanna) and convection (Emanuel) schemes declare via
+    required_met_keys() to their ERA5 physical names and asserts presence.
+    """
+
+    module = _load_download_sample_cube_module()
+    required = set(module.REQUIRED_VARS)
+
+    # Physical ERA5 names the runtime schemes depend on (beyond the advection
+    # baseline u/v/w/blh/sp, which are always present).
+    scheme_dependencies = {
+        "temperature",            # Hanna T + Emanuel parcel lift
+        "specific_humidity",      # Emanuel convection (q)
+        "friction_velocity",      # Hanna ustar
+        "surface_sensible_heat_flux",  # Hanna shf
+        "geopotential",           # AGL height derivation
+        "geopotential_at_surface",
+    }
+    missing = scheme_dependencies - required
+    assert not missing, f"download script is missing scheme-required vars: {sorted(missing)}"
+
+
 def test_resolve_year_month_window_covers_full_month_inclusive() -> None:
     module = _load_download_sample_cube_module()
 

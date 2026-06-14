@@ -39,6 +39,11 @@ from lpdm.output_writer import OutputWriter
 from lpdm.release_generator import generate_batch_particles
 from lpdm.runtime import DEVICE
 from lpdm.turbulence import TurbulenceScheme, get_scheme, list_schemes
+from lpdm.convection import (
+	ConvectionScheme,
+	get_scheme as get_convection_scheme,
+	list_schemes as list_convection_schemes,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -549,11 +554,30 @@ def _scheme_kwargs(cfg: RunConfig) -> dict[str, object]:
 	return kwargs
 
 
+def _convection_scheme_kwargs(cfg: RunConfig) -> dict[str, object]:
+	"""Constructor kwargs for the configured convection scheme.
+
+	The Emanuel tuning block is scheme-specific; other schemes take no kwargs
+	(``NoConvection`` is parameter-less).
+	"""
+
+	if cfg.convection.scheme != "emanuel_reduced":
+		return {}
+	e = cfg.convection.emanuel
+	return {
+		"closure_c": e.closure_c,
+		"trigger_dtv_k": e.trigger_dtv_k,
+		"min_cape_j_kg": e.min_cape_j_kg,
+		"min_cloud_depth_m": e.min_cloud_depth_m,
+	}
+
+
 def _run(
 	cfg: RunConfig,
 	*,
 	reader: MetReader | None = None,
 	scheme: TurbulenceScheme | None = None,
+	convection_scheme: ConvectionScheme | None = None,
 ) -> dict[str, object]:
 	sim = cfg.simulation
 	mem = cfg.memory
@@ -562,11 +586,20 @@ def _run(
 
 	if scheme is None:
 		scheme = get_scheme(cfg.turbulence.scheme, **_scheme_kwargs(cfg))
+	if convection_scheme is None:
+		convection_scheme = get_convection_scheme(
+			cfg.convection.scheme, **_convection_scheme_kwargs(cfg),
+		)
 	if reader is None:
 		# Channels = baseline (advection needs u/v/w; runtime telemetry uses blh/sp)
-		# unioned with whatever the chosen turbulence scheme declares it needs.
+		# unioned with whatever the turbulence + convection schemes declare they
+		# need (e.g. Hanna adds ustar/shf/t; Emanuel adds q).
 		required_channels = tuple(
-			dict.fromkeys(("u", "v", "w", "blh", "sp", *scheme.required_met_keys()))
+			dict.fromkeys((
+				"u", "v", "w", "blh", "sp",
+				*scheme.required_met_keys(),
+				*convection_scheme.required_met_keys(),
+			))
 		)
 		reader = ArcoEra5ZarrReader(
 			zarr_store=cfg.io.zarr_store,
@@ -676,6 +709,13 @@ def _run(
 		turbulence_state = scheme.initialize_state(
 			particles.shape[0], device=device, dtype=particles.dtype
 		)
+		convection_state = convection_scheme.initialize_state(
+			particles.shape[0], device=device, dtype=particles.dtype
+		)
+		# Track the met bracket start time so we fire convection exactly once
+		# per met update (i.e. when the cursor crosses an hour boundary into a
+		# new bracket). `None` = nothing fired yet.
+		last_convection_bracket_start: datetime | None = None
 
 		# Persistent per-batch liveness mask. A particle is killed (drop-and-count)
 		# the step it leaves met_domain — it can never re-enter with valid met, so
@@ -731,6 +771,23 @@ def _run(
 					active_mask=active_mask,
 					engine=engine,
 				)
+
+				# Deep convection — fired ONCE per met-update interval (when the
+				# cursor crosses into a new hourly bracket), not per timestep.
+				# The Emanuel scheme computes per-column CAPE / mass-flux matrix
+				# (expensive) and that doesn't change inside a met window.
+				bracket_start = met_window.metadata.time_start
+				if bracket_start != last_convection_bracket_start:
+					particles, convection_state = convection_scheme.maybe_convect(
+						particles=particles,
+						state=convection_state,
+						met_window=met_window,
+						t_alpha=t_alpha,
+						dt_seconds=delta_s,
+						active_mask=active_mask,
+						engine=engine,
+					)
+					last_convection_bracket_start = bracket_start
 
 				del active_particles
 				del advected_active
@@ -893,6 +950,8 @@ def main(argv: Sequence[str] | None = None) -> None:
 
 	if cfg.turbulence.scheme not in list_schemes():
 		parser.exit(2, f"Error: unknown turbulence scheme {cfg.turbulence.scheme!r}. Registered: {', '.join(list_schemes())}\n")
+	if cfg.convection.scheme not in list_convection_schemes():
+		parser.exit(2, f"Error: unknown convection scheme {cfg.convection.scheme!r}. Registered: {', '.join(list_convection_schemes())}\n")
 
 	try:
 		metadata = _run(cfg)
