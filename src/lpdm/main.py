@@ -489,8 +489,13 @@ def _advect_active_particles(
 	t_cursor: datetime,
 	delta_s: float,
 	dtype: torch.dtype,
-) -> tuple[torch.Tensor, float, tuple[float, float, float]]:
-	"""RK2 backward advection on the active particle subset."""
+) -> tuple[torch.Tensor, float, torch.Tensor]:
+	"""RK2 backward advection on the active particle subset.
+
+	The third return is the grid-mean (u, v, w) wind as a device tensor — NOT
+	materialised to floats here, so the trajectory diagnostics can be transferred
+	to the host once per batch rather than syncing every step (matters on CUDA).
+	"""
 
 	t_start_s = met_window.metadata.time_start.timestamp()
 	t_end_s = met_window.metadata.time_end.timestamp()
@@ -536,16 +541,14 @@ def _advect_active_particles(
 
 	advected_active = engine.rk2_advect_backward(active_particles, dt_seconds=delta_s, wind_fn=wind_fn)
 
-	diag_means = (
-		float(torch.mean(m_start[0, 0] * (1 - alpha) + m_end[0, 0] * alpha).item()),
-		float(torch.mean(m_start[0, 1] * (1 - alpha) + m_end[0, 1] * alpha).item()),
-		float(torch.mean(m_start[0, 2] * (1 - alpha) + m_end[0, 2] * alpha).item()),
-	)
+	# Grid-mean wind as a 0-sync (3,) device tensor; materialised per-batch.
+	interp_wind = m_start[0] * (1 - alpha) + m_end[0] * alpha  # [3, Z, Y, X]
+	diag_wind_mean = interp_wind.reshape(3, -1).mean(dim=1)
 
 	del m_start
 	del m_end
 
-	return advected_active, alpha, diag_means
+	return advected_active, alpha, diag_wind_mean
 
 
 def _scheme_kwargs(cfg: RunConfig) -> dict[str, object]:
@@ -738,6 +741,18 @@ def _run(
 		alive = torch.ones(particles.shape[0], dtype=torch.bool, device=device)
 		batch_escaped_total = 0
 
+		# Per-step trajectory diagnostics are accumulated as device tensors here
+		# and transferred to the host ONCE at batch end (`_materialize_*` below),
+		# instead of a `.item()` sync every step. On CUDA those per-step syncs
+		# serialise the pipeline; on CPU it's equivalent. The host-side bookkeeping
+		# (step index, time, active count) is collected alongside.
+		diag_pos_means: list[torch.Tensor] = []   # each (3,): mean lon/lat/alt over all particles
+		diag_wind_means: list[torch.Tensor] = []  # each (3,): grid-mean u/v/w (0 when no active set)
+		diag_escaped: list[torch.Tensor] = []     # each (): newly-escaped count this step
+		diag_host: list[tuple[int, int, str, int]] = []  # (step, batch_idx, iso_time, active_count)
+		zero_wind = torch.zeros(3, device=device, dtype=particles.dtype)
+		zero_escaped = torch.zeros((), device=device, dtype=torch.long)
+
 		t_cursor = batch_cursor_start
 		while t_cursor > batch_cursor_terminus:
 			delta_s = min(
@@ -757,6 +772,11 @@ def _run(
 				& (release_time_offsets_s - sim_length_s <= cursor_offset_s)
 				& alive
 			)
+			# NOTE (perf TODO #2, see CHECKPOINT 2026-06-18): this `.item()` is the
+			# one remaining per-step host sync — it gates the work below. The
+			# per-step diagnostics no longer sync (materialised per batch). When
+			# wiring up torch.compile, fold this branch away (operate on the
+			# possibly-empty active set) so the hot loop has zero host syncs.
 			active_count = int(torch.count_nonzero(active_mask).item())
 
 			if active_count > 0:
@@ -765,7 +785,7 @@ def _run(
 					reader, cfg, t_cursor, met_cache
 				)
 				hour_windows += fetched_windows
-				advected_active, t_alpha, (u_m_s, v_m_s, w_m_s) = _advect_active_particles(
+				advected_active, t_alpha, wind_mean = _advect_active_particles(
 					engine,
 					device,
 					active_particles,
@@ -806,7 +826,7 @@ def _run(
 				del active_particles
 				del advected_active
 			else:
-				u_m_s, v_m_s, w_m_s = 0.0, 0.0, 0.0
+				wind_mean = zero_wind
 
 			if active_count > 0:
 				# Per-particle time-ago bin: each particle measures elapsed time
@@ -825,34 +845,23 @@ def _run(
 			# Kill particles that left met_domain this step (drop-and-count). They
 			# accumulated 0 this step already (outside output_grid → dropped by the
 			# gridder's valid_mask), and `alive` excludes them from all future
-			# steps. Escaped particles are out-of-domain, so the cheap count is
-			# `n_particles - escaped_total` (no extra device sync needed).
-			escaped_this_step = 0
+			# steps. The `alive` update is unconditional (idempotent when nothing
+			# escaped) so no per-step count `.item()` is needed; the escaped count
+			# is kept as a device tensor and summed at batch end.
 			if active_count > 0:
 				newly_escaped = active_mask & ~_within_met_domain(particles, cfg)
-				escaped_this_step = int(torch.count_nonzero(newly_escaped).item())
-				if escaped_this_step:
-					alive = alive & ~newly_escaped
-					batch_escaped_total += escaped_this_step
+				alive = alive & ~newly_escaped
+				escaped_count = torch.count_nonzero(newly_escaped)
+			else:
+				escaped_count = zero_escaped
 
 			step_count += 1
 
-			diag_rows.append(
-				{
-					"step": step_count,
-					"batch_idx": batch.batch_idx,
-					"time_hour_end": t_cursor.isoformat(),
-					"mean_lon": float(torch.mean(particles[:, 0]).item()),
-					"mean_lat": float(torch.mean(particles[:, 1]).item()),
-					"mean_alt_agl_m": float(torch.mean(particles[:, 2]).item()),
-					"u_mean_m_s": u_m_s,
-					"v_mean_m_s": v_m_s,
-					"w_mean_m_s": w_m_s,
-					"active_particles": active_count,
-					"escaped_this_step": escaped_this_step,
-					"alive_particles": int(particles.shape[0]) - batch_escaped_total,
-				}
-			)
+			# Accumulate diagnostics as device tensors (no host sync this step).
+			diag_pos_means.append(particles[:, :3].mean(dim=0))
+			diag_wind_means.append(wind_mean)
+			diag_escaped.append(escaped_count)
+			diag_host.append((step_count, batch.batch_idx, t_cursor.isoformat(), active_count))
 
 			if mem.gc_every_steps > 0 and step_count % mem.gc_every_steps == 0:
 				gc.collect()
@@ -888,6 +897,37 @@ def _run(
 				)
 
 			t_cursor = t_prev
+
+		# Materialise this batch's per-step diagnostics in ONE host transfer
+		# (instead of a `.item()` sync every step). `alive_particles` is the
+		# running survivor count = N − cumulative escaped, recovered from the
+		# escaped-per-step tensor via cumsum.
+		if diag_host:
+			pos = torch.stack(diag_pos_means).to("cpu").tolist()
+			wind = torch.stack(diag_wind_means).to("cpu").tolist()
+			escaped_dev = torch.stack(diag_escaped).to("cpu")
+			batch_escaped_total = int(escaped_dev.sum().item())
+			escaped_each = escaped_dev.tolist()
+			alive_each = (particles.shape[0] - torch.cumsum(escaped_dev, dim=0)).tolist()
+			for (st, bidx, iso, ac), pm, wm, esc, al in zip(
+				diag_host, pos, wind, escaped_each, alive_each
+			):
+				diag_rows.append(
+					{
+						"step": st,
+						"batch_idx": bidx,
+						"time_hour_end": iso,
+						"mean_lon": pm[0],
+						"mean_lat": pm[1],
+						"mean_alt_agl_m": pm[2],
+						"u_mean_m_s": wm[0],
+						"v_mean_m_s": wm[1],
+						"w_mean_m_s": wm[2],
+						"active_particles": ac,
+						"escaped_this_step": esc,
+						"alive_particles": al,
+					}
+				)
 
 		# End of batch: stream this batch's footprint slice to disk, then drop the
 		# gridder and per-batch tensors so peak footprint memory is one batch's

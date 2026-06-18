@@ -36,8 +36,8 @@
 #SBATCH --gres=gpu:1                        # one GH200 (a node has 4; we use 1)
 #SBATCH --cpus-per-task=16                  # CPU-side work (met I/O, numpy) + dataloader threads
 #SBATCH --mem=64G                           # >>> EDIT: Grace has unified memory; headroom for met cache
-#SBATCH --account=CHEM007981                # >>> EDIT: set to your Isambard AI project code
-#SBATCH --partition=workq                   # >>> EDIT: set to the Isambard AI GPU partition
+# #SBATCH --account=CHEM007981                # >>> EDIT: set to your Isambard AI project code
+# #SBATCH --partition=workq                   # >>> EDIT: set to the Isambard AI GPU partition
 
 set -euo pipefail
 
