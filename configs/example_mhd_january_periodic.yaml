@@ -50,7 +50,7 @@ release:
     alt_agl_m: 10.0                    # Mace Head inlet height
   start_time: 2024-01-01T00:00:00Z     # first release window start (UTC)
   period_seconds: 3600                 # one release per hour
-  n_releases: 24                      # 1 day × 24 hours = 24 releases
+  n_releases: 720                      # 30 days × 24 hours = 720 releases
   duration_seconds: 3600               # 1 h release window per release
   n_particles_per_release: 20000
   seed: 42                             # per-release seeds derive as 42 + release_idx

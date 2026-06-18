@@ -29,8 +29,8 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=48                  # torch CPU thread pool size
 #SBATCH --mem=32G                           # >>> EDIT: steady-state RSS ~3-8 GB; headroom for met cache
-##SBATCH --account=CHEM007981                # >>> EDIT: uncomment + set if your cluster requires it
-##SBATCH --partition=compute
+#SBATCH --account=CHEM007981                # >>> EDIT: uncomment + set if your cluster requires it
+#SBATCH --partition=compute
 
 # --- GPU alternative -------------------------------------------------------
 # The model is device-agnostic (cuda -> mps -> cpu). A single GPU is much faster
@@ -81,7 +81,10 @@ echo "device:   ${DEVICE}"
 echo "output:   ${OUTPUT_URI}"
 echo "=========================="
 
-srun "${PYTHON}" -m lpdm.main \
+# Direct invocation (not srun) — GLIDE is a single-process, non-MPI job.
+# srun wraps the launcher in SLURM's PMI/PMIx task-launch machinery which can
+# fail with "Unspecified error" on some cluster configurations even for ntasks=1.
+"${PYTHON}" -m lpdm.main \
 	--config "${CONFIG}" \
 	--device "${DEVICE}" \
 	--output-uri "${OUTPUT_URI}"
