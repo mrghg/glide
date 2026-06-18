@@ -71,6 +71,20 @@ def _resolve_device(name: str) -> str:
 
 	if name == "auto":
 		return str(DEVICE)
+	# Fail fast with a clear message if an explicit CUDA/MPS device was requested
+	# but this torch build can't provide it — otherwise the failure surfaces deep
+	# in the first tensor allocation. Matters on Isambard AI, where the wrong
+	# (CPU-only or x86) torch wheel in the venv is an easy mistake.
+	if name.startswith("cuda") and not torch.cuda.is_available():
+		raise PreflightValidationError(
+			f"device={name!r} requested but torch.cuda.is_available() is False. "
+			"Check the venv has a CUDA (and, on Isambard AI, ARM64/aarch64) torch "
+			"build and that the CUDA module is loaded (e.g. `module load cuda/12.6`)."
+		)
+	if name == "mps" and not torch.backends.mps.is_available():
+		raise PreflightValidationError(
+			f"device={name!r} requested but torch.backends.mps.is_available() is False."
+		)
 	return name
 
 
@@ -934,11 +948,39 @@ def _run(
 	return metadata
 
 
+def _configure_cpu_threads() -> None:
+	"""Set torch's intra-op thread pool from ``GLIDE_NUM_THREADS`` if present.
+
+	The per-step tensors here are modest (10^4–10^5 particles), so torch's CPU
+	parallel sections hit lock-contention overhead well before they saturate a
+	big core count: benchmarking the real engine on a 48-core node showed ~16
+	threads is ~25% faster than 48 at both 20k and 200k particles (the SLURM
+	default of one-thread-per-core is the *slowest* option). We therefore honour
+	an explicit ``GLIDE_NUM_THREADS`` override and otherwise leave torch's
+	default untouched. CPU-only knob — no effect on CUDA/MPS runs.
+	"""
+
+	raw = os.environ.get("GLIDE_NUM_THREADS")
+	if not raw:
+		return
+	try:
+		n = int(raw)
+	except ValueError:
+		LOGGER.warning("Ignoring non-integer GLIDE_NUM_THREADS=%r", raw)
+		return
+	if n < 1:
+		LOGGER.warning("Ignoring GLIDE_NUM_THREADS=%d (must be >= 1)", n)
+		return
+	torch.set_num_threads(n)
+	LOGGER.info("torch intra-op threads set to %d (GLIDE_NUM_THREADS)", n)
+
+
 def main(argv: Sequence[str] | None = None) -> None:
 	logging.basicConfig(
 		level=logging.INFO,
 		format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 	)
+	_configure_cpu_threads()
 
 	parser = _build_arg_parser()
 	args = parser.parse_args(argv)

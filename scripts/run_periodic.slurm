@@ -27,7 +27,8 @@
 #SBATCH --time=12:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=48                  # torch CPU thread pool size
+#SBATCH --cpus-per-task=16                  # see threading note below: ~16 is the
+                                            # sweet spot; 48 is ~25% SLOWER here.
 #SBATCH --mem=32G                           # >>> EDIT: steady-state RSS ~3-8 GB; headroom for met cache
 #SBATCH --account=CHEM007981                # >>> EDIT: uncomment + set if your cluster requires it
 #SBATCH --partition=compute
@@ -58,11 +59,21 @@ if [[ ! -x "${PYTHON}" ]]; then
 	exit 1
 fi
 
-# Pin torch's thread pools to the cores SLURM actually allocated (avoids
-# oversubscription / noisy-neighbour slowdowns on shared nodes).
-export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
-export MKL_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
-export OPENBLAS_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
+# --- CPU threading --------------------------------------------------------
+# Benchmarking the real engine on a 48-core node (20k AND 200k particles) found
+# ~16 torch threads is the sweet spot; one-thread-per-core (48) is ~25% SLOWER
+# because the per-step tensors are small enough that thread lock-contention
+# dominates before the cores saturate. GLIDE_NUM_THREADS drives torch's intra-op
+# pool directly (lpdm.main._configure_cpu_threads); the *_NUM_THREADS exports
+# pin the BLAS/OpenMP backends to match so nothing oversubscribes.
+#
+# THROUGHPUT TIP: because one run only needs ~16 cores, a 48-core node fits ~3
+# concurrent runs. For parameter sweeps, submit 3 jobs with --cpus-per-task=16
+# (or one job array) instead of one 48-thread job — ~3x aggregate throughput.
+export GLIDE_NUM_THREADS="${GLIDE_NUM_THREADS:-${SLURM_CPUS_PER_TASK:-16}}"
+export OMP_NUM_THREADS="${GLIDE_NUM_THREADS}"
+export MKL_NUM_THREADS="${GLIDE_NUM_THREADS}"
+export OPENBLAS_NUM_THREADS="${GLIDE_NUM_THREADS}"
 
 # --- Run parameters --------------------------------------------------------
 CONFIG="${1:-configs/example_mhd_january_periodic.yaml}"   # 1st arg overrides

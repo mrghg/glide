@@ -461,3 +461,88 @@ def test_meander_state_keys_only_when_enabled() -> None:
         4, device=torch.device("cpu"), dtype=torch.float32
     )
     assert set(on) == {"u_prime", "v_prime", "w_prime", "u_meander", "v_meander"}
+
+
+def _make_meander_test_window(t0, u_start_val: float, u_end_val: float):
+    """A tiny met window whose `u` ramps along longitude (so windowed-std > 0)
+    and differs between the two time endpoints. Used by the per-window field
+    cache test."""
+
+    from datetime import timedelta
+
+    from lpdm.met_reader import HourlyMetTensors, MetFieldMetadata
+
+    n_lev, n_lat, n_lon = 4, 5, 5
+    shape = (n_lev, n_lat, n_lon)
+    names = ("u", "v", "w", "blh", "sp", "t", "ustar", "shf")
+    ramp = torch.linspace(0.0, 1.0, n_lon).view(1, 1, n_lon).expand(shape)
+
+    def _stack(u_val: float) -> torch.Tensor:
+        ch = {
+            "u": u_val * ramp, "v": torch.zeros(shape), "w": torch.zeros(shape),
+            "blh": torch.full(shape, 1500.0), "sp": torch.full(shape, 101325.0),
+            "t": torch.full(shape, 280.0), "ustar": torch.full(shape, 0.4),
+            "shf": torch.zeros(shape),
+        }
+        return torch.stack([ch[n] for n in names], dim=0)
+
+    level = np.linspace(0.0, 4000.0, n_lev)
+    metadata = MetFieldMetadata(
+        lon=np.linspace(-2.0, 2.0, n_lon), lat=np.linspace(-2.0, 2.0, n_lat),
+        level=level, pressure_level_hpa=np.linspace(1000.0, 600.0, n_lev),
+        time_start=t0, time_end=t0 + timedelta(hours=1),
+        variable_units={n: "m/s" for n in names},
+    )
+    height = torch.as_tensor(level, dtype=torch.float32).view(n_lev, 1, 1).expand(shape).contiguous()
+    return HourlyMetTensors(
+        hour_start=_stack(u_start_val), hour_end=_stack(u_end_val),
+        metadata=metadata, channel_names=names, height_agl_m=height,
+    )
+
+
+def test_per_window_field_cache_reuses_within_window_and_rebuilds_across() -> None:
+    """Per-window field caching (perf 2026-06-18): the grid-wide meander σ,
+    density, and free-troposphere stacks are built once per met window (keyed by
+    ``metadata.time_start``) and reused for every step in that window; a new
+    window rebuilds them. The cached value is the field evaluated at the window
+    MIDPOINT (``t_alpha = 0.5``), not per-step time-interpolated."""
+
+    from datetime import datetime, timezone, timedelta
+
+    scheme = HannaScheme(meander_enabled=True)
+    dev, dt = torch.device("cpu"), torch.float32
+    t0 = datetime(2024, 1, 1, 12, tzinfo=timezone.utc)
+    met_a = _make_meander_test_window(t0, u_start_val=2.0, u_end_val=4.0)
+
+    # Within one window: every field function returns the *same* cached tensor
+    # object on repeat calls (i.e. it is not recomputed).
+    f1, _ = scheme._meander_sigma_fields(met_a, dev, dt)
+    f2, _ = scheme._meander_sigma_fields(met_a, dev, dt)
+    assert f1 is f2
+
+    d1 = scheme._density_fields(met_a, dev, dt)
+    d2 = scheme._density_fields(met_a, dev, dt)
+    assert d1 is d2
+
+    ft1, _ = scheme._free_trop_fields(met_a, dev, dt)
+    ft2, _ = scheme._free_trop_fields(met_a, dev, dt)
+    assert ft1 is ft2
+
+    # Three distinct cache keys, one entry each — keys do not collide.
+    assert set(scheme._window_field_cache) == {"meander", "density", "freetrop"}
+
+    # Midpoint semantics: the cached meander σ_u equals the coefficient times the
+    # windowed std of the time-MIDPOINT wind (0.5·(u_start + u_end)), NOT either
+    # endpoint alone.
+    u_mid = 0.5 * (met_a.channel("u")[0] + met_a.channel("u")[1])
+    expected_su = scheme.meander_coefficient * scheme._windowed_std(
+        u_mid, scheme.meander_stencil_radius
+    )
+    assert torch.allclose(f1[0], expected_su)
+
+    # A new window (different time_start) rebuilds: different object AND, because
+    # its winds differ, different values.
+    met_b = _make_meander_test_window(t0 + timedelta(hours=1), u_start_val=20.0, u_end_val=40.0)
+    f3, _ = scheme._meander_sigma_fields(met_b, dev, dt)
+    assert f3 is not f1
+    assert not torch.allclose(f3, f1)

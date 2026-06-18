@@ -13,7 +13,8 @@ run; secondary references occasionally diverge by ~10% on minor coefficients.
 from __future__ import annotations
 
 import logging
-from typing import ClassVar
+from datetime import datetime
+from typing import Callable, ClassVar
 
 import numpy as np
 import torch
@@ -407,6 +408,15 @@ class HannaScheme(TurbulenceScheme):
 		# `max_substeps` is the binding constraint (the substep cap saturates).
 		self._warned_substep_cap: bool = False
 
+		# Per-met-window cache for the grid-wide derived fields (meander σ, density
+		# + ∂ρ/∂z, free-trop σ/T_L). These depend only on the hourly met window,
+		# but `step` is called every dt (~60 steps/window), so recomputing the
+		# avg_pool2d / vertical-gradient stacks per step was ~18% of runtime
+		# (profiled 2026-06-18). We instead build each stack at the window's two
+		# time endpoints once per window and time-interpolate per step. See
+		# `_cached_window_field`. One entry per field key (the current window).
+		self._window_field_cache: dict[str, tuple[datetime, torch.Tensor]] = {}
+
 	def required_met_keys(self) -> tuple[str, ...]:
 		# Baseline (u, v, w, blh, sp) is added by the runtime; declare scheme-specific extras.
 		return ("t", "ustar", "shf")
@@ -469,13 +479,13 @@ class HannaScheme(TurbulenceScheme):
 
 		# Free-troposphere σ/T_L fields on the met grid (gradient-Richardson
 		# closure); interpolated per-particle inside _column_turbulence for the
-		# above-BL regime. Computed once per step (depends only on the met window).
-		ft_fields, grid_bounds = self._free_trop_fields(met_window, t_alpha, device, dtype)
+		# above-BL regime. Built once per met window and cached (perf 2026-06-18).
+		ft_fields, grid_bounds = self._free_trop_fields(met_window, device, dtype)
 
 		# Density and ∂ρ/∂z on the met grid for the Stohl-Thomson (1999) density
 		# correction term in the well-mixed drift (F2, audit 2026-05-30). Built
-		# once per step from sp/T/height; sampled per-particle below.
-		density_fields = self._density_fields(met_window, t_alpha, device, dtype)
+		# once per met window and cached; sampled per-particle below.
+		density_fields = self._density_fields(met_window, device, dtype)
 
 		col_kwargs = dict(
 			blh=blh, ustar=ustar, w_star=w_star, h_over_L=h_over_L, L=L,
@@ -564,7 +574,7 @@ class HannaScheme(TurbulenceScheme):
 		u_meander_active = v_meander_active = None
 		if self.meander_enabled:
 			meander_fields, meander_bounds = self._meander_sigma_fields(
-				met_window, t_alpha, device, dtype,
+				met_window, device, dtype,
 			)
 			sm = self._interp_3d_field(
 				meander_fields, meander_bounds, lon_deg, lat_deg, z_eval, engine,
@@ -809,10 +819,52 @@ class HannaScheme(TurbulenceScheme):
 		T_Lw = T_Lw.clamp(min=T_L_MIN_S)
 		return sigma_u, sigma_v, sigma_w, T_Lu, T_Lv, T_Lw
 
+	def _cached_window_field(
+		self,
+		met_window: HourlyMetTensors,
+		key: str,
+		build: Callable[[], torch.Tensor],
+	) -> torch.Tensor:
+		"""Build a grid field stack once per met window and reuse it all window.
+
+		``build()`` computes the stack ``[C, Z, Y, X]`` from the window met
+		evaluated at its MIDPOINT (``t_alpha = 0.5``); we cache it keyed by
+		``metadata.time_start`` and return the same tensor for every step in that
+		window (~60 at dt=60). Because ``step`` walks the met windows
+		monotonically, a single cached entry per ``key`` suffices — a new window
+		overwrites it.
+
+		This replaces the previous per-step recompute of the grid-wide
+		``avg_pool2d`` / vertical-gradient stacks (~18% of runtime, profiled
+		2026-06-18). The met-derived σ/ρ/FT fields evolve slowly — sub-percent
+		over one met interval — so freezing them at the window midpoint is a
+		standard met-cadence approximation (FLEXPART-class models refresh
+		turbulence fields at the met step, not the particle step). The previously
+		exact per-step *time* interpolation of these support fields is dropped;
+		the per-particle interpolation through them is unchanged. Documented
+		change (per-window field caching, perf 2026-06-18).
+		"""
+
+		ts = met_window.metadata.time_start
+		entry = self._window_field_cache.get(key)
+		if entry is None or entry[0] != ts:
+			stack = build()
+			self._window_field_cache[key] = (ts, stack)
+			return stack
+		return entry[1]
+
+	@staticmethod
+	def _window_mid(
+		met_window: HourlyMetTensors, name: str, device: torch.device, dtype: torch.dtype,
+	) -> torch.Tensor:
+		"""Window-midpoint (``t_alpha=0.5``) value of a met channel ``[Z, Y, X]``."""
+
+		start, end = met_window.channel(name)
+		return 0.5 * (start.to(device=device, dtype=dtype) + end.to(device=device, dtype=dtype))
+
 	def _free_trop_fields(
 		self,
 		met_window: HourlyMetTensors,
-		t_alpha: float,
 		device: torch.device,
 		dtype: torch.dtype,
 	) -> tuple[torch.Tensor, "GridInterpolationBounds"]:
@@ -830,44 +882,39 @@ class HannaScheme(TurbulenceScheme):
 				"(3D geopotential height). The met reader provides it; synthetic readers must too."
 			)
 
-		def _time_interp(name: str) -> torch.Tensor:
-			start, end = met_window.channel(name)  # [Z, Y, X] each
-			return (start.to(device=device, dtype=dtype) * (1.0 - t_alpha)
-			        + end.to(device=device, dtype=dtype) * t_alpha)
-
-		t_field = _time_interp("t")
-		u_field = _time_interp("u")
-		v_field = _time_interp("v")
 		height = met_window.height_agl_m.to(device=device, dtype=dtype)  # [Z, Y, X]
-
 		pressure_pa = torch.as_tensor(
 			np.array(met_window.metadata.pressure_level_hpa), device=device, dtype=dtype
 		).view(-1, 1, 1) * 100.0
 
-		theta = potential_temperature(t_field, pressure_pa)
-		dtheta_dz = self._vertical_gradient(theta, height)
-		n2 = brunt_vaisala_squared(theta, dtheta_dz)
+		def _build() -> torch.Tensor:
+			# Grid-wide FT σ/T_L stack at the window midpoint; cached per window.
+			t_field = self._window_mid(met_window, "t", device, dtype)
+			u_field = self._window_mid(met_window, "u", device, dtype)
+			v_field = self._window_mid(met_window, "v", device, dtype)
 
-		du_dz = self._vertical_gradient(u_field, height)
-		dv_dz = self._vertical_gradient(v_field, height)
-		shear_sq = du_dz.pow(2) + dv_dz.pow(2)
-		shear_mag = shear_sq.clamp(min=FT_SHEAR_SQ_FLOOR_S2).sqrt()
+			theta = potential_temperature(t_field, pressure_pa)
+			dtheta_dz = self._vertical_gradient(theta, height)
+			n2 = brunt_vaisala_squared(theta, dtheta_dz)
 
-		ri = gradient_richardson(n2, shear_sq)
-		k_z = free_trop_diffusivity(height.clamp(min=T_L_MIN_S), shear_mag, ri)
-		sigma_w_ft, t_lw_ft = free_trop_sigma_TL(k_z, n2)
-		# FT shear turbulence treated as isotropic (documented simplification);
-		# the unresolved-mesoscale "meander" horizontal term is a separate item.
-		sigma_uv_ft = sigma_w_ft
-		t_luv_ft = t_lw_ft
+			du_dz = self._vertical_gradient(u_field, height)
+			dv_dz = self._vertical_gradient(v_field, height)
+			shear_sq = du_dz.pow(2) + dv_dz.pow(2)
+			shear_mag = shear_sq.clamp(min=FT_SHEAR_SQ_FLOOR_S2).sqrt()
 
-		fields = torch.stack([sigma_w_ft, sigma_uv_ft, t_lw_ft, t_luv_ft], dim=0)
+			ri = gradient_richardson(n2, shear_sq)
+			k_z = free_trop_diffusivity(height.clamp(min=T_L_MIN_S), shear_mag, ri)
+			sigma_w_ft, t_lw_ft = free_trop_sigma_TL(k_z, n2)
+			# FT shear turbulence treated as isotropic (documented simplification);
+			# the unresolved-mesoscale "meander" horizontal term is separate.
+			return torch.stack([sigma_w_ft, sigma_w_ft, t_lw_ft, t_lw_ft], dim=0)
+
+		fields = self._cached_window_field(met_window, "freetrop", _build)
 		return fields, self._grid_bounds(met_window)
 
 	def _density_fields(
 		self,
 		met_window: HourlyMetTensors,
-		t_alpha: float,
 		device: torch.device,
 		dtype: torch.dtype,
 	) -> torch.Tensor:
@@ -888,24 +935,22 @@ class HannaScheme(TurbulenceScheme):
 				"(3D geopotential height). The met reader provides it; synthetic readers must too."
 			)
 
-		t_start, t_end = met_window.channel("t")
-		t_field = (
-			t_start.to(device=device, dtype=dtype) * (1.0 - t_alpha)
-			+ t_end.to(device=device, dtype=dtype) * t_alpha
-		)
 		height = met_window.height_agl_m.to(device=device, dtype=dtype)  # [Z, Y, X]
-
 		pressure_pa = torch.as_tensor(
 			np.array(met_window.metadata.pressure_level_hpa), device=device, dtype=dtype
 		).view(-1, 1, 1) * 100.0
-		rho = pressure_pa / (R_DRY_AIR_J_KG_K * t_field.clamp(min=1.0))
-		drho_dz = self._vertical_gradient(rho, height)
-		return torch.stack([rho, drho_dz], dim=0)
+
+		def _build() -> torch.Tensor:
+			t_field = self._window_mid(met_window, "t", device, dtype)
+			rho = pressure_pa / (R_DRY_AIR_J_KG_K * t_field.clamp(min=1.0))
+			drho_dz = self._vertical_gradient(rho, height)
+			return torch.stack([rho, drho_dz], dim=0)
+
+		return self._cached_window_field(met_window, "density", _build)
 
 	def _meander_sigma_fields(
 		self,
 		met_window: HourlyMetTensors,
-		t_alpha: float,
 		device: torch.device,
 		dtype: torch.dtype,
 	) -> tuple[torch.Tensor, "GridInterpolationBounds"]:
@@ -918,17 +963,16 @@ class HannaScheme(TurbulenceScheme):
 		mesoscale energy is left to parameterize.
 		"""
 
-		u_start, u_end = met_window.channel("u")  # [Z, Y, X] each
-		v_start, v_end = met_window.channel("v")
-		u_field = (u_start.to(device=device, dtype=dtype) * (1.0 - t_alpha)
-		           + u_end.to(device=device, dtype=dtype) * t_alpha)
-		v_field = (v_start.to(device=device, dtype=dtype) * (1.0 - t_alpha)
-		           + v_end.to(device=device, dtype=dtype) * t_alpha)
-
 		r = self.meander_stencil_radius
-		sigma_u = self.meander_coefficient * self._windowed_std(u_field, r)
-		sigma_v = self.meander_coefficient * self._windowed_std(v_field, r)
-		fields = torch.stack([sigma_u, sigma_v], dim=0)
+
+		def _build() -> torch.Tensor:
+			u_field = self._window_mid(met_window, "u", device, dtype)
+			v_field = self._window_mid(met_window, "v", device, dtype)
+			sigma_u = self.meander_coefficient * self._windowed_std(u_field, r)
+			sigma_v = self.meander_coefficient * self._windowed_std(v_field, r)
+			return torch.stack([sigma_u, sigma_v], dim=0)
+
+		fields = self._cached_window_field(met_window, "meander", _build)
 		return fields, self._grid_bounds(met_window)
 
 	@staticmethod

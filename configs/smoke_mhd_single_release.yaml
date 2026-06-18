@@ -1,0 +1,75 @@
+# GLIDE GPU smoke test: ONE Mace Head release, backward-integrated 1 day.
+#
+# Purpose: confirm the GPU path works end-to-end and measure single-release
+# throughput on a new device (e.g. Isambard AI GH200) BEFORE committing the full
+# 720-release / 30-day production job (configs/example_mhd_january_periodic.yaml).
+#
+# It mirrors the production config's physics (Hanna + meander + Emanuel
+# convection, same output grid) so the per-step cost is representative; only the
+# release count (1) and integration length (1 day) are trimmed for a fast run.
+#
+# Run on GPU:
+#   sbatch scripts/run_periodic_cuda.slurm configs/smoke_mhd_single_release.yaml
+# Or directly:
+#   GLIDE_DEVICE=cuda .venv/bin/python -m lpdm.main \
+#       --config configs/smoke_mhd_single_release.yaml --device cuda \
+#       --output-uri outputs/smoke-gpu
+
+io:
+  zarr_store: ~/data/arco-era5/EUROPE_*.zarr
+  output_uri: outputs/smoke-mhd-single
+
+simulation:
+  start_time: 2024-01-01T00:00:00Z
+  length_seconds: 86400                # 1 day backward — enough to time, fast to run
+  dt_seconds: 60
+  device: auto                         # overridden by --device on the CLI
+
+release:
+  kind: periodic_point
+  point:
+    lon: -9.9046
+    lat: 53.3267
+    alt_agl_m: 10.0
+  start_time: 2024-01-01T00:00:00Z
+  period_seconds: 3600
+  n_releases: 1                        # single release — the whole point of the smoke test
+  duration_seconds: 3600
+  n_particles_per_release: 20000       # production per-release count, for a representative per-step cost
+  seed: 42
+
+turbulence:
+  scheme: hanna_1982
+  meander:
+    enabled: true
+    coefficient: 0.16
+
+convection:
+  scheme: emanuel_reduced
+  emanuel:
+    closure_c: 0.03
+
+output_grid:
+  lon_bounds: [-98.076, 39.556]
+  lat_bounds: [10.612, 79.174]
+  n_x: 391
+  n_y: 293
+  z_edges_m: [0.0, 40.0, 1000.0, 5000.0]
+  n_time_bins: 1
+
+met_domain:
+  lon_bounds: [-100.0, 40.0]
+  lat_bounds: [10.0, 80.0]
+  alt_max_m: 15000.0
+
+batch:
+  max_releases_per_batch: 1
+
+memory:
+  met_cache_max_hours: 2
+  log_every_steps: 100
+  gc_every_steps: 50
+  guard_check_every_steps: 10
+  guard_max_rss_gib: null
+  guard_max_device_allocated_gib: null
+  guard_max_device_reserved_gib: null
