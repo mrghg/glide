@@ -74,13 +74,27 @@ export MKL_NUM_THREADS="${GLIDE_NUM_THREADS}"
 export OPENBLAS_NUM_THREADS="${GLIDE_NUM_THREADS}"
 
 # torch.compile of the elementwise hot-path kernels (OU update + displacement +
-# reflection). Fuses many tiny kernels into few — the next lever once the run is
-# launch-bound (low GPU sm% in the telemetry below). Needs nvcc/ptxas from the
-# CUDA toolkit for Inductor/Triton: on Isambard AI `module load cudatoolkit/24.11_12.6`.
-# It can't hard-fail a run (eager fallback is on); the first step pays a one-time
-# compile cost. Uncomment to enable:
-# module load cudatoolkit/24.11_12.6
-# export GLIDE_COMPILE=1
+# reflection). Fuses many tiny kernels into far fewer — the key lever when the run
+# is launch-bound (low GPU sm% in the telemetry below). Inductor/Triton codegen on
+# Isambard AI needs TWO toolchain pieces; loading only one makes every kernel
+# silently fall back to eager:
+#   - cudatoolkit/24.11_12.6 : nvcc/ptxas for the Triton GPU backend
+#   - gcc-native/14.2        : a C++20 host compiler for Inductor's C++ codegen.
+#     The system GCC (8.x) rejects `-std=c++20` (only knows `-std=c++2a`), so the
+#     precompiled-header build fails and compilation never happens. Inductor
+#     honours $CC/$CXX, so we point them at the freshly-loaded GCC 14.
+# torch.compile can't hard-fail a run (eager fallback is on); the first step pays a
+# one-time compile cost (seconds). Set GLIDE_COMPILE=0 at submit to skip it.
+export GLIDE_COMPILE="${GLIDE_COMPILE:-1}"
+if [[ "${GLIDE_COMPILE}" != "0" ]]; then
+	module load cudatoolkit/24.11_12.6
+	module load gcc-native/14.2
+	export CC=gcc
+	export CXX=g++
+	echo "compile:  ON   CC=$(command -v gcc)  CXX=$(command -v g++)"
+else
+	echo "compile:  OFF  (GLIDE_COMPILE=0)"
+fi
 
 # --- Run parameters --------------------------------------------------------
 CONFIG="${1:-configs/example_mhd_january_periodic.yaml}"   # 1st arg overrides

@@ -79,6 +79,25 @@ Profiled the real engine (cProfile + thread sweeps on a 48-core node) to cut run
 - **GPU telemetry in the run script.** `scripts/run_periodic_cuda.slurm` now starts `nvidia-smi dmon -s um` in the background (10 s cadence) to a `*.gpu.log` sidecar and prints a mean/max sm% summary at the end — auto-killed via an EXIT trap. This is the diagnostic for the launch/sync-bound vs compute-bound question: low sustained sm% ⇒ try `GLIDE_COMPILE=1`.
 - **Remaining per-step host syncs:** `max_k` (bounds the substep loop), the `scheme.step` empty-active guard, and `active_count` (control flow in `main._run`). All three are one-per-step and cheap relative to the removed hundreds; folding `active_count` away (operate on a possibly-empty active set) is the last micro-sync to chase if profiling still shows host stalls.
 
+### 2026-06-19 torch.compile needs a C++20 host compiler on Isambard AI
+
+Enabling `GLIDE_COMPILE=1` produced a flood of `torch._dynamo` **"WON'T CONVERT"** warnings, one per hot-path function, and ran no faster — every kernel was silently falling back to eager. The warnings name the *function* (`reflect_surface`, then `update_langevin_velocity`, …) so it looks like a per-method tracing problem, but it is **not**: the real error is at the bottom of the (suppressed) traceback, in Inductor's C++ codegen —
+
+```
+g++: error: unrecognized command line option '-std=c++20'; did you mean '-std=c++2a'?
+```
+
+- **Root cause.** Inductor compiles a C++ glue layer + precompiled header with the *host* compiler even on the GPU/Triton path. The system GCC on the el8 nodes is 8.x, which only knows `-std=c++2a` (the pre-final C++20 spelling). The build fails, `suppress_errors=True` swallows it as a per-graph eager fallback, and dynamo advances to the next function — which dies identically. So the failure is environmental and uniform across every compiled target, not fixable by editing any method.
+- **Fix (in `scripts/run_periodic_cuda.slurm`, active when `GLIDE_COMPILE != 0`).** Load a C++20 host compiler alongside the CUDA toolkit and point Inductor at it:
+  ```bash
+  module load cudatoolkit/24.11_12.6   # nvcc/ptxas for Triton (GPU backend)
+  module load gcc-native/14.2          # C++20 host compiler for Inductor C++ codegen
+  export CC=gcc; export CXX=g++        # Inductor honours $CC/$CXX
+  ```
+  Confirmation that it worked: the "WON'T CONVERT" warnings disappear (compilation actually ran rather than falling back).
+- **Diagnosis tip.** Because `suppress_errors=True` hides the real exception, reproduce with it *off* to see the bottom of the traceback: `torch._dynamo.config.suppress_errors = False`, then call the compiled fn directly. That is the only way the `-std=c++20` line surfaces.
+- **Code cleanups made while chasing this (kept — sound regardless of the real cause).** (a) `reflect_surface` rewritten from boolean-mask in-place assignment to `torch.where` (one fewer clone, more compile-friendly). (b) The OU update extracted to a module-level pure-tensor kernel `_ou_step_kernel`, compiled via `self._ou_step_fn` instead of the bound method — a clean tensor-only function with no `self`/`Tensor|float` unions is what Inductor traces best. Both are numerically identical to before (`test_compiled_hot_paths_match_eager_and_never_hard_fail` + the OU/altitude variance tests pass).
+
 ### 2026-06-01 Deep convection (Emanuel reduced port; Forster 2007 / Stohl 2005 §4.6)
 
 The biggest non-audit dispersion gap GLIDE had vs FLEXPART — deep cumulus convection that loft surface air through the entire troposphere in minutes-to-hours — is now implemented as a reduced faithful port of the FLEXPART Emanuel & Živković-Rothman scheme (Stohl 2005 §4.6; Forster, Stohl & Seibert 2007). See `docs/convection.md` for the full spec.
