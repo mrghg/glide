@@ -11,12 +11,28 @@ Implementation TODO:
 
 from __future__ import annotations
 
+import logging
+import os
 from dataclasses import dataclass
 from typing import Callable
 
 import torch
 
 from lpdm.runtime import DEVICE
+
+LOGGER = logging.getLogger(__name__)
+
+
+# Per-call *value* validation in the hot-path engine methods
+# (update_langevin_velocity, apply_vertical/horizontal_turbulence) uses
+# `torch.any(... <= 0)` checks. Each one is a device→host sync, and the Hanna
+# substep loop calls these hundreds of times per integration step — on CUDA the
+# syncs serialise the pipeline and dominate runtime (the GPU stalls waiting for
+# the host to read a bool). They guard only against negative dt / σ² / T_L, which
+# are positive by construction in the integrator, so they are OFF by default.
+# Cheap host-side *shape* checks (ndim/shape) are unaffected and always run.
+# Set GLIDE_VALIDATE_ENGINE=1 to re-enable the value checks (tests / debugging).
+VALIDATE_ENGINE_INPUTS = os.environ.get("GLIDE_VALIDATE_ENGINE", "") not in ("", "0", "false", "False")
 
 
 @dataclass(frozen=True)
@@ -62,9 +78,55 @@ class GPUEngine:
 	methods used by upcoming advection and turbulence implementations.
 	"""
 
-	def __init__(self, *, device: torch.device | str = DEVICE, dtype: torch.dtype = torch.float32) -> None:
+	def __init__(
+		self,
+		*,
+		device: torch.device | str = DEVICE,
+		dtype: torch.dtype = torch.float32,
+		compile_hot_paths: bool | None = None,
+	) -> None:
 		self.device = torch.device(device)
 		self.dtype = dtype
+		# `torch.compile` the elementwise hot-path methods (OU velocity update +
+		# displacement + reflection). Each fuses its internal ops into far fewer
+		# CUDA kernels, which helps when the run is launch-bound (the regime after
+		# the host-sync removal — see CHECKPOINT 2026-06-18b). Off by default;
+		# opt in with GLIDE_COMPILE=1 (or compile_hot_paths=True). Primarily a CUDA
+		# win (Inductor/Triton); on CPU Inductor may help or be neutral. NOTE:
+		# compiled RNG is statistically equivalent but not bit-identical to eager,
+		# and the FIRST call pays a one-time compile cost (seconds).
+		if compile_hot_paths is None:
+			compile_hot_paths = os.environ.get("GLIDE_COMPILE", "") not in ("", "0", "false", "False")
+		self._compile_hot_paths = bool(compile_hot_paths)
+		if self._compile_hot_paths:
+			self._enable_compiled_hot_paths()
+
+	def _enable_compiled_hot_paths(self) -> None:
+		"""Wrap the elementwise hot-path methods with ``torch.compile``.
+
+		Uses ``dynamic=True`` because the Hanna substep loop calls these on
+		masked subsets whose size changes each substep — a static compile would
+		recompile per shape. ``torch._dynamo`` is set to fall back to eager on any
+		graph it can't capture, so enabling this can never hard-fail a run; worst
+		case it's a no-op with a warning. Reassigning the bound methods to their
+		compiled wrappers is intentional (instance attr shadows the class method).
+		"""
+
+		try:
+			import torch._dynamo as dynamo
+
+			dynamo.config.suppress_errors = True  # graceful per-graph fallback to eager
+			kw = dict(dynamic=True, fullgraph=False)
+			self.update_langevin_velocity = torch.compile(self.update_langevin_velocity, **kw)  # type: ignore[method-assign]
+			self.apply_vertical_turbulence = torch.compile(self.apply_vertical_turbulence, **kw)  # type: ignore[method-assign]
+			self.apply_horizontal_turbulence = torch.compile(self.apply_horizontal_turbulence, **kw)  # type: ignore[method-assign]
+			self.reflect_surface = torch.compile(self.reflect_surface, **kw)  # type: ignore[method-assign]
+			LOGGER.info(
+				"GPUEngine: torch.compile enabled for hot-path methods (dynamic, eager fallback on)"
+			)
+		except Exception as exc:  # pragma: no cover - defensive; compile is opt-in
+			LOGGER.warning("GPUEngine: torch.compile setup failed (%s); running eager", exc)
+			self._compile_hot_paths = False
 
 	def to_device(self, tensor: torch.Tensor) -> torch.Tensor:
 		"""Move any tensor to the configured compute device/dtype."""
@@ -231,17 +293,17 @@ class GPUEngine:
 		"""
 
 		dt = torch.as_tensor(dt_seconds, device=self.device, dtype=self.dtype)
-		if torch.any(dt <= 0):
-			raise ValueError("dt_seconds must be > 0")
-
 		w_prev = w_prime.to(device=self.device, dtype=self.dtype)
 		tl = torch.as_tensor(t_lagrangian, device=self.device, dtype=self.dtype)
 		sigma2 = torch.as_tensor(sigma_w2, device=self.device, dtype=self.dtype)
 
-		if torch.any(tl <= 0):
-			raise ValueError("t_lagrangian must be strictly positive")
-		if torch.any(sigma2 < 0):
-			raise ValueError("sigma_w2 must be non-negative")
+		if VALIDATE_ENGINE_INPUTS:
+			if torch.any(dt <= 0):
+				raise ValueError("dt_seconds must be > 0")
+			if torch.any(tl <= 0):
+				raise ValueError("t_lagrangian must be strictly positive")
+			if torch.any(sigma2 < 0):
+				raise ValueError("sigma_w2 must be non-negative")
 
 		if noise is None:
 			eta = torch.randn_like(w_prev)
@@ -279,7 +341,7 @@ class GPUEngine:
 			raise ValueError("particles must have shape (N, 4)")
 
 		dt = torch.as_tensor(dt_seconds, device=self.device, dtype=self.dtype)
-		if torch.any(dt <= 0):
+		if VALIDATE_ENGINE_INPUTS and torch.any(dt <= 0):
 			raise ValueError("dt_seconds must be > 0")
 
 		state = particles.to(device=self.device, dtype=self.dtype)
@@ -312,7 +374,7 @@ class GPUEngine:
 			raise ValueError("particles must have shape (N, 4)")
 
 		dt = torch.as_tensor(dt_seconds, device=self.device, dtype=self.dtype)
-		if torch.any(dt <= 0):
+		if VALIDATE_ENGINE_INPUTS and torch.any(dt <= 0):
 			raise ValueError("dt_seconds must be > 0")
 
 		state = particles.to(device=self.device, dtype=self.dtype)

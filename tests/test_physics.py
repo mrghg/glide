@@ -482,3 +482,40 @@ def test_well_mixed_uniformity_in_periodic_turbulence() -> None:
 
     final_mass = particles[:, 3].sum()
     assert torch.allclose(initial_mass, final_mass, atol=0.0, rtol=0.0)
+
+
+def test_compiled_hot_paths_match_eager_and_never_hard_fail() -> None:
+    """Enabling `compile_hot_paths` (GLIDE_COMPILE) must not change results and
+    must not crash the run. `torch._dynamo.config.suppress_errors` makes any
+    graph that won't compile fall back to eager, so this holds even where the
+    Inductor/Triton toolchain is unavailable (then it simply tests the eager
+    fallback). Compiled RNG can differ from eager, so we pass fixed `noise` to
+    compare the deterministic math exactly.
+    """
+
+    eager = GPUEngine(device="cpu", compile_hot_paths=False)
+    compiled = GPUEngine(device="cpu", compile_hot_paths=True)
+    # Either it wrapped the methods, or setup fell back to eager — both are valid.
+    assert compiled._compile_hot_paths in (True, False)
+
+    w = torch.linspace(-2.0, 2.0, 1000)
+    noise = torch.linspace(-1.0, 1.0, 1000)
+    ref = eager.update_langevin_velocity(
+        w, t_lagrangian=120.0, sigma_w2=0.7, dt_seconds=45.0, noise=noise, drift=0.01,
+    )
+    got = compiled.update_langevin_velocity(
+        w, t_lagrangian=120.0, sigma_w2=0.7, dt_seconds=45.0, noise=noise, drift=0.01,
+    )
+    assert torch.allclose(ref, got, atol=1e-5)
+
+    # Displacement + reflection through the (possibly) compiled path, with a
+    # different shape to exercise the dynamic=True path without recompiling.
+    p = torch.zeros(321, 4)
+    p[:, 2] = torch.linspace(-3.0, 50.0, 321)
+    out_e = eager.apply_vertical_turbulence(p, torch.ones(321), dt_seconds=60.0)
+    out_c = compiled.apply_vertical_turbulence(p, torch.ones(321), dt_seconds=60.0)
+    assert torch.allclose(out_e, out_c, atol=1e-5)
+    refl_e, wpe = eager.reflect_surface(out_e, torch.ones(321))
+    refl_c, wpc = compiled.reflect_surface(out_c, torch.ones(321))
+    assert torch.allclose(refl_e, refl_c, atol=1e-5)
+    assert torch.allclose(wpe, wpc, atol=1e-5)

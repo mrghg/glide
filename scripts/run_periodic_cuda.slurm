@@ -73,6 +73,15 @@ export OMP_NUM_THREADS="${GLIDE_NUM_THREADS}"
 export MKL_NUM_THREADS="${GLIDE_NUM_THREADS}"
 export OPENBLAS_NUM_THREADS="${GLIDE_NUM_THREADS}"
 
+# torch.compile of the elementwise hot-path kernels (OU update + displacement +
+# reflection). Fuses many tiny kernels into few — the next lever once the run is
+# launch-bound (low GPU sm% in the telemetry below). Needs nvcc/ptxas from the
+# CUDA toolkit for Inductor/Triton: on Isambard AI `module load cudatoolkit/24.11_12.6`.
+# It can't hard-fail a run (eager fallback is on); the first step pays a one-time
+# compile cost. Uncomment to enable:
+# module load cudatoolkit/24.11_12.6
+# export GLIDE_COMPILE=1
+
 # --- Run parameters --------------------------------------------------------
 CONFIG="${1:-configs/example_mhd_january_periodic.yaml}"   # 1st arg overrides
 DEVICE="${GLIDE_DEVICE:-cuda}"                              # cuda by default here
@@ -91,6 +100,21 @@ echo "device:   ${DEVICE}"
 echo "output:   ${OUTPUT_URI}"
 echo "============================="
 
+# --- GPU telemetry (background, auto-stopped) ------------------------------
+# Sample GPU utilisation (sm%) + memory every 10 s to a sidecar log for the whole
+# run — nothing to launch by hand. This is the key diagnostic for whether the
+# GPU is actually busy: sustained sm% > ~70 means compute-bound (near the limit);
+# sm% persistently low means launch/sync-bound (try GLIDE_COMPILE=1 below). The
+# sampler is killed automatically when the job exits (success, failure, or
+# timeout) via the EXIT trap.
+GPU_LOG="slurm_logs/${SLURM_JOB_NAME:-glide}-${SLURM_JOB_ID:-local}.gpu.log"
+if command -v nvidia-smi >/dev/null 2>&1; then
+	nvidia-smi dmon -s um -d 10 -o DT > "${GPU_LOG}" 2>&1 &
+	DMON_PID=$!
+	trap 'kill "${DMON_PID}" 2>/dev/null || true' EXIT
+	echo "gpu telemetry -> ${GPU_LOG} (nvidia-smi dmon, 10 s cadence)"
+fi
+
 # Direct invocation (not srun) — GLIDE is a single-process, non-MPI job. srun
 # wraps the launcher in SLURM's PMI/PMIx machinery which can fail with
 # "Unspecified error" on some clusters even for ntasks=1.
@@ -100,6 +124,11 @@ echo "============================="
 	--output-uri "${OUTPUT_URI}"
 
 echo "=== GLIDE run complete: ${OUTPUT_URI} ==="
+if [[ -f "${GPU_LOG:-}" ]]; then
+	echo "--- GPU utilisation summary (sm% column) ---"
+	# Mean/Max of the sm% column (3rd field on data rows; skip the two header lines).
+	awk 'NR>2 && $3 ~ /^[0-9]+$/ {n++; s+=$3; if ($3>m) m=$3} END {if (n) printf "  samples=%d  mean_sm=%.1f%%  max_sm=%d%%\n", n, s/n, m}' "${GPU_LOG}" || true
+fi
 
 # =============================================================================
 # Sizing notes

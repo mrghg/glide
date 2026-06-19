@@ -667,28 +667,32 @@ class HannaScheme(TurbulenceScheme):
 		# but we add an extra safety clamp here so a pathological floor change
 		# doesn't divide by zero.
 		k_required = torch.ceil(dt_seconds / (c * T_Lw.clamp(min=1e-3))).long().clamp(min=1, max=k_cap)
+		# One host sync per step to bound the loop. (Looping to the static
+		# `k_cap` instead would avoid it but run up to ~50 empty-mask iterations
+		# every step — far more kernel launches than the single sync costs.)
 		max_k = int(k_required.max().item())
 
 		# Per-particle sub-dt (each particle distributes the outer dt across
 		# its k_i substeps).
 		sub_dt = (float(dt_seconds) / k_required.to(dtype=sigma_w.dtype))  # [N_active]
 
-		# F4 Tier 1 warning: fires (once per instance) when the cap is binding
-		# for any active particle — i.e. the substepping isn't keeping the Δt/τ
-		# bias small even at max_substeps.
-		if not self._warned_substep_cap:
+		# F4 Tier 1 warning: fires (once per instance) when the cap is binding for
+		# any active particle — i.e. the substepping isn't keeping the Δt/τ bias
+		# small even at max_substeps. `max_k` (already synced above) reaching the
+		# cap means at least one particle saturated it, so gate on that instead of
+		# a fresh `at_cap.any()` sync — which would otherwise fire EVERY step for
+		# runs that never hit the cap. The detailed counts below run only the once.
+		if not self._warned_substep_cap and max_k >= k_cap:
 			at_cap = k_required >= k_cap
-			if bool(at_cap.any()):
-				# Particles at cap have effective dt/T_L ≥ 1/c; report worst.
-				ratio_at_cap = (sub_dt[at_cap] / T_Lw[at_cap]).max().item()
-				LOGGER.warning(
-					"Hanna turbulence: %d active particles hit max_substeps=%d "
-					"(worst sub_dt/T_Lw=%.2f, target < %.2f). The Δt/τ bias is "
-					"only partially controlled for these particles. Reduce "
-					"simulation.dt_seconds or raise max_substeps.",
-					int(at_cap.sum().item()), k_cap, float(ratio_at_cap), float(c),
-				)
-				self._warned_substep_cap = True
+			ratio_at_cap = (sub_dt[at_cap] / T_Lw[at_cap]).max().item()
+			LOGGER.warning(
+				"Hanna turbulence: %d active particles hit max_substeps=%d "
+				"(worst sub_dt/T_Lw=%.2f, target < %.2f). The Δt/τ bias is "
+				"only partially controlled for these particles. Reduce "
+				"simulation.dt_seconds or raise max_substeps.",
+				int(at_cap.sum().item()), k_cap, float(ratio_at_cap), float(c),
+			)
+			self._warned_substep_cap = True
 
 		# Working tensors. Clone so we don't mutate the input subsets.
 		xyz = active_xyz.clone()
@@ -696,10 +700,12 @@ class HannaScheme(TurbulenceScheme):
 		v_p = v_prime_in.clone()
 		w_p = w_prime_in.clone()
 
+		# `mask` is non-empty for every i < max_k by construction (max_k is the
+		# max of k_required), so no per-iteration emptiness check / break is
+		# needed — and skipping it removes up to ~max_k host syncs per step,
+		# which on CUDA were serialising the substep loop.
 		for i in range(max_k):
 			mask = k_required > i
-			if not bool(mask.any()):
-				break
 			sub_dt_m = sub_dt[mask]
 			T_Lu_m, T_Lv_m, T_Lw_m = T_Lu[mask], T_Lv[mask], T_Lw[mask]
 			sigma_u_m, sigma_v_m, sigma_w_m = sigma_u[mask], sigma_v[mask], sigma_w[mask]
@@ -799,17 +805,21 @@ class HannaScheme(TurbulenceScheme):
 		T_Lv = torch.where(in_sl, KARMAN * z_for_TL / sigma_v.clamp(min=SIGMA_MIN_M_S), T_Lv)
 		T_Lw = torch.where(in_sl, KARMAN * z_for_TL / sigma_w.clamp(min=SIGMA_MIN_M_S), T_Lw)
 
-		# Free-troposphere override for z > h.
+		# Free-troposphere override for z > h. Applied unconditionally (the
+		# `torch.where` is a no-op where `above_bl` is false) rather than guarded
+		# by `if bool(torch.any(above_bl))` — that guard is a host sync, and this
+		# runs 3× per step (σ_w plus the two drift finite-difference probes). The
+		# only cost when nothing is above the BL is one extra cached-field
+		# grid_sample, which is far cheaper on CUDA than the sync it removes.
 		above_bl = z_query > blh
-		if bool(torch.any(above_bl)):
-			ft = self._interp_3d_field(ft_fields, grid_bounds, lon, lat, z_query, engine)
-			ft_sw, ft_suv, ft_tlw, ft_tluv = ft[0], ft[1], ft[2], ft[3]
-			sigma_u = torch.where(above_bl, ft_suv, sigma_u)
-			sigma_v = torch.where(above_bl, ft_suv, sigma_v)
-			sigma_w = torch.where(above_bl, ft_sw, sigma_w)
-			T_Lu = torch.where(above_bl, ft_tluv, T_Lu)
-			T_Lv = torch.where(above_bl, ft_tluv, T_Lv)
-			T_Lw = torch.where(above_bl, ft_tlw, T_Lw)
+		ft = self._interp_3d_field(ft_fields, grid_bounds, lon, lat, z_query, engine)
+		ft_sw, ft_suv, ft_tlw, ft_tluv = ft[0], ft[1], ft[2], ft[3]
+		sigma_u = torch.where(above_bl, ft_suv, sigma_u)
+		sigma_v = torch.where(above_bl, ft_suv, sigma_v)
+		sigma_w = torch.where(above_bl, ft_sw, sigma_w)
+		T_Lu = torch.where(above_bl, ft_tluv, T_Lu)
+		T_Lv = torch.where(above_bl, ft_tluv, T_Lv)
+		T_Lw = torch.where(above_bl, ft_tlw, T_Lw)
 
 		sigma_u = sigma_u.clamp(min=SIGMA_MIN_M_S)
 		sigma_v = sigma_v.clamp(min=SIGMA_MIN_M_S)
