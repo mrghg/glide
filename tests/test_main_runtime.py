@@ -581,7 +581,8 @@ def _wmc_met_window(
     )
 
 
-def test_v1_well_mixed_hanna_backward_path() -> None:
+@pytest.mark.parametrize("static_substeps", [False, True])
+def test_v1_well_mixed_hanna_backward_path(static_substeps: bool) -> None:
     """V1 well-mixed test against the production HannaScheme backward code path.
 
     Thomson (1987) WMC: a well-mixed distribution of particles in z must remain
@@ -606,7 +607,10 @@ def test_v1_well_mixed_hanna_backward_path() -> None:
 
     blh = 3000.0
     engine = GPUEngine(device="cpu")
-    scheme = HannaScheme(meander_enabled=False)  # WMC test is for in-BL Hanna only
+    # WMC test is for in-BL Hanna only. Run it against BOTH substep-loop variants
+    # so the static-shape (CUDA) path is held to the same well-mixed criterion as
+    # the dynamic (CPU) path (architecture.md §5).
+    scheme = HannaScheme(meander_enabled=False, static_substeps=static_substeps)
     met = _wmc_met_window(blh_m=blh, ustar_m_s=0.4)
 
     n = 6000

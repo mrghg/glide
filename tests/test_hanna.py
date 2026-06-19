@@ -546,3 +546,132 @@ def test_per_window_field_cache_reuses_within_window_and_rebuilds_across() -> No
     f3, _ = scheme._meander_sigma_fields(met_b, dev, dt)
     assert f3 is not f1
     assert not torch.allclose(f3, f1)
+
+
+# ---------------------------------------------------------------------------
+# Static-shape substep loop (architecture.md §5) — equivalence to the dynamic
+# masked loop. The static path is the CUDA / launch-bound variant; these tests
+# force it on CPU (static_substeps=...) and check it against the proven dynamic
+# loop. Both call the integrators directly with synthetic inputs (no met window).
+# ---------------------------------------------------------------------------
+
+
+def _substep_inputs(
+    n: int, *, T_Lw: object, dt: float = 60.0, seed: int = 7, half_drift: float = -1e-4,
+) -> dict:
+    """Synthetic kwargs for ``_integrate_vertical_substeps[_static]``.
+
+    ``T_Lw`` may be a scalar (homogeneous substep count) or a length-``n`` tensor
+    (heterogeneous). σ is homogeneous so the only thing varying ``k_i`` is T_Lw.
+    """
+
+    g = torch.Generator().manual_seed(seed)
+    xyz = torch.zeros(n, 4)
+    xyz[:, 1] = 45.0
+    xyz[:, 2] = torch.rand(n, generator=g) * 1500.0 + 100.0  # z ∈ [100, 1600] m
+    xyz[:, 3] = 1.0
+    sigma = torch.full((n,), 0.6)
+    tlw = T_Lw if isinstance(T_Lw, torch.Tensor) else torch.full((n,), float(T_Lw))
+    return dict(
+        active_xyz=xyz,
+        u_prime_in=torch.zeros(n), v_prime_in=torch.zeros(n), w_prime_in=torch.zeros(n),
+        sigma_u=sigma.clone(), sigma_v=sigma.clone(), sigma_w=sigma.clone(),
+        sigma_w_sq=sigma.pow(2),
+        T_Lu=tlw.clone(), T_Lv=tlw.clone(), T_Lw=tlw.clone(),
+        half_dsig2_dz_backward=torch.full((n,), float(half_drift)),
+        density_drift_backward=torch.zeros(n),
+        dt_seconds=dt,
+    )
+
+
+def test_ou_and_displacement_are_noops_at_zero_dt() -> None:
+    """The static substep path advances finished particles with sub_dt=0, relying
+    on that being a mathematical no-op. Pin the contract on the engine primitives:
+    OU returns w' unchanged (a=exp(0)=1, variance=0, drift·0=0), displacement is
+    zero, and reflection of a non-negative z is the identity."""
+
+    from lpdm.gpu_engine import GPUEngine
+
+    engine = GPUEngine(device="cpu")
+    n = 32
+    torch.manual_seed(1)
+    w = torch.randn(n)
+    particles = torch.zeros(n, 4)
+    particles[:, 2] = torch.rand(n) * 500.0 + 50.0  # all z > 0
+    particles[:, 3] = 1.0
+    T_L = torch.full((n,), 100.0)
+    sigma2 = torch.full((n,), 0.5)
+
+    # OU with dt=0 ignores noise and drift entirely → w' unchanged.
+    w_out = engine.update_langevin_velocity(
+        w, t_lagrangian=T_L, sigma_w2=sigma2, dt_seconds=0.0,
+        noise=torch.randn(n), drift=torch.full((n,), 3.0),
+    )
+    assert torch.equal(w_out, w)
+
+    assert torch.equal(
+        engine.apply_vertical_turbulence(particles, w, dt_seconds=0.0, backward=True), particles
+    )
+    assert torch.equal(
+        engine.apply_horizontal_turbulence(particles, w, w, dt_seconds=0.0, backward=True), particles
+    )
+    p_r, w_r = engine.reflect_surface(particles, w, z_surface=0.0)
+    assert torch.equal(p_r, particles) and torch.equal(w_r, w)
+
+
+def test_static_substeps_bit_identical_for_homogeneous_k() -> None:
+    """When every particle needs the same substep count, none finishes early, so
+    the static (full-set) and dynamic (masked) loops execute identical ops and
+    consume the RNG identically → bit-for-bit equal. Covers the base case (k=1)
+    and a multi-substep case (k=5)."""
+
+    from lpdm.gpu_engine import GPUEngine
+
+    engine = GPUEngine(device="cpu")
+    scheme = HannaScheme()
+    # dt=60, substep_c=0.5: T_Lw=1000 → k=1; T_Lw=24 → k=5.
+    for T_Lw, expected_k in ((1000.0, 1), (24.0, 5)):
+        inp = _substep_inputs(256, T_Lw=T_Lw)
+        k_req, _, max_k = scheme._substep_schedule(inp["T_Lw"], inp["dt_seconds"], torch.float32)
+        assert int(k_req.min()) == int(k_req.max()) == max_k == expected_k
+
+        torch.manual_seed(0)
+        dyn = scheme._integrate_vertical_substeps(engine=engine, **inp)
+        torch.manual_seed(0)
+        stat = scheme._integrate_vertical_substeps_static(engine=engine, **inp)
+        for a, b in zip(dyn, stat):
+            assert torch.equal(a, b)
+
+
+def test_static_substeps_matches_dynamic_distribution_for_heterogeneous_k() -> None:
+    """With a spread of substep counts the two paths draw RNG differently (full
+    set vs shrinking subset), so they are not bit-identical — but each particle
+    integrates the same OU over the same total dt, so the end-state distributions
+    match within Monte-Carlo tolerance, with no NaNs."""
+
+    from lpdm.gpu_engine import GPUEngine
+
+    engine = GPUEngine(device="cpu")
+    scheme = HannaScheme()
+    n = 8192
+    tlw = torch.linspace(15.0, 1000.0, n)  # k spans 1 .. ~8 at dt=60, c=0.5
+    k_req, _, _ = scheme._substep_schedule(tlw, 60.0, torch.float32)
+    assert int(k_req.min()) == 1 and int(k_req.max()) > 3  # genuinely heterogeneous
+
+    inp_d = _substep_inputs(n, T_Lw=tlw, seed=11, half_drift=0.0)  # driftless OU
+    inp_s = _substep_inputs(n, T_Lw=tlw, seed=11, half_drift=0.0)
+
+    torch.manual_seed(100)
+    d_xyz, _, _, d_w = scheme._integrate_vertical_substeps(engine=engine, **inp_d)
+    torch.manual_seed(200)
+    s_xyz, _, _, s_w = scheme._integrate_vertical_substeps_static(engine=engine, **inp_s)
+
+    assert torch.isfinite(s_xyz).all() and torch.isfinite(s_w).all()
+
+    dz_d = d_xyz[:, 2] - inp_d["active_xyz"][:, 2]
+    dz_s = s_xyz[:, 2] - inp_s["active_xyz"][:, 2]
+    # Std is the discriminating statistic (driftless → mean ≈ 0); n=8192 gives
+    # MC error ~1% on the std, so a 5% relative tolerance is safe.
+    assert abs(dz_s.std() / dz_d.std() - 1.0) < 0.05
+    assert abs(s_w.std() / d_w.std() - 1.0) < 0.05
+    assert abs(s_w.mean()) < 0.1 * s_w.std()  # near-zero mean velocity

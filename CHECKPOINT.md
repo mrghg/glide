@@ -98,6 +98,42 @@ g++: error: unrecognized command line option '-std=c++20'; did you mean '-std=c+
 - **Diagnosis tip.** Because `suppress_errors=True` hides the real exception, reproduce with it *off* to see the bottom of the traceback: `torch._dynamo.config.suppress_errors = False`, then call the compiled fn directly. That is the only way the `-std=c++20` line surfaces.
 - **Code cleanups made while chasing this (kept — sound regardless of the real cause).** (a) `reflect_surface` rewritten from boolean-mask in-place assignment to `torch.where` (one fewer clone, more compile-friendly). (b) The OU update extracted to a module-level pure-tensor kernel `_ou_step_kernel`, compiled via `self._ou_step_fn` instead of the bound method — a clean tensor-only function with no `self`/`Tensor|float` unions is what Inductor traces best. Both are numerically identical to before (`test_compiled_hot_paths_match_eager_and_never_hard_fail` + the OU/altitude variance tests pass).
 
+### 2026-06-19 CUDA-graph prep — device-gated static-shape substep loop (M3 phase 1)
+
+First phase of the CUDA-graph restructure (`architecture.md` §5). The substep loop
+is the densest per-step kernel-launch region; CUDA-graph capture (the real cure for
+the GH200's launch/orchestration-bound state) requires **constant tensor shapes**
+across substeps, which the existing dynamic masked loop violates (the active subset
+shrinks each substep). This phase adds a static-shape variant and validates it
+against the dynamic one; graph capture itself is phase 3.
+
+- **New `HannaScheme._integrate_vertical_substeps_static`.** Processes the **full**
+  active set every substep, masking finished particles by `sub_dt=0` (a math no-op:
+  `a=exp(0)=1`, `variance=σ²(1−a²)=0`, displacement `w'·0=0`, reflection of `z≥0` is
+  identity) instead of indexing a shrinking subset. Constant kernel shapes across
+  iterations → fuses cleanly under `torch.compile` and is the prerequisite for CUDA
+  graphs. Trades extra elementwise FLOPs (finished particles keep being touched) for
+  far fewer/consistent launches — a win on a launch-bound GPU, a loss on CPU.
+- **Device-gated.** New `static_substeps: bool | None` ctor arg + `GLIDE_STATIC_SUBSTEPS`
+  env + `_use_static_substeps(engine)`: auto-selects static on CUDA, dynamic
+  (masked) on CPU/MPS. **CPU behaviour is unchanged** (still the dynamic path), so
+  all existing runs/tests are bit-identical by default.
+- **Shared `_substep_schedule`** factored out of both variants (single source of
+  truth for `k_i`, sub-dt, the `max_k` loop bound, and the once-per-instance
+  substep-cap warning). The `max_k` host sync is now the *only* per-step sync in the
+  static path; phase 2 removes the remaining `scheme.step`/`active_count` syncs and
+  phase 3 replaces `max_k` with a fixed loop count for graph capture.
+- **Equivalence (not bit-identical when `k_i` varies).** `randn` is drawn for the
+  full set each substep (vs only the owing subset), so the random realisation
+  differs; the two paths are statistically equivalent, and **bit-identical when
+  every particle needs the same `k`** (no early finishers → identical ops + RNG).
+- **Tests (+3 in `test_hanna.py`):** zero-dt no-op contract on the engine
+  primitives; bit-identity for homogeneous `k` (k=1 and k=5); distribution match
+  for heterogeneous `k` (std within 5% at n=8192). **`test_v1_well_mixed_hanna_backward_path`
+  parametrized over `static_substeps`** so the static path is held to the same WMC
+  acceptance gate (interior relative-RMS < 15%) as the dynamic path. Both pass.
+  **Test count 203 → 207** (+3 new, +1 from the V1 parametrize); full suite green.
+
 ### 2026-06-01 Deep convection (Emanuel reduced port; Forster 2007 / Stohl 2005 §4.6)
 
 The biggest non-audit dispersion gap GLIDE had vs FLEXPART — deep cumulus convection that loft surface air through the entire troposphere in minutes-to-hours — is now implemented as a reduced faithful port of the FLEXPART Emanuel & Živković-Rothman scheme (Stohl 2005 §4.6; Forster, Stohl & Seibert 2007). See `docs/convection.md` for the full spec.
@@ -519,9 +555,18 @@ First multi-month EUROPE comparison run consumed >200 GB of RAM. Two distinct bu
 
 ### Milestone 3: Production GPU execution
 
+**Status (2026-06-19): in progress.** Device-agnostic runtime, host-sync minimization,
+`torch.compile`, per-window field caching, CPU thread tuning, and the GPU
+toolchain/telemetry are landed (see the 2026-06-18 / 2026-06-19 entries). The
+GH200 is diagnosed launch/orchestration-bound; the CUDA-graph restructure is the
+active workstream (phase 1, the device-gated static-shape substep loop, landed
+2026-06-19). The architecture and the remaining phases are documented in
+`architecture.md` (§4 implemented, §5 the CUDA-graph plan). The exit-criteria
+benchmark/perf-note will live there.
+
 - Harden the existing device-aware runtime for real CUDA execution rather than just device selection and local MPS compatibility.
 - Profile interpolation, met staging, footprint accumulation, and any host-device transfers in the current runtime.
-- Address the vertical-interpolation approximation in `src/lpdm/main.py`: the `grid_sample` call treats the vertical tensor axis as linear in AGL meters using only the first/last level's spatially-averaged AGL, but ARCO ERA5 data sits on pressure levels that are roughly log-linear in altitude. Either resample the met tensor onto a uniform AGL grid before interpolation, or perform vertical interpolation in log-pressure (or pressure-level-index) space and convert at the end. Profile both options before committing.
+- ~~Address the vertical-interpolation approximation in `src/lpdm/main.py`~~ **DONE (F9, 2026-05-31):** the vertical `grid_sample` axis now uses a piecewise-linear fractional-level lookup against the per-level AGL array (`GridInterpolationBounds.level_agl_m`), handling the log-linear-in-altitude pressure-level spacing. See the 2026-05-31 audit-followup entry.
 - Benchmark on a representative NVIDIA target and tune memory behavior under the existing guardrails.
 - Ensure the turbulence and aggregation implementations remain GPU-efficient and do not reintroduce hidden CPU bottlenecks.
 - Exit criteria:
@@ -562,13 +607,14 @@ First multi-month EUROPE comparison run consumed >200 GB of RAM. Two distinct bu
 
 ## Immediate recommendation
 
-**Milestone status (as of 2026-05-31):**
+**Milestone status (as of 2026-06-19):**
 - **M0 / M1 / M4 / M5: code-complete.** Hanna turbulence (drift, FT closure, meander) + full audit fixes (F1+F2+F3+F4Tier1+F4Tier2+F5/F15+F9+F10) + **deep convection (Emanuel reduced port, 2026-06-01)**. Multi-release execution, streaming per-batch Zarr writes, drop-and-count out-of-domain handling all landed.
-- **Physics audit (all 10 items) + deep convection — closed.** Three PRs total: `physics-audit-may30`, `physics-audit-followup`, `deep-convection`. 200 tests passing.
+- **Physics audit (all 10 items) + deep convection — closed.** Three PRs total: `physics-audit-may30`, `physics-audit-followup`, `deep-convection`.
+- **M3 (Production GPU execution): in progress.** Host-sync minimization, `torch.compile`, per-window field caching, CPU thread tuning, GPU toolchain + telemetry landed. GH200 diagnosed launch/orchestration-bound; the CUDA-graph restructure is the active workstream — phase 1 (device-gated static-shape substep loop) landed 2026-06-19. Plan + systems-performance architecture in `architecture.md`.
 - **Open M4 item:** `schema_version` field on the YAML.
 - **Open M5 item:** satellite multi-point-per-time releases.
 
-**Next user step:** re-run `configs/example_mhd_january_periodic.yaml` (now convection-enabled by default in addition to all audit fixes) and update `notebooks/flexpart_comparison.ipynb`. January 2024 mid-latitude is winter so convection will be modest; the comparison will be more meaningful in summer / tropical cases.
+**Next user step (M3):** continue the CUDA-graph phases in `architecture.md` §5.2 — phase 2 (remove the residual 3 per-step host syncs), phase 3 (`mode="reduce-overhead"` graph capture + graph-safe RNG), phase 4 (benchmark `sm%`/per-batch time on the GH200), phase 5 (document the benchmark as the M3 exit note). The §5.1 escaped-particle/graph tradeoff is deferred to measurement. Separately, the FLEXPART comparison can be generated now via CPU batch-parallelism while the GPU work proceeds.
 
 **Open follow-ups (no longer including deep convection):**
 - **M2 — particle aggregation.** Compute savings; orthogonal to physics.
