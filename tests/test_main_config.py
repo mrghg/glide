@@ -370,6 +370,9 @@ def test_scheme_kwargs_forwards_meander_only_for_hanna() -> None:
         "meander_coefficient": 0.2,
         "meander_stencil_radius": 2,
         "meander_timescale_seconds": 900.0,
+        # Substepping knobs default to the historical hardcoded values.
+        "substep_c": 0.5,
+        "max_substeps": 50,
     }
 
     # Non-Hanna schemes take no kwargs (would reject meander), so forward nothing.

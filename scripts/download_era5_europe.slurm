@@ -2,9 +2,7 @@
 # =============================================================================
 # Download ERA5 EUROPE domain cubes for GLIDE testing — Isambard AI
 #
-# Downloads two months sequentially:
-#   data/era5/EUROPE_202312.zarr
-#   data/era5/EUROPE_202401.zarr
+# Downloads months sequentially
 #
 # Network-bound job; the GPU is not used but Isambard AI has no pure CPU nodes
 # so one GPU must be requested to get an allocation. The EUROPE domain is
@@ -55,7 +53,7 @@ echo "git rev: $(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 echo "==========================="
 
 # --- Downloads -------------------------------------------------------------
-for YEAR_MONTH in 202312 202401; do
+for YEAR_MONTH in 202402 202403 202404 202405 202406 202407 202408 202409 202410 202411 202412; do
 	echo ""
 	echo "--- Downloading EUROPE ${YEAR_MONTH} ---"
 	"${PYTHON}" scripts/download_sample_cube.py \

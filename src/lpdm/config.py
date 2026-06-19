@@ -237,6 +237,21 @@ class MeanderConfig(_Frozen):
 class TurbulenceConfig(_Frozen):
     scheme: str = Field(..., min_length=1)
     meander: MeanderConfig = MeanderConfig()
+    # Hanna F4 Tier 2 adaptive substepping (audit 2026-05-30). Each particle runs
+    # k_i = ceil(dt / (substep_c · T_Lw_i)) substeps, capped at max_substeps. These
+    # default to the historical hardcoded values, so existing configs are
+    # unchanged. They are also a performance knob: on GPU the substep loop is the
+    # dominant kernel-launch source, so lowering max_substeps (or raising
+    # substep_c) issues fewer kernels — at the cost of a larger near-surface Δt/τ
+    # bias. Ignored by non-Hanna schemes.
+    substep_c: float = Field(
+        0.5, gt=0,
+        description="Target sub-dt / T_Lw ratio. Smaller → more substeps → smaller Δt/τ bias, more cost.",
+    )
+    max_substeps: int = Field(
+        50, ge=1,
+        description="Cap on per-particle substeps per step. Lower → fewer GPU kernels but coarser near-surface integration.",
+    )
 
 
 class EmanuelConvectionConfig(_Frozen):
