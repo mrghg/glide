@@ -425,11 +425,11 @@ class GPUEngine:
 		state = particles.to(device=self.device, dtype=self.dtype)
 		wp = w_prime.to(device=self.device, dtype=self.dtype)
 
+		below = state[:, 2] < float(z_surface)
+		reflected_z = 2.0 * float(z_surface) - state[:, 2]
 		out = state.clone()
-		wp_out = wp.clone()
-		below = out[:, 2] < float(z_surface)
-		out[below, 2] = 2.0 * float(z_surface) - out[below, 2]
-		wp_out[below] = -wp_out[below]
+		out[:, 2] = torch.where(below, reflected_z, state[:, 2])
+		wp_out = torch.where(below, -wp, wp)
 		return out, wp_out
 
 	def diffuse_positions_periodic(
