@@ -23,6 +23,25 @@ from lpdm.runtime import DEVICE
 LOGGER = logging.getLogger(__name__)
 
 
+def _ou_step_kernel(
+    w_prev: torch.Tensor,
+    tl: torch.Tensor,
+    sigma2: torch.Tensor,
+    dt: torch.Tensor,
+    eta: torch.Tensor,
+    drift_dt: torch.Tensor,
+) -> torch.Tensor:
+    """Pure-tensor OU/Langevin update kernel.
+
+    Extracted from ``update_langevin_velocity`` so ``torch.compile`` can trace
+    it without encountering Python-level ``Tensor | float`` union branches or
+    ``self``-attribute guards from the wrapper method.
+    """
+    a = torch.exp(-dt / tl)
+    variance = torch.clamp(sigma2 * (1.0 - a * a), min=0.0)
+    return a * w_prev + drift_dt + torch.sqrt(variance) * eta
+
+
 # Per-call *value* validation in the hot-path engine methods
 # (update_langevin_velocity, apply_vertical/horizontal_turbulence) uses
 # `torch.any(... <= 0)` checks. Each one is a device→host sync, and the Hanna
@@ -98,6 +117,7 @@ class GPUEngine:
 		if compile_hot_paths is None:
 			compile_hot_paths = os.environ.get("GLIDE_COMPILE", "") not in ("", "0", "false", "False")
 		self._compile_hot_paths = bool(compile_hot_paths)
+		self._ou_step_fn: Callable[..., torch.Tensor] = _ou_step_kernel
 		if self._compile_hot_paths:
 			self._enable_compiled_hot_paths()
 
@@ -117,7 +137,10 @@ class GPUEngine:
 
 			dynamo.config.suppress_errors = True  # graceful per-graph fallback to eager
 			kw = dict(dynamic=True, fullgraph=False)
-			self.update_langevin_velocity = torch.compile(self.update_langevin_velocity, **kw)  # type: ignore[method-assign]
+			# Compile the pure-tensor OU kernel rather than the wrapper method —
+			# the wrapper contains Python-level Tensor|float branches and None
+			# checks that confuse dynamo's type guards on bound methods.
+			self._ou_step_fn = torch.compile(_ou_step_kernel, **kw)
 			self.apply_vertical_turbulence = torch.compile(self.apply_vertical_turbulence, **kw)  # type: ignore[method-assign]
 			self.apply_horizontal_turbulence = torch.compile(self.apply_horizontal_turbulence, **kw)  # type: ignore[method-assign]
 			self.reflect_surface = torch.compile(self.reflect_surface, **kw)  # type: ignore[method-assign]
@@ -312,16 +335,12 @@ class GPUEngine:
 			if eta.shape != w_prev.shape:
 				raise ValueError("noise must have same shape as w_prime")
 
-		a = torch.exp(-dt / tl)
-		# For the OU process dw = -(w/T_L)dt + sqrt(2*sigma_w^2/T_L)dW,
-		# this exact discrete form preserves the stationary variance sigma_w^2.
-		# The altitude test uses the integrated OU variance:
-		# Var[z(t)] = 2*sigma_w^2*T_L*(t - T_L*(1 - exp(-t/T_L))).
-		variance = torch.clamp(sigma2 * (1.0 - a * a), min=0.0)
-		std = torch.sqrt(variance)
 		drift_tensor = torch.as_tensor(drift, device=self.device, dtype=self.dtype)
-		drift_term = drift_tensor * dt
-		return a * w_prev + drift_term + std * eta
+		drift_dt = drift_tensor * dt
+		# Delegate to the module-level pure-tensor kernel (compiled when
+		# GLIDE_COMPILE=1). Keeping type coercion and branching here in eager
+		# lets the kernel stay a clean, dynamo-traceable function.
+		return self._ou_step_fn(w_prev, tl, sigma2, dt, eta, drift_dt)
 
 	def apply_vertical_turbulence(
 		self,
