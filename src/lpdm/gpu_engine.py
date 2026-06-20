@@ -54,6 +54,32 @@ def _ou_step_kernel(
 VALIDATE_ENGINE_INPUTS = os.environ.get("GLIDE_VALIDATE_ENGINE", "") not in ("", "0", "false", "False")
 
 
+def use_static_step_path(device: torch.device, override: bool | None = None) -> bool:
+    """Whether to use the static-shape (full-set, mask-gated) per-step path.
+
+    The static path processes the **full** particle set every step and gates
+    inactive particles with ``torch.where`` instead of boolean-indexing the active
+    subset. Constant tensor shapes + no data-dependent control flow are what
+    CUDA-graph capture requires, and they beat the shrinking masked subsets on a
+    launch-bound GPU; the dynamic (boolean-indexed) path is cheaper on CPU where
+    launches/syncs are free. See ``architecture.md`` §5.
+
+    Resolution order: an explicit ``override`` (e.g. a scheme ctor flag) wins;
+    then the ``GLIDE_STATIC_SUBSTEPS`` env var; otherwise auto by device — static
+    on CUDA, dynamic elsewhere. Shared by ``HannaScheme`` and the ``main`` runtime
+    loop so the two always agree.
+    """
+
+    if override is not None:
+        return bool(override)
+    env = os.environ.get("GLIDE_STATIC_SUBSTEPS", "")
+    if env in ("1", "true", "True"):
+        return True
+    if env in ("0", "false", "False"):
+        return False
+    return device.type == "cuda"
+
+
 @dataclass(frozen=True)
 class CoordinateBounds:
 	"""Physical coordinate bounds used for periodic wrapping."""

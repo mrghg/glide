@@ -13,14 +13,13 @@ run; secondary references occasionally diverge by ~10% on minor coefficients.
 from __future__ import annotations
 
 import logging
-import os
 from datetime import datetime
 from typing import Callable, ClassVar
 
 import numpy as np
 import torch
 
-from lpdm.gpu_engine import GPUEngine
+from lpdm.gpu_engine import GPUEngine, use_static_step_path
 from lpdm.met_reader import HourlyMetTensors
 from lpdm.turbulence.base import TurbulenceScheme, TurbulenceState, register_scheme
 
@@ -465,13 +464,31 @@ class HannaScheme(TurbulenceScheme):
 		active_mask: torch.Tensor,
 		engine: GPUEngine,
 	) -> tuple[torch.Tensor, TurbulenceState]:
-		if not bool(torch.any(active_mask)):
-			return particles, state
-
 		device = engine.device
 		dtype = engine.dtype
 
-		active_xyz = particles[active_mask]
+		# Two execution paths (architecture.md §5), chosen by device gate:
+		#   * static  — operate on the FULL particle buffer; inactive particles are
+		#     frozen by mask-gating (`sub_dt=0` in the substep loop + a `torch.where`
+		#     at write-back). No boolean indexing → constant shapes, no host sync.
+		#   * dynamic — boolean-index the active subset (cheaper on CPU). The empty
+		#     guard (`bool(torch.any(...))`, a host sync) only runs here; the static
+		#     path handles an all-inactive mask as a no-op without syncing.
+		use_static = self._use_static_substeps(engine)
+		if not use_static and not bool(torch.any(active_mask)):
+			return particles, state
+
+		if use_static:
+			active_xyz = particles
+			u_prime_in, v_prime_in, w_prime_in = state["u_prime"], state["v_prime"], state["w_prime"]
+			sub_active_mask: torch.Tensor | None = active_mask
+		else:
+			active_xyz = particles[active_mask]
+			u_prime_in = state["u_prime"][active_mask]
+			v_prime_in = state["v_prime"][active_mask]
+			w_prime_in = state["w_prime"][active_mask]
+			sub_active_mask = None
+
 		lon_deg = active_xyz[:, 0]
 		lat_deg = active_xyz[:, 1]
 		z_agl = active_xyz[:, 2]
@@ -525,7 +542,6 @@ class HannaScheme(TurbulenceScheme):
 		# evaluated holding the per-column scalars (blh, u*, …) fixed. The
 		# finite-difference probes also use z_eval so the UBL clamping gives
 		# ∂σ²/∂z = 0 inside the basal layer (consistent with constant σ).
-		w_prev = state["w_prime"][active_mask]
 		z_hi = z_eval + self.DRIFT_FD_DELTA_M
 		z_lo = (z_eval - self.DRIFT_FD_DELTA_M).clamp(min=self.z_ubl_m)
 		sw_hi = self._column_turbulence(z_hi, **col_kwargs)[2]
@@ -572,11 +588,11 @@ class HannaScheme(TurbulenceScheme):
 			if self._use_static_substeps(engine)
 			else self._integrate_vertical_substeps
 		)
-		moved, u_prime_active, v_prime_active, w_prime_active = integrate(
+		integrate_kwargs = dict(
 			active_xyz=active_xyz,
-			u_prime_in=state["u_prime"][active_mask],
-			v_prime_in=state["v_prime"][active_mask],
-			w_prime_in=state["w_prime"][active_mask],
+			u_prime_in=u_prime_in,
+			v_prime_in=v_prime_in,
+			w_prime_in=w_prime_in,
 			sigma_u=sigma_u, sigma_v=sigma_v, sigma_w=sigma_w, sigma_w_sq=sigma_w_sq,
 			T_Lu=T_Lu, T_Lv=T_Lv, T_Lw=T_Lw,
 			half_dsig2_dz_backward=half_dsig2_dz_backward,
@@ -584,6 +600,10 @@ class HannaScheme(TurbulenceScheme):
 			dt_seconds=dt_seconds,
 			engine=engine,
 		)
+		if use_static:
+			# The static loop freezes inactive particles via the mask (sub_dt=0).
+			integrate_kwargs["active_mask"] = sub_active_mask
+		moved, u_prime_active, v_prime_active, w_prime_active = integrate(**integrate_kwargs)
 
 		# Meander (unresolved-mesoscale) horizontal turbulence: an independent
 		# horizontal OU process whose σ is the local grid-wind variability (Maryon
@@ -599,16 +619,20 @@ class HannaScheme(TurbulenceScheme):
 				meander_fields, meander_bounds, lon_deg, lat_deg, z_eval, engine,
 			)
 			sigma_mu, sigma_mv = sm[0], sm[1]
+			u_meander_in = state["u_meander"] if use_static else state["u_meander"][active_mask]
+			v_meander_in = state["v_meander"] if use_static else state["v_meander"][active_mask]
 			u_meander_active = engine.update_langevin_velocity(
-				state["u_meander"][active_mask],
+				u_meander_in,
 				t_lagrangian=self.meander_timescale_seconds,
 				sigma_w2=sigma_mu.pow(2), dt_seconds=dt_seconds,
 			)
 			v_meander_active = engine.update_langevin_velocity(
-				state["v_meander"][active_mask],
+				v_meander_in,
 				t_lagrangian=self.meander_timescale_seconds,
 				sigma_w2=sigma_mv.pow(2), dt_seconds=dt_seconds,
 			)
+			# On the static path this displaces inactive particles too, but they are
+			# reverted by the `torch.where` write-back below (mask-gated).
 			moved = engine.apply_horizontal_turbulence(
 				moved, u_meander_active, v_meander_active, dt_seconds=dt_seconds, backward=True,
 			)
@@ -617,13 +641,25 @@ class HannaScheme(TurbulenceScheme):
 		# no additional reflection here. Meander has no boundary semantics
 		# (horizontal-only displacement) so it doesn't need an extra reflection.
 
-		particles[active_mask] = moved
-		state["u_prime"][active_mask] = u_prime_active
-		state["v_prime"][active_mask] = v_prime_active
-		state["w_prime"][active_mask] = w_prime_active
-		if self.meander_enabled:
-			state["u_meander"][active_mask] = u_meander_active
-			state["v_meander"][active_mask] = v_meander_active
+		if use_static:
+			# Write the full buffer back, keeping inactive particles unchanged. The
+			# `where` is the authoritative gate (covers both substep and meander).
+			am = active_mask.unsqueeze(1)
+			particles = torch.where(am, moved, particles)
+			state["u_prime"] = torch.where(active_mask, u_prime_active, state["u_prime"])
+			state["v_prime"] = torch.where(active_mask, v_prime_active, state["v_prime"])
+			state["w_prime"] = torch.where(active_mask, w_prime_active, state["w_prime"])
+			if self.meander_enabled:
+				state["u_meander"] = torch.where(active_mask, u_meander_active, state["u_meander"])
+				state["v_meander"] = torch.where(active_mask, v_meander_active, state["v_meander"])
+		else:
+			particles[active_mask] = moved
+			state["u_prime"][active_mask] = u_prime_active
+			state["v_prime"][active_mask] = v_prime_active
+			state["w_prime"][active_mask] = w_prime_active
+			if self.meander_enabled:
+				state["u_meander"][active_mask] = u_meander_active
+				state["v_meander"][active_mask] = v_meander_active
 		return particles, state
 
 	def _warn_if_dt_too_large(
@@ -640,25 +676,21 @@ class HannaScheme(TurbulenceScheme):
 		del T_Lu, T_Lv, T_Lw, dt_seconds  # unused
 
 	def _use_static_substeps(self, engine: GPUEngine) -> bool:
-		"""Choose the static-shape vs dynamic-masked substep loop (architecture.md §5).
+		"""Choose the static-shape vs dynamic-masked per-step path (architecture.md §5).
 
-		Explicit constructor flag wins; then the ``GLIDE_STATIC_SUBSTEPS`` env var;
-		otherwise auto-select — static on CUDA (constant kernel shapes beat the
-		shrinking masked subsets on a launch-bound GPU, and are the prerequisite for
-		CUDA-graph capture), dynamic everywhere else (cheaper where launches are free).
+		Delegates to the shared `use_static_step_path` so the scheme and the `main`
+		runtime loop always agree on the device gate; the per-instance
+		``static_substeps`` ctor flag is the override (used by the equivalence tests).
 		"""
 
-		if self._static_substeps is not None:
-			return self._static_substeps
-		env = os.environ.get("GLIDE_STATIC_SUBSTEPS", "")
-		if env in ("1", "true", "True"):
-			return True
-		if env in ("0", "false", "False"):
-			return False
-		return engine.device.type == "cuda"
+		return use_static_step_path(engine.device, self._static_substeps)
 
 	def _substep_schedule(
-		self, T_Lw: torch.Tensor, dt_seconds: float, dtype: torch.dtype,
+		self,
+		T_Lw: torch.Tensor,
+		dt_seconds: float,
+		dtype: torch.dtype,
+		active_mask: torch.Tensor | None = None,
 	) -> tuple[torch.Tensor, torch.Tensor, int]:
 		"""Per-particle substep count ``k_i``, sub-dt, and ``max_k`` (one host sync).
 
@@ -667,11 +699,17 @@ class HannaScheme(TurbulenceScheme):
 		once-per-instance substep-cap warning (reusing the ``max_k`` sync). The
 		``max_k`` sync that bounds the loop is the last per-step host sync in the
 		static path; phase 3 (CUDA-graph capture) replaces it with a fixed loop count.
+
+		``active_mask`` (full-set static path only): inactive particles are forced to
+		``k=1`` so they neither inflate ``max_k`` nor trip the cap warning — they are
+		then frozen via ``sub_dt=0`` in the loop and the ``where`` gating in ``step``.
 		"""
 
 		c = self.substep_c
 		k_cap = self.max_substeps
 		k_required = torch.ceil(dt_seconds / (c * T_Lw.clamp(min=1e-3))).long().clamp(min=1, max=k_cap)
+		if active_mask is not None:
+			k_required = torch.where(active_mask, k_required, torch.ones_like(k_required))
 		sub_dt = float(dt_seconds) / k_required.to(dtype=dtype)
 		max_k = int(k_required.max().item())
 
@@ -707,6 +745,7 @@ class HannaScheme(TurbulenceScheme):
 		density_drift_backward: torch.Tensor,
 		dt_seconds: float,
 		engine: GPUEngine,
+		active_mask: torch.Tensor | None = None,
 	) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
 		"""Static-shape variant of the substep loop (architecture.md §5; device-gated).
 
@@ -725,13 +764,21 @@ class HannaScheme(TurbulenceScheme):
 		a launch-bound GPU and a loss on CPU, hence the device gate in
 		``_use_static_substeps`` (the dynamic masked variant stays the CPU path).
 
+		``active_mask`` (full-set ``step`` path): inactive particles (not yet
+		released / escaped) are frozen by forcing ``sub_dt=0`` for them every substep
+		— position and state unchanged — so the whole particle buffer can be passed
+		without boolean-indexing the active subset. When ``None`` all particles are
+		treated as active (the isolated equivalence tests).
+
 		**Not bit-identical** to the dynamic variant when ``k_i`` varies across
 		particles: ``randn`` is drawn for the full set every iteration (vs only the
 		owing subset), so the random realisation differs. The two are statistically
 		equivalent (and bit-identical when every particle needs the same ``k``).
 		"""
 
-		k_required, sub_dt, max_k = self._substep_schedule(T_Lw, dt_seconds, sigma_w.dtype)
+		k_required, sub_dt, max_k = self._substep_schedule(
+			T_Lw, dt_seconds, sigma_w.dtype, active_mask=active_mask,
+		)
 
 		# Full-set working tensors (no per-iteration indexing). Clone so the input
 		# subsets aren't mutated.
@@ -749,12 +796,18 @@ class HannaScheme(TurbulenceScheme):
 		v_max = W_PRIME_SIGMA_RATIO_MAX * sigma_v
 		w_max = W_PRIME_SIGMA_RATIO_MAX * sigma_w
 
+		# `owing_base = k_required > i` per substep; inactive particles already have
+		# k_required forced to 1 (so they never owe a substep past i=0) AND we AND in
+		# `active_mask` below so they get sub_dt=0 even at i=0 → fully frozen.
+		zero_dt = torch.zeros_like(sub_dt)
 		for i in range(max_k):
-			# Particles still owing a substep get their real sub_dt; finished ones
-			# get 0 (no-op). Multiply-mask, never index → constant shape every pass.
-			sub_dt_i = torch.where(
-				k_required > i, sub_dt, torch.zeros_like(sub_dt),
-			)
+			# Particles still owing a substep get their real sub_dt; finished /
+			# inactive ones get 0 (no-op). Multiply-mask, never index → constant
+			# shape every pass.
+			owing = k_required > i
+			if active_mask is not None:
+				owing = owing & active_mask
+			sub_dt_i = torch.where(owing, sub_dt, zero_dt)
 
 			# Backward drift with the CURRENT w' (the (1+w'²/σ²) factor must be
 			# recomputed per substep — see the dynamic variant's docstring). For a

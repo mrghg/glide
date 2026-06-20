@@ -98,6 +98,44 @@ g++: error: unrecognized command line option '-std=c++20'; did you mean '-std=c+
 - **Diagnosis tip.** Because `suppress_errors=True` hides the real exception, reproduce with it *off* to see the bottom of the traceback: `torch._dynamo.config.suppress_errors = False`, then call the compiled fn directly. That is the only way the `-std=c++20` line surfaces.
 - **Code cleanups made while chasing this (kept — sound regardless of the real cause).** (a) `reflect_surface` rewritten from boolean-mask in-place assignment to `torch.where` (one fewer clone, more compile-friendly). (b) The OU update extracted to a module-level pure-tensor kernel `_ou_step_kernel`, compiled via `self._ou_step_fn` instead of the bound method — a clean tensor-only function with no `self`/`Tensor|float` unions is what Inductor traces best. Both are numerically identical to before (`test_compiled_hot_paths_match_eager_and_never_hard_fail` + the OU/altitude variance tests pass).
 
+### 2026-06-19 CUDA-graph prep — full-set device-gated per-step path (M3 phase 2)
+
+Phase 2 of the CUDA-graph restructure (`architecture.md` §5.2): make the **whole**
+per-step body static-shape and host-sync-free on the GPU path, so phase 1's static
+substep loop is actually fed constant shapes (it was previously handed a
+boolean-indexed — dynamic-shape — active subset). This is strategy **(D)+(A)** from
+§5.1: device-gated, "accept the waste" (inactive/escaped particles are processed
+then masked out, not dropped). **CPU is byte-for-byte unchanged.**
+
+- **Shared gate `use_static_step_path(device, override)`** (`gpu_engine.py`): static
+  on CUDA, dynamic on CPU/MPS; `GLIDE_STATIC_SUBSTEPS` env override; explicit
+  override arg for the scheme ctor flag. `HannaScheme._use_static_substeps` and the
+  `main._run` loop both call it, so they always agree.
+- **`HannaScheme.step` full-set path.** Operates on the full particle buffer (no
+  `particles[active_mask]` indexing); writes back with `torch.where(active_mask, …)`
+  for positions and every state channel (`u/v/w_prime`, `u/v_meander`). Inactive
+  particles are additionally frozen inside the substep loop by forcing `sub_dt=0`
+  (via an `active_mask` threaded into `_integrate_vertical_substeps_static` /
+  `_substep_schedule`, which also stops inactive particles inflating `max_k` or
+  tripping the cap warning). The dynamic (masked-subset) path is retained for CPU.
+- **`main._run` static branch.** Advects the full buffer and gates with
+  `torch.where`; runs scheme.step / convection / accumulate / escaped-update
+  unconditionally (all already `active_mask`-gated), with **no per-step `.item()`**.
+  The `active_count` control-flow sync is gone on this path; the diagnostic is now a
+  per-step device tensor (`active_mask.sum()`) materialized once per batch. The
+  dynamic branch is the verbatim pre-phase-2 code (and the gridder accumulate +
+  escaped-update were already full-set + mask, so they needed no change).
+- **Remaining per-step host sync on the static path:** `max_k` only (bounds the
+  substep loop). Phase 3 replaces it with a fixed loop count for graph capture.
+- **Convection** is untouched — it runs once per met-window (outside the per-step
+  hot path), already full-set + `torch.where`-gated, so it stays out of the future
+  captured region by design.
+- **Tests (+2, total 209):** `test_static_step_freezes_inactive_particles` (mixed
+  mask → inactive positions + all state byte-identical, active particles move);
+  `test_static_path_footprint_conservation` (end-to-end with `GLIDE_STATIC_SUBSTEPS=1`
+  → footprint sum = Σ(active)·dt/N, validating full-set advection gating + the
+  `active_count` desync + mask-gated accumulation). Full suite green.
+
 ### 2026-06-19 CUDA-graph prep — device-gated static-shape substep loop (M3 phase 1)
 
 First phase of the CUDA-graph restructure (`architecture.md` §5). The substep loop
@@ -610,11 +648,11 @@ benchmark/perf-note will live there.
 **Milestone status (as of 2026-06-19):**
 - **M0 / M1 / M4 / M5: code-complete.** Hanna turbulence (drift, FT closure, meander) + full audit fixes (F1+F2+F3+F4Tier1+F4Tier2+F5/F15+F9+F10) + **deep convection (Emanuel reduced port, 2026-06-01)**. Multi-release execution, streaming per-batch Zarr writes, drop-and-count out-of-domain handling all landed.
 - **Physics audit (all 10 items) + deep convection — closed.** Three PRs total: `physics-audit-may30`, `physics-audit-followup`, `deep-convection`.
-- **M3 (Production GPU execution): in progress.** Host-sync minimization, `torch.compile`, per-window field caching, CPU thread tuning, GPU toolchain + telemetry landed. GH200 diagnosed launch/orchestration-bound; the CUDA-graph restructure is the active workstream — phase 1 (device-gated static-shape substep loop) landed 2026-06-19. Plan + systems-performance architecture in `architecture.md`.
+- **M3 (Production GPU execution): in progress.** Host-sync minimization, `torch.compile`, per-window field caching, CPU thread tuning, GPU toolchain + telemetry landed. GH200 diagnosed launch/orchestration-bound; the CUDA-graph restructure is the active workstream — **phases 1–2 landed 2026-06-19** (device-gated static-shape substep loop + full-set sync-free per-step path; strategy (D)+(A)). Plan + systems-performance architecture in `architecture.md`.
 - **Open M4 item:** `schema_version` field on the YAML.
 - **Open M5 item:** satellite multi-point-per-time releases.
 
-**Next user step (M3):** continue the CUDA-graph phases in `architecture.md` §5.2 — phase 2 (remove the residual 3 per-step host syncs), phase 3 (`mode="reduce-overhead"` graph capture + graph-safe RNG), phase 4 (benchmark `sm%`/per-batch time on the GH200), phase 5 (document the benchmark as the M3 exit note). The §5.1 escaped-particle/graph tradeoff is deferred to measurement. Separately, the FLEXPART comparison can be generated now via CPU batch-parallelism while the GPU work proceeds.
+**Next user step (M3):** CUDA-graph phase 3 (`architecture.md` §5.2) — wrap the now-static, sync-free per-step path with `torch.compile(mode="reduce-overhead")`, add graph-safe RNG, and replace the `max_k` loop bound with a fixed count so the loop is graph-capturable. Then phase 4 (benchmark `sm%`/per-batch time on the GH200) and phase 5 (document the benchmark as the M3 exit note). The §5.1 escaped-particle escalation to (B) stays deferred to that measurement. Separately, the FLEXPART comparison can be generated now via CPU batch-parallelism while the GPU work proceeds.
 
 **Open follow-ups (no longer including deep convection):**
 - **M2 — particle aggregation.** Compute savings; orthogonal to physics.

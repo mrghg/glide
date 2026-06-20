@@ -1227,3 +1227,86 @@ def test_no_escapes_leaves_alive_count_full(tmp_path: Path) -> None:
     assert int(traj["escaped_this_step"].sum()) == 0
     assert (traj["alive_particles"] == 128).all()
     assert metadata["schedule"]["escaped_met_domain_total"] == 0
+
+
+# ---- Phase 2: static-shape (full-set, mask-gated) per-step path ----------------
+# (architecture.md §5). The dynamic path stays the CPU default; these tests force
+# the static path (scheme ctor flag / GLIDE_STATIC_SUBSTEPS env) and check that it
+# (a) freezes inactive particles exactly and (b) conserves footprint mass.
+
+
+def test_static_step_freezes_inactive_particles() -> None:
+    """The static (full-set) HannaScheme.step must leave inactive particles'
+    positions AND turbulence/meander state byte-for-byte unchanged, advancing only
+    the active ones (the `torch.where` write-back + `sub_dt=0` substep gating)."""
+
+    from lpdm.gpu_engine import GPUEngine
+    from lpdm.turbulence import HannaScheme
+
+    torch.manual_seed(7)
+    engine = GPUEngine(device="cpu")
+    # meander on so the meander state-gating is exercised too.
+    scheme = HannaScheme(meander_enabled=True, static_substeps=True)
+    met = _wmc_met_window(blh_m=2000.0, ustar_m_s=0.4)
+
+    n = 200
+    particles = torch.zeros(n, 4, dtype=torch.float32)
+    particles[:, 1] = 45.0
+    particles[:, 2] = torch.rand(n) * 1500.0 + 100.0
+    particles[:, 3] = 1.0
+    state = scheme.initialize_state(n, device=torch.device("cpu"), dtype=torch.float32)
+    # Seed nonzero state so "unchanged" is a real assertion (not 0 == 0).
+    for k in state:
+        state[k] = torch.randn(n) * 0.1
+
+    active = torch.zeros(n, dtype=torch.bool)
+    active[: n // 2] = True  # first half active, second half frozen
+
+    p0 = particles.clone()
+    s0 = {k: v.clone() for k, v in state.items()}
+
+    particles, state = scheme.step(
+        particles, state, met, t_alpha=0.5, dt_seconds=60.0,
+        active_mask=active, engine=engine,
+    )
+
+    inactive = ~active
+    assert torch.equal(particles[inactive], p0[inactive]), "inactive positions changed"
+    for k in s0:
+        assert torch.equal(state[k][inactive], s0[k][inactive]), f"inactive state {k} changed"
+    # Active particles actually moved vertically (turbulence applied).
+    assert not torch.equal(particles[active, 2], p0[active, 2])
+    assert torch.isfinite(particles).all()
+
+
+def test_static_path_footprint_conservation(tmp_path: Path, monkeypatch) -> None:
+    """End-to-end conservation on the STATIC per-step runtime path
+    (GLIDE_STATIC_SUBSTEPS=1): footprint sum = Σ(active_count)·dt / n_particles —
+    the same identity as the dynamic path. Validates full-set advection gating, the
+    `active_count` desync (active_particles diagnostic via `active_mask.sum()`), and
+    mask-gated accumulation in `main._run`, plus HannaScheme.step's full-set path."""
+
+    monkeypatch.setenv("GLIDE_STATIC_SUBSTEPS", "1")
+    cfg = _make_run_config(
+        release_duration_seconds=60,
+        simulation_length_seconds=3600,
+        dt_seconds=300,
+        n_particles=512,
+        release_seed=42,
+        output_uri=str(tmp_path / "out"),
+        n_time_bins=1,
+        turbulence_scheme="hanna_1982",
+    )
+    reader = _make_hanna_reader(cfg, wind_fn=lambda _: (5.0, 0.0, 0.0))
+
+    _run(cfg, reader=reader)
+
+    traj = pd.read_parquet(tmp_path / "out" / "trajectory_diagnostics.parquet")
+    expected_total = float(
+        (traj["active_particles"].astype(float) * cfg.simulation.dt_seconds).sum()
+    ) / cfg.release.n_particles
+
+    fp = xr.open_zarr(tmp_path / "out" / "footprints.zarr")
+    actual_total = float(fp["footprint"].sum())
+
+    assert abs(actual_total - expected_total) / expected_total < 1e-3

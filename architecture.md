@@ -194,16 +194,28 @@ to **(B)** if the escaped-particle waste shows up in the profile. Measure before
 adding graph-lifecycle complexity.
 
 ### 5.2 Phasing
-1. **Static-shape substep loop, device-gated** (CPU keeps dynamic masking). Run
-   full set + `sub_dt=0`, fixed `max_substeps`. Validate bit-for-bit-close against
-   the eager path (WMC tests, substep-cap behaviour, no-runaway-lofting). *No
-   graphs yet* — this isolates the restructure from the capture.
-2. **Remove the residual 3 host syncs** from the per-step path (mask-multiply the
-   empty-guard and `active_count`).
+1. **✅ DONE (2026-06-19) — Static-shape substep loop, device-gated** (CPU keeps
+   dynamic masking). Full set + `sub_dt=0` no-ops for finished particles. Validated
+   against the dynamic path (bit-identical for homogeneous `k`; WMC gate parametrized
+   over both paths). *No graphs yet.*
+2. **✅ DONE (2026-06-19) — Full-set per-step path, device-gated (= strategy (D)+(A)).**
+   `HannaScheme.step` and the `main._run` cursor loop now process the **full**
+   particle buffer on the static path and gate inactive particles with `torch.where`
+   (no boolean indexing, no `active_count`/empty-guard `.item()`). The shared
+   `use_static_step_path(device, override)` (in `gpu_engine.py`) keys the gate; the
+   dynamic CPU branch is byte-for-byte the pre-phase-2 runtime. The `active_count`
+   diagnostic is now a per-step device tensor (`active_mask.sum()`), materialized per
+   batch. *Remaining per-step sync on the static path:* `max_k` only (phase 3).
+   Convection stays outside the per-step path (once per met-window) by design.
 3. **Enable `mode="reduce-overhead"` (CUDA graphs)** on the now-static path;
-   graph-safe RNG; capture-region boundary at met-window edges.
+   graph-safe RNG; fixed loop count (removes the `max_k` sync); capture-region
+   boundary at met-window edges.
 4. **Measure** `sm%` + per-batch time; decide on §5.1 (B) only if needed.
 5. **Document** the benchmark + dominant remaining bottleneck (M3 exit criterion).
+
+**Status:** phases 1–2 landed (strategy **(D)+(A)** implemented: device-gated
+static path, escaped/inactive particles processed-then-gated rather than dropped).
+The §5.1 escalation to **(B)** stays deferred to the phase-4 measurement.
 
 ---
 
