@@ -98,6 +98,47 @@ g++: error: unrecognized command line option '-std=c++20'; did you mean '-std=c+
 - **Diagnosis tip.** Because `suppress_errors=True` hides the real exception, reproduce with it *off* to see the bottom of the traceback: `torch._dynamo.config.suppress_errors = False`, then call the compiled fn directly. That is the only way the `-std=c++20` line surfaces.
 - **Code cleanups made while chasing this (kept — sound regardless of the real cause).** (a) `reflect_surface` rewritten from boolean-mask in-place assignment to `torch.where` (one fewer clone, more compile-friendly). (b) The OU update extracted to a module-level pure-tensor kernel `_ou_step_kernel`, compiled via `self._ou_step_fn` instead of the bound method — a clean tensor-only function with no `self`/`Tensor|float` unions is what Inductor traces best. Both are numerically identical to before (`test_compiled_hot_paths_match_eager_and_never_hard_fail` + the OU/altitude variance tests pass).
 
+### 2026-06-19 CUDA-graph capture wired — fixed-count loop + reduce-overhead (M3 phase 3)
+
+Phase 3 of the CUDA-graph restructure (`architecture.md` §5.2): turn the now-static,
+sync-free per-step path into a **captured CUDA graph**. CPU-verifiable parts are
+done and tested; the actual graph capture + `sm%` payoff is **CUDA-only**, so it is
+**pending Matt's GH200 run** (this dev box is CPU — can't capture graphs here).
+
+- **Fixed-count substep loop (removes the last per-step sync).** `_substep_counts`
+  (sync-free `k_i`/sub-dt) split out of `_substep_schedule` (which keeps the `max_k`
+  `.item()` + cap warning for the variable-count path). `_integrate_vertical_substeps_static`
+  gains `n_substeps`: when given, it loops a **constant** `max_substeps` times instead
+  of the data-dependent `max_k`. Iterations past a particle's `k_i` are `sub_dt=0`
+  no-ops, so the result is **bit-identical** to the variable-count loop (both draw
+  RNG identically up to `max_k`; the extra iterations draw unused RNG but never change
+  state). A constant trip count is what makes the loop graph-capturable.
+- **`mode="reduce-overhead"` graph capture.** `HannaScheme._maybe_graph_compile`
+  lazily wraps the fixed-count loop with `torch.compile(mode="reduce-overhead",
+  dynamic=False)` on the static+compile path → the whole loop is one CUDA graph
+  replayed per step (eager fallback via `suppress_errors`; logs "enabled"). RNG is
+  handled by Inductor's cudagraph trees.
+- **No nested compile.** `GPUEngine` now separates `_compile_requested` (the user's
+  `GLIDE_COMPILE` intent) from `_compile_hot_paths` (whether *it* compiles the
+  per-method kernels). On the static/graph path the per-method compile is **suppressed**
+  (`_compile_hot_paths=False`) so the scheme's whole-loop graph doesn't nest a
+  per-method graph; the scheme reads `_compile_requested` to drive its own capture.
+- **Capture boundary = the substep loop.** Met fetch, convection (once/window), and
+  the per-window field rebuilds are computed in `step` *outside* the loop and passed
+  in as tensors, so they never enter the graph — the existing per-window/per-step
+  split made this clean.
+- **Tests (+3, total 212):** `test_fixed_count_static_substeps_matches_variable_count`
+  (bit-identical, with genuine no-op iterations); `test_graph_compile_gating` (engages
+  only on static+compile; per-method compile suppressed there); `test_graph_compile_substep_path_runs_on_cpu`
+  (forces the path, actually compiles via Inductor on CPU, runs + finite + z≥0 — proves
+  the loop is traceable, no hard graph breaks). Full suite green.
+- **`scripts/run_periodic_cuda.slurm`** updated: `GLIDE_COMPILE` now drives graph
+  capture on the static path; added a "WHAT TO CHECK" block (look for the "enabled"
+  log + no "WON'T CONVERT", sm% climbing above 0–37%, per-batch time dropping) and a
+  note that `max_substeps` is now the fixed per-step iteration count (tune to ~15–25).
+- **Pending (phase 4, Matt on GH200):** confirm the graph actually captures and sm%
+  rises; decide whether the §5.1 (B) escaped-particle recapture is needed.
+
 ### 2026-06-19 CUDA-graph prep — full-set device-gated per-step path (M3 phase 2)
 
 Phase 2 of the CUDA-graph restructure (`architecture.md` §5.2): make the **whole**
@@ -648,11 +689,11 @@ benchmark/perf-note will live there.
 **Milestone status (as of 2026-06-19):**
 - **M0 / M1 / M4 / M5: code-complete.** Hanna turbulence (drift, FT closure, meander) + full audit fixes (F1+F2+F3+F4Tier1+F4Tier2+F5/F15+F9+F10) + **deep convection (Emanuel reduced port, 2026-06-01)**. Multi-release execution, streaming per-batch Zarr writes, drop-and-count out-of-domain handling all landed.
 - **Physics audit (all 10 items) + deep convection — closed.** Three PRs total: `physics-audit-may30`, `physics-audit-followup`, `deep-convection`.
-- **M3 (Production GPU execution): in progress.** Host-sync minimization, `torch.compile`, per-window field caching, CPU thread tuning, GPU toolchain + telemetry landed. GH200 diagnosed launch/orchestration-bound; the CUDA-graph restructure is the active workstream — **phases 1–2 landed 2026-06-19** (device-gated static-shape substep loop + full-set sync-free per-step path; strategy (D)+(A)). Plan + systems-performance architecture in `architecture.md`.
+- **M3 (Production GPU execution): in progress.** Host-sync minimization, `torch.compile`, per-window field caching, CPU thread tuning, GPU toolchain + telemetry landed. GH200 diagnosed launch/orchestration-bound; the CUDA-graph restructure is the active workstream — **phases 1–3 landed 2026-06-19** (device-gated static-shape substep loop → full-set sync-free per-step path → fixed-count loop wrapped with `mode="reduce-overhead"` graph capture; strategy (D)+(A)). All CPU-verifiable parts tested green; the graph capture itself is CUDA-only and awaits the GH200 run. Plan + systems-performance architecture in `architecture.md`.
 - **Open M4 item:** `schema_version` field on the YAML.
 - **Open M5 item:** satellite multi-point-per-time releases.
 
-**Next user step (M3):** CUDA-graph phase 3 (`architecture.md` §5.2) — wrap the now-static, sync-free per-step path with `torch.compile(mode="reduce-overhead")`, add graph-safe RNG, and replace the `max_k` loop bound with a fixed count so the loop is graph-capturable. Then phase 4 (benchmark `sm%`/per-batch time on the GH200) and phase 5 (document the benchmark as the M3 exit note). The §5.1 escaped-particle escalation to (B) stays deferred to that measurement. Separately, the FLEXPART comparison can be generated now via CPU batch-parallelism while the GPU work proceeds.
+**Next user step (M3 phase 4 — Matt, on the GH200):** submit `scripts/run_periodic_cuda.slurm` (compile on by default) and report back from the log: (a) "torch.compile(mode='reduce-overhead') enabled" present and NO "WON'T CONVERT" (⇒ the loop captured), (b) the end-of-run sm% summary vs the prior 0–37% launch-bound range, (c) per-batch wall time. Tune `turbulence.max_substeps` down to ~15–25 (it is now the fixed per-step iteration count). Those numbers decide whether M3 is done or the §5.1 (B) escaped-particle recapture is worth adding. Separately, the FLEXPART comparison can be generated now via CPU batch-parallelism while the GPU work proceeds.
 
 **Open follow-ups (no longer including deep convection):**
 - **M2 — particle aggregation.** Compute savings; orthogonal to physics.

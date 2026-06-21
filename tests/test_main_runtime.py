@@ -1310,3 +1310,41 @@ def test_static_path_footprint_conservation(tmp_path: Path, monkeypatch) -> None
     actual_total = float(fp["footprint"].sum())
 
     assert abs(actual_total - expected_total) / expected_total < 1e-3
+
+
+def test_graph_compile_substep_path_runs_on_cpu(monkeypatch) -> None:
+    """Phase 3 smoke: force the static + graph-compile path (GLIDE_STATIC_SUBSTEPS=1,
+    GLIDE_COMPILE=1) and confirm the fixed-count substep loop actually compiles +
+    runs + stays finite, with the per-method engine compile suppressed (no nesting).
+    CUDA graphs are CUDA-only, so on CPU this checks the loop is *traceable* — the
+    sm% / capture payoff is validated on the GH200, not here. max_substeps=2 keeps
+    the unrolled loop small so the one-time compile is quick."""
+
+    monkeypatch.setenv("GLIDE_STATIC_SUBSTEPS", "1")
+    monkeypatch.setenv("GLIDE_COMPILE", "1")
+
+    from lpdm.gpu_engine import GPUEngine
+    from lpdm.turbulence import HannaScheme
+
+    torch.manual_seed(3)
+    engine = GPUEngine(device="cpu")
+    assert engine._compile_hot_paths is False  # per-method compile off on the graph path
+    scheme = HannaScheme(max_substeps=2)
+    met = _wmc_met_window(blh_m=1500.0, ustar_m_s=0.4)
+
+    n = 32
+    particles = torch.zeros(n, 4, dtype=torch.float32)
+    particles[:, 1] = 45.0
+    particles[:, 2] = torch.rand(n) * 1000.0 + 100.0
+    particles[:, 3] = 1.0
+    state = scheme.initialize_state(n, device=torch.device("cpu"), dtype=torch.float32)
+    active = torch.ones(n, dtype=torch.bool)
+
+    particles, state = scheme.step(
+        particles, state, met, t_alpha=0.5, dt_seconds=60.0,
+        active_mask=active, engine=engine,
+    )
+
+    assert scheme._graph_compile_state == "ok"  # the graph-compile path engaged
+    assert torch.isfinite(particles).all()
+    assert (particles[:, 2] >= 0.0).all()  # reflection kept z >= 0

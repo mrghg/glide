@@ -675,3 +675,62 @@ def test_static_substeps_matches_dynamic_distribution_for_heterogeneous_k() -> N
     assert abs(dz_s.std() / dz_d.std() - 1.0) < 0.05
     assert abs(s_w.std() / d_w.std() - 1.0) < 0.05
     assert abs(s_w.mean()) < 0.1 * s_w.std()  # near-zero mean velocity
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 (CUDA-graph prep): fixed-count loop + graph-compile wiring.
+# ---------------------------------------------------------------------------
+
+
+def test_fixed_count_static_substeps_matches_variable_count() -> None:
+    """The fixed-count substep loop (`n_substeps=max_substeps` — the constant,
+    graph-capturable trip count) is **bit-identical** to the variable-count loop
+    (`n_substeps=None`). Iterations past `max_k` are pure no-ops (`sub_dt=0`): they
+    draw unused RNG but never change state, and both paths draw identically up to
+    `max_k`, so the end state matches exactly. This is what lets phase 3 drop the
+    `max_k` host sync for a constant loop bound."""
+
+    from lpdm.gpu_engine import GPUEngine
+
+    engine = GPUEngine(device="cpu")
+    scheme = HannaScheme()  # max_substeps = 50
+    n = 1024
+    tlw = torch.linspace(15.0, 1000.0, n)  # k spans 1..~8, well below 50
+    k_req, _ = scheme._substep_counts(tlw, 60.0, torch.float32)
+    assert int(k_req.max()) < scheme.max_substeps  # there really are no-op iterations
+
+    inp = _substep_inputs(n, T_Lw=tlw, seed=5)
+    torch.manual_seed(0)
+    var = scheme._integrate_vertical_substeps_static(engine=engine, **inp)
+    torch.manual_seed(0)
+    fix = scheme._integrate_vertical_substeps_static(
+        engine=engine, n_substeps=scheme.max_substeps, **inp
+    )
+    for a, b in zip(var, fix):
+        assert torch.equal(a, b)
+
+
+def test_graph_compile_gating(monkeypatch) -> None:
+    """Phase 3 wiring: the substep-loop graph compile engages ONLY on the static
+    path with compilation requested; and on the static path the engine does NOT also
+    compile its per-method hot paths (that would nest inside the loop's graph)."""
+
+    from lpdm.gpu_engine import GPUEngine
+
+    monkeypatch.setenv("GLIDE_COMPILE", "1")
+
+    # Static + compile → graph compile engages; per-method engine compile suppressed.
+    monkeypatch.setenv("GLIDE_STATIC_SUBSTEPS", "1")
+    scheme = HannaScheme()
+    eng_static = GPUEngine(device="cpu")
+    assert eng_static._compile_requested is True
+    assert eng_static._compile_hot_paths is False  # avoid nesting under the loop graph
+    assert scheme._maybe_graph_compile(eng_static) is not None
+    assert scheme._graph_compile_state == "ok"
+
+    # Dynamic path → no graph compile; per-method engine compile stays on.
+    monkeypatch.setenv("GLIDE_STATIC_SUBSTEPS", "0")
+    scheme2 = HannaScheme()
+    eng_dyn = GPUEngine(device="cpu")
+    assert eng_dyn._compile_hot_paths is True
+    assert scheme2._maybe_graph_compile(eng_dyn) is None

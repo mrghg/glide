@@ -142,7 +142,15 @@ class GPUEngine:
 		# and the FIRST call pays a one-time compile cost (seconds).
 		if compile_hot_paths is None:
 			compile_hot_paths = os.environ.get("GLIDE_COMPILE", "") not in ("", "0", "false", "False")
-		self._compile_hot_paths = bool(compile_hot_paths)
+		# `_compile_requested` is the user's intent (GLIDE_COMPILE); `_compile_hot_paths`
+		# is whether WE compile the per-method hot paths here. On the static/graph path
+		# (CUDA, or GLIDE_STATIC_SUBSTEPS) the turbulence scheme captures the WHOLE
+		# substep loop as one graph (`mode="reduce-overhead"`, phase 3) — compiling the
+		# individual methods here would nest inside that capture, so we skip it and let
+		# the scheme read `_compile_requested` to drive its own compilation. On the
+		# dynamic path we keep the per-method compile (the pre-phase-3 behaviour).
+		self._compile_requested = bool(compile_hot_paths)
+		self._compile_hot_paths = self._compile_requested and not use_static_step_path(self.device)
 		self._ou_step_fn: Callable[..., torch.Tensor] = _ou_step_kernel
 		if self._compile_hot_paths:
 			self._enable_compiled_hot_paths()

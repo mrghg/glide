@@ -73,18 +73,33 @@ export OMP_NUM_THREADS="${GLIDE_NUM_THREADS}"
 export MKL_NUM_THREADS="${GLIDE_NUM_THREADS}"
 export OPENBLAS_NUM_THREADS="${GLIDE_NUM_THREADS}"
 
-# torch.compile of the elementwise hot-path kernels (OU update + displacement +
-# reflection). Fuses many tiny kernels into far fewer — the key lever when the run
-# is launch-bound (low GPU sm% in the telemetry below). Inductor/Triton codegen on
-# Isambard AI needs TWO toolchain pieces; loading only one makes every kernel
-# silently fall back to eager:
+# torch.compile / CUDA-graph capture of the per-step physics. On CUDA the runtime
+# uses the static-shape per-step path (full particle buffer, mask-gated, no per-step
+# host sync — architecture.md §5), and GLIDE_COMPILE wraps the whole fixed-count
+# Hanna substep loop with `torch.compile(mode="reduce-overhead")` so it is captured
+# as ONE CUDA graph and replayed per step. This is THE lever for the launch/
+# orchestration-bound regime (low GPU sm% in the telemetry below): it collapses the
+# per-step kernel-launch overhead, not just per-kernel cost.
+#
+# Inductor/Triton codegen on Isambard AI needs TWO toolchain pieces; loading only
+# one makes compilation silently fall back to eager (no graph capture):
 #   - cudatoolkit/24.11_12.6 : nvcc/ptxas for the Triton GPU backend
 #   - gcc-native/14.2        : a C++20 host compiler for Inductor's C++ codegen.
 #     The system GCC (8.x) rejects `-std=c++20` (only knows `-std=c++2a`), so the
 #     precompiled-header build fails and compilation never happens. Inductor
 #     honours $CC/$CXX, so we point them at the freshly-loaded GCC 14.
-# torch.compile can't hard-fail a run (eager fallback is on); the first step pays a
-# one-time compile cost (seconds). Set GLIDE_COMPILE=0 at submit to skip it.
+#
+# It can't hard-fail a run (eager fallback is on); the FIRST step pays a one-time
+# compile cost (seconds–tens of seconds). Set GLIDE_COMPILE=0 at submit to skip it.
+#
+# WHAT TO CHECK after a run (this is the phase-4 measurement — report these back):
+#   - the .out log shows "torch.compile(mode='reduce-overhead') enabled" and NO
+#     "WON'T CONVERT" warnings (⇒ the loop captured rather than fell back);
+#   - the end-of-run sm% summary climbs well above the ~0–37% launch-bound range;
+#   - per-batch wall time drops.
+# TUNE: on the graph path `turbulence.max_substeps` is the FIXED per-step iteration
+# count (the loop is unrolled to it), so set it to the smallest physically-converged
+# value (≈15–25), not the default 50 — it is now a direct per-step cost.
 export GLIDE_COMPILE="${GLIDE_COMPILE:-1}"
 if [[ "${GLIDE_COMPILE}" != "0" ]]; then
 	module load cudatoolkit/24.11_12.6

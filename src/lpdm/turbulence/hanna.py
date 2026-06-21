@@ -421,6 +421,12 @@ class HannaScheme(TurbulenceScheme):
 		# `max_substeps` is the binding constraint (the substep cap saturates).
 		self._warned_substep_cap: bool = False
 
+		# Phase 3 (CUDA-graph capture): lazily-built `torch.compile(mode="reduce-overhead")`
+		# wrapper of the fixed-count static substep loop. Built on first use on the
+		# static+compile path; `_graph_compile_state` is none/ok/failed.
+		self._compiled_graph_substep: Callable[..., tuple] | None = None
+		self._graph_compile_state: str = "none"
+
 		# Per-met-window cache for the grid-wide derived fields (meander σ, density
 		# + ∂ρ/∂z, free-trop σ/T_L). These depend only on the hourly met window,
 		# but `step` is called every dt (~60 steps/window), so recomputing the
@@ -583,11 +589,6 @@ class HannaScheme(TurbulenceScheme):
 		# internal steps so its effective sub-dt satisfies the Δt/τ bias bound.
 		# Capped at `max_substeps`; warning fires (once per instance) if the cap
 		# saturates. Meander uses τ ≈ 1800 s and stays at the outer dt.
-		integrate = (
-			self._integrate_vertical_substeps_static
-			if self._use_static_substeps(engine)
-			else self._integrate_vertical_substeps
-		)
 		integrate_kwargs = dict(
 			active_xyz=active_xyz,
 			u_prime_in=u_prime_in,
@@ -603,6 +604,17 @@ class HannaScheme(TurbulenceScheme):
 		if use_static:
 			# The static loop freezes inactive particles via the mask (sub_dt=0).
 			integrate_kwargs["active_mask"] = sub_active_mask
+			graph_fn = self._maybe_graph_compile(engine)
+			if graph_fn is not None:
+				# Phase 3: fixed-count loop (constant trip count, no max_k sync) captured
+				# as a CUDA graph. `max_substeps` is now the per-step iteration count, so
+				# tune it down for graph runs.
+				integrate = graph_fn
+				integrate_kwargs["n_substeps"] = self.max_substeps
+			else:
+				integrate = self._integrate_vertical_substeps_static
+		else:
+			integrate = self._integrate_vertical_substeps
 		moved, u_prime_active, v_prime_active, w_prime_active = integrate(**integrate_kwargs)
 
 		# Meander (unresolved-mesoscale) horizontal turbulence: an independent
@@ -685,24 +697,61 @@ class HannaScheme(TurbulenceScheme):
 
 		return use_static_step_path(engine.device, self._static_substeps)
 
-	def _substep_schedule(
+	def _maybe_graph_compile(self, engine: GPUEngine) -> Callable[..., tuple] | None:
+		"""Return a CUDA-graph-capturing compiled fixed-count substep loop, or None.
+
+		Enabled only on the static path when compilation was requested
+		(``engine._compile_requested``, i.e. GLIDE_COMPILE). Compiles
+		``_integrate_vertical_substeps_static`` once with ``mode="reduce-overhead"``
+		(Inductor cudagraph trees): on CUDA the whole fixed-count substep loop becomes
+		**one captured graph**, replayed per step with a single host call — the cure
+		for the launch/orchestration-bound regime (architecture.md §5, phase 3). Eager
+		fallback on any failure, so it can never hard-fail a run; the FIRST step pays a
+		one-time compile cost. On CPU there are no CUDA graphs — it just compiles via
+		Inductor (used by the CPU smoke test to confirm the loop is traceable).
+		"""
+
+		if not (self._use_static_substeps(engine) and getattr(engine, "_compile_requested", False)):
+			return None
+		if self._graph_compile_state == "failed":
+			return None
+		if self._compiled_graph_substep is not None:
+			return self._compiled_graph_substep
+		try:
+			import torch._dynamo as dynamo
+
+			dynamo.config.suppress_errors = True  # per-graph eager fallback
+			self._compiled_graph_substep = torch.compile(
+				self._integrate_vertical_substeps_static,
+				mode="reduce-overhead", dynamic=False, fullgraph=False,
+			)
+			self._graph_compile_state = "ok"
+			LOGGER.info(
+				"HannaScheme: torch.compile(mode='reduce-overhead') enabled for the "
+				"fixed-count substep loop (CUDA-graph capture; eager fallback on)."
+			)
+			return self._compiled_graph_substep
+		except Exception as exc:  # pragma: no cover - defensive; compile is opt-in
+			LOGGER.warning(
+				"HannaScheme: substep-loop graph compile setup failed (%s); running eager", exc
+			)
+			self._graph_compile_state = "failed"
+			return None
+
+	def _substep_counts(
 		self,
 		T_Lw: torch.Tensor,
 		dt_seconds: float,
 		dtype: torch.dtype,
 		active_mask: torch.Tensor | None = None,
-	) -> tuple[torch.Tensor, torch.Tensor, int]:
-		"""Per-particle substep count ``k_i``, sub-dt, and ``max_k`` (one host sync).
+	) -> tuple[torch.Tensor, torch.Tensor]:
+		"""Per-particle substep count ``k_i`` and sub-dt — **no host sync**.
 
-		Shared by both substep-loop variants. ``k_i = ceil(dt / (substep_c · T_Lw_i))``
-		clamped to ``[1, max_substeps]``; ``sub_dt_i = dt / k_i``. Also fires the
-		once-per-instance substep-cap warning (reusing the ``max_k`` sync). The
-		``max_k`` sync that bounds the loop is the last per-step host sync in the
-		static path; phase 3 (CUDA-graph capture) replaces it with a fixed loop count.
-
-		``active_mask`` (full-set static path only): inactive particles are forced to
-		``k=1`` so they neither inflate ``max_k`` nor trip the cap warning — they are
-		then frozen via ``sub_dt=0`` in the loop and the ``where`` gating in ``step``.
+		``k_i = ceil(dt / (substep_c · T_Lw_i))`` clamped to ``[1, max_substeps]``;
+		``sub_dt_i = dt / k_i``. ``active_mask`` (full-set static path) forces inactive
+		particles to ``k=1`` (they're frozen via ``sub_dt=0`` in the loop). This is the
+		graph-safe part of the schedule; ``_substep_schedule`` adds the ``max_k`` sync
+		and the cap warning for the variable-count (non-graph) path.
 		"""
 
 		c = self.substep_c
@@ -711,6 +760,25 @@ class HannaScheme(TurbulenceScheme):
 		if active_mask is not None:
 			k_required = torch.where(active_mask, k_required, torch.ones_like(k_required))
 		sub_dt = float(dt_seconds) / k_required.to(dtype=dtype)
+		return k_required, sub_dt
+
+	def _substep_schedule(
+		self,
+		T_Lw: torch.Tensor,
+		dt_seconds: float,
+		dtype: torch.dtype,
+		active_mask: torch.Tensor | None = None,
+	) -> tuple[torch.Tensor, torch.Tensor, int]:
+		"""``_substep_counts`` plus ``max_k`` (one host sync) and the cap warning.
+
+		Used by the variable-count loop (dynamic path, and the static path when graph
+		capture is off). The fixed-count graph path calls ``_substep_counts`` directly
+		and loops a constant ``max_substeps`` times, so it needs neither the ``max_k``
+		sync nor the per-step warning.
+		"""
+
+		k_cap = self.max_substeps
+		k_required, sub_dt = self._substep_counts(T_Lw, dt_seconds, dtype, active_mask)
 		max_k = int(k_required.max().item())
 
 		if not self._warned_substep_cap and max_k >= k_cap:
@@ -721,7 +789,7 @@ class HannaScheme(TurbulenceScheme):
 				"(worst sub_dt/T_Lw=%.2f, target < %.2f). The Δt/τ bias is "
 				"only partially controlled for these particles. Reduce "
 				"simulation.dt_seconds or raise max_substeps.",
-				int(at_cap.sum().item()), k_cap, float(ratio_at_cap), float(c),
+				int(at_cap.sum().item()), k_cap, float(ratio_at_cap), float(self.substep_c),
 			)
 			self._warned_substep_cap = True
 
@@ -746,6 +814,7 @@ class HannaScheme(TurbulenceScheme):
 		dt_seconds: float,
 		engine: GPUEngine,
 		active_mask: torch.Tensor | None = None,
+		n_substeps: int | None = None,
 	) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
 		"""Static-shape variant of the substep loop (architecture.md §5; device-gated).
 
@@ -774,11 +843,27 @@ class HannaScheme(TurbulenceScheme):
 		particles: ``randn`` is drawn for the full set every iteration (vs only the
 		owing subset), so the random realisation differs. The two are statistically
 		equivalent (and bit-identical when every particle needs the same ``k``).
+
+		``n_substeps`` (phase 3, graph path): when given, loop a **fixed** number of
+		iterations (``self.max_substeps``) instead of the data-dependent ``max_k`` —
+		removing the last per-step host sync and giving the loop a compile-time-constant
+		trip count so ``torch.compile(mode="reduce-overhead")`` can capture it as a CUDA
+		graph. Iterations beyond a particle's ``k_i`` are ``sub_dt=0`` no-ops, so the
+		result matches the ``max_k`` loop; it just does more (no-op) iterations. The
+		per-step cap warning is skipped on this path (max_substeps is then a deliberate
+		fixed cost — tune it down for the graph runs).
 		"""
 
-		k_required, sub_dt, max_k = self._substep_schedule(
-			T_Lw, dt_seconds, sigma_w.dtype, active_mask=active_mask,
-		)
+		if n_substeps is None:
+			k_required, sub_dt, n_iter = self._substep_schedule(
+				T_Lw, dt_seconds, sigma_w.dtype, active_mask=active_mask,
+			)
+		else:
+			# Fixed-count, sync-free path (graph capture). No max_k, no warning.
+			k_required, sub_dt = self._substep_counts(
+				T_Lw, dt_seconds, sigma_w.dtype, active_mask=active_mask,
+			)
+			n_iter = n_substeps
 
 		# Full-set working tensors (no per-iteration indexing). Clone so the input
 		# subsets aren't mutated.
@@ -800,7 +885,7 @@ class HannaScheme(TurbulenceScheme):
 		# k_required forced to 1 (so they never owe a substep past i=0) AND we AND in
 		# `active_mask` below so they get sub_dt=0 even at i=0 → fully frozen.
 		zero_dt = torch.zeros_like(sub_dt)
-		for i in range(max_k):
+		for i in range(n_iter):
 			# Particles still owing a substep get their real sub_dt; finished /
 			# inactive ones get 0 (no-op). Multiply-mask, never index → constant
 			# shape every pass.
