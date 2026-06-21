@@ -1296,6 +1296,9 @@ def test_static_path_footprint_conservation(tmp_path: Path, monkeypatch) -> None
         output_uri=str(tmp_path / "out"),
         n_time_bins=1,
         turbulence_scheme="hanna_1982",
+        # Exercise the per-step memory-log block on the static path (it references
+        # the active count, which only the dynamic branch binds as `active_count`).
+        memory_log_every_steps=1,
     )
     reader = _make_hanna_reader(cfg, wind_fn=lambda _: (5.0, 0.0, 0.0))
 

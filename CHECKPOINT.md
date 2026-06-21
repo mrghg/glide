@@ -138,6 +138,13 @@ done and tested; the actual graph capture + `sm%` payoff is **CUDA-only**, so it
   note that `max_substeps` is now the fixed per-step iteration count (tune to ~15–25).
 - **Pending (phase 4, Matt on GH200):** confirm the graph actually captures and sm%
   rises; decide whether the §5.1 (B) escaped-particle recapture is needed.
+- **Fix (found on the first GH200 run, 2026-06-21):** the per-step memory-log block
+  (`mem.log_every_steps`) still referenced `active_count`, which only the *dynamic*
+  branch binds → `UnboundLocalError` on the static path. CPU tests missed it because
+  `_make_run_config` defaults `memory_log_every_steps=0` (block never ran). Fixed by
+  materialising the count locally in the log line (`int(active_mask.sum().item())` —
+  occasional, off the hot path) and adding `memory_log_every_steps=1` to
+  `test_static_path_footprint_conservation` so the static log path is exercised.
 
 ### 2026-06-19 CUDA-graph prep — full-set device-gated per-step path (M3 phase 2)
 

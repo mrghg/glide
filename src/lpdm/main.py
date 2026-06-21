@@ -927,11 +927,15 @@ def _run(
 
 			if mem.log_every_steps > 0 and step_count % mem.log_every_steps == 0:
 				rss_bytes, allocated, reserved = memory_stats.observe(device)
+				# Materialise the active count just for this log line (runs only every
+				# `log_every_steps`, so the sync is off the hot path). Works on both
+				# the static and dynamic paths; `active_count` itself only exists in
+				# the dynamic branch.
 				LOGGER.info(
 					"batch=%d step=%d active=%d cache_hours=%d rss=%s dev_alloc=%s dev_reserved=%s",
 					batch.batch_idx,
 					step_count,
-					active_count,
+					int(active_mask.sum().item()),
 					len(met_cache),
 					_format_gib(rss_bytes),
 					_format_gib(allocated),
