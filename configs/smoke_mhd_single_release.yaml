@@ -40,6 +40,7 @@ release:
 
 turbulence:
   scheme: hanna_1982
+  max_substeps: 20                      # placeholder; on the GPU graph path this is the FIXED per-step iteration count — evaluate the converged value
   meander:
     enabled: true
     coefficient: 0.16
