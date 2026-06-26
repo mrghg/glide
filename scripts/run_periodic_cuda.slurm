@@ -111,6 +111,15 @@ else
 	echo "compile:  OFF  (GLIDE_COMPILE=0)"
 fi
 
+# PROFILING PASS (when sm% stays low and you need to know WHY the GPU idles):
+# submit with GLIDE_PROFILE=1 — the runtime captures a window of cursor-loop steps
+# (default: 20 steps after 5 warmup) with torch.profiler, prints a CPU/GPU summary
+# (GPU-busy %, host syncs, and top ops with their CALL COUNTS) and writes a Chrome
+# trace, then exits early (no full run). Open the trace at https://ui.perfetto.dev,
+# or just paste the printed summary. Knobs: GLIDE_PROFILE_STEPS / _WARMUP / _TRACE;
+# GLIDE_PROFILE_CONTINUE=1 to finish the run instead of exiting. Best on the smoke
+# config:  GLIDE_PROFILE=1 sbatch scripts/run_periodic_cuda.slurm configs/smoke_mhd_single_release.yaml
+
 # --- Run parameters --------------------------------------------------------
 CONFIG="${1:-configs/example_mhd_january_periodic.yaml}"   # 1st arg overrides
 DEVICE="${GLIDE_DEVICE:-cuda}"                              # cuda by default here

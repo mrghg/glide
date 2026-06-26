@@ -138,6 +138,21 @@ done and tested; the actual graph capture + `sm%` payoff is **CUDA-only**, so it
   note that `max_substeps` is now the fixed per-step iteration count (tune to ~15–25).
 - **Pending (phase 4, Matt on GH200):** confirm the graph actually captures and sm%
   rises; decide whether the §5.1 (B) escaped-particle recapture is needed.
+- **Phase 4 finding (2026-06-21):** with compile ON and **no "WON'T CONVERT"** (the
+  substep-loop graph captured cleanly), GH200 sm% is **still ~0–35%** (unchanged from
+  pre-graph). So the substep loop was *not* the wall — the GPU finishes its bursts
+  fast and idles in the **gaps**: the rest of the per-step pipeline is still eager
+  (~5 surface `grid_sample`s, **3×** `_column_turbulence` with a `grid_sample` each,
+  density/meander interp, RK2 advection `grid_sample`s, footprint scatter) plus the
+  per-step Python orchestration. Next is to *localise the gap before building more*.
+- **Profiler hook (`GLIDE_PROFILE`, 2026-06-26):** `main._StepProfiler` wraps a window
+  of cursor-loop steps in `torch.profiler` (default 20 after 3 warmup), writes a Chrome
+  trace + prints a summary (GPU-busy %, host-sync ops, top ops **with call counts**),
+  then exits the run. Off by default (zero overhead). Env: `GLIDE_PROFILE`,
+  `_WARMUP`/`_STEPS`/`_TRACE`, `_CONTINUE`. The summary's diagnosis → fix: many small
+  GPU ops = launch-bound (expand the captured region to the whole `step`); a
+  `cudaStreamSynchronize` = a residual host sync; long CPU spans = Python/met-bound
+  (async prefetch). Guarded by `test_step_profiler_captures_window_and_exits`.
 - **Fix (found on the first GH200 run, 2026-06-21):** the per-step memory-log block
   (`mem.log_every_steps`) still referenced `active_count`, which only the *dynamic*
   branch binds → `UnboundLocalError` on the static path. CPU tests missed it because

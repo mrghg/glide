@@ -282,3 +282,9 @@ Performance work must not make the physics opaque. Non-negotiable constraints:
   time drops but `sm%` doesn't, it's launch-bound, not compute-bound.
 - **Confirm `torch.compile` actually engaged:** no "WON'T CONVERT" in the `.err`
   log; first step noticeably slower (one-time compile).
+- **Localise where per-step time goes:** `GLIDE_PROFILE=1` (the `main._StepProfiler`
+  hook) captures ~20 cursor-loop steps with `torch.profiler`, prints a summary
+  (GPU-busy %, host-sync ops, top ops with call counts) + a Chrome trace, then exits.
+  Diagnosis → fix: many small GPU ops ⇒ launch-bound (expand the captured region);
+  `cudaStreamSynchronize` ⇒ residual host sync; long CPU spans ⇒ Python/met-bound
+  (async prefetch). Knobs: `GLIDE_PROFILE_STEPS`/`_WARMUP`/`_TRACE`/`_CONTINUE`.

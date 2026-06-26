@@ -1351,3 +1351,22 @@ def test_graph_compile_substep_path_runs_on_cpu(monkeypatch) -> None:
     assert scheme._graph_compile_state == "ok"  # the graph-compile path engaged
     assert torch.isfinite(particles).all()
     assert (particles[:, 2] >= 0.0).all()  # reflection kept z >= 0
+
+
+def test_step_profiler_captures_window_and_exits(tmp_path: Path, monkeypatch) -> None:
+    """GLIDE_PROFILE captures a window of cursor-loop steps, writes a Chrome trace, and
+    exits the run early (a profiling pass doesn't need the full output)."""
+
+    trace = tmp_path / "prof.json"
+    monkeypatch.setenv("GLIDE_PROFILE", "1")
+    monkeypatch.setenv("GLIDE_PROFILE_WARMUP", "1")
+    monkeypatch.setenv("GLIDE_PROFILE_STEPS", "2")
+    monkeypatch.setenv("GLIDE_PROFILE_TRACE", str(trace))
+
+    cfg = _make_run_config(turbulence_scheme="hanna_1982", output_uri=str(tmp_path / "out"))
+    reader = _make_hanna_reader(cfg, wind_fn=lambda _: (5.0, 0.0, 0.0))
+
+    with pytest.raises(SystemExit):
+        _run(cfg, reader=reader)
+
+    assert trace.exists() and trace.stat().st_size > 0  # trace was written before exit

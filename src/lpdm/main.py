@@ -16,9 +16,11 @@ import logging
 import os
 import resource
 import sys
+import time
 from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Sequence
 
 import numpy as np
@@ -47,6 +49,131 @@ from lpdm.convection import (
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _emit_profile_summary(prof, device: torch.device, trace_path: Path, wall_s: float) -> None:
+	"""Write a Chrome trace and print a CPU/GPU summary for a profiled step window.
+
+	The summary is built to localise *why the GPU idles*: the GPU-busy fraction, any
+	host-sync ops (``cudaStreamSynchronize`` ⇒ a stall), and the top ops by GPU and
+	CPU self-time (many tiny GPU ops ⇒ launch-bound; large CPU spans with little GPU
+	⇒ Python/met-bound). See architecture.md §5.
+	"""
+
+	try:
+		prof.export_chrome_trace(str(trace_path))
+		LOGGER.info("profiler: chrome trace -> %s (open in https://ui.perfetto.dev)", trace_path)
+	except Exception as exc:  # pragma: no cover - defensive
+		LOGGER.warning("profiler: chrome trace export failed: %s", exc)
+
+	ka = prof.key_averages()
+
+	def _dev_us(evt) -> float:
+		# PyTorch renamed self_cuda_time_total -> self_device_time_total across versions.
+		for attr in ("self_device_time_total", "self_cuda_time_total"):
+			val = getattr(evt, attr, 0) or 0
+			if val:
+				return float(val)
+		return 0.0
+
+	gpu_us = sum(_dev_us(e) for e in ka)
+	busy = 100.0 * (gpu_us / 1e6) / wall_s if wall_s > 0 else 0.0
+
+	print("\n" + "=" * 74)
+	print(f"GLIDE profiler — {device.type} — window wall {wall_s:.3f}s — GPU-busy ~{busy:.1f}%")
+	print("=" * 74)
+
+	syncs = [e for e in ka if "synchronize" in e.key.lower()]
+	if syncs:
+		print("host syncs in window (each one stalls the GPU on the CPU):")
+		for e in syncs:
+			print(f"  {e.key}: count={e.count}  cpu_total={getattr(e, 'cpu_time_total', 0) / 1000:.1f}ms")
+	else:
+		print("host syncs in window: none detected by name")
+
+	def _safe_table(sort_by: str):
+		try:
+			return ka.table(sort_by=sort_by, row_limit=20)
+		except Exception:
+			return None
+
+	gpu_tbl = _safe_table("self_cuda_time_total") or _safe_table("self_device_time_total")
+	if gpu_tbl and device.type == "cuda":
+		print("\n--- top ops by GPU (device) self-time ---")
+		print(gpu_tbl)
+	cpu_tbl = _safe_table("self_cpu_time_total")
+	if cpu_tbl:
+		print("\n--- top ops by CPU self-time (look for many calls = launch-bound) ---")
+		print(cpu_tbl)
+	print("=" * 74 + "\n")
+
+
+class _StepProfiler:
+	"""Profiles a contiguous window of cursor-loop steps when ``GLIDE_PROFILE`` is set.
+
+	Skips ``warmup`` steps (one-time ``torch.compile`` + settle), profiles the next
+	``active`` steps, writes a trace + summary, then (by default) exits the process —
+	a profiling run doesn't need the full output. Disabled = a no-op object isn't even
+	created, so steady-state runs pay nothing. Env knobs:
+
+	* ``GLIDE_PROFILE``           — enable (truthy)
+	* ``GLIDE_PROFILE_WARMUP``    — steps to skip first (default 5; lets the CUDA-graph
+	                                trees warm up so the window is steady-state replay)
+	* ``GLIDE_PROFILE_STEPS``     — steps to profile (default 20)
+	* ``GLIDE_PROFILE_TRACE``     — trace output path (default ./glide_profile_trace.json)
+	* ``GLIDE_PROFILE_CONTINUE``  — finish the run instead of exiting after the window
+	"""
+
+	def __init__(self, *, device: torch.device, warmup: int, active: int, trace_path: Path, exit_after: bool) -> None:
+		self.device = device
+		self.warmup = max(0, warmup)
+		self.active = max(1, active)
+		self.trace_path = trace_path
+		self.exit_after = exit_after
+		self.n = 0
+		self.prof = None
+		self.t0 = 0.0
+		self.done = False
+
+	def before_step(self) -> None:
+		"""Call at the TOP of the cursor-loop body: starts capture once warmup is done."""
+		if self.done or self.prof is not None or self.n < self.warmup:
+			return
+		acts = [torch.profiler.ProfilerActivity.CPU]
+		if self.device.type == "cuda":
+			acts.append(torch.profiler.ProfilerActivity.CUDA)
+		self.prof = torch.profiler.profile(activities=acts)
+		self.prof.__enter__()
+		self.t0 = time.perf_counter()
+		LOGGER.info("profiler: capturing %d steps (after %d warmup)…", self.active, self.warmup)
+
+	def after_step(self) -> None:
+		"""Call at the BOTTOM of the cursor-loop body: stops + reports once the window ends."""
+		if self.done:
+			return
+		self.n += 1
+		if self.prof is not None and self.n >= self.warmup + self.active:
+			wall = time.perf_counter() - self.t0
+			self.prof.__exit__(None, None, None)
+			_emit_profile_summary(self.prof, self.device, self.trace_path, wall)
+			self.prof = None
+			self.done = True
+			if self.exit_after:
+				LOGGER.info("profiler: window complete; exiting (GLIDE_PROFILE_CONTINUE=1 to finish the run)")
+				raise SystemExit(0)
+
+
+def _make_step_profiler(device: torch.device) -> "_StepProfiler | None":
+	"""Build the step profiler from env, or None when ``GLIDE_PROFILE`` is unset."""
+	if os.environ.get("GLIDE_PROFILE", "") in ("", "0", "false", "False"):
+		return None
+	return _StepProfiler(
+		device=device,
+		warmup=int(os.environ.get("GLIDE_PROFILE_WARMUP", "5")),
+		active=int(os.environ.get("GLIDE_PROFILE_STEPS", "20")),
+		trace_path=Path(os.environ.get("GLIDE_PROFILE_TRACE", "glide_profile_trace.json")),
+		exit_after=os.environ.get("GLIDE_PROFILE_CONTINUE", "") in ("", "0", "false", "False"),
+	)
 
 
 FOOTPRINT_UNITS_DOC = {
@@ -640,6 +767,11 @@ def _run(
 	if use_static:
 		LOGGER.info("runtime: static-shape per-step path (full-set, mask-gated)")
 
+	# Optional per-step profiler (GLIDE_PROFILE): captures a window of cursor-loop
+	# steps to localise where the per-step time goes (GPU kernels vs host syncs vs
+	# CPU/met). None unless GLIDE_PROFILE is set, so normal runs pay nothing.
+	step_profiler = _make_step_profiler(device)
+
 	# M5 stage 5: expand the schedule into batches and validate met coverage over
 	# the full schedule. Each batch is integrated independently and its footprint
 	# slice is streamed to the output Zarr region (see the batch loop below), so
@@ -769,6 +901,8 @@ def _run(
 
 		t_cursor = batch_cursor_start
 		while t_cursor > batch_cursor_terminus:
+			if step_profiler is not None:
+				step_profiler.before_step()
 			delta_s = min(
 				float(sim.dt_seconds),
 				(t_cursor - batch_cursor_terminus).total_seconds(),
@@ -958,6 +1092,9 @@ def _run(
 					allocated,
 					reserved,
 				)
+
+			if step_profiler is not None:
+				step_profiler.after_step()
 
 			t_cursor = t_prev
 
