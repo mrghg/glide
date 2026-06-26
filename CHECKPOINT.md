@@ -153,6 +153,52 @@ done and tested; the actual graph capture + `sm%` payoff is **CUDA-only**, so it
   GPU ops = launch-bound (expand the captured region to the whole `step`); a
   `cudaStreamSynchronize` = a residual host sync; long CPU spans = Python/met-bound
   (async prefetch). Guarded by `test_step_profiler_captures_window_and_exits`.
+- **Profile result (GH200 smoke, 2026-06-26): LAUNCH-BOUND, conclusively.** 20-step
+  window: **GPU-busy ~16.9%**, ~30 ms/step wall but only ~2.5 ms/step of actual GPU
+  compute (50 ms CUDA / 20 steps) ⇒ **~10× headroom**. `cudaLaunchKernel` = **25,012
+  calls (~1,250 launches/step), 33% of CPU**; kernels avg 1.6 µs CUDA but 5.9 µs CPU
+  to launch (launch overhead > kernel). The captured substep graph works (the single
+  `CompiledFxGraph` op runs 20×, once/step) but is a small slice; the wall is the
+  **~1,250 eager launches/step from the rest of `HannaScheme.step`** — 5 surface
+  `grid_sample`s, 3× `_column_turbulence` (each a `grid_sample` + ~40 elementwise),
+  density/meander interp, RK2 advection, footprint scatter. Secondary: 740
+  `cudaStreamSynchronize` (~37/step, only 4.8 ms but they block kernel queuing) +
+  `aten::nonzero`/`index` from boolean masking (gridder valid-mask / escaped). **Fix:
+  expand the compiled region from the substep loop to the whole per-step tensor core
+  (gather met-field tensors in Python outside, compile `_step_core(...)`), collapsing
+  ~1,250 launches → a handful. Expected GPU-busy 17% → 60–80%.**
+
+### 2026-06-26 Whole per-step core compiled — the launch-bound fix (M3 phase 4)
+
+Acting on the profile above: extracted the entire static-path per-step pipeline into a
+**pure-tensor `HannaScheme._step_core`** and made *it* (not just the substep loop) the
+`torch.compile(mode="reduce-overhead")` / CUDA-graph target. On CUDA the whole step —
+5 surface `grid_sample`s, 3× `_column_turbulence` (each a `grid_sample` + ~40 elementwise),
+density/meander interp, the substep loop, and the mask-gated write-back — now captures as
+**one graph** replayed per step, instead of ~1,250 individual eager launches.
+
+- **Split `step` into two clean paths.** The Python met-window access is hoisted into
+  `_gather_static_inputs` (returns the per-step met-field *tensors* — 5 time-interpolated
+  surface 2D fields + the cached FT/density/meander 3D stacks — plus the run-constant
+  `GridInterpolationBounds`). `_step_core` takes only tensors + bounds + `engine`, so it's
+  a clean compile target. The **dynamic (CPU) path** keeps the boolean-indexed body,
+  byte-identical to before. Physics free-functions (`_column_turbulence`, `obukhov_length`,
+  …) are unchanged and shared by both paths — interrogability preserved.
+- **New compile-clean helper `_bilinear_at`** (float grid bounds, no numpy access) for the
+  surface fields inside the core; `_interp_2d_bilinear` stays for the dynamic path.
+- **`_maybe_graph_compile` now wraps `_step_core`** (was the substep loop);
+  `_compiled_graph_core` replaces `_compiled_graph_substep`. The substep loop is called
+  *inside* the core (eager, fixed-count via `n_substeps=max_substeps`), so no nested
+  compile. Eager static path (no compile) uses `n_substeps=None` (variable `max_k`).
+- **Eager `_step_core` is equivalent to the old static path** — same op sequence, so the
+  static gates (`test_v1_well_mixed[static]`, `test_static_step_freezes_inactive_particles`,
+  `test_static_path_footprint_conservation`) pass unchanged, and the dynamic-path tests
+  too. **CPU smoke confirms the whole core compiles + runs** (no hard graph breaks → it
+  should capture as a CUDA graph on the GH200). Full suite green.
+- **Pending (Matt, GH200):** re-run `GLIDE_PROFILE=1` smoke — expect `cudaLaunchKernel`
+  to collapse from ~25k to a few hundred and GPU-busy to jump from 17%. If a graph break
+  limits it, the profiler/`TORCH_LOGS=graph_breaks` will show which op; fix and re-profile.
+  Then the §5.1 (B) escaped-particle question, if still relevant.
 - **Fix (found on the first GH200 run, 2026-06-21):** the per-step memory-log block
   (`mem.log_every_steps`) still referenced `active_count`, which only the *dynamic*
   branch binds → `UnboundLocalError` on the static path. CPU tests missed it because
