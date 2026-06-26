@@ -216,9 +216,48 @@ density/meander interp, the substep loop, and the mask-gated write-back — now 
   any break, needs no GPU or C++ codegen) — locked in as `test_step_core_traces_as_one_graph_no_breaks`,
   a CPU regression guard against future `.item()`/`bool()` breaks. (Aside: `GLIDE_PROFILE`
   "exits early without error" is **by design** — it `SystemExit`s after the capture window.)
-- **Pending (Matt, GH200):** re-run `GLIDE_PROFILE=1` smoke — now expect `cudaLaunchKernel`
-  to collapse from ~25k to a few hundred and GPU-busy to jump from 17%. Then the §5.1 (B)
-  escaped-particle question, if still relevant.
+- **GH200 result (2026-06-26): capture works, 4× faster, but bottleneck shifted.** With the
+  graph-break fixed: per-step wall ~30 → ~7.3 ms (**4×**), `cudaLaunchKernel` ~1,250 → ~237
+  /step, GPU-busy 17% → 27%, `cudaGraphLaunch` ×20 (one replay/step). The Hanna core is now
+  a small slice; the remaining ~237 launches/step are everything in `main._run` *around* the
+  core — **advection** (`grid_sample`s) and the **footprint gridder** (`nonzero`/`index` from
+  valid-mask boolean indexing, = the remaining ~18 syncs/step).
+
+### 2026-06-26 Sync-free gridder + advection folded into the graph (M3 phase 4 cont.)
+
+Closing the two non-core per-step costs the GH200 profile exposed.
+
+- **Sync-free `FootprintGridder.accumulate`.** Rewrote it to operate on the WHOLE particle
+  buffer with **no `torch.any` and no boolean indexing** (`particles[active_mask]`,
+  `act_r[valid_mask]`) — those forced ~9 device→host syncs/step that blocked kernel queuing.
+  Now: compute all indices, build a `valid` mask (active & in-bounds), zero the weight of
+  invalid/inactive particles (`weights * valid * dt`), clamp indices into range, and
+  `scatter_add_` the full set — out-of-bounds particles add 0.0 (exact no-op), so the
+  footprint is **bit-identical** to the masked version. All 22 footprint/conservation/
+  escaped tests pass unchanged.
+- **RK2 advection folded into `HannaScheme._step_core`.** Advection was the other eager
+  chunk (the `grid_sample`s). Rather than a second CUDA graph (whose `mark_step_begin`
+  semantics across two graphs are subtle and untestable on CPU), advection now runs *inside*
+  the single captured core: `_gather_static_inputs` also gathers the raw u/v/w wind fields +
+  `alpha`; `_step_core` does RK2 (`_advect_rk2`, bit-identical to the old `wind_fn` +
+  `engine.rk2_advect_backward`) on the full set FIRST, then turbulence on the advected
+  positions, then gates inactive particles back to their **original (pre-advection)** state.
+  So the whole step (advect + turbulence) is ONE graph and inherits the existing
+  `cudagraph_mark_step_begin` + output-clone handling — no new cudagraph reasoning.
+- **Robustness: `TurbulenceScheme.step_includes_advection(engine)`** (default `False`;
+  `HannaScheme` returns `True` on the static path). `main._run`'s static branch advects
+  itself **only when the scheme does not fold it**, so a non-Hanna scheme on CUDA still
+  advects correctly (the fold made the static path Hanna-specific otherwise). Alpha +
+  grid-mean-wind diagnostic factored into `_advection_alpha_wind_mean`, shared by both paths.
+- **Validated CPU-side:** the fullgraph break-guard now traces the whole advect+turbulence
+  core as one graph (no breaks); `test_hanna_constant_wind_preserves_mean_trajectory`
+  parametrized over static/dynamic confirms the folded advection reproduces the analytic
+  backward trajectory (conservation alone is position-independent and wouldn't catch it);
+  freeze/conservation/dynamic-path tests pass.
+- **Pending (Matt, GH200):** re-profile — expect another launch drop (the ~237/step loses the
+  advection `grid_sample`s and the gridder `nonzero` syncs) and GPU-busy past 27%. The gridder
+  scatter + the cudagraph input/output copies (`copy_`/`Memcpy DtoD`) remain eager; capturing
+  the gridder is the next lever if it's still the wall.
 - **Fix (found on the first GH200 run, 2026-06-21):** the per-step memory-log block
   (`mem.log_every_steps`) still referenced `active_count`, which only the *dynamic*
   branch binds → `UnboundLocalError` on the static path. CPU tests missed it because

@@ -319,9 +319,16 @@ def test_hanna_run_completes_with_synthetic_met(tmp_path: Path) -> None:
     assert (out / "run_metadata.json").exists()
 
 
-def test_hanna_constant_wind_preserves_mean_trajectory(tmp_path: Path) -> None:
-    """Hanna's zero-mean perturbations shouldn't bias the ensemble mean position."""
+@pytest.mark.parametrize("static", [False, True])
+def test_hanna_constant_wind_preserves_mean_trajectory(tmp_path: Path, monkeypatch, static: bool) -> None:
+    """Hanna's zero-mean perturbations shouldn't bias the ensemble mean position.
 
+    Parametrized over the dynamic path (the runtime advects) and the static path
+    (RK2 advection is folded into `_step_core`'s captured graph). Both must reproduce
+    the analytic backward trajectory — this is the advection-correctness check for the
+    fold (conservation alone is position-independent and wouldn't catch broken advection)."""
+
+    monkeypatch.setenv("GLIDE_STATIC_SUBSTEPS", "1" if static else "0")
     cfg = _make_run_config(
         release_duration_seconds=60,
         simulation_length_seconds=10800,

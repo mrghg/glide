@@ -608,6 +608,35 @@ def _get_hourly_met_window(
 	return met_window, 1
 
 
+def _advection_alpha_wind_mean(
+	met_window: HourlyMetTensors,
+	t_cursor: datetime,
+	delta_s: float,
+	device: torch.device,
+	dtype: torch.dtype,
+) -> tuple[float, torch.Tensor]:
+	"""RK2-midpoint time-interpolation weight ``alpha`` + the grid-mean (u, v, w) wind.
+
+	Shared by the dynamic path (`_advect_active_particles`) and the static path, where
+	advection is folded into `HannaScheme._step_core` so `main._run` only needs these two
+	scalars/diagnostics. ``wind_mean`` is a (3,) device tensor (no host sync — materialised
+	once per batch for the trajectory diagnostics).
+	"""
+
+	t_start_s = met_window.metadata.time_start.timestamp()
+	t_end_s = met_window.metadata.time_end.timestamp()
+	t_eval_s = t_cursor.timestamp() - 0.5 * delta_s
+	alpha = max(0.0, min(1.0, (t_eval_s - t_start_s) / max(1.0, float(t_end_s - t_start_s))))
+
+	m_start_uvw, m_end_uvw = met_window.channels("u", "v", "w")
+	interp_wind = (
+		m_start_uvw.to(device=device, dtype=dtype) * (1.0 - alpha)
+		+ m_end_uvw.to(device=device, dtype=dtype) * alpha
+	)  # [3, Z, Y, X]
+	wind_mean = interp_wind.reshape(3, -1).mean(dim=1)
+	return alpha, wind_mean
+
+
 def _advect_active_particles(
 	engine: GPUEngine,
 	device: torch.device,
@@ -617,19 +646,14 @@ def _advect_active_particles(
 	delta_s: float,
 	dtype: torch.dtype,
 ) -> tuple[torch.Tensor, float, torch.Tensor]:
-	"""RK2 backward advection on the active particle subset.
+	"""RK2 backward advection on the active particle subset (dynamic / CPU path).
 
 	The third return is the grid-mean (u, v, w) wind as a device tensor — NOT
 	materialised to floats here, so the trajectory diagnostics can be transferred
 	to the host once per batch rather than syncing every step (matters on CUDA).
 	"""
 
-	t_start_s = met_window.metadata.time_start.timestamp()
-	t_end_s = met_window.metadata.time_end.timestamp()
-
-	t_eval_s = t_cursor.timestamp() - 0.5 * delta_s
-	alpha = (t_eval_s - t_start_s) / max(1.0, float(t_end_s - t_start_s))
-	alpha = max(0.0, min(1.0, alpha))
+	alpha, diag_wind_mean = _advection_alpha_wind_mean(met_window, t_cursor, delta_s, device, dtype)
 
 	grid_bounds = GridInterpolationBounds(
 		lon_first=float(met_window.metadata.lon[0]),
@@ -667,10 +691,6 @@ def _advect_active_particles(
 		return out
 
 	advected_active = engine.rk2_advect_backward(active_particles, dt_seconds=delta_s, wind_fn=wind_fn)
-
-	# Grid-mean wind as a 0-sync (3,) device tensor; materialised per-batch.
-	interp_wind = m_start[0] * (1 - alpha) + m_end[0] * alpha  # [3, Z, Y, X]
-	diag_wind_mean = interp_wind.reshape(3, -1).mean(dim=1)
 
 	del m_start
 	del m_end
@@ -929,11 +949,21 @@ def _run(
 					reader, cfg, t_cursor, met_cache
 				)
 				hour_windows += fetched_windows
-				advected_full, t_alpha, wind_mean = _advect_active_particles(
-					engine, device, particles, met_window, t_cursor, delta_s, particles.dtype,
+				# On the static path HannaScheme folds RK2 advection into its captured
+				# graph (one graph for advect + turbulence), so the runtime must NOT
+				# advect separately. A scheme that does NOT fold advection (e.g. the
+				# placeholder, or any non-Hanna scheme on CUDA) gets the runtime's own
+				# full-set advection + where-gate here. Either way we need `t_alpha`
+				# (the RK2-midpoint weight, also used for the surface fields) and the
+				# grid-mean wind diagnostic.
+				t_alpha, wind_mean = _advection_alpha_wind_mean(
+					met_window, t_cursor, delta_s, device, particles.dtype
 				)
-				# Gate advection: inactive particles (not-yet-released / escaped) stay put.
-				particles = torch.where(active_mask.unsqueeze(1), advected_full, particles)
+				if not scheme.step_includes_advection(engine):
+					advected_full = _advect_active_particles(
+						engine, device, particles, met_window, t_cursor, delta_s, particles.dtype,
+					)[0]
+					particles = torch.where(active_mask.unsqueeze(1), advected_full, particles)
 				particles, turbulence_state = scheme.step(
 					particles=particles,
 					state=turbulence_state,
@@ -969,7 +999,6 @@ def _run(
 				newly_escaped = active_mask & ~_within_met_domain(particles, cfg)
 				alive = alive & ~newly_escaped
 				escaped_count = torch.count_nonzero(newly_escaped)
-				del advected_full
 			else:
 				active_count = int(torch.count_nonzero(active_mask).item())
 

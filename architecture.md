@@ -237,13 +237,31 @@ adding graph-lifecycle complexity.
    (here all six: `particles` + the persisted `u/v/w_prime`/meander state) — graph
    outputs alias static buffers the next replay overwrites. CPU-verified: eager core ==
    old static path (WMC/freeze/conservation gates), whole core compiles + runs.
-6. **Re-measure on the GH200** (`GLIDE_PROFILE=1`): expect `cudaLaunchKernel` ~25k → a
-   few hundred and GPU-busy 17% → high. Then decide on §5.1 (B) only if needed.
+6. **✅ DONE (2026-06-26) — Graph break fixed; capture confirmed.** The first GH200 capture
+   left perf unchanged due to ONE graph break: `normalize_particle_coordinates` did
+   `bool(level_arr[-1] > level_arr[0])` (data-dependent), and that lookup runs ~5×/step.
+   Fixed by reading `ascending` from the constant Python tuple. **Result:** per-step wall
+   ~30 → ~7.3 ms (4×), `cudaLaunchKernel` ~1,250 → ~237/step, GPU-busy 17 → 27%,
+   `cudaGraphLaunch` ×1/step. CPU break-detector added: `torch.compile(_step_core,
+   fullgraph=True, backend="eager")` raises on any break with no GPU/C++ needed
+   (`test_step_core_traces_as_one_graph_no_breaks`).
+7. **✅ DONE (2026-06-26) — Killed the two non-core per-step costs the profile exposed.**
+   **(a) Sync-free gridder:** `FootprintGridder.accumulate` rewritten to full-set masked
+   scatter — no `torch.any`/boolean-indexing (was ~9 syncs/step), bit-identical footprint.
+   **(b) Advection folded into the graph:** RK2 advection moved *inside* `_step_core` (the
+   raw u/v/w fields are gathered in `_gather_static_inputs`; the core advects the full set
+   first, then turbulence, gating inactive back to their pre-advection state), so the whole
+   step is ONE graph and inherits the existing `mark_step_begin`/clone handling — no second
+   graph. `TurbulenceScheme.step_includes_advection(engine)` keeps the runtime correct for
+   non-folding schemes (the runtime advects only when the scheme doesn't).
+8. **Re-measure on the GH200**: expect the remaining ~237 launches/step to drop (advection
+   `grid_sample`s + gridder `nonzero` syncs gone). The gridder scatter + cudagraph in/out
+   copies are the next eager bits if it's still the wall. Then decide on §5.1 (B) if needed.
 
-**Status:** phases 1–5 landed (strategy **(D)+(A)**; the whole per-step core is the
-CUDA-graph target). Remaining: the **phase-6 GH200 re-profile** to confirm the launch
-collapse + sm% lift. On the graph path `max_substeps` is the fixed per-step iteration
-count, so tune it down (~15–25) from the default 50.
+**Status:** phases 1–7 landed (strategy **(D)+(A)**; whole step incl. advection captures as
+one graph, gridder sync-free). GH200-confirmed **4× per-step** so far. Remaining: the
+phase-8 re-profile. On the graph path `max_substeps` is the fixed per-step iteration count
+— tune it down (~15–25) from the default 50.
 
 ---
 

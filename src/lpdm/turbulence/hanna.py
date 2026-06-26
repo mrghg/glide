@@ -604,6 +604,11 @@ class HannaScheme(TurbulenceScheme):
 		meander_fields = None
 		if self.meander_enabled:
 			meander_fields, _ = self._meander_sigma_fields(met_window, device, dtype)
+		# Raw u/v/w wind fields (hour-start/end, [3, Z, Y, X]) for the RK2 advection,
+		# which is now folded into `_step_core` so the whole step (advect + turbulence)
+		# captures as one graph. The time interpolation is done per-sample inside the
+		# core (matches the pre-fold advection), so these stay raw.
+		m_start_uvw, m_end_uvw = met_window.channels("u", "v", "w")
 		return dict(
 			blh_field=_surf("blh", 0),
 			sp_field=_surf("sp", 0),
@@ -614,20 +619,57 @@ class HannaScheme(TurbulenceScheme):
 			density_fields=self._density_fields(met_window, device, dtype),
 			meander_fields=meander_fields,
 			grid_bounds=grid_bounds,
+			m_start_uvw=m_start_uvw.to(device=device, dtype=dtype),
+			m_end_uvw=m_end_uvw.to(device=device, dtype=dtype),
+			alpha=float(t_alpha),
 		)
+
+	def _advect_rk2(self, particles, m_start_uvw, m_end_uvw, alpha, grid_bounds, dt_seconds, engine):
+		"""RK2 backward advection on the full particle buffer (folded into `_step_core`
+		so the whole step captures as one graph). Bit-identical to the pre-fold
+		`main._advect_active_particles` wind_fn + `engine.rk2_advect_backward`."""
+		m_start = m_start_uvw.unsqueeze(0)
+		m_end = m_end_uvw.unsqueeze(0)
+
+		def wind(xyz: torch.Tensor) -> torch.Tensor:
+			xyz_norm = engine.normalize_particle_coordinates(xyz, grid_bounds)
+			grid = xyz_norm.view(1, 1, 1, -1, 3)
+			v_start = torch.nn.functional.grid_sample(m_start, grid, align_corners=True).view(3, -1).t()
+			v_end = torch.nn.functional.grid_sample(m_end, grid, align_corners=True).view(3, -1).t()
+			v = v_start * (1.0 - alpha) + v_end * alpha
+			lat = xyz[:, 1]
+			m_lon = 111320.0 * torch.cos(torch.deg2rad(lat)).abs().clamp(min=0.05)
+			out = torch.empty_like(xyz)
+			out[:, 0] = v[:, 0] / m_lon
+			out[:, 1] = v[:, 1] / 110540.0
+			out[:, 2] = v[:, 2]
+			return out
+
+		xyz = particles[:, :3]
+		v1 = wind(xyz)
+		v2 = wind(xyz - 0.5 * dt_seconds * v1)
+		out = particles.clone()
+		out[:, :3] = xyz - dt_seconds * v2
+		return out
 
 	def _step_core(
 		self, *, particles, u_prime, v_prime, w_prime, u_meander, v_meander, active_mask,
 		blh_field, sp_field, ustar_field, shf_field, t_field, ft_fields, density_fields,
-		meander_fields, grid_bounds, dt_seconds, n_substeps, engine,
+		meander_fields, grid_bounds, m_start_uvw, m_end_uvw, alpha, dt_seconds, n_substeps, engine,
 	):
-		"""Pure-tensor per-step pipeline for the static path -- the torch.compile /
-		CUDA-graph target (architecture.md S5). Identical physics to the dynamic path but
-		on the FULL particle buffer with mask-gating; all met *tensors* + bounds are passed
-		in (gathered by `_gather_static_inputs`) so nothing here touches the met window or
-		Python met access. Returns the full, mask-gated particle buffer + turb/meander
-		state (inactive particles unchanged). Eager when n_substeps is None (variable max_k);
-		fixed-count (graph-friendly) when n_substeps is given."""
+		"""Pure-tensor WHOLE per-step pipeline for the static path -- the torch.compile /
+		CUDA-graph target (architecture.md S5): RK2 advection + interp + column turbulence +
+		drift + substep loop + meander + mask-gated write-back. All met *tensors* + bounds
+		are passed in (gathered by `_gather_static_inputs`) so nothing here touches the met
+		window. Operates on the FULL particle buffer; inactive particles are gated back to
+		their ORIGINAL (pre-advection) state at the end. Returns the full state (inactive
+		unchanged). Eager when n_substeps is None (variable max_k); fixed-count (graph-
+		friendly) when n_substeps is given."""
+		# RK2 advection first (full set). Keep the pre-advection particles for the gate so
+		# inactive particles are reverted to their original position, not the advected one.
+		orig_particles = particles
+		particles = self._advect_rk2(particles, m_start_uvw, m_end_uvw, alpha, grid_bounds, dt_seconds, engine)
+
 		lon_deg = particles[:, 0]
 		lat_deg = particles[:, 1]
 		z_agl = particles[:, 2]
@@ -683,9 +725,12 @@ class HannaScheme(TurbulenceScheme):
 			)
 			moved = engine.apply_horizontal_turbulence(moved, u_meander_new, v_meander_new, dt_seconds=dt_seconds, backward=True)
 
-		# Mask-gated write-back (authoritative gate: covers substep + meander).
+		# Mask-gated write-back (authoritative gate: covers advection + substep + meander).
+		# Inactive particles revert to `orig_particles` — their ORIGINAL pre-advection
+		# state — so they are frozen exactly (advection ran on the full set but is undone
+		# here for them, same as the pre-fold `where(active, advected, particles)`).
 		am = active_mask.unsqueeze(1)
-		particles_new = torch.where(am, moved, particles)
+		particles_new = torch.where(am, moved, orig_particles)
 		u_prime_new = torch.where(active_mask, u_prime_new, u_prime)
 		v_prime_new = torch.where(active_mask, v_prime_new, v_prime)
 		w_prime_new = torch.where(active_mask, w_prime_new, w_prime)
@@ -729,6 +774,13 @@ class HannaScheme(TurbulenceScheme):
 		"""
 
 		return use_static_step_path(engine.device, self._static_substeps)
+
+	def step_includes_advection(self, engine: GPUEngine) -> bool:
+		"""On the static path, RK2 advection is folded into `_step_core` (so the whole
+		step is one captured graph), and the runtime must not advect separately. The
+		dynamic path leaves advection to the runtime (returns False)."""
+
+		return self._use_static_substeps(engine)
 
 	def _maybe_graph_compile(self, engine: GPUEngine) -> Callable[..., tuple] | None:
 		"""Return a CUDA-graph-capturing compiled per-step core (`_step_core`), or None.
