@@ -195,10 +195,30 @@ density/meander interp, the substep loop, and the mask-gated write-back — now 
   `test_static_path_footprint_conservation`) pass unchanged, and the dynamic-path tests
   too. **CPU smoke confirms the whole core compiles + runs** (no hard graph breaks → it
   should capture as a CUDA graph on the GH200). Full suite green.
-- **Pending (Matt, GH200):** re-run `GLIDE_PROFILE=1` smoke — expect `cudaLaunchKernel`
-  to collapse from ~25k to a few hundred and GPU-busy to jump from 17%. If a graph break
-  limits it, the profiler/`TORCH_LOGS=graph_breaks` will show which op; fix and re-profile.
-  Then the §5.1 (B) escaped-particle question, if still relevant.
+- **Two CUDA-graph correctness fixes found on the GH200 (Matt, 2026-06-26; ba96533,
+  ddd9683)** — neither reproducible on CPU (CPU `reduce-overhead` doesn't use CUDA
+  graphs, so the CPU smoke test passed without them): **(1)** call
+  `torch.compiler.cudagraph_mark_step_begin()` before each compiled-core invocation, so
+  the framework doesn't treat the previous step's output buffers as live inputs; **(2)**
+  `.clone()` the six tensors the core returns before storing them in `state` / returning
+  `particles`, because the graph's outputs alias static graph memory that the next replay
+  overwrites (and we persist `u/v/w_prime`/meander across steps and hand `particles` to
+  `main._run`). General rule for any future CUDA-graph capture here: mark step-begin per
+  replay, and clone any captured output that outlives the call.
+- **Graph-break fix — the whole core now captures as ONE graph (2026-06-26).** The first
+  GH200 capture left perf unchanged because of a single **graph break** (GH200 `.err`):
+  `GPUEngine.normalize_particle_coordinates` did `ascending = bool(level_arr[-1] > level_arr[0])`
+  — a data-dependent `bool(tensor)` — and that lookup runs ~5×/step (F9 + density/meander
+  interp), shattering the capture into eager sub-graphs. Fixed by reading `ascending` from
+  the **Python tuple** `bounds.level_agl_m` (constant for the whole run → compile-time
+  constant, bit-identical). **CPU-confirmed break-free:** `torch.compile(_step_core,
+  fullgraph=True, backend="eager")` now traces the whole core as one graph (it raises on
+  any break, needs no GPU or C++ codegen) — locked in as `test_step_core_traces_as_one_graph_no_breaks`,
+  a CPU regression guard against future `.item()`/`bool()` breaks. (Aside: `GLIDE_PROFILE`
+  "exits early without error" is **by design** — it `SystemExit`s after the capture window.)
+- **Pending (Matt, GH200):** re-run `GLIDE_PROFILE=1` smoke — now expect `cudaLaunchKernel`
+  to collapse from ~25k to a few hundred and GPU-busy to jump from 17%. Then the §5.1 (B)
+  escaped-particle question, if still relevant.
 - **Fix (found on the first GH200 run, 2026-06-21):** the per-step memory-log block
   (`mem.log_every_steps`) still referenced `active_count`, which only the *dynamic*
   branch binds → `UnboundLocalError` on the static path. CPU tests missed it because

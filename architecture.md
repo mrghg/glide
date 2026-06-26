@@ -216,18 +216,34 @@ adding graph-lifecycle complexity.
    (`GPUEngine._compile_requested` vs `_compile_hot_paths`). Graph-safe RNG is handled
    by Inductor's cudagraph trees. Capture boundary is the substep loop — met fetch,
    convection, and per-window field rebuilds are computed in `step` *outside* it and
-   passed in as tensors, so they never enter the graph. **CPU-verified**: fixed-count
-   == variable-count (bit-identical), the loop compiles + runs (smoke test); **CUDA
-   graph capture + sm% is pending the GH200 run** (CUDA-only — see §6 / the SLURM
-   script's "WHAT TO CHECK").
-4. **Measure** `sm%` + per-batch time on the GH200; decide on §5.1 (B) only if needed.
-5. **Document** the benchmark + dominant remaining bottleneck (M3 exit criterion).
+   passed in as tensors, so they never enter the graph. **— SUPERSEDED by phase 5:**
+   the GH200 profile (below) showed capturing *only* the substep loop left sm% at ~17%
+   — the loop wasn't the wall.
+4. **✅ DONE (2026-06-26) — Profiler hook (`GLIDE_PROFILE`).** `main._StepProfiler`
+   captures a window of cursor-loop steps and reports GPU-busy %, host syncs, and top
+   ops with call counts (§8). **Verdict from the GH200 smoke: launch-bound** — GPU-busy
+   ~16.9%, `cudaLaunchKernel` = ~1,250 launches/step (33% of CPU), ~2.5 ms/step GPU vs
+   ~30 ms/step wall ⇒ ~10× headroom. The substep graph worked (1 call/step) but the
+   wall was the ~1,250 *eager* launches in the rest of `step`.
+5. **✅ DONE (2026-06-26) — Whole per-step core compiled.** Extracted the static-path
+   pipeline into a pure-tensor `HannaScheme._step_core` (interp + 3× `_column_turbulence`
+   + drift + substep loop + meander + mask-gated write-back) and made *it* the
+   `reduce-overhead` target, so the whole step captures as one graph instead of ~1,250
+   launches. Python met-window access is hoisted into `_gather_static_inputs` (returns
+   the met-field tensors + constant grid bounds); the dynamic CPU path keeps the
+   boolean-indexed body, byte-identical. **CUDA-graph requirements (found on the GH200,
+   not reproducible on CPU):** call `torch.compiler.cudagraph_mark_step_begin()` before
+   each invocation, and **`.clone()` every captured output that outlives the call**
+   (here all six: `particles` + the persisted `u/v/w_prime`/meander state) — graph
+   outputs alias static buffers the next replay overwrites. CPU-verified: eager core ==
+   old static path (WMC/freeze/conservation gates), whole core compiles + runs.
+6. **Re-measure on the GH200** (`GLIDE_PROFILE=1`): expect `cudaLaunchKernel` ~25k → a
+   few hundred and GPU-busy 17% → high. Then decide on §5.1 (B) only if needed.
 
-**Status:** phases 1–3 landed (strategy **(D)+(A)** implemented and the graph-capture
-path wired). The remaining work is **phase 4 — measurement on the GH200** (the sm%
-payoff, and whether the §5.1 (B) escalation is needed). On the graph path
-`max_substeps` is the fixed per-step iteration count, so it should be tuned down
-(~15–25) from the default 50.
+**Status:** phases 1–5 landed (strategy **(D)+(A)**; the whole per-step core is the
+CUDA-graph target). Remaining: the **phase-6 GH200 re-profile** to confirm the launch
+collapse + sm% lift. On the graph path `max_substeps` is the fixed per-step iteration
+count, so tune it down (~15–25) from the default 50.
 
 ---
 

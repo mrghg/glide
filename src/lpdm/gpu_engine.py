@@ -246,8 +246,12 @@ class GPUEngine:
 			if n_levels < 2:
 				raise ValueError("level_agl_m must have at least 2 entries for vertical interpolation")
 			# Determine sorting direction (ARCO ERA5 level arrays may come in
-			# descending altitude — pressure-coordinate convention).
-			ascending = bool(level_arr[-1] > level_arr[0])
+			# descending altitude — pressure-coordinate convention). Read it from the
+			# Python tuple, NOT the tensor: the level array is constant for the whole
+			# run, so this is a compile-time constant. `bool(tensor)` here would be a
+			# data-dependent graph break that shatters the whole-step CUDA-graph capture
+			# (this lookup runs ~5× per step — F9 + density/meander interp). [perf 2026-06-26]
+			ascending = bounds.level_agl_m[-1] > bounds.level_agl_m[0]
 			if not ascending:
 				level_arr_sorted = level_arr.flip(0)
 			else:

@@ -1370,3 +1370,47 @@ def test_step_profiler_captures_window_and_exits(tmp_path: Path, monkeypatch) ->
         _run(cfg, reader=reader)
 
     assert trace.exists() and trace.stat().st_size > 0  # trace was written before exit
+
+
+def test_step_core_traces_as_one_graph_no_breaks() -> None:
+    """The whole per-step core must trace as ONE graph (no graph breaks) so it captures
+    as a single CUDA graph on GPU — otherwise the eager glue between sub-graphs keeps the
+    run launch-bound (the phase-4 failure mode). `fullgraph=True` + `backend="eager"`
+    surfaces any data-dependent break (a tensor `.item()`/`bool()`/Python control flow on
+    tensor data) as a hard error here on CPU — no GPU and no C++ codegen needed. Guards
+    against regressions like the F9 `ascending = bool(level_arr[...])` break (fixed
+    2026-06-26)."""
+
+    import torch._dynamo
+
+    from lpdm.gpu_engine import GPUEngine
+    from lpdm.turbulence import HannaScheme
+
+    torch._dynamo.reset()
+    prev = torch._dynamo.config.suppress_errors
+    torch._dynamo.config.suppress_errors = False  # make breaks raise, don't swallow
+    try:
+        engine = GPUEngine(device="cpu")
+        scheme = HannaScheme(meander_enabled=True, max_substeps=4)  # meander on → trace that path too
+        met = _wmc_met_window(blh_m=2000.0, ustar_m_s=0.4)
+
+        n = 48
+        particles = torch.zeros(n, 4, dtype=torch.float32)
+        particles[:, 1] = 45.0
+        particles[:, 2] = torch.rand(n) * 1500.0 + 100.0
+        particles[:, 3] = 1.0
+        state = scheme.initialize_state(n, device=torch.device("cpu"), dtype=torch.float32)
+        active = torch.ones(n, dtype=torch.bool)
+        inputs = scheme._gather_static_inputs(met, 0.5, torch.device("cpu"), torch.float32)
+
+        compiled = torch.compile(scheme._step_core, fullgraph=True, backend="eager")
+        out = compiled(
+            particles=particles, u_prime=state["u_prime"], v_prime=state["v_prime"],
+            w_prime=state["w_prime"], u_meander=state["u_meander"], v_meander=state["v_meander"],
+            active_mask=active, dt_seconds=60.0, n_substeps=scheme.max_substeps, engine=engine,
+            **inputs,
+        )
+        assert len(out) == 6 and all(torch.isfinite(o).all() for o in out)
+    finally:
+        torch._dynamo.config.suppress_errors = prev
+        torch._dynamo.reset()
