@@ -485,6 +485,11 @@ class HannaScheme(TurbulenceScheme):
 			graph_core = self._maybe_graph_compile(engine)
 			core_fn = graph_core if graph_core is not None else self._step_core
 			n_substeps = self.max_substeps if graph_core is not None else None
+			if graph_core is not None:
+				# Required before each replay of a CUDAGraph-captured function: tells
+				# the framework that a new invocation is beginning so it doesn't treat
+				# the previous run's output buffers as live inputs for the current step.
+				torch.compiler.cudagraph_mark_step_begin()
 			particles, u_p, v_p, w_p, u_m, v_m = core_fn(
 				particles=particles,
 				u_prime=state["u_prime"],
