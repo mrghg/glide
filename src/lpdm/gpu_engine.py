@@ -201,6 +201,9 @@ class GPUEngine:
 		self,
 		particle_xyz: torch.Tensor,
 		bounds: GridInterpolationBounds,
+		*,
+		level_arr: torch.Tensor | None = None,
+		ascending: bool | None = None,
 	) -> torch.Tensor:
 		"""Normalize particle coordinates into grid_sample's [-1, 1] space.
 
@@ -235,23 +238,25 @@ class GPUEngine:
 		x = scale(lon, bounds.lon_first, bounds.lon_last)
 		y = scale(lat, bounds.lat_first, bounds.lat_last)
 
-		if bounds.level_agl_m is not None:
-			# F9: piecewise-linear fractional-level lookup against the per-level
-			# AGL array. This handles non-uniform-in-z pressure-level spacing
-			# correctly (the levels are roughly log-linear in altitude).
-			level_arr = torch.as_tensor(
-				bounds.level_agl_m, device=self.device, dtype=self.dtype,
-			)
+		# Level array + ordering. COMPILED callers (the whole-step CUDA graph) pass
+		# `level_arr` (a dynamic TENSOR — its VALUES are the bbox-mean AGL heights, which
+		# change every met window) and `ascending` (a genuinely-constant bool: the
+		# pressure-level order never changes). This is essential: deriving `level_arr`
+		# from the `bounds.level_agl_m` *tuple* inside the graph makes dynamo specialise
+		# on the per-window level VALUES → recompile every window → recompile-limit
+		# blowout → eager fallback (GH200 2026-06-26). Other callers leave both None and
+		# we derive them from the tuple (the level order/values are constant for them).
+		if level_arr is None and bounds.level_agl_m is not None:
+			level_arr = torch.as_tensor(bounds.level_agl_m, device=self.device, dtype=self.dtype)
+			if ascending is None:
+				ascending = bounds.level_agl_m[-1] > bounds.level_agl_m[0]
+
+		if level_arr is not None:
+			# F9: piecewise-linear fractional-level lookup against the per-level AGL
+			# array (non-uniform-in-z pressure-level spacing; roughly log-linear in alt).
 			n_levels = level_arr.numel()
 			if n_levels < 2:
 				raise ValueError("level_agl_m must have at least 2 entries for vertical interpolation")
-			# Determine sorting direction (ARCO ERA5 level arrays may come in
-			# descending altitude — pressure-coordinate convention). Read it from the
-			# Python tuple, NOT the tensor: the level array is constant for the whole
-			# run, so this is a compile-time constant. `bool(tensor)` here would be a
-			# data-dependent graph break that shatters the whole-step CUDA-graph capture
-			# (this lookup runs ~5× per step — F9 + density/meander interp). [perf 2026-06-26]
-			ascending = bounds.level_agl_m[-1] > bounds.level_agl_m[0]
 			if not ascending:
 				level_arr_sorted = level_arr.flip(0)
 			else:

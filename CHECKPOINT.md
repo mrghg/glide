@@ -268,9 +268,32 @@ Closing the two non-core per-step costs the GH200 profile exposed.
   to turn a per-step recompile into a hard CPU error (no GPU needed) — the recompile analogue
   of the fullgraph break-guard. Profiler default warmup bumped 5 → 10 (the whole-core compile
   is large; gives the CUDA-graph trees room to settle before the window).
-- **Pending (Matt, GH200):** re-profile — with no recompile, expect the launch drop the fold +
-  sync-free gridder were meant to deliver (advection `grid_sample`s now in the graph, gridder
-  `nonzero` syncs gone) and GPU-busy back up. The gridder scatter + cudagraph in/out copies
+- **Steady-state profile confirmed (2026-06-26; GH200 23cdce1).** With the `alpha` fix the
+  capture is clean: per-step wall **30 → 7.3 → 5.0 ms**, GPU-busy **17 → 27 → 36.5%**,
+  `cudaLaunchKernel` **~1250 → 237 → 106/step**, `cudaStreamSynchronize` **740 → 360 → 140**,
+  `cudaGraphLaunch` ×1/step, no recompile. **≈6× faster than the pre-graph baseline** → the
+  ~2.5 h month run → ~25 min. Remaining GPU time: ~49% is `copy_`/`Memcpy DtoD` (cudagraph
+  input/output plumbing — the big met-field tensors copied into static buffers each replay),
+  ~26% the captured physics core, the rest the still-eager footprint gridder (~45 launches/
+  step) + diagnostics. Next levers (diminishing returns): capture the gridder (a 2nd graph) or
+  make the met fields static graph inputs (recapture per window). **Decision pending Matt:**
+  bank the 6× or push.
+- **Second recompile — per-WINDOW, from `level_agl_m` — fixed (2026-06-26; GH200 23cdce1, month
+  run).** Only showed on a multi-window run: `normalize_particle_coordinates` built the F9
+  vertical-lookup axis with `torch.as_tensor(bounds.level_agl_m)` from a **tuple of floats**,
+  and the per-level AGL heights (bbox-mean) **change every met window** (geopotential is
+  weather-dependent). dynamo specialised on the tuple values → recompiled every window → blew
+  the limit (`0/8`, reason `grid_bounds.level_agl_m[0] == 18026.37`) → eager fallback. **Fix:**
+  pass the level array as a **dynamic tensor** (`level_arr`) and the order as a genuinely-
+  constant **bool** (`ascending`), threaded `_gather_static_inputs → _step_core → {_advect_rk2,
+  _column_turbulence, _interp_3d_field} → normalize_particle_coordinates`. The tuple path is
+  kept for non-compiled callers (level_arr/ascending default None). The recompile guard now
+  **varies the level array** across calls (blh 2000 vs 4000 → 4000 vs 6000 m top) so it covers
+  this class too; verified non-vacuous (forcing the tuple path → `RecompileError`). Same lesson
+  as `alpha`, one level deeper: *no per-window-varying value may reach the compiled core as a
+  Python scalar/tuple — only constants and tensors.*
+- **Pending (Matt, GH200):** re-run the month job — should now compile once and stay captured
+  for the whole run (no per-window recompile). The gridder scatter + cudagraph in/out copies
   remain eager; capturing the gridder is the next lever if it's still the wall.
 - **Fix (found on the first GH200 run, 2026-06-21):** the per-step memory-log block
   (`mem.log_every_steps`) still referenced `active_count`, which only the *dynamic*

@@ -609,6 +609,14 @@ class HannaScheme(TurbulenceScheme):
 		# captures as one graph. The time interpolation is done per-sample inside the
 		# core (matches the pre-fold advection), so these stay raw.
 		m_start_uvw, m_end_uvw = met_window.channels("u", "v", "w")
+		# The per-level AGL heights (bbox-mean) are the F9 vertical-lookup axis. Their
+		# VALUES change every met window (geopotential is weather-dependent), so pass them
+		# as a dynamic TENSOR — a tuple-of-floats would make dynamo specialise the graph
+		# per window and recompile every window (GH200 2026-06-26). `ascending` (the
+		# pressure-level ORDER) is genuinely constant, so it stays a plain bool.
+		level = met_window.metadata.level
+		level_arr = torch.as_tensor(np.asarray(level), device=device, dtype=dtype)
+		ascending = bool(level[-1] > level[0])
 		return dict(
 			blh_field=_surf("blh", 0),
 			sp_field=_surf("sp", 0),
@@ -627,9 +635,11 @@ class HannaScheme(TurbulenceScheme):
 			# recompile limit, and fall back to eager (GH200 profile 2026-06-26 — the run
 			# went 4× slower than before, GPU-busy 0.7%). A tensor is a dynamic input.
 			alpha=torch.tensor(float(t_alpha), device=device, dtype=dtype),
+			level_arr=level_arr,
+			ascending=ascending,
 		)
 
-	def _advect_rk2(self, particles, m_start_uvw, m_end_uvw, alpha, grid_bounds, dt_seconds, engine):
+	def _advect_rk2(self, particles, m_start_uvw, m_end_uvw, alpha, grid_bounds, dt_seconds, engine, level_arr=None, ascending=None):
 		"""RK2 backward advection on the full particle buffer (folded into `_step_core`
 		so the whole step captures as one graph). Bit-identical to the pre-fold
 		`main._advect_active_particles` wind_fn + `engine.rk2_advect_backward`."""
@@ -637,7 +647,7 @@ class HannaScheme(TurbulenceScheme):
 		m_end = m_end_uvw.unsqueeze(0)
 
 		def wind(xyz: torch.Tensor) -> torch.Tensor:
-			xyz_norm = engine.normalize_particle_coordinates(xyz, grid_bounds)
+			xyz_norm = engine.normalize_particle_coordinates(xyz, grid_bounds, level_arr=level_arr, ascending=ascending)
 			grid = xyz_norm.view(1, 1, 1, -1, 3)
 			v_start = torch.nn.functional.grid_sample(m_start, grid, align_corners=True).view(3, -1).t()
 			v_end = torch.nn.functional.grid_sample(m_end, grid, align_corners=True).view(3, -1).t()
@@ -660,7 +670,8 @@ class HannaScheme(TurbulenceScheme):
 	def _step_core(
 		self, *, particles, u_prime, v_prime, w_prime, u_meander, v_meander, active_mask,
 		blh_field, sp_field, ustar_field, shf_field, t_field, ft_fields, density_fields,
-		meander_fields, grid_bounds, m_start_uvw, m_end_uvw, alpha, dt_seconds, n_substeps, engine,
+		meander_fields, grid_bounds, m_start_uvw, m_end_uvw, alpha, level_arr, ascending,
+		dt_seconds, n_substeps, engine,
 	):
 		"""Pure-tensor WHOLE per-step pipeline for the static path -- the torch.compile /
 		CUDA-graph target (architecture.md S5): RK2 advection + interp + column turbulence +
@@ -673,7 +684,7 @@ class HannaScheme(TurbulenceScheme):
 		# RK2 advection first (full set). Keep the pre-advection particles for the gate so
 		# inactive particles are reverted to their original position, not the advected one.
 		orig_particles = particles
-		particles = self._advect_rk2(particles, m_start_uvw, m_end_uvw, alpha, grid_bounds, dt_seconds, engine)
+		particles = self._advect_rk2(particles, m_start_uvw, m_end_uvw, alpha, grid_bounds, dt_seconds, engine, level_arr=level_arr, ascending=ascending)
 
 		lon_deg = particles[:, 0]
 		lat_deg = particles[:, 1]
@@ -694,6 +705,7 @@ class HannaScheme(TurbulenceScheme):
 		col_kwargs = dict(
 			blh=blh, ustar=ustar, w_star=w_star, h_over_L=h_over_L, L=L,
 			lat=lat_deg, lon=lon_deg, ft_fields=ft_fields, grid_bounds=grid_bounds, engine=engine,
+			level_arr=level_arr, ascending=ascending,
 		)
 		z_eval = z_agl.clamp(min=self.z_ubl_m)
 		sigma_u, sigma_v, sigma_w, T_Lu, T_Lv, T_Lw = self._column_turbulence(z_eval, **col_kwargs)
@@ -705,7 +717,7 @@ class HannaScheme(TurbulenceScheme):
 		dsig2_dz = (sw_hi.pow(2) - sw_lo.pow(2)) / (z_hi - z_lo).clamp(min=self.DRIFT_FD_DELTA_M)
 		sigma_w_sq = sigma_w.pow(2).clamp(min=SIGMA_MIN_M_S ** 2)
 
-		density_at_p = self._interp_3d_field(density_fields, grid_bounds, lon_deg, lat_deg, z_eval, engine)
+		density_at_p = self._interp_3d_field(density_fields, grid_bounds, lon_deg, lat_deg, z_eval, engine, level_arr=level_arr, ascending=ascending)
 		rho_at_p = density_at_p[0].clamp(min=1e-3)
 		density_drift_forward = sigma_w_sq * density_at_p[1] / rho_at_p
 		half_dsig2_dz_backward = -0.5 * dsig2_dz
@@ -721,7 +733,7 @@ class HannaScheme(TurbulenceScheme):
 
 		u_meander_new, v_meander_new = u_meander, v_meander
 		if self.meander_enabled:
-			sm = self._interp_3d_field(meander_fields, grid_bounds, lon_deg, lat_deg, z_eval, engine)
+			sm = self._interp_3d_field(meander_fields, grid_bounds, lon_deg, lat_deg, z_eval, engine, level_arr=level_arr, ascending=ascending)
 			u_meander_new = engine.update_langevin_velocity(
 				u_meander, t_lagrangian=self.meander_timescale_seconds, sigma_w2=sm[0].pow(2), dt_seconds=dt_seconds,
 			)
@@ -1146,6 +1158,8 @@ class HannaScheme(TurbulenceScheme):
 		ft_fields: torch.Tensor,
 		grid_bounds: "GridInterpolationBounds",
 		engine: GPUEngine,
+		level_arr: torch.Tensor | None = None,
+		ascending: bool | None = None,
 	) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
 		"""Per-particle (σ_u, σ_v, σ_w, T_Lu, T_Lv, T_Lw) at height ``z_query``.
 
@@ -1181,7 +1195,7 @@ class HannaScheme(TurbulenceScheme):
 		# only cost when nothing is above the BL is one extra cached-field
 		# grid_sample, which is far cheaper on CUDA than the sync it removes.
 		above_bl = z_query > blh
-		ft = self._interp_3d_field(ft_fields, grid_bounds, lon, lat, z_query, engine)
+		ft = self._interp_3d_field(ft_fields, grid_bounds, lon, lat, z_query, engine, level_arr=level_arr, ascending=ascending)
 		ft_sw, ft_suv, ft_tlw, ft_tluv = ft[0], ft[1], ft[2], ft[3]
 		sigma_u = torch.where(above_bl, ft_suv, sigma_u)
 		sigma_v = torch.where(above_bl, ft_suv, sigma_v)
@@ -1418,13 +1432,17 @@ class HannaScheme(TurbulenceScheme):
 		lat: torch.Tensor,
 		z: torch.Tensor,
 		engine: GPUEngine,
+		level_arr: torch.Tensor | None = None,
+		ascending: bool | None = None,
 	) -> torch.Tensor:
 		"""Trilinear interp of a [C, Z, Y, X] field stack at particle (lon, lat, z).
 		Returns [C, N]. Reuses the engine's coordinate normalisation so the vertical
-		mapping matches the wind advection."""
+		mapping matches the wind advection. ``level_arr`` (dynamic tensor) + ``ascending``
+		(constant bool) are threaded to ``normalize_particle_coordinates`` on the compiled
+		path so the per-window level VALUES don't trigger recompiles (see that method)."""
 
 		xyz = torch.stack([lon, lat, z], dim=1)
-		xyz_norm = engine.normalize_particle_coordinates(xyz, grid_bounds)
+		xyz_norm = engine.normalize_particle_coordinates(xyz, grid_bounds, level_arr=level_arr, ascending=ascending)
 		grid = xyz_norm.view(1, 1, 1, -1, 3)
 		vol = fields_stacked.unsqueeze(0)  # [1, C, Z, Y, X]
 		sampled = torch.nn.functional.grid_sample(vol, grid, align_corners=True)

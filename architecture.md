@@ -328,9 +328,14 @@ Performance work must not make the physics opaque. Non-negotiable constraints:
 
 **Two CPU guards protect the GPU capture (no GPU needed):** `fullgraph=True,
 backend="eager"` raises on any **graph break** (`test_step_core_traces_as_one_graph_no_breaks`);
-`torch._dynamo.config.error_on_recompile` raises on any **per-step recompile**
+`torch._dynamo.config.error_on_recompile` raises on any **recompile** as `alpha`, the met-field
+values, **and the per-level AGL array** change call to call
 (`test_step_core_does_not_recompile_per_step`). Both classes of regression silently destroy
 the GH200 capture, so they're caught in CI here. **Rules for the compiled `_step_core`:** no
-`.item()`/`bool(tensor)`/data-dependent control flow (graph break); no per-step-varying Python
-scalar as an argument (recompile — pass a 0-d tensor); clone any output that outlives the call
-and `cudagraph_mark_step_begin()` per invocation (cudagraph aliasing).
+`.item()`/`bool(tensor)`/data-dependent control flow (graph break); **no value that varies
+across steps OR met windows may reach the core as a Python scalar or tuple** — dynamo
+specialises on those and recompiles per value (the per-step `alpha` and the per-window
+`level_agl_m` heights both bit us). Pass varying numbers as **tensors** (0-d for scalars, 1-d
+for the level array) and only genuine run-constants (e.g. the `ascending` level order) as
+Python scalars. Also: clone any output that outlives the call and `cudagraph_mark_step_begin()`
+per invocation (cudagraph aliasing).

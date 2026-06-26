@@ -1463,14 +1463,17 @@ def test_step_core_does_not_recompile_per_step() -> None:
                 **inputs,
             )
 
-        # Same grid/shapes (so any recompile is a genuine value-specialisation bug), but
-        # different alpha AND different met-field values across calls. blh_m kept < 2667 so
-        # both windows share the same level array → identical grid_bounds.
-        met_a = _wmc_met_window(blh_m=2000.0, ustar_m_s=0.4)
-        met_b = _wmc_met_window(blh_m=1200.0, ustar_m_s=0.6)
+        # Same grid SHAPE (so any recompile is a genuine value-specialisation bug), but
+        # different alpha, different met-field values, AND a different per-level AGL array
+        # (`_wmc_met_window` sets level = linspace(0, max(4000, 1.5·blh_m), n_lev), so
+        # blh_m=4000 → 6000 m top vs 2000 → 4000 m). The level VALUES change every met
+        # window in production (weather-dependent geopotential); they must be a dynamic
+        # tensor, not a tuple dynamo specialises on (GH200 month run 2026-06-26).
+        met_a = _wmc_met_window(blh_m=2000.0, ustar_m_s=0.4)   # level top 4000 m
+        met_b = _wmc_met_window(blh_m=4000.0, ustar_m_s=0.6)   # level top 6000 m (different F9 axis)
         call(met_a, 0.3, 1)   # first call: compiles once (not a recompile)
         call(met_a, 0.7, 2)   # different alpha → must NOT recompile
-        call(met_b, 0.5, 3)   # different alpha + met-field values → must NOT recompile
+        call(met_b, 0.5, 3)   # different alpha + met values + LEVEL array → must NOT recompile
     finally:
         torch._dynamo.config.suppress_errors = prev_sup
         torch._dynamo.config.error_on_recompile = prev_rec
