@@ -503,10 +503,17 @@ class HannaScheme(TurbulenceScheme):
 				engine=engine,
 				**inputs,
 			)
-			state["u_prime"], state["v_prime"], state["w_prime"] = u_p, v_p, w_p
+			# Clone graph output buffers before storing them back as state / returning
+			# particles. Without this, the CUDAGraph output memory is aliased with the
+			# inputs of the next invocation, triggering "overwritten by a subsequent
+			# run" errors even after cudagraph_mark_step_begin().
+			state["u_prime"] = u_p.clone()
+			state["v_prime"] = v_p.clone()
+			state["w_prime"] = w_p.clone()
 			if self.meander_enabled:
-				state["u_meander"], state["v_meander"] = u_m, v_m
-			return particles, state
+				state["u_meander"] = u_m.clone()
+				state["v_meander"] = v_m.clone()
+			return particles.clone(), state
 
 		# DYNAMIC / boolean-indexed path (CPU): touch only the active subset; the empty
 		# guard (bool(torch.any(...)), a host sync) is cheap here. Byte-identical to the
