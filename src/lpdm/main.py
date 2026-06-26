@@ -169,7 +169,7 @@ def _make_step_profiler(device: torch.device) -> "_StepProfiler | None":
 		return None
 	return _StepProfiler(
 		device=device,
-		warmup=int(os.environ.get("GLIDE_PROFILE_WARMUP", "5")),
+		warmup=int(os.environ.get("GLIDE_PROFILE_WARMUP", "10")),
 		active=int(os.environ.get("GLIDE_PROFILE_STEPS", "20")),
 		trace_path=Path(os.environ.get("GLIDE_PROFILE_TRACE", "glide_profile_trace.json")),
 		exit_after=os.environ.get("GLIDE_PROFILE_CONTINUE", "") in ("", "0", "false", "False"),

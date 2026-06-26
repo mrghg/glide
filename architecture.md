@@ -321,4 +321,16 @@ Performance work must not make the physics opaque. Non-negotiable constraints:
   (GPU-busy %, host-sync ops, top ops with call counts) + a Chrome trace, then exits.
   Diagnosis → fix: many small GPU ops ⇒ launch-bound (expand the captured region);
   `cudaStreamSynchronize` ⇒ residual host sync; long CPU spans ⇒ Python/met-bound
-  (async prefetch). Knobs: `GLIDE_PROFILE_STEPS`/`_WARMUP`/`_TRACE`/`_CONTINUE`.
+  (async prefetch); **CPU dominated by `dynamo_timed`/`fx_codegen_and_compile` with
+  `aten::*` running thousands of times ⇒ recompile thrashing → eager fallback** (a
+  per-step-varying Python scalar reached a compiled-core arg — make it a 0-d tensor).
+  Knobs: `GLIDE_PROFILE_STEPS`/`_WARMUP`/`_TRACE`/`_CONTINUE`.
+
+**Two CPU guards protect the GPU capture (no GPU needed):** `fullgraph=True,
+backend="eager"` raises on any **graph break** (`test_step_core_traces_as_one_graph_no_breaks`);
+`torch._dynamo.config.error_on_recompile` raises on any **per-step recompile**
+(`test_step_core_does_not_recompile_per_step`). Both classes of regression silently destroy
+the GH200 capture, so they're caught in CI here. **Rules for the compiled `_step_core`:** no
+`.item()`/`bool(tensor)`/data-dependent control flow (graph break); no per-step-varying Python
+scalar as an argument (recompile — pass a 0-d tensor); clone any output that outlives the call
+and `cudagraph_mark_step_begin()` per invocation (cudagraph aliasing).

@@ -1421,3 +1421,57 @@ def test_step_core_traces_as_one_graph_no_breaks() -> None:
     finally:
         torch._dynamo.config.suppress_errors = prev
         torch._dynamo.reset()
+
+
+def test_step_core_does_not_recompile_per_step() -> None:
+    """The compiled core must NOT recompile as `alpha` and the met-field VALUES change
+    step to step (only shapes/grid are constant). Passing `alpha` (the RK2-midpoint
+    weight, different every step) as a Python float would specialize the graph per value
+    → recompile every step → blow the recompile limit → eager fallback (GH200 2026-06-26:
+    4× *slower*, GPU-busy 0.7%). `error_on_recompile` turns a recompile into a hard error
+    here on CPU — no GPU needed. The fix is passing `alpha` as a 0-d tensor."""
+
+    import torch._dynamo
+
+    from lpdm.gpu_engine import GPUEngine
+    from lpdm.turbulence import HannaScheme
+
+    torch._dynamo.reset()
+    prev_sup = torch._dynamo.config.suppress_errors
+    prev_rec = torch._dynamo.config.error_on_recompile
+    torch._dynamo.config.suppress_errors = False
+    torch._dynamo.config.error_on_recompile = True
+    try:
+        engine = GPUEngine(device="cpu")
+        scheme = HannaScheme(meander_enabled=True, max_substeps=4)
+        n = 48
+        compiled = torch.compile(scheme._step_core, fullgraph=True, backend="eager")
+
+        def call(met, t_alpha, seed):
+            torch.manual_seed(seed)
+            particles = torch.zeros(n, 4, dtype=torch.float32)
+            particles[:, 1] = 45.0
+            particles[:, 2] = torch.rand(n) * 1500.0 + 100.0
+            particles[:, 3] = 1.0
+            state = scheme.initialize_state(n, device=torch.device("cpu"), dtype=torch.float32)
+            active = torch.ones(n, dtype=torch.bool)
+            inputs = scheme._gather_static_inputs(met, t_alpha, torch.device("cpu"), torch.float32)
+            compiled(
+                particles=particles, u_prime=state["u_prime"], v_prime=state["v_prime"],
+                w_prime=state["w_prime"], u_meander=state["u_meander"], v_meander=state["v_meander"],
+                active_mask=active, dt_seconds=60.0, n_substeps=scheme.max_substeps, engine=engine,
+                **inputs,
+            )
+
+        # Same grid/shapes (so any recompile is a genuine value-specialisation bug), but
+        # different alpha AND different met-field values across calls. blh_m kept < 2667 so
+        # both windows share the same level array → identical grid_bounds.
+        met_a = _wmc_met_window(blh_m=2000.0, ustar_m_s=0.4)
+        met_b = _wmc_met_window(blh_m=1200.0, ustar_m_s=0.6)
+        call(met_a, 0.3, 1)   # first call: compiles once (not a recompile)
+        call(met_a, 0.7, 2)   # different alpha → must NOT recompile
+        call(met_b, 0.5, 3)   # different alpha + met-field values → must NOT recompile
+    finally:
+        torch._dynamo.config.suppress_errors = prev_sup
+        torch._dynamo.config.error_on_recompile = prev_rec
+        torch._dynamo.reset()

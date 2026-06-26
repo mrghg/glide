@@ -254,10 +254,24 @@ Closing the two non-core per-step costs the GH200 profile exposed.
   parametrized over static/dynamic confirms the folded advection reproduces the analytic
   backward trajectory (conservation alone is position-independent and wouldn't catch it);
   freeze/conservation/dynamic-path tests pass.
-- **Pending (Matt, GH200):** re-profile — expect another launch drop (the ~237/step loses the
-  advection `grid_sample`s and the gridder `nonzero` syncs) and GPU-busy past 27%. The gridder
-  scatter + the cudagraph input/output copies (`copy_`/`Memcpy DtoD`) remain eager; capturing
-  the gridder is the next lever if it's still the wall.
+- **Recompile blowout from the advection fold — fixed (2026-06-26; GH200 ca807de).** The fold
+  passed `alpha` (the RK2-midpoint time-interp weight, **different every step**) to the
+  compiled core as a **Python float**. dynamo specialises graphs on float values → it
+  recompiled the whole core *every step*, blew the recompile limit (`cache_size_limit`), and
+  fell back to eager: the profile window took **64.8 s** (vs 0.15 s), GPU-busy **0.7%**, the
+  CPU dominated by `create_aot_dispatcher_function`/`fx_codegen_and_compile` and `aten::mul`
+  running 29,958× eager. **Fix:** pass `alpha` as a **0-d tensor** (a dynamic input dynamo
+  doesn't specialise on). General rule: *no per-step-varying Python scalar may be a compiled-
+  core argument — make it a 0-d tensor.* (`dt_seconds` is a float too but is constant within a
+  batch, so it only recompiles on the rare clamped last step — cached.) Guard added:
+  `test_step_core_does_not_recompile_per_step` uses `torch._dynamo.config.error_on_recompile`
+  to turn a per-step recompile into a hard CPU error (no GPU needed) — the recompile analogue
+  of the fullgraph break-guard. Profiler default warmup bumped 5 → 10 (the whole-core compile
+  is large; gives the CUDA-graph trees room to settle before the window).
+- **Pending (Matt, GH200):** re-profile — with no recompile, expect the launch drop the fold +
+  sync-free gridder were meant to deliver (advection `grid_sample`s now in the graph, gridder
+  `nonzero` syncs gone) and GPU-busy back up. The gridder scatter + cudagraph in/out copies
+  remain eager; capturing the gridder is the next lever if it's still the wall.
 - **Fix (found on the first GH200 run, 2026-06-21):** the per-step memory-log block
   (`mem.log_every_steps`) still referenced `active_count`, which only the *dynamic*
   branch binds → `UnboundLocalError` on the static path. CPU tests missed it because

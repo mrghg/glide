@@ -621,7 +621,12 @@ class HannaScheme(TurbulenceScheme):
 			grid_bounds=grid_bounds,
 			m_start_uvw=m_start_uvw.to(device=device, dtype=dtype),
 			m_end_uvw=m_end_uvw.to(device=device, dtype=dtype),
-			alpha=float(t_alpha),
+			# alpha (the RK2-midpoint time-interp weight) changes EVERY step. Pass it as
+			# a 0-d TENSOR, not a Python float: dynamo specializes the compiled graph on
+			# float values, so a per-step float would recompile every step, blow the
+			# recompile limit, and fall back to eager (GH200 profile 2026-06-26 — the run
+			# went 4× slower than before, GPU-busy 0.7%). A tensor is a dynamic input.
+			alpha=torch.tensor(float(t_alpha), device=device, dtype=dtype),
 		)
 
 	def _advect_rk2(self, particles, m_start_uvw, m_end_uvw, alpha, grid_bounds, dt_seconds, engine):
