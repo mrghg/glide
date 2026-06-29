@@ -54,6 +54,32 @@ def _ou_step_kernel(
 VALIDATE_ENGINE_INPUTS = os.environ.get("GLIDE_VALIDATE_ENGINE", "") not in ("", "0", "false", "False")
 
 
+def use_static_step_path(device: torch.device, override: bool | None = None) -> bool:
+    """Whether to use the static-shape (full-set, mask-gated) per-step path.
+
+    The static path processes the **full** particle set every step and gates
+    inactive particles with ``torch.where`` instead of boolean-indexing the active
+    subset. Constant tensor shapes + no data-dependent control flow are what
+    CUDA-graph capture requires, and they beat the shrinking masked subsets on a
+    launch-bound GPU; the dynamic (boolean-indexed) path is cheaper on CPU where
+    launches/syncs are free. See ``architecture.md`` §5.
+
+    Resolution order: an explicit ``override`` (e.g. a scheme ctor flag) wins;
+    then the ``GLIDE_STATIC_SUBSTEPS`` env var; otherwise auto by device — static
+    on CUDA, dynamic elsewhere. Shared by ``HannaScheme`` and the ``main`` runtime
+    loop so the two always agree.
+    """
+
+    if override is not None:
+        return bool(override)
+    env = os.environ.get("GLIDE_STATIC_SUBSTEPS", "")
+    if env in ("1", "true", "True"):
+        return True
+    if env in ("0", "false", "False"):
+        return False
+    return device.type == "cuda"
+
+
 @dataclass(frozen=True)
 class CoordinateBounds:
 	"""Physical coordinate bounds used for periodic wrapping."""
@@ -116,7 +142,15 @@ class GPUEngine:
 		# and the FIRST call pays a one-time compile cost (seconds).
 		if compile_hot_paths is None:
 			compile_hot_paths = os.environ.get("GLIDE_COMPILE", "") not in ("", "0", "false", "False")
-		self._compile_hot_paths = bool(compile_hot_paths)
+		# `_compile_requested` is the user's intent (GLIDE_COMPILE); `_compile_hot_paths`
+		# is whether WE compile the per-method hot paths here. On the static/graph path
+		# (CUDA, or GLIDE_STATIC_SUBSTEPS) the turbulence scheme captures the WHOLE
+		# substep loop as one graph (`mode="reduce-overhead"`, phase 3) — compiling the
+		# individual methods here would nest inside that capture, so we skip it and let
+		# the scheme read `_compile_requested` to drive its own compilation. On the
+		# dynamic path we keep the per-method compile (the pre-phase-3 behaviour).
+		self._compile_requested = bool(compile_hot_paths)
+		self._compile_hot_paths = self._compile_requested and not use_static_step_path(self.device)
 		self._ou_step_fn: Callable[..., torch.Tensor] = _ou_step_kernel
 		if self._compile_hot_paths:
 			self._enable_compiled_hot_paths()
@@ -167,6 +201,9 @@ class GPUEngine:
 		self,
 		particle_xyz: torch.Tensor,
 		bounds: GridInterpolationBounds,
+		*,
+		level_arr: torch.Tensor | None = None,
+		ascending: bool | None = None,
 	) -> torch.Tensor:
 		"""Normalize particle coordinates into grid_sample's [-1, 1] space.
 
@@ -201,19 +238,25 @@ class GPUEngine:
 		x = scale(lon, bounds.lon_first, bounds.lon_last)
 		y = scale(lat, bounds.lat_first, bounds.lat_last)
 
-		if bounds.level_agl_m is not None:
-			# F9: piecewise-linear fractional-level lookup against the per-level
-			# AGL array. This handles non-uniform-in-z pressure-level spacing
-			# correctly (the levels are roughly log-linear in altitude).
-			level_arr = torch.as_tensor(
-				bounds.level_agl_m, device=self.device, dtype=self.dtype,
-			)
+		# Level array + ordering. COMPILED callers (the whole-step CUDA graph) pass
+		# `level_arr` (a dynamic TENSOR — its VALUES are the bbox-mean AGL heights, which
+		# change every met window) and `ascending` (a genuinely-constant bool: the
+		# pressure-level order never changes). This is essential: deriving `level_arr`
+		# from the `bounds.level_agl_m` *tuple* inside the graph makes dynamo specialise
+		# on the per-window level VALUES → recompile every window → recompile-limit
+		# blowout → eager fallback (GH200 2026-06-26). Other callers leave both None and
+		# we derive them from the tuple (the level order/values are constant for them).
+		if level_arr is None and bounds.level_agl_m is not None:
+			level_arr = torch.as_tensor(bounds.level_agl_m, device=self.device, dtype=self.dtype)
+			if ascending is None:
+				ascending = bounds.level_agl_m[-1] > bounds.level_agl_m[0]
+
+		if level_arr is not None:
+			# F9: piecewise-linear fractional-level lookup against the per-level AGL
+			# array (non-uniform-in-z pressure-level spacing; roughly log-linear in alt).
 			n_levels = level_arr.numel()
 			if n_levels < 2:
 				raise ValueError("level_agl_m must have at least 2 entries for vertical interpolation")
-			# Determine sorting direction (ARCO ERA5 level arrays may come in
-			# descending altitude — pressure-coordinate convention).
-			ascending = bool(level_arr[-1] > level_arr[0])
 			if not ascending:
 				level_arr_sorted = level_arr.flip(0)
 			else:

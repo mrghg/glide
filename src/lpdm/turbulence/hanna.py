@@ -13,14 +13,13 @@ run; secondary references occasionally diverge by ~10% on minor coefficients.
 from __future__ import annotations
 
 import logging
-import os
 from datetime import datetime
 from typing import Callable, ClassVar
 
 import numpy as np
 import torch
 
-from lpdm.gpu_engine import GPUEngine
+from lpdm.gpu_engine import GPUEngine, use_static_step_path
 from lpdm.met_reader import HourlyMetTensors
 from lpdm.turbulence.base import TurbulenceScheme, TurbulenceState, register_scheme
 
@@ -422,6 +421,12 @@ class HannaScheme(TurbulenceScheme):
 		# `max_substeps` is the binding constraint (the substep cap saturates).
 		self._warned_substep_cap: bool = False
 
+		# CUDA-graph capture (phase 4): lazily-built `torch.compile(mode="reduce-overhead")`
+		# wrapper of the WHOLE per-step core (`_step_core`). Built on first use on the
+		# static+compile path; `_graph_compile_state` is none/ok/failed.
+		self._compiled_graph_core: Callable[..., tuple] | None = None
+		self._graph_compile_state: str = "none"
+
 		# Per-met-window cache for the grid-wide derived fields (meander σ, density
 		# + ∂ρ/∂z, free-trop σ/T_L). These depend only on the hourly met window,
 		# but `step` is called every dt (~60 steps/window), so recomputing the
@@ -465,67 +470,84 @@ class HannaScheme(TurbulenceScheme):
 		active_mask: torch.Tensor,
 		engine: GPUEngine,
 	) -> tuple[torch.Tensor, TurbulenceState]:
-		if not bool(torch.any(active_mask)):
-			return particles, state
-
 		device = engine.device
 		dtype = engine.dtype
 
+		# Two execution paths (architecture.md S5), chosen by device gate.
+		if self._use_static_substeps(engine):
+			# STATIC / compilable path. The whole per-step tensor pipeline lives in
+			# `_step_core`; only the met-field *access* (Python) is hoisted out into
+			# `_gather_static_inputs`. The core is ONE torch.compile target -> on CUDA
+			# it captures as a single graph, collapsing the ~1000+ eager kernel launches
+			# per step that left the GPU launch-bound (profile 2026-06-26). Inactive
+			# particles are frozen by the mask (sub_dt=0 in the loop + a where at the end).
+			inputs = self._gather_static_inputs(met_window, t_alpha, device, dtype)
+			graph_core = self._maybe_graph_compile(engine)
+			core_fn = graph_core if graph_core is not None else self._step_core
+			n_substeps = self.max_substeps if graph_core is not None else None
+			if graph_core is not None:
+				# Required before each replay of a CUDAGraph-captured function: tells
+				# the framework that a new invocation is beginning so it doesn't treat
+				# the previous run's output buffers as live inputs for the current step.
+				torch.compiler.cudagraph_mark_step_begin()
+			particles, u_p, v_p, w_p, u_m, v_m = core_fn(
+				particles=particles,
+				u_prime=state["u_prime"],
+				v_prime=state["v_prime"],
+				w_prime=state["w_prime"],
+				u_meander=state.get("u_meander"),
+				v_meander=state.get("v_meander"),
+				active_mask=active_mask,
+				dt_seconds=dt_seconds,
+				n_substeps=n_substeps,
+				engine=engine,
+				**inputs,
+			)
+			# Clone graph output buffers before storing them back as state / returning
+			# particles. Without this, the CUDAGraph output memory is aliased with the
+			# inputs of the next invocation, triggering "overwritten by a subsequent
+			# run" errors even after cudagraph_mark_step_begin().
+			state["u_prime"] = u_p.clone()
+			state["v_prime"] = v_p.clone()
+			state["w_prime"] = w_p.clone()
+			if self.meander_enabled:
+				state["u_meander"] = u_m.clone()
+				state["v_meander"] = v_m.clone()
+			return particles.clone(), state
+
+		# DYNAMIC / boolean-indexed path (CPU): touch only the active subset; the empty
+		# guard (bool(torch.any(...)), a host sync) is cheap here. Byte-identical to the
+		# pre-phase-4 dynamic path.
+		if not bool(torch.any(active_mask)):
+			return particles, state
+
 		active_xyz = particles[active_mask]
+		u_prime_in = state["u_prime"][active_mask]
+		v_prime_in = state["v_prime"][active_mask]
+		w_prime_in = state["w_prime"][active_mask]
 		lon_deg = active_xyz[:, 0]
 		lat_deg = active_xyz[:, 1]
 		z_agl = active_xyz[:, 2]
 
-		# Interpolate scalar surface fields at particle positions.
-		blh = self._interp_surface_field(met_window, "blh", t_alpha, lon_deg, lat_deg, device, dtype)
+		blh = self._interp_surface_field(met_window, "blh", t_alpha, lon_deg, lat_deg, device, dtype).clamp(min=BLH_MIN_M)
 		sp = self._interp_surface_field(met_window, "sp", t_alpha, lon_deg, lat_deg, device, dtype)
-		ustar = self._interp_surface_field(met_window, "ustar", t_alpha, lon_deg, lat_deg, device, dtype)
+		ustar = self._interp_surface_field(met_window, "ustar", t_alpha, lon_deg, lat_deg, device, dtype).clamp(min=USTAR_MIN_M_S)
 		shf = self._interp_surface_field(met_window, "shf", t_alpha, lon_deg, lat_deg, device, dtype)
 		t_surface = self._interp_t_at_lowest_level(met_window, t_alpha, lon_deg, lat_deg, device, dtype)
 
-		blh = blh.clamp(min=BLH_MIN_M)
-		ustar = ustar.clamp(min=USTAR_MIN_M_S)
-
-		# Stability + convective velocity per particle.
 		L = obukhov_length(ustar, shf, t_surface, sp)
 		h_over_L = blh / L
 		w_star = convective_velocity(blh, shf, t_surface, sp)
 
-		# Free-troposphere σ/T_L fields on the met grid (gradient-Richardson
-		# closure); interpolated per-particle inside _column_turbulence for the
-		# above-BL regime. Built once per met window and cached (perf 2026-06-18).
 		ft_fields, grid_bounds = self._free_trop_fields(met_window, device, dtype)
-
-		# Density and ∂ρ/∂z on the met grid for the Stohl-Thomson (1999) density
-		# correction term in the well-mixed drift (F2, audit 2026-05-30). Built
-		# once per met window and cached; sampled per-particle below.
 		density_fields = self._density_fields(met_window, device, dtype)
-
 		col_kwargs = dict(
 			blh=blh, ustar=ustar, w_star=w_star, h_over_L=h_over_L, L=L,
-			lat=lat_deg, lon=lon_deg, ft_fields=ft_fields, grid_bounds=grid_bounds,
-			engine=engine,
+			lat=lat_deg, lon=lon_deg, ft_fields=ft_fields, grid_bounds=grid_bounds, engine=engine,
 		)
-
-		# F5/F15 (audit 2026-05-30): "unresolved basal layer" per W&F §7b. For
-		# the σ/T_L/drift/density sampling we clamp z at z_ubl_m (default 2 m),
-		# so anything below the UBL gets the same turbulence parameters as the
-		# UBL top. This makes smooth-wall reflection WMC-exact in the basal
-		# layer (W&F prove perfect reflection requires constant σ over the
-		# largest distance a particle can traverse in one step). Particle
-		# *position* is NOT clamped — only the SAMPLING height for σ/T_L.
 		z_eval = z_agl.clamp(min=self.z_ubl_m)
-
-		# σ/T_L at the particle height (in-BL + surface-layer + free-troposphere).
 		sigma_u, sigma_v, sigma_w, T_Lu, T_Lv, T_Lw = self._column_turbulence(z_eval, **col_kwargs)
 
-		# Thomson (1987) well-mixed drift for the vertical component:
-		# a = ½(1 + w'²/σ_w²) ∂σ_w²/∂z. ∂σ_w²/∂z is a central finite difference of
-		# the *full* column profile (so it spans the in-BL → free-trop transition),
-		# evaluated holding the per-column scalars (blh, u*, …) fixed. The
-		# finite-difference probes also use z_eval so the UBL clamping gives
-		# ∂σ²/∂z = 0 inside the basal layer (consistent with constant σ).
-		w_prev = state["w_prime"][active_mask]
 		z_hi = z_eval + self.DRIFT_FD_DELTA_M
 		z_lo = (z_eval - self.DRIFT_FD_DELTA_M).clamp(min=self.z_ubl_m)
 		sw_hi = self._column_turbulence(z_hi, **col_kwargs)[2]
@@ -533,89 +555,32 @@ class HannaScheme(TurbulenceScheme):
 		dsig2_dz = (sw_hi.pow(2) - sw_lo.pow(2)) / (z_hi - z_lo).clamp(min=self.DRIFT_FD_DELTA_M)
 		sigma_w_sq = sigma_w.pow(2).clamp(min=SIGMA_MIN_M_S ** 2)
 
-		# Density-correction term (Stohl & Thomson 1999 Eq 3, raw-w form):
-		# `+ (σ_w²/ρ)·∂ρ/∂z`. Required for WMC in ρ-weighted coordinates — air
-		# density drops 20%+ across a deep BL and the term suppresses spurious
-		# accumulation of particles aloft (S&T's CAPTEX runs: +5.5% mean on
-		# surface concentrations, +1–15% range). Sampled per-particle from the
-		# stack built in `_density_fields` above.
-		density_at_p = self._interp_3d_field(
-			density_fields, grid_bounds, lon_deg, lat_deg, z_eval, engine,
-		)
+		density_at_p = self._interp_3d_field(density_fields, grid_bounds, lon_deg, lat_deg, z_eval, engine)
 		rho_at_p = density_at_p[0].clamp(min=1e-3)
-		drho_dz_at_p = density_at_p[1]
-		density_drift_forward = sigma_w_sq * drho_dz_at_p / rho_at_p
-
-		# Backward-Langevin sign pieces (Flesch et al. 1995: a_b = -a_f - 2w/τ
-		# flips both inhomogeneity terms in lockstep for symmetric Gaussian g_a;
-		# the homogeneous -w/τ is handled inside the OU exp(-dt/τ) factor).
-		# Pre-negate here so the subsequent backward displacement gives the
-		# correct physical direction. The (1 + w'²/σ²) factor is RECOMPUTED
-		# inside _integrate_vertical_substeps per substep using the current w',
-		# so we pass the w-independent pieces (`half_dsig2_dz_backward` and
-		# `density_drift_backward`) and the σ² needed to form the factor.
+		density_drift_forward = sigma_w_sq * density_at_p[1] / rho_at_p
 		half_dsig2_dz_backward = -0.5 * dsig2_dz
 		density_drift_backward = -density_drift_forward
 
-		# F3 (audit 2026-05-30): drift cap removed. The cap (`±σ_w/Δt`) was an
-		# ad-hoc safeguard for sharp σ_w kinks under too-large Δt; F4 Tier 2
-		# substepping below addresses the root cause (Δt/τ bias) without
-		# silently violating the WMC formula at the BL-top / SL seam.
-
-		# F4 Tier 2 (audit 2026-05-30): per-particle substepping. Each particle's
-		# OU + displacement + reflection runs `k_i = ceil(dt / (substep_c · T_Lw_i))`
-		# internal steps so its effective sub-dt satisfies the Δt/τ bias bound.
-		# Capped at `max_substeps`; warning fires (once per instance) if the cap
-		# saturates. Meander uses τ ≈ 1800 s and stays at the outer dt.
-		integrate = (
-			self._integrate_vertical_substeps_static
-			if self._use_static_substeps(engine)
-			else self._integrate_vertical_substeps
-		)
-		moved, u_prime_active, v_prime_active, w_prime_active = integrate(
-			active_xyz=active_xyz,
-			u_prime_in=state["u_prime"][active_mask],
-			v_prime_in=state["v_prime"][active_mask],
-			w_prime_in=state["w_prime"][active_mask],
+		moved, u_prime_active, v_prime_active, w_prime_active = self._integrate_vertical_substeps(
+			active_xyz=active_xyz, u_prime_in=u_prime_in, v_prime_in=v_prime_in, w_prime_in=w_prime_in,
 			sigma_u=sigma_u, sigma_v=sigma_v, sigma_w=sigma_w, sigma_w_sq=sigma_w_sq,
 			T_Lu=T_Lu, T_Lv=T_Lv, T_Lw=T_Lw,
-			half_dsig2_dz_backward=half_dsig2_dz_backward,
-			density_drift_backward=density_drift_backward,
-			dt_seconds=dt_seconds,
-			engine=engine,
+			half_dsig2_dz_backward=half_dsig2_dz_backward, density_drift_backward=density_drift_backward,
+			dt_seconds=dt_seconds, engine=engine,
 		)
 
-		# Meander (unresolved-mesoscale) horizontal turbulence: an independent
-		# horizontal OU process whose σ is the local grid-wind variability (Maryon
-		# 1998 / FLEXPART §4.5). Applied at all altitudes. No drift (the
-		# inhomogeneity captured by the well-mixed term is vertical). Symmetric
-		# random forcing, so the backward displacement needs no sign change.
-		u_meander_active = v_meander_active = None
 		if self.meander_enabled:
-			meander_fields, meander_bounds = self._meander_sigma_fields(
-				met_window, device, dtype,
-			)
-			sm = self._interp_3d_field(
-				meander_fields, meander_bounds, lon_deg, lat_deg, z_eval, engine,
-			)
-			sigma_mu, sigma_mv = sm[0], sm[1]
+			meander_fields, meander_bounds = self._meander_sigma_fields(met_window, device, dtype)
+			sm = self._interp_3d_field(meander_fields, meander_bounds, lon_deg, lat_deg, z_eval, engine)
 			u_meander_active = engine.update_langevin_velocity(
-				state["u_meander"][active_mask],
-				t_lagrangian=self.meander_timescale_seconds,
-				sigma_w2=sigma_mu.pow(2), dt_seconds=dt_seconds,
+				state["u_meander"][active_mask], t_lagrangian=self.meander_timescale_seconds,
+				sigma_w2=sm[0].pow(2), dt_seconds=dt_seconds,
 			)
 			v_meander_active = engine.update_langevin_velocity(
-				state["v_meander"][active_mask],
-				t_lagrangian=self.meander_timescale_seconds,
-				sigma_w2=sigma_mv.pow(2), dt_seconds=dt_seconds,
+				state["v_meander"][active_mask], t_lagrangian=self.meander_timescale_seconds,
+				sigma_w2=sm[1].pow(2), dt_seconds=dt_seconds,
 			)
-			moved = engine.apply_horizontal_turbulence(
-				moved, u_meander_active, v_meander_active, dt_seconds=dt_seconds, backward=True,
-			)
-
-		# Reflection (with w'-flip) is now applied inside the substep loop above;
-		# no additional reflection here. Meander has no boundary semantics
-		# (horizontal-only displacement) so it doesn't need an extra reflection.
+			moved = engine.apply_horizontal_turbulence(moved, u_meander_active, v_meander_active, dt_seconds=dt_seconds, backward=True)
 
 		particles[active_mask] = moved
 		state["u_prime"][active_mask] = u_prime_active
@@ -625,6 +590,184 @@ class HannaScheme(TurbulenceScheme):
 			state["u_meander"][active_mask] = u_meander_active
 			state["v_meander"][active_mask] = v_meander_active
 		return particles, state
+
+	def _gather_static_inputs(self, met_window, t_alpha, device, dtype):
+		"""Hoist the Python (met-window-accessing) field gathering out of `_step_core`
+		so the core is a pure-tensor torch.compile target. Returns the per-step met-field
+		tensors + the (run-constant) interpolation bounds. The 3D stacks are the per-window
+		cache; the surface fields are the cheap time-interpolated lowest-level slices."""
+		def _surf(name, lev):
+			cs, ce = met_window.channel(name)
+			return cs[lev].to(device=device, dtype=dtype) * (1.0 - t_alpha) + ce[lev].to(device=device, dtype=dtype) * t_alpha
+		lowest_t = int(np.argmin(met_window.metadata.level))
+		ft_fields, grid_bounds = self._free_trop_fields(met_window, device, dtype)
+		meander_fields = None
+		if self.meander_enabled:
+			meander_fields, _ = self._meander_sigma_fields(met_window, device, dtype)
+		# Raw u/v/w wind fields (hour-start/end, [3, Z, Y, X]) for the RK2 advection,
+		# which is now folded into `_step_core` so the whole step (advect + turbulence)
+		# captures as one graph. The time interpolation is done per-sample inside the
+		# core (matches the pre-fold advection), so these stay raw.
+		m_start_uvw, m_end_uvw = met_window.channels("u", "v", "w")
+		# The per-level AGL heights (bbox-mean) are the F9 vertical-lookup axis. Their
+		# VALUES change every met window (geopotential is weather-dependent), so pass them
+		# as a dynamic TENSOR — a tuple-of-floats would make dynamo specialise the graph
+		# per window and recompile every window (GH200 2026-06-26). `ascending` (the
+		# pressure-level ORDER) is genuinely constant, so it stays a plain bool.
+		level = met_window.metadata.level
+		level_arr = torch.as_tensor(np.asarray(level), device=device, dtype=dtype)
+		ascending = bool(level[-1] > level[0])
+		return dict(
+			blh_field=_surf("blh", 0),
+			sp_field=_surf("sp", 0),
+			ustar_field=_surf("ustar", 0),
+			shf_field=_surf("shf", 0),
+			t_field=_surf("t", lowest_t),
+			ft_fields=ft_fields,
+			density_fields=self._density_fields(met_window, device, dtype),
+			meander_fields=meander_fields,
+			grid_bounds=grid_bounds,
+			m_start_uvw=m_start_uvw.to(device=device, dtype=dtype),
+			m_end_uvw=m_end_uvw.to(device=device, dtype=dtype),
+			# alpha (the RK2-midpoint time-interp weight) changes EVERY step. Pass it as
+			# a 0-d TENSOR, not a Python float: dynamo specializes the compiled graph on
+			# float values, so a per-step float would recompile every step, blow the
+			# recompile limit, and fall back to eager (GH200 profile 2026-06-26 — the run
+			# went 4× slower than before, GPU-busy 0.7%). A tensor is a dynamic input.
+			alpha=torch.tensor(float(t_alpha), device=device, dtype=dtype),
+			level_arr=level_arr,
+			ascending=ascending,
+		)
+
+	def _advect_rk2(self, particles, m_start_uvw, m_end_uvw, alpha, grid_bounds, dt_seconds, engine, level_arr=None, ascending=None):
+		"""RK2 backward advection on the full particle buffer (folded into `_step_core`
+		so the whole step captures as one graph). Bit-identical to the pre-fold
+		`main._advect_active_particles` wind_fn + `engine.rk2_advect_backward`."""
+		m_start = m_start_uvw.unsqueeze(0)
+		m_end = m_end_uvw.unsqueeze(0)
+
+		def wind(xyz: torch.Tensor) -> torch.Tensor:
+			xyz_norm = engine.normalize_particle_coordinates(xyz, grid_bounds, level_arr=level_arr, ascending=ascending)
+			grid = xyz_norm.view(1, 1, 1, -1, 3)
+			v_start = torch.nn.functional.grid_sample(m_start, grid, align_corners=True).view(3, -1).t()
+			v_end = torch.nn.functional.grid_sample(m_end, grid, align_corners=True).view(3, -1).t()
+			v = v_start * (1.0 - alpha) + v_end * alpha
+			lat = xyz[:, 1]
+			m_lon = 111320.0 * torch.cos(torch.deg2rad(lat)).abs().clamp(min=0.05)
+			out = torch.empty_like(xyz)
+			out[:, 0] = v[:, 0] / m_lon
+			out[:, 1] = v[:, 1] / 110540.0
+			out[:, 2] = v[:, 2]
+			return out
+
+		xyz = particles[:, :3]
+		v1 = wind(xyz)
+		v2 = wind(xyz - 0.5 * dt_seconds * v1)
+		out = particles.clone()
+		out[:, :3] = xyz - dt_seconds * v2
+		return out
+
+	def _step_core(
+		self, *, particles, u_prime, v_prime, w_prime, u_meander, v_meander, active_mask,
+		blh_field, sp_field, ustar_field, shf_field, t_field, ft_fields, density_fields,
+		meander_fields, grid_bounds, m_start_uvw, m_end_uvw, alpha, level_arr, ascending,
+		dt_seconds, n_substeps, engine,
+	):
+		"""Pure-tensor WHOLE per-step pipeline for the static path -- the torch.compile /
+		CUDA-graph target (architecture.md S5): RK2 advection + interp + column turbulence +
+		drift + substep loop + meander + mask-gated write-back. All met *tensors* + bounds
+		are passed in (gathered by `_gather_static_inputs`) so nothing here touches the met
+		window. Operates on the FULL particle buffer; inactive particles are gated back to
+		their ORIGINAL (pre-advection) state at the end. Returns the full state (inactive
+		unchanged). Eager when n_substeps is None (variable max_k); fixed-count (graph-
+		friendly) when n_substeps is given."""
+		# RK2 advection first (full set). Keep the pre-advection particles for the gate so
+		# inactive particles are reverted to their original position, not the advected one.
+		orig_particles = particles
+		particles = self._advect_rk2(particles, m_start_uvw, m_end_uvw, alpha, grid_bounds, dt_seconds, engine, level_arr=level_arr, ascending=ascending)
+
+		lon_deg = particles[:, 0]
+		lat_deg = particles[:, 1]
+		z_agl = particles[:, 2]
+		lon0, lon1 = grid_bounds.lon_first, grid_bounds.lon_last
+		lat0, lat1 = grid_bounds.lat_first, grid_bounds.lat_last
+
+		blh = self._bilinear_at(blh_field, lon0, lon1, lat0, lat1, lon_deg, lat_deg).clamp(min=BLH_MIN_M)
+		sp = self._bilinear_at(sp_field, lon0, lon1, lat0, lat1, lon_deg, lat_deg)
+		ustar = self._bilinear_at(ustar_field, lon0, lon1, lat0, lat1, lon_deg, lat_deg).clamp(min=USTAR_MIN_M_S)
+		shf = self._bilinear_at(shf_field, lon0, lon1, lat0, lat1, lon_deg, lat_deg)
+		t_surface = self._bilinear_at(t_field, lon0, lon1, lat0, lat1, lon_deg, lat_deg)
+
+		L = obukhov_length(ustar, shf, t_surface, sp)
+		h_over_L = blh / L
+		w_star = convective_velocity(blh, shf, t_surface, sp)
+
+		col_kwargs = dict(
+			blh=blh, ustar=ustar, w_star=w_star, h_over_L=h_over_L, L=L,
+			lat=lat_deg, lon=lon_deg, ft_fields=ft_fields, grid_bounds=grid_bounds, engine=engine,
+			level_arr=level_arr, ascending=ascending,
+		)
+		z_eval = z_agl.clamp(min=self.z_ubl_m)
+		sigma_u, sigma_v, sigma_w, T_Lu, T_Lv, T_Lw = self._column_turbulence(z_eval, **col_kwargs)
+
+		z_hi = z_eval + self.DRIFT_FD_DELTA_M
+		z_lo = (z_eval - self.DRIFT_FD_DELTA_M).clamp(min=self.z_ubl_m)
+		sw_hi = self._column_turbulence(z_hi, **col_kwargs)[2]
+		sw_lo = self._column_turbulence(z_lo, **col_kwargs)[2]
+		dsig2_dz = (sw_hi.pow(2) - sw_lo.pow(2)) / (z_hi - z_lo).clamp(min=self.DRIFT_FD_DELTA_M)
+		sigma_w_sq = sigma_w.pow(2).clamp(min=SIGMA_MIN_M_S ** 2)
+
+		density_at_p = self._interp_3d_field(density_fields, grid_bounds, lon_deg, lat_deg, z_eval, engine, level_arr=level_arr, ascending=ascending)
+		rho_at_p = density_at_p[0].clamp(min=1e-3)
+		density_drift_forward = sigma_w_sq * density_at_p[1] / rho_at_p
+		half_dsig2_dz_backward = -0.5 * dsig2_dz
+		density_drift_backward = -density_drift_forward
+
+		moved, u_prime_new, v_prime_new, w_prime_new = self._integrate_vertical_substeps_static(
+			active_xyz=particles, u_prime_in=u_prime, v_prime_in=v_prime, w_prime_in=w_prime,
+			sigma_u=sigma_u, sigma_v=sigma_v, sigma_w=sigma_w, sigma_w_sq=sigma_w_sq,
+			T_Lu=T_Lu, T_Lv=T_Lv, T_Lw=T_Lw,
+			half_dsig2_dz_backward=half_dsig2_dz_backward, density_drift_backward=density_drift_backward,
+			dt_seconds=dt_seconds, engine=engine, active_mask=active_mask, n_substeps=n_substeps,
+		)
+
+		u_meander_new, v_meander_new = u_meander, v_meander
+		if self.meander_enabled:
+			sm = self._interp_3d_field(meander_fields, grid_bounds, lon_deg, lat_deg, z_eval, engine, level_arr=level_arr, ascending=ascending)
+			u_meander_new = engine.update_langevin_velocity(
+				u_meander, t_lagrangian=self.meander_timescale_seconds, sigma_w2=sm[0].pow(2), dt_seconds=dt_seconds,
+			)
+			v_meander_new = engine.update_langevin_velocity(
+				v_meander, t_lagrangian=self.meander_timescale_seconds, sigma_w2=sm[1].pow(2), dt_seconds=dt_seconds,
+			)
+			moved = engine.apply_horizontal_turbulence(moved, u_meander_new, v_meander_new, dt_seconds=dt_seconds, backward=True)
+
+		# Mask-gated write-back (authoritative gate: covers advection + substep + meander).
+		# Inactive particles revert to `orig_particles` — their ORIGINAL pre-advection
+		# state — so they are frozen exactly (advection ran on the full set but is undone
+		# here for them, same as the pre-fold `where(active, advected, particles)`).
+		am = active_mask.unsqueeze(1)
+		particles_new = torch.where(am, moved, orig_particles)
+		u_prime_new = torch.where(active_mask, u_prime_new, u_prime)
+		v_prime_new = torch.where(active_mask, v_prime_new, v_prime)
+		w_prime_new = torch.where(active_mask, w_prime_new, w_prime)
+		if self.meander_enabled:
+			u_meander_new = torch.where(active_mask, u_meander_new, u_meander)
+			v_meander_new = torch.where(active_mask, v_meander_new, v_meander)
+		return particles_new, u_prime_new, v_prime_new, w_prime_new, u_meander_new, v_meander_new
+
+	@staticmethod
+	def _bilinear_at(field_2d, lon0, lon1, lat0, lat1, particle_lon, particle_lat):
+		"""Bilinear sample of a [Y, X] field at particle (lon, lat) from float grid bounds
+		-- the compile-clean variant of `_interp_2d_bilinear` (no numpy-array access)."""
+		if lon1 == lon0 or lat1 == lat0:
+			raise ValueError("Met grid has zero span in lon or lat -- cannot interpolate.")
+		lon_norm = (2.0 * (particle_lon - lon0) / (lon1 - lon0) - 1.0).clamp(-1.0, 1.0)
+		lat_norm = (2.0 * (particle_lat - lat0) / (lat1 - lat0) - 1.0).clamp(-1.0, 1.0)
+		grid = torch.stack([lon_norm, lat_norm], dim=-1).view(1, 1, -1, 2).to(device=field_2d.device, dtype=field_2d.dtype)
+		field = field_2d.unsqueeze(0).unsqueeze(0)
+		sampled = torch.nn.functional.grid_sample(field, grid, align_corners=True, mode="bilinear")
+		return sampled.view(-1)
 
 	def _warn_if_dt_too_large(
 		self,
@@ -640,39 +783,106 @@ class HannaScheme(TurbulenceScheme):
 		del T_Lu, T_Lv, T_Lw, dt_seconds  # unused
 
 	def _use_static_substeps(self, engine: GPUEngine) -> bool:
-		"""Choose the static-shape vs dynamic-masked substep loop (architecture.md §5).
+		"""Choose the static-shape vs dynamic-masked per-step path (architecture.md §5).
 
-		Explicit constructor flag wins; then the ``GLIDE_STATIC_SUBSTEPS`` env var;
-		otherwise auto-select — static on CUDA (constant kernel shapes beat the
-		shrinking masked subsets on a launch-bound GPU, and are the prerequisite for
-		CUDA-graph capture), dynamic everywhere else (cheaper where launches are free).
+		Delegates to the shared `use_static_step_path` so the scheme and the `main`
+		runtime loop always agree on the device gate; the per-instance
+		``static_substeps`` ctor flag is the override (used by the equivalence tests).
 		"""
 
-		if self._static_substeps is not None:
-			return self._static_substeps
-		env = os.environ.get("GLIDE_STATIC_SUBSTEPS", "")
-		if env in ("1", "true", "True"):
-			return True
-		if env in ("0", "false", "False"):
-			return False
-		return engine.device.type == "cuda"
+		return use_static_step_path(engine.device, self._static_substeps)
 
-	def _substep_schedule(
-		self, T_Lw: torch.Tensor, dt_seconds: float, dtype: torch.dtype,
-	) -> tuple[torch.Tensor, torch.Tensor, int]:
-		"""Per-particle substep count ``k_i``, sub-dt, and ``max_k`` (one host sync).
+	def step_includes_advection(self, engine: GPUEngine) -> bool:
+		"""On the static path, RK2 advection is folded into `_step_core` (so the whole
+		step is one captured graph), and the runtime must not advect separately. The
+		dynamic path leaves advection to the runtime (returns False)."""
 
-		Shared by both substep-loop variants. ``k_i = ceil(dt / (substep_c · T_Lw_i))``
-		clamped to ``[1, max_substeps]``; ``sub_dt_i = dt / k_i``. Also fires the
-		once-per-instance substep-cap warning (reusing the ``max_k`` sync). The
-		``max_k`` sync that bounds the loop is the last per-step host sync in the
-		static path; phase 3 (CUDA-graph capture) replaces it with a fixed loop count.
+		return self._use_static_substeps(engine)
+
+	def _maybe_graph_compile(self, engine: GPUEngine) -> Callable[..., tuple] | None:
+		"""Return a CUDA-graph-capturing compiled per-step core (`_step_core`), or None.
+
+		Enabled only on the static path when compilation was requested
+		(``engine._compile_requested``, i.e. GLIDE_COMPILE). Compiles the **whole**
+		per-step tensor core once with ``mode="reduce-overhead"`` (Inductor cudagraph
+		trees): on CUDA the entire step (interp + column turbulence + drift + substep
+		loop + meander + write-back) captures as **one graph**, replayed per step with a
+		single host call. This is phase 4 — collapsing the ~1000+ eager kernel launches
+		per step that the profile (2026-06-26) showed were the launch-bound wall (the
+		earlier phase-3 capture of just the substep loop left them). Eager fallback on
+		any failure, so it can never hard-fail a run; the FIRST step pays a one-time
+		compile cost. On CPU there are no CUDA graphs — it just compiles via Inductor
+		(used by the smoke test to confirm the core is traceable).
+		"""
+
+		if not (self._use_static_substeps(engine) and getattr(engine, "_compile_requested", False)):
+			return None
+		if self._graph_compile_state == "failed":
+			return None
+		if self._compiled_graph_core is not None:
+			return self._compiled_graph_core
+		try:
+			import torch._dynamo as dynamo
+
+			dynamo.config.suppress_errors = True  # per-graph eager fallback
+			self._compiled_graph_core = torch.compile(
+				self._step_core,
+				mode="reduce-overhead", dynamic=False, fullgraph=False,
+			)
+			self._graph_compile_state = "ok"
+			LOGGER.info(
+				"HannaScheme: torch.compile(mode='reduce-overhead') enabled for the "
+				"whole per-step core (CUDA-graph capture; eager fallback on)."
+			)
+			return self._compiled_graph_core
+		except Exception as exc:  # pragma: no cover - defensive; compile is opt-in
+			LOGGER.warning(
+				"HannaScheme: per-step-core graph compile setup failed (%s); running eager", exc
+			)
+			self._graph_compile_state = "failed"
+			return None
+
+	def _substep_counts(
+		self,
+		T_Lw: torch.Tensor,
+		dt_seconds: float,
+		dtype: torch.dtype,
+		active_mask: torch.Tensor | None = None,
+	) -> tuple[torch.Tensor, torch.Tensor]:
+		"""Per-particle substep count ``k_i`` and sub-dt — **no host sync**.
+
+		``k_i = ceil(dt / (substep_c · T_Lw_i))`` clamped to ``[1, max_substeps]``;
+		``sub_dt_i = dt / k_i``. ``active_mask`` (full-set static path) forces inactive
+		particles to ``k=1`` (they're frozen via ``sub_dt=0`` in the loop). This is the
+		graph-safe part of the schedule; ``_substep_schedule`` adds the ``max_k`` sync
+		and the cap warning for the variable-count (non-graph) path.
 		"""
 
 		c = self.substep_c
 		k_cap = self.max_substeps
 		k_required = torch.ceil(dt_seconds / (c * T_Lw.clamp(min=1e-3))).long().clamp(min=1, max=k_cap)
+		if active_mask is not None:
+			k_required = torch.where(active_mask, k_required, torch.ones_like(k_required))
 		sub_dt = float(dt_seconds) / k_required.to(dtype=dtype)
+		return k_required, sub_dt
+
+	def _substep_schedule(
+		self,
+		T_Lw: torch.Tensor,
+		dt_seconds: float,
+		dtype: torch.dtype,
+		active_mask: torch.Tensor | None = None,
+	) -> tuple[torch.Tensor, torch.Tensor, int]:
+		"""``_substep_counts`` plus ``max_k`` (one host sync) and the cap warning.
+
+		Used by the variable-count loop (dynamic path, and the static path when graph
+		capture is off). The fixed-count graph path calls ``_substep_counts`` directly
+		and loops a constant ``max_substeps`` times, so it needs neither the ``max_k``
+		sync nor the per-step warning.
+		"""
+
+		k_cap = self.max_substeps
+		k_required, sub_dt = self._substep_counts(T_Lw, dt_seconds, dtype, active_mask)
 		max_k = int(k_required.max().item())
 
 		if not self._warned_substep_cap and max_k >= k_cap:
@@ -683,7 +893,7 @@ class HannaScheme(TurbulenceScheme):
 				"(worst sub_dt/T_Lw=%.2f, target < %.2f). The Δt/τ bias is "
 				"only partially controlled for these particles. Reduce "
 				"simulation.dt_seconds or raise max_substeps.",
-				int(at_cap.sum().item()), k_cap, float(ratio_at_cap), float(c),
+				int(at_cap.sum().item()), k_cap, float(ratio_at_cap), float(self.substep_c),
 			)
 			self._warned_substep_cap = True
 
@@ -707,6 +917,8 @@ class HannaScheme(TurbulenceScheme):
 		density_drift_backward: torch.Tensor,
 		dt_seconds: float,
 		engine: GPUEngine,
+		active_mask: torch.Tensor | None = None,
+		n_substeps: int | None = None,
 	) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
 		"""Static-shape variant of the substep loop (architecture.md §5; device-gated).
 
@@ -725,13 +937,37 @@ class HannaScheme(TurbulenceScheme):
 		a launch-bound GPU and a loss on CPU, hence the device gate in
 		``_use_static_substeps`` (the dynamic masked variant stays the CPU path).
 
+		``active_mask`` (full-set ``step`` path): inactive particles (not yet
+		released / escaped) are frozen by forcing ``sub_dt=0`` for them every substep
+		— position and state unchanged — so the whole particle buffer can be passed
+		without boolean-indexing the active subset. When ``None`` all particles are
+		treated as active (the isolated equivalence tests).
+
 		**Not bit-identical** to the dynamic variant when ``k_i`` varies across
 		particles: ``randn`` is drawn for the full set every iteration (vs only the
 		owing subset), so the random realisation differs. The two are statistically
 		equivalent (and bit-identical when every particle needs the same ``k``).
+
+		``n_substeps`` (phase 3, graph path): when given, loop a **fixed** number of
+		iterations (``self.max_substeps``) instead of the data-dependent ``max_k`` —
+		removing the last per-step host sync and giving the loop a compile-time-constant
+		trip count so ``torch.compile(mode="reduce-overhead")`` can capture it as a CUDA
+		graph. Iterations beyond a particle's ``k_i`` are ``sub_dt=0`` no-ops, so the
+		result matches the ``max_k`` loop; it just does more (no-op) iterations. The
+		per-step cap warning is skipped on this path (max_substeps is then a deliberate
+		fixed cost — tune it down for the graph runs).
 		"""
 
-		k_required, sub_dt, max_k = self._substep_schedule(T_Lw, dt_seconds, sigma_w.dtype)
+		if n_substeps is None:
+			k_required, sub_dt, n_iter = self._substep_schedule(
+				T_Lw, dt_seconds, sigma_w.dtype, active_mask=active_mask,
+			)
+		else:
+			# Fixed-count, sync-free path (graph capture). No max_k, no warning.
+			k_required, sub_dt = self._substep_counts(
+				T_Lw, dt_seconds, sigma_w.dtype, active_mask=active_mask,
+			)
+			n_iter = n_substeps
 
 		# Full-set working tensors (no per-iteration indexing). Clone so the input
 		# subsets aren't mutated.
@@ -749,12 +985,18 @@ class HannaScheme(TurbulenceScheme):
 		v_max = W_PRIME_SIGMA_RATIO_MAX * sigma_v
 		w_max = W_PRIME_SIGMA_RATIO_MAX * sigma_w
 
-		for i in range(max_k):
-			# Particles still owing a substep get their real sub_dt; finished ones
-			# get 0 (no-op). Multiply-mask, never index → constant shape every pass.
-			sub_dt_i = torch.where(
-				k_required > i, sub_dt, torch.zeros_like(sub_dt),
-			)
+		# `owing_base = k_required > i` per substep; inactive particles already have
+		# k_required forced to 1 (so they never owe a substep past i=0) AND we AND in
+		# `active_mask` below so they get sub_dt=0 even at i=0 → fully frozen.
+		zero_dt = torch.zeros_like(sub_dt)
+		for i in range(n_iter):
+			# Particles still owing a substep get their real sub_dt; finished /
+			# inactive ones get 0 (no-op). Multiply-mask, never index → constant
+			# shape every pass.
+			owing = k_required > i
+			if active_mask is not None:
+				owing = owing & active_mask
+			sub_dt_i = torch.where(owing, sub_dt, zero_dt)
 
 			# Backward drift with the CURRENT w' (the (1+w'²/σ²) factor must be
 			# recomputed per substep — see the dynamic variant's docstring). For a
@@ -916,6 +1158,8 @@ class HannaScheme(TurbulenceScheme):
 		ft_fields: torch.Tensor,
 		grid_bounds: "GridInterpolationBounds",
 		engine: GPUEngine,
+		level_arr: torch.Tensor | None = None,
+		ascending: bool | None = None,
 	) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
 		"""Per-particle (σ_u, σ_v, σ_w, T_Lu, T_Lv, T_Lw) at height ``z_query``.
 
@@ -951,7 +1195,7 @@ class HannaScheme(TurbulenceScheme):
 		# only cost when nothing is above the BL is one extra cached-field
 		# grid_sample, which is far cheaper on CUDA than the sync it removes.
 		above_bl = z_query > blh
-		ft = self._interp_3d_field(ft_fields, grid_bounds, lon, lat, z_query, engine)
+		ft = self._interp_3d_field(ft_fields, grid_bounds, lon, lat, z_query, engine, level_arr=level_arr, ascending=ascending)
 		ft_sw, ft_suv, ft_tlw, ft_tluv = ft[0], ft[1], ft[2], ft[3]
 		sigma_u = torch.where(above_bl, ft_suv, sigma_u)
 		sigma_v = torch.where(above_bl, ft_suv, sigma_v)
@@ -1188,13 +1432,17 @@ class HannaScheme(TurbulenceScheme):
 		lat: torch.Tensor,
 		z: torch.Tensor,
 		engine: GPUEngine,
+		level_arr: torch.Tensor | None = None,
+		ascending: bool | None = None,
 	) -> torch.Tensor:
 		"""Trilinear interp of a [C, Z, Y, X] field stack at particle (lon, lat, z).
 		Returns [C, N]. Reuses the engine's coordinate normalisation so the vertical
-		mapping matches the wind advection."""
+		mapping matches the wind advection. ``level_arr`` (dynamic tensor) + ``ascending``
+		(constant bool) are threaded to ``normalize_particle_coordinates`` on the compiled
+		path so the per-window level VALUES don't trigger recompiles (see that method)."""
 
 		xyz = torch.stack([lon, lat, z], dim=1)
-		xyz_norm = engine.normalize_particle_coordinates(xyz, grid_bounds)
+		xyz_norm = engine.normalize_particle_coordinates(xyz, grid_bounds, level_arr=level_arr, ascending=ascending)
 		grid = xyz_norm.view(1, 1, 1, -1, 3)
 		vol = fields_stacked.unsqueeze(0)  # [1, C, Z, Y, X]
 		sampled = torch.nn.functional.grid_sample(vol, grid, align_corners=True)

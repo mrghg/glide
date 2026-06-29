@@ -148,59 +148,42 @@ class FootprintGridder:
                                 in [0, n_releases). Out-of-range values are filtered.
                         dt_seconds: timestep length over which `weights` apply.
                 """
-                if not torch.any(active_mask):
-                        return
+                # Fully vectorised, SYNC-FREE accumulation: operate on the WHOLE particle
+                # buffer with no boolean indexing (particles[active_mask]) and no torch.any
+                # -- those force device->host syncs that stall the GPU and block kernel
+                # queuing (profile 2026-06-26). Invalid/inactive particles get zero weight
+                # and a clamped (dummy) cell index, so they scatter 0 and the footprint is
+                # identical to the old masked version (adding 0.0 is an exact no-op).
+                lon = particles[:, 0]
+                lat = particles[:, 1]
+                z_coord = particles[:, 2].contiguous()
 
-                act_p = particles[active_mask]
-                act_w = weights[active_mask]
-                act_t = t_idx[active_mask]
-                act_r = release_idx[active_mask]
-
-                # Horizontal: uniform fractional indices.
-                x_frac = (act_p[:, 0] - self.lon_min) / max(1e-6, self.lon_max - self.lon_min) * (self.n_x)
-                y_frac = (act_p[:, 1] - self.lat_min) / max(1e-6, self.lat_max - self.lat_min) * (self.n_y)
-                x_idx = torch.floor(x_frac).long()
-                y_idx = torch.floor(y_frac).long()
-
-                # Vertical: bucketize against (potentially non-uniform) edges. With
-                # right=False, bucketize returns the smallest i such that z < edges[i];
-                # subtracting 1 gives the half-open bin index in [0, n_z-1] for in-range
-                # values. Below the first edge → -1, at-or-above the last edge → n_z;
-                # both are filtered by valid_mask below.
-                # `act_p[:, 2]` is a non-contiguous column view; bucketize warns and
-                # makes an internal copy unless we hand it a contiguous tensor.
-                z_coord = act_p[:, 2].contiguous()
+                x_idx = torch.floor((lon - self.lon_min) / max(1e-6, self.lon_max - self.lon_min) * self.n_x).long()
+                y_idx = torch.floor((lat - self.lat_min) / max(1e-6, self.lat_max - self.lat_min) * self.n_y).long()
+                # bucketize: smallest i with z < edges[i]; -1 => half-open bin in [0, n_z-1].
                 z_idx = torch.bucketize(z_coord, self.z_edges, right=False) - 1
 
-                # Filter out-of-bounds (release, horizontal, vertical, per-particle time).
-                valid_mask = (
-                        (act_r >= 0) & (act_r < self.n_releases) &
-                        (x_idx >= 0) & (x_idx < self.n_x) &
-                        (y_idx >= 0) & (y_idx < self.n_y) &
-                        (z_idx >= 0) & (z_idx < self.n_z) &
-                        (act_t >= 0) & (act_t < self.n_t)
+                valid = (
+                        active_mask
+                        & (release_idx >= 0) & (release_idx < self.n_releases)
+                        & (x_idx >= 0) & (x_idx < self.n_x)
+                        & (y_idx >= 0) & (y_idx < self.n_y)
+                        & (z_idx >= 0) & (z_idx < self.n_z)
+                        & (t_idx >= 0) & (t_idx < self.n_t)
                 )
 
-                if not torch.any(valid_mask):
-                        return
+                # Clamp every index into range so the flat index is always valid; invalid
+                # particles carry zero weight below, so the cell they land in is irrelevant.
+                r_c = release_idx.clamp(0, self.n_releases - 1)
+                t_c = t_idx.clamp(0, self.n_t - 1)
+                z_c = z_idx.clamp(0, self.n_z - 1)
+                y_c = y_idx.clamp(0, self.n_y - 1)
+                x_c = x_idx.clamp(0, self.n_x - 1)
 
-                r_sel = act_r[valid_mask]
-                t_sel = act_t[valid_mask]
-                z_sel = z_idx[valid_mask]
-                y_sel = y_idx[valid_mask]
-                x_sel = x_idx[valid_mask]
-                w = act_w[valid_mask]
-
-                # 5D flat index: r*(T*Z*Y*X) + t*(Z*Y*X) + z*(Y*X) + y*X + x.
-                # Equivalent to scattering into tensor[r, t, z, y, x] in one pass.
                 stride_t = self.n_z * self.n_y * self.n_x
                 stride_r = self.n_t * stride_t
                 stride_z = self.n_y * self.n_x
-                flat_idx = (
-                        r_sel * stride_r
-                        + t_sel * stride_t
-                        + z_sel * stride_z
-                        + y_sel * self.n_x
-                        + x_sel
-                )
-                self.tensor.view(-1).scatter_add_(0, flat_idx, w * dt_seconds)
+                flat_idx = r_c * stride_r + t_c * stride_t + z_c * stride_z + y_c * self.n_x + x_c
+
+                w_eff = weights * valid.to(weights.dtype) * dt_seconds
+                self.tensor.view(-1).scatter_add_(0, flat_idx, w_eff)

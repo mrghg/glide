@@ -76,6 +76,20 @@ class TurbulenceScheme(ABC):
 			place; callers must treat the return values as authoritative.
 		"""
 
+	def step_includes_advection(self, engine: GPUEngine) -> bool:
+		"""Whether ``step`` also performs the RK2 mean-wind advection (so the runtime
+		must NOT advect separately).
+
+		Default ``False``: the runtime advects, then calls ``step`` for turbulence only.
+		A scheme may fold advection into ``step`` for a specific path (e.g. ``HannaScheme``
+		on the static/CUDA path folds it into one captured graph) and return ``True`` there
+		— the runtime then skips its own advection. ``engine`` is provided so the answer
+		can be path/device-dependent.
+		"""
+
+		del engine
+		return False
+
 
 _REGISTRY: dict[str, type[TurbulenceScheme]] = {}
 

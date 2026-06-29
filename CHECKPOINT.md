@@ -98,6 +98,360 @@ g++: error: unrecognized command line option '-std=c++20'; did you mean '-std=c+
 - **Diagnosis tip.** Because `suppress_errors=True` hides the real exception, reproduce with it *off* to see the bottom of the traceback: `torch._dynamo.config.suppress_errors = False`, then call the compiled fn directly. That is the only way the `-std=c++20` line surfaces.
 - **Code cleanups made while chasing this (kept — sound regardless of the real cause).** (a) `reflect_surface` rewritten from boolean-mask in-place assignment to `torch.where` (one fewer clone, more compile-friendly). (b) The OU update extracted to a module-level pure-tensor kernel `_ou_step_kernel`, compiled via `self._ou_step_fn` instead of the bound method — a clean tensor-only function with no `self`/`Tensor|float` unions is what Inductor traces best. Both are numerically identical to before (`test_compiled_hot_paths_match_eager_and_never_hard_fail` + the OU/altitude variance tests pass).
 
+### 2026-06-19 CUDA-graph capture wired — fixed-count loop + reduce-overhead (M3 phase 3)
+
+Phase 3 of the CUDA-graph restructure (`architecture.md` §5.2): turn the now-static,
+sync-free per-step path into a **captured CUDA graph**. CPU-verifiable parts are
+done and tested; the actual graph capture + `sm%` payoff is **CUDA-only**, so it is
+**pending Matt's GH200 run** (this dev box is CPU — can't capture graphs here).
+
+- **Fixed-count substep loop (removes the last per-step sync).** `_substep_counts`
+  (sync-free `k_i`/sub-dt) split out of `_substep_schedule` (which keeps the `max_k`
+  `.item()` + cap warning for the variable-count path). `_integrate_vertical_substeps_static`
+  gains `n_substeps`: when given, it loops a **constant** `max_substeps` times instead
+  of the data-dependent `max_k`. Iterations past a particle's `k_i` are `sub_dt=0`
+  no-ops, so the result is **bit-identical** to the variable-count loop (both draw
+  RNG identically up to `max_k`; the extra iterations draw unused RNG but never change
+  state). A constant trip count is what makes the loop graph-capturable.
+- **`mode="reduce-overhead"` graph capture.** `HannaScheme._maybe_graph_compile`
+  lazily wraps the fixed-count loop with `torch.compile(mode="reduce-overhead",
+  dynamic=False)` on the static+compile path → the whole loop is one CUDA graph
+  replayed per step (eager fallback via `suppress_errors`; logs "enabled"). RNG is
+  handled by Inductor's cudagraph trees.
+- **No nested compile.** `GPUEngine` now separates `_compile_requested` (the user's
+  `GLIDE_COMPILE` intent) from `_compile_hot_paths` (whether *it* compiles the
+  per-method kernels). On the static/graph path the per-method compile is **suppressed**
+  (`_compile_hot_paths=False`) so the scheme's whole-loop graph doesn't nest a
+  per-method graph; the scheme reads `_compile_requested` to drive its own capture.
+- **Capture boundary = the substep loop.** Met fetch, convection (once/window), and
+  the per-window field rebuilds are computed in `step` *outside* the loop and passed
+  in as tensors, so they never enter the graph — the existing per-window/per-step
+  split made this clean.
+- **Tests (+3, total 212):** `test_fixed_count_static_substeps_matches_variable_count`
+  (bit-identical, with genuine no-op iterations); `test_graph_compile_gating` (engages
+  only on static+compile; per-method compile suppressed there); `test_graph_compile_substep_path_runs_on_cpu`
+  (forces the path, actually compiles via Inductor on CPU, runs + finite + z≥0 — proves
+  the loop is traceable, no hard graph breaks). Full suite green.
+- **`scripts/run_periodic_cuda.slurm`** updated: `GLIDE_COMPILE` now drives graph
+  capture on the static path; added a "WHAT TO CHECK" block (look for the "enabled"
+  log + no "WON'T CONVERT", sm% climbing above 0–37%, per-batch time dropping) and a
+  note that `max_substeps` is now the fixed per-step iteration count (tune to ~15–25).
+- **Pending (phase 4, Matt on GH200):** confirm the graph actually captures and sm%
+  rises; decide whether the §5.1 (B) escaped-particle recapture is needed.
+- **Phase 4 finding (2026-06-21):** with compile ON and **no "WON'T CONVERT"** (the
+  substep-loop graph captured cleanly), GH200 sm% is **still ~0–35%** (unchanged from
+  pre-graph). So the substep loop was *not* the wall — the GPU finishes its bursts
+  fast and idles in the **gaps**: the rest of the per-step pipeline is still eager
+  (~5 surface `grid_sample`s, **3×** `_column_turbulence` with a `grid_sample` each,
+  density/meander interp, RK2 advection `grid_sample`s, footprint scatter) plus the
+  per-step Python orchestration. Next is to *localise the gap before building more*.
+- **Profiler hook (`GLIDE_PROFILE`, 2026-06-26):** `main._StepProfiler` wraps a window
+  of cursor-loop steps in `torch.profiler` (default 20 after 3 warmup), writes a Chrome
+  trace + prints a summary (GPU-busy %, host-sync ops, top ops **with call counts**),
+  then exits the run. Off by default (zero overhead). Env: `GLIDE_PROFILE`,
+  `_WARMUP`/`_STEPS`/`_TRACE`, `_CONTINUE`. The summary's diagnosis → fix: many small
+  GPU ops = launch-bound (expand the captured region to the whole `step`); a
+  `cudaStreamSynchronize` = a residual host sync; long CPU spans = Python/met-bound
+  (async prefetch). Guarded by `test_step_profiler_captures_window_and_exits`.
+- **Profile result (GH200 smoke, 2026-06-26): LAUNCH-BOUND, conclusively.** 20-step
+  window: **GPU-busy ~16.9%**, ~30 ms/step wall but only ~2.5 ms/step of actual GPU
+  compute (50 ms CUDA / 20 steps) ⇒ **~10× headroom**. `cudaLaunchKernel` = **25,012
+  calls (~1,250 launches/step), 33% of CPU**; kernels avg 1.6 µs CUDA but 5.9 µs CPU
+  to launch (launch overhead > kernel). The captured substep graph works (the single
+  `CompiledFxGraph` op runs 20×, once/step) but is a small slice; the wall is the
+  **~1,250 eager launches/step from the rest of `HannaScheme.step`** — 5 surface
+  `grid_sample`s, 3× `_column_turbulence` (each a `grid_sample` + ~40 elementwise),
+  density/meander interp, RK2 advection, footprint scatter. Secondary: 740
+  `cudaStreamSynchronize` (~37/step, only 4.8 ms but they block kernel queuing) +
+  `aten::nonzero`/`index` from boolean masking (gridder valid-mask / escaped). **Fix:
+  expand the compiled region from the substep loop to the whole per-step tensor core
+  (gather met-field tensors in Python outside, compile `_step_core(...)`), collapsing
+  ~1,250 launches → a handful. Expected GPU-busy 17% → 60–80%.**
+
+### 2026-06-26 Whole per-step core compiled — the launch-bound fix (M3 phase 4)
+
+Acting on the profile above: extracted the entire static-path per-step pipeline into a
+**pure-tensor `HannaScheme._step_core`** and made *it* (not just the substep loop) the
+`torch.compile(mode="reduce-overhead")` / CUDA-graph target. On CUDA the whole step —
+5 surface `grid_sample`s, 3× `_column_turbulence` (each a `grid_sample` + ~40 elementwise),
+density/meander interp, the substep loop, and the mask-gated write-back — now captures as
+**one graph** replayed per step, instead of ~1,250 individual eager launches.
+
+- **Split `step` into two clean paths.** The Python met-window access is hoisted into
+  `_gather_static_inputs` (returns the per-step met-field *tensors* — 5 time-interpolated
+  surface 2D fields + the cached FT/density/meander 3D stacks — plus the run-constant
+  `GridInterpolationBounds`). `_step_core` takes only tensors + bounds + `engine`, so it's
+  a clean compile target. The **dynamic (CPU) path** keeps the boolean-indexed body,
+  byte-identical to before. Physics free-functions (`_column_turbulence`, `obukhov_length`,
+  …) are unchanged and shared by both paths — interrogability preserved.
+- **New compile-clean helper `_bilinear_at`** (float grid bounds, no numpy access) for the
+  surface fields inside the core; `_interp_2d_bilinear` stays for the dynamic path.
+- **`_maybe_graph_compile` now wraps `_step_core`** (was the substep loop);
+  `_compiled_graph_core` replaces `_compiled_graph_substep`. The substep loop is called
+  *inside* the core (eager, fixed-count via `n_substeps=max_substeps`), so no nested
+  compile. Eager static path (no compile) uses `n_substeps=None` (variable `max_k`).
+- **Eager `_step_core` is equivalent to the old static path** — same op sequence, so the
+  static gates (`test_v1_well_mixed[static]`, `test_static_step_freezes_inactive_particles`,
+  `test_static_path_footprint_conservation`) pass unchanged, and the dynamic-path tests
+  too. **CPU smoke confirms the whole core compiles + runs** (no hard graph breaks → it
+  should capture as a CUDA graph on the GH200). Full suite green.
+- **Two CUDA-graph correctness fixes found on the GH200 (Matt, 2026-06-26; ba96533,
+  ddd9683)** — neither reproducible on CPU (CPU `reduce-overhead` doesn't use CUDA
+  graphs, so the CPU smoke test passed without them): **(1)** call
+  `torch.compiler.cudagraph_mark_step_begin()` before each compiled-core invocation, so
+  the framework doesn't treat the previous step's output buffers as live inputs; **(2)**
+  `.clone()` the six tensors the core returns before storing them in `state` / returning
+  `particles`, because the graph's outputs alias static graph memory that the next replay
+  overwrites (and we persist `u/v/w_prime`/meander across steps and hand `particles` to
+  `main._run`). General rule for any future CUDA-graph capture here: mark step-begin per
+  replay, and clone any captured output that outlives the call.
+- **Graph-break fix — the whole core now captures as ONE graph (2026-06-26).** The first
+  GH200 capture left perf unchanged because of a single **graph break** (GH200 `.err`):
+  `GPUEngine.normalize_particle_coordinates` did `ascending = bool(level_arr[-1] > level_arr[0])`
+  — a data-dependent `bool(tensor)` — and that lookup runs ~5×/step (F9 + density/meander
+  interp), shattering the capture into eager sub-graphs. Fixed by reading `ascending` from
+  the **Python tuple** `bounds.level_agl_m` (constant for the whole run → compile-time
+  constant, bit-identical). **CPU-confirmed break-free:** `torch.compile(_step_core,
+  fullgraph=True, backend="eager")` now traces the whole core as one graph (it raises on
+  any break, needs no GPU or C++ codegen) — locked in as `test_step_core_traces_as_one_graph_no_breaks`,
+  a CPU regression guard against future `.item()`/`bool()` breaks. (Aside: `GLIDE_PROFILE`
+  "exits early without error" is **by design** — it `SystemExit`s after the capture window.)
+- **GH200 result (2026-06-26): capture works, 4× faster, but bottleneck shifted.** With the
+  graph-break fixed: per-step wall ~30 → ~7.3 ms (**4×**), `cudaLaunchKernel` ~1,250 → ~237
+  /step, GPU-busy 17% → 27%, `cudaGraphLaunch` ×20 (one replay/step). The Hanna core is now
+  a small slice; the remaining ~237 launches/step are everything in `main._run` *around* the
+  core — **advection** (`grid_sample`s) and the **footprint gridder** (`nonzero`/`index` from
+  valid-mask boolean indexing, = the remaining ~18 syncs/step).
+
+### 2026-06-26 Sync-free gridder + advection folded into the graph (M3 phase 4 cont.)
+
+Closing the two non-core per-step costs the GH200 profile exposed.
+
+- **Sync-free `FootprintGridder.accumulate`.** Rewrote it to operate on the WHOLE particle
+  buffer with **no `torch.any` and no boolean indexing** (`particles[active_mask]`,
+  `act_r[valid_mask]`) — those forced ~9 device→host syncs/step that blocked kernel queuing.
+  Now: compute all indices, build a `valid` mask (active & in-bounds), zero the weight of
+  invalid/inactive particles (`weights * valid * dt`), clamp indices into range, and
+  `scatter_add_` the full set — out-of-bounds particles add 0.0 (exact no-op), so the
+  footprint is **bit-identical** to the masked version. All 22 footprint/conservation/
+  escaped tests pass unchanged.
+- **RK2 advection folded into `HannaScheme._step_core`.** Advection was the other eager
+  chunk (the `grid_sample`s). Rather than a second CUDA graph (whose `mark_step_begin`
+  semantics across two graphs are subtle and untestable on CPU), advection now runs *inside*
+  the single captured core: `_gather_static_inputs` also gathers the raw u/v/w wind fields +
+  `alpha`; `_step_core` does RK2 (`_advect_rk2`, bit-identical to the old `wind_fn` +
+  `engine.rk2_advect_backward`) on the full set FIRST, then turbulence on the advected
+  positions, then gates inactive particles back to their **original (pre-advection)** state.
+  So the whole step (advect + turbulence) is ONE graph and inherits the existing
+  `cudagraph_mark_step_begin` + output-clone handling — no new cudagraph reasoning.
+- **Robustness: `TurbulenceScheme.step_includes_advection(engine)`** (default `False`;
+  `HannaScheme` returns `True` on the static path). `main._run`'s static branch advects
+  itself **only when the scheme does not fold it**, so a non-Hanna scheme on CUDA still
+  advects correctly (the fold made the static path Hanna-specific otherwise). Alpha +
+  grid-mean-wind diagnostic factored into `_advection_alpha_wind_mean`, shared by both paths.
+- **Validated CPU-side:** the fullgraph break-guard now traces the whole advect+turbulence
+  core as one graph (no breaks); `test_hanna_constant_wind_preserves_mean_trajectory`
+  parametrized over static/dynamic confirms the folded advection reproduces the analytic
+  backward trajectory (conservation alone is position-independent and wouldn't catch it);
+  freeze/conservation/dynamic-path tests pass.
+- **Recompile blowout from the advection fold — fixed (2026-06-26; GH200 ca807de).** The fold
+  passed `alpha` (the RK2-midpoint time-interp weight, **different every step**) to the
+  compiled core as a **Python float**. dynamo specialises graphs on float values → it
+  recompiled the whole core *every step*, blew the recompile limit (`cache_size_limit`), and
+  fell back to eager: the profile window took **64.8 s** (vs 0.15 s), GPU-busy **0.7%**, the
+  CPU dominated by `create_aot_dispatcher_function`/`fx_codegen_and_compile` and `aten::mul`
+  running 29,958× eager. **Fix:** pass `alpha` as a **0-d tensor** (a dynamic input dynamo
+  doesn't specialise on). General rule: *no per-step-varying Python scalar may be a compiled-
+  core argument — make it a 0-d tensor.* (`dt_seconds` is a float too but is constant within a
+  batch, so it only recompiles on the rare clamped last step — cached.) Guard added:
+  `test_step_core_does_not_recompile_per_step` uses `torch._dynamo.config.error_on_recompile`
+  to turn a per-step recompile into a hard CPU error (no GPU needed) — the recompile analogue
+  of the fullgraph break-guard. Profiler default warmup bumped 5 → 10 (the whole-core compile
+  is large; gives the CUDA-graph trees room to settle before the window).
+- **Steady-state profile confirmed (2026-06-26; GH200 23cdce1).** With the `alpha` fix the
+  capture is clean: per-step wall **30 → 7.3 → 5.0 ms**, GPU-busy **17 → 27 → 36.5%**,
+  `cudaLaunchKernel` **~1250 → 237 → 106/step**, `cudaStreamSynchronize` **740 → 360 → 140**,
+  `cudaGraphLaunch` ×1/step, no recompile. **≈6× faster than the pre-graph baseline** → the
+  ~2.5 h month run → ~25 min. Remaining GPU time: ~49% is `copy_`/`Memcpy DtoD` (cudagraph
+  input/output plumbing — the big met-field tensors copied into static buffers each replay),
+  ~26% the captured physics core, the rest the still-eager footprint gridder (~45 launches/
+  step) + diagnostics. Next levers (diminishing returns): capture the gridder (a 2nd graph) or
+  make the met fields static graph inputs (recapture per window). **Decision pending Matt:**
+  bank the 6× or push.
+- **Second recompile — per-WINDOW, from `level_agl_m` — fixed (2026-06-26; GH200 23cdce1, month
+  run).** Only showed on a multi-window run: `normalize_particle_coordinates` built the F9
+  vertical-lookup axis with `torch.as_tensor(bounds.level_agl_m)` from a **tuple of floats**,
+  and the per-level AGL heights (bbox-mean) **change every met window** (geopotential is
+  weather-dependent). dynamo specialised on the tuple values → recompiled every window → blew
+  the limit (`0/8`, reason `grid_bounds.level_agl_m[0] == 18026.37`) → eager fallback. **Fix:**
+  pass the level array as a **dynamic tensor** (`level_arr`) and the order as a genuinely-
+  constant **bool** (`ascending`), threaded `_gather_static_inputs → _step_core → {_advect_rk2,
+  _column_turbulence, _interp_3d_field} → normalize_particle_coordinates`. The tuple path is
+  kept for non-compiled callers (level_arr/ascending default None). The recompile guard now
+  **varies the level array** across calls (blh 2000 vs 4000 → 4000 vs 6000 m top) so it covers
+  this class too; verified non-vacuous (forcing the tuple path → `RecompileError`). Same lesson
+  as `alpha`, one level deeper: *no per-window-varying value may reach the compiled core as a
+  Python scalar/tuple — only constants and tensors.*
+- **Month run: physics fast, WALL not faster — GPU bursts (≤64% sm) then long idle (2026-06-26).**
+  The per-step capture is fast but the *job* isn't, and the dmon shows the GPU idling between
+  bursts → the bottleneck is non-GPU work *between* the captured bursts, which the 20-step
+  `GLIDE_PROFILE` window (always inside ONE met window) is structurally blind to. Prime
+  suspect: synchronous met I/O at window transitions (`reader.fetch_hourly_window`,
+  `_get_hourly_met_window`), made worse by **cross-batch met RE-FETCH**. Config analysis of
+  `example_mhd_january_periodic.yaml` (5-day backward window, 24-release/1-day batches → 30
+  batches, `met_cache_max_hours: 2`): consecutive batches' 5-day windows overlap ~4/5, and a
+  2-hour LRU keeps none of it → each met hour is fetched by ~5 batches. Est. **~4320 fetches vs
+  ~840 unique hours (~5× redundant I/O)**. Prefetch does NOT fix the *count* — that's a cache
+  (or batch-size) change. Whether it matters depends on per-fetch latency (local zarr vs GCS).
+- **Built `_PhaseTimer` (`GLIDE_PHASE_TIMERS`, main.py) to settle it.** Whole-run wall-clock
+  accountant bucketed by phase (met_fetch / step / advect / convection / gridder + residual),
+  printed at run end AND logged every `GLIDE_PHASE_TIMERS_EVERY` (default 25) fetches — so a
+  TIMED-OUT job still leaves the split in the .out log (the last run timed out, no manifest).
+  `met_fetch` is exact (synchronous CPU/IO), so `met_fetch / wall` is a faithful GPU-idle
+  fraction even with no CUDA sync; `GLIDE_PHASE_TIMERS_SYNC=1` adds per-phase `cuda.synchronize`
+  for clean step-vs-gridder attribution (serialises → perturbs totals). Wired on both step
+  paths; no-op when disabled.
+- **MEASURED (2026-06-29, 2-day GH200 run): I/O-bound.** `met_fetch=63% of wall, ~1.6 s/fetch`;
+  step+gridder only ~15%. The 6× physics win was real but irrelevant to the wall — the GPU
+  idles ~2/3 of the time on `fetch_hourly_window`. So the fix is fetch reduction + overlap, not
+  more GPU work.
+- **CACHE FIX CONFIRMED (2026-06-29): `met_cache_max_hours` must EXCEED one batch's met span,
+  not equal it.** Bumping 2→**144** (= exactly one batch span: 120 h backward + 24 h release
+  span) gave **zero** benefit — batch 1 still re-fetched its whole range. Cause: **LRU thrash**.
+  The cursor walks latest→earliest, so at a batch's end the LRU-oldest entry is the *top* hour —
+  exactly what the next batch (starting 24 h later) needs first. With the cache exactly full,
+  batch N+1's first new fetches evict the overlap hours right before they'd be reused. Bumping
+  to **192** (≥ span + one batch advance ≈ 168 h) fixed it: batch 1's fetch count **plateaued at
+  ~168** (batch 0's 144 + ~24 new) and the periodic log went quiet = reuse working. Month
+  extrapolation: ~840 vs ~4320 fetches (**~5×**), met_fetch ~63%→~30% of wall, ≈2× faster
+  overall. Current recommended config value: `met_cache_max_hours: 192` (240 for margin).
+  **NB on memory: a cached window is ~300 MiB (`[C,Z,Y,X]`), so 192 h ≈ ~50 GiB.** The early
+  "~21 MB/window" note was wrong (that RSS was staging, not the cache). With `met_cache_on_host`
+  (the dev_alloc fix) that ~50 GiB lives in host RAM, not HBM — so confirm Grace headroom.
+
+### NEXT STEPS (ordered; 2026-06-29 — Matt stepping away, resume here)
+1. **⚠️ `dev_alloc` per-batch GPU-memory growth (GATES the month run) — INSTRUMENTED + MITIGATED,
+   2026-06-29; awaiting a GH200 run to confirm.** Observed 29.7→43.5 GiB across batches
+   (`cache=144`), 45 GiB at batch 1 (`cache=192`) — *device* memory, not the host cache; and
+   `alloc ≈ reserved` so it's LIVE tensors, ~40 GiB more than one batch needs (~1 GiB) → real
+   accumulation. If ~linear a 30-batch month OOMs ~batch 7–8 (likely why earlier long runs died).
+   Changes made in `main.py`:
+   - **`@torch.no_grad()` on `_run`** — the whole batch loop ran with autograd live; correct for
+     an inference model and rules out grad-graph retention. (Tests still pass — values unchanged.)
+   - **Per-batch reclaim** at batch end: `del convection_state` (was leaked — only
+     `turbulence_state` was deleted) + `gc.collect()` + `torch.cuda.empty_cache()` (CUDA only) to
+     break reference cycles (closures / compiled-fn caches retain device tensors past plain `del`)
+     and return blocks to the driver.
+   - **Batch-boundary diagnostics**: `_log_device_memory` logs alloc/reserved/peak + **compile
+     count** at `batch N start`, `end (pre-reclaim)`, `end (post-reclaim)`.
+   **Data from the 2-day run (2026-06-29):** `batch 0 end (post-reclaim) alloc=43.48 GiB`,
+   `batch 1 start=43.48`, `batch 1 end (post-reclaim)=50.70`, **`compiles=1` throughout**. So:
+   (a) NOT recompilation (compiles flat → the `dt` worry was wrong); (b) `gc`+`empty_cache` freed
+   ~nothing (43.54→43.48); (c) batch 0's 43 GiB **survives every `del` into batch 1**; (d) ~**+7
+   GiB/batch** of LIVE memory (`alloc≈reserved`). I hypothesised cudagraph-pool growth — and was
+   WRONG; the snapshot disproved it (good thing I localised instead of "fixing" a guess).
+   **RESOLVED via `GLIDE_MEM_SNAPSHOT=1` allocation snapshot (added to main.py; open the pickle at
+   https://pytorch.org/memory_viz, or use scratch `analyze2.py` to aggregate by Python frame):**
+   the 50.7 GiB is **47.9 GiB in 336 blocks of 146 MiB, all from `met_reader.py:798
+   _dataset_to_channel_tensor`** (via `fetch_hourly_window` ← `_get_hourly_met_window`) + 2.6 GiB
+   more from the reader. Cause: the reader was built with `device=cuda`, so every cached met
+   window's `[C,Z,Y,X]` stack lived in **HBM**, and the 192 h cache held ~168 windows × ~300 MiB
+   ≈ 50 GiB on the GPU. NOT a leak — the cache doing its job on the wrong device; the "per-batch
+   growth" was the cache filling toward the cap. (Also corrects the earlier "~21 MB/window" note —
+   that host RSS was staging, not the cache; a window is ~300 MiB.) Diag lists were negligible
+   (34 k tiny blocks). **FIX: cache met on the HOST** — new `memory.met_cache_on_host` config
+   (default True) → reader built with `device="cpu"`; the per-step physics already moves the active
+   window to the device via its `.to(device)` calls (audited ALL consumers: `_advection_alpha_wind_mean`,
+   `_advect_active_particles`, `_gather_static_inputs`+`_build` closures, Emanuel `maybe_convect` —
+   every one `.to(device)`s; the CPU suite can't catch a missing one since cpu==cpu, so this was a
+   manual audit). Frees ~50 GiB HBM; the cache moves to Grace LPDDR5X (plentiful). Per-step
+   host→device copy of the active window is cheap over NVLink-C2C. Kept the no_grad wrap +
+   `del convection_state` + per-batch `gc`/`empty_cache` (cheap correctness hygiene).
+   **CONFIRMED on GH200 (2026-06-29):** `dev_alloc` dropped from ~50 GiB to **~0.2 GiB**, flat
+   across the batch boundary (0.15→0.15), `compiles=1`; host RSS plateaus at **~58 GiB** (the
+   cache) once full. OOM gate cleared — ~119 GiB HBM now free (so bigger batches are an option
+   later). The non-cache GPU working set is tiny (~0.2 GiB), incl. the cudagraph workspace.
+2. **Async prefetch — BUILT (2026-06-29; `memory.met_prefetch`, default True).** `MetPrefetcher`
+   in main.py: a single background worker prefetches the next backward met hour while the
+   current window is stepped, so fetch I/O overlaps compute (~1.58 s fetch ≈ ~1.2 s compute per
+   window → up to ~1.75× on the remaining ~22 min month I/O). Safety as designed: ONE worker does
+   every reader access (no reader-concurrency assumption); requires `met_cache_on_host` so the
+   worker only makes HOST tensors (no CUDA off-thread; auto-disabled+warned otherwise); the cache
+   is mutated only by the main thread in `get()` (no lock); fetch errors re-raise via
+   `Future.result()`; `shutdown()` after the batch loop. Bit-equivalence guard:
+   `test_met_prefetch_matches_synchronous_footprints` (prefetch on vs off → identical footprints,
+   spanning several met-hour boundaries). **Next: confirm on GH200 — phase-timer `met_fetch%`
+   should drop sharply (it now measures only the *un-hidden* I/O = prefetch misses).**
+3. **Cache guard — DONE (2026-06-29).** `_warn_if_met_cache_thrashes` (main.py) warns at startup
+   when `met_cache_max_hours` is below the batch-geometry reuse threshold (≈ batch met span +
+   advance, computed from the first two expanded batches), so the set-cache-to-batch-span →
+   zero-benefit footgun can't recur silently. Test: `test_met_cache_thrash_warning_fires_when_undersized`.
+
+### I/O-OPTIMISATION ARC COMPLETE (2026-06-29) — all planned items shipped, full suite 217 green
+Confirmed on GH200 (2-day, 48 footprints, ~7 min): phase timers now **balanced** —
+`step 29% / convection 19% / met_fetch 15% (was 63%) / gridder 7% / residual ~29%`;
+`dev_alloc 0.2 GiB`, RSS plateau ~52 GiB. Month extrapolation ≈ **~1.5 h (was 2.5 h) and now
+completes reliably** (no OOM). Summary of the arc: cache fix (~5× fewer fetches) + host cache
+(~50 GiB HBM → host, no OOM) + async prefetch (overlap remaining I/O) + guards/diagnostics
+(phase timer, mem snapshot, recompile/break guards, cache-thrash guard).
+
+### NEW OPTIMISATION FRONTIER (if Matt wants to push further; the run is now I/O-solved + reliable)
+The bottleneck has shifted off I/O. Remaining levers, in rough order:
+- **residual ~29%** — per-step Python loop overhead + batch setup/finalize + output write; not in
+  any timed phase. Profile what's there before optimising.
+- **convection ~19%** (Emanuel) — fires once per met bracket; not yet optimised like Hanna was.
+- **step ~29%** — already the 6× CUDA-graph win; diminishing.
+- **Bigger batches** — now unlocked: GPU is ~0.2 GiB used (was the constraint). Larger
+  `max_releases_per_batch` → fewer batches → less per-batch residual + better compile
+  amortisation, traded against more inactive-particle work on the static full-buffer path
+  (step). Net unclear — measure with the phase timer.
+- REMINDER: `max_substeps=20` is still a placeholder pending Matt's convergence eval [[open-max-substeps-eval]].
+- **Fix (found on the first GH200 run, 2026-06-21):** the per-step memory-log block
+  (`mem.log_every_steps`) still referenced `active_count`, which only the *dynamic*
+  branch binds → `UnboundLocalError` on the static path. CPU tests missed it because
+  `_make_run_config` defaults `memory_log_every_steps=0` (block never ran). Fixed by
+  materialising the count locally in the log line (`int(active_mask.sum().item())` —
+  occasional, off the hot path) and adding `memory_log_every_steps=1` to
+  `test_static_path_footprint_conservation` so the static log path is exercised.
+
+### 2026-06-19 CUDA-graph prep — full-set device-gated per-step path (M3 phase 2)
+
+Phase 2 of the CUDA-graph restructure (`architecture.md` §5.2): make the **whole**
+per-step body static-shape and host-sync-free on the GPU path, so phase 1's static
+substep loop is actually fed constant shapes (it was previously handed a
+boolean-indexed — dynamic-shape — active subset). This is strategy **(D)+(A)** from
+§5.1: device-gated, "accept the waste" (inactive/escaped particles are processed
+then masked out, not dropped). **CPU is byte-for-byte unchanged.**
+
+- **Shared gate `use_static_step_path(device, override)`** (`gpu_engine.py`): static
+  on CUDA, dynamic on CPU/MPS; `GLIDE_STATIC_SUBSTEPS` env override; explicit
+  override arg for the scheme ctor flag. `HannaScheme._use_static_substeps` and the
+  `main._run` loop both call it, so they always agree.
+- **`HannaScheme.step` full-set path.** Operates on the full particle buffer (no
+  `particles[active_mask]` indexing); writes back with `torch.where(active_mask, …)`
+  for positions and every state channel (`u/v/w_prime`, `u/v_meander`). Inactive
+  particles are additionally frozen inside the substep loop by forcing `sub_dt=0`
+  (via an `active_mask` threaded into `_integrate_vertical_substeps_static` /
+  `_substep_schedule`, which also stops inactive particles inflating `max_k` or
+  tripping the cap warning). The dynamic (masked-subset) path is retained for CPU.
+- **`main._run` static branch.** Advects the full buffer and gates with
+  `torch.where`; runs scheme.step / convection / accumulate / escaped-update
+  unconditionally (all already `active_mask`-gated), with **no per-step `.item()`**.
+  The `active_count` control-flow sync is gone on this path; the diagnostic is now a
+  per-step device tensor (`active_mask.sum()`) materialized once per batch. The
+  dynamic branch is the verbatim pre-phase-2 code (and the gridder accumulate +
+  escaped-update were already full-set + mask, so they needed no change).
+- **Remaining per-step host sync on the static path:** `max_k` only (bounds the
+  substep loop). Phase 3 replaces it with a fixed loop count for graph capture.
+- **Convection** is untouched — it runs once per met-window (outside the per-step
+  hot path), already full-set + `torch.where`-gated, so it stays out of the future
+  captured region by design.
+- **Tests (+2, total 209):** `test_static_step_freezes_inactive_particles` (mixed
+  mask → inactive positions + all state byte-identical, active particles move);
+  `test_static_path_footprint_conservation` (end-to-end with `GLIDE_STATIC_SUBSTEPS=1`
+  → footprint sum = Σ(active)·dt/N, validating full-set advection gating + the
+  `active_count` desync + mask-gated accumulation). Full suite green.
+
 ### 2026-06-19 CUDA-graph prep — device-gated static-shape substep loop (M3 phase 1)
 
 First phase of the CUDA-graph restructure (`architecture.md` §5). The substep loop
@@ -610,11 +964,11 @@ benchmark/perf-note will live there.
 **Milestone status (as of 2026-06-19):**
 - **M0 / M1 / M4 / M5: code-complete.** Hanna turbulence (drift, FT closure, meander) + full audit fixes (F1+F2+F3+F4Tier1+F4Tier2+F5/F15+F9+F10) + **deep convection (Emanuel reduced port, 2026-06-01)**. Multi-release execution, streaming per-batch Zarr writes, drop-and-count out-of-domain handling all landed.
 - **Physics audit (all 10 items) + deep convection — closed.** Three PRs total: `physics-audit-may30`, `physics-audit-followup`, `deep-convection`.
-- **M3 (Production GPU execution): in progress.** Host-sync minimization, `torch.compile`, per-window field caching, CPU thread tuning, GPU toolchain + telemetry landed. GH200 diagnosed launch/orchestration-bound; the CUDA-graph restructure is the active workstream — phase 1 (device-gated static-shape substep loop) landed 2026-06-19. Plan + systems-performance architecture in `architecture.md`.
+- **M3 (Production GPU execution): in progress.** Host-sync minimization, `torch.compile`, per-window field caching, CPU thread tuning, GPU toolchain + telemetry landed. GH200 diagnosed launch/orchestration-bound; the CUDA-graph restructure is the active workstream — **phases 1–3 landed 2026-06-19** (device-gated static-shape substep loop → full-set sync-free per-step path → fixed-count loop wrapped with `mode="reduce-overhead"` graph capture; strategy (D)+(A)). All CPU-verifiable parts tested green; the graph capture itself is CUDA-only and awaits the GH200 run. Plan + systems-performance architecture in `architecture.md`.
 - **Open M4 item:** `schema_version` field on the YAML.
 - **Open M5 item:** satellite multi-point-per-time releases.
 
-**Next user step (M3):** continue the CUDA-graph phases in `architecture.md` §5.2 — phase 2 (remove the residual 3 per-step host syncs), phase 3 (`mode="reduce-overhead"` graph capture + graph-safe RNG), phase 4 (benchmark `sm%`/per-batch time on the GH200), phase 5 (document the benchmark as the M3 exit note). The §5.1 escaped-particle/graph tradeoff is deferred to measurement. Separately, the FLEXPART comparison can be generated now via CPU batch-parallelism while the GPU work proceeds.
+**Next user step (M3 phase 4 — Matt, on the GH200):** submit `scripts/run_periodic_cuda.slurm` (compile on by default) and report back from the log: (a) "torch.compile(mode='reduce-overhead') enabled" present and NO "WON'T CONVERT" (⇒ the loop captured), (b) the end-of-run sm% summary vs the prior 0–37% launch-bound range, (c) per-batch wall time. Tune `turbulence.max_substeps` down to ~15–25 (it is now the fixed per-step iteration count). Those numbers decide whether M3 is done or the §5.1 (B) escaped-particle recapture is worth adding. Separately, the FLEXPART comparison can be generated now via CPU batch-parallelism while the GPU work proceeds.
 
 **Open follow-ups (no longer including deep convection):**
 - **M2 — particle aggregation.** Compute savings; orthogonal to physics.

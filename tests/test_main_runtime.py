@@ -6,6 +6,7 @@ accumulation, output writing) without depending on remote ERA5 data.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -152,6 +153,8 @@ def _make_run_config(**flat_overrides: object) -> RunConfig:
         met_alt_max_m=10000.0,
         # Memory
         met_cache_max_hours=2,
+        met_cache_on_host=True,
+        met_prefetch=True,
         memory_log_every_steps=0,
         gc_every_steps=0,
         memory_guard_max_rss_gib=None,
@@ -198,6 +201,8 @@ def _make_run_config(**flat_overrides: object) -> RunConfig:
             },
             "memory": {
                 "met_cache_max_hours": flat["met_cache_max_hours"],
+                "met_cache_on_host": flat["met_cache_on_host"],
+                "met_prefetch": flat["met_prefetch"],
                 "log_every_steps": flat["memory_log_every_steps"],
                 "gc_every_steps": flat["gc_every_steps"],
                 "guard_max_rss_gib": flat["memory_guard_max_rss_gib"],
@@ -319,9 +324,16 @@ def test_hanna_run_completes_with_synthetic_met(tmp_path: Path) -> None:
     assert (out / "run_metadata.json").exists()
 
 
-def test_hanna_constant_wind_preserves_mean_trajectory(tmp_path: Path) -> None:
-    """Hanna's zero-mean perturbations shouldn't bias the ensemble mean position."""
+@pytest.mark.parametrize("static", [False, True])
+def test_hanna_constant_wind_preserves_mean_trajectory(tmp_path: Path, monkeypatch, static: bool) -> None:
+    """Hanna's zero-mean perturbations shouldn't bias the ensemble mean position.
 
+    Parametrized over the dynamic path (the runtime advects) and the static path
+    (RK2 advection is folded into `_step_core`'s captured graph). Both must reproduce
+    the analytic backward trajectory — this is the advection-correctness check for the
+    fold (conservation alone is position-independent and wouldn't catch broken advection)."""
+
+    monkeypatch.setenv("GLIDE_STATIC_SUBSTEPS", "1" if static else "0")
     cfg = _make_run_config(
         release_duration_seconds=60,
         simulation_length_seconds=10800,
@@ -834,6 +846,68 @@ def test_v1_density_weighted_well_mixed_with_F2() -> None:
     )
 
 
+def test_met_cache_thrash_warning_fires_when_undersized(caplog) -> None:
+    """Guard must warn when met_cache_max_hours is below the cross-batch reuse threshold
+    (≈ batch met span + advance) — the LRU-thrash footgun (set cache == batch span → zero
+    benefit) that cost a GH200 run — and stay quiet when the cache is large enough."""
+
+    from types import SimpleNamespace
+
+    from lpdm.main import _warn_if_met_cache_thrashes
+
+    base = datetime(2024, 1, 1, tzinfo=timezone.utc)
+
+    def _rel(secs: int) -> SimpleNamespace:
+        return SimpleNamespace(release_time=base + timedelta(seconds=secs), duration_seconds=3600)
+
+    # Two consecutive days of hourly releases (24/batch), 5-day backward window:
+    # batch span ≈ 143 h, advance ≈ 24 h → reuse threshold ≈ 167 h.
+    b0 = SimpleNamespace(releases=[_rel(h * 3600) for h in range(24)])
+    b1 = SimpleNamespace(releases=[_rel(86400 + h * 3600) for h in range(24)])
+    sim_len = 5 * 86400.0
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        _warn_if_met_cache_thrashes(_make_run_config(met_cache_max_hours=144), [b0, b1], sim_len)
+    assert "below the cross-batch reuse threshold" in caplog.text  # 144 < 167 → warn
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        _warn_if_met_cache_thrashes(_make_run_config(met_cache_max_hours=200), [b0, b1], sim_len)
+    assert "cross-batch reuse threshold" not in caplog.text  # 200 ≥ 167 → quiet
+
+
+def test_met_prefetch_matches_synchronous_footprints(tmp_path: Path) -> None:
+    """Background met prefetch must be bit-identical to the synchronous fetch path.
+
+    Prefetch only changes WHEN met I/O happens (a background thread loads the next backward
+    hour while the current window is stepped) — never the fetched data, the cache contents,
+    the compute order, or the RNG draws. So the footprints must match exactly. The run spans
+    several met-hour boundaries (3 h backward at dt=300 s, cache=2 h so it both evicts and
+    re-fetches) to actually exercise the prefetch schedule / pending-reuse / eviction paths.
+    """
+
+    def run(prefetch: bool, sub: str):
+        cfg = _make_run_config(
+            simulation_length_seconds=10800,
+            dt_seconds=300,
+            n_particles=512,
+            release_seed=42,
+            met_cache_max_hours=2,
+            met_prefetch=prefetch,
+            n_time_bins=3,
+            output_uri=str(tmp_path / sub),
+        )
+        reader = _make_reader(cfg, wind_fn=lambda _: (6.0, -3.0, 0.0))
+        torch.manual_seed(0)
+        _run(cfg, reader=reader)
+        return xr.open_zarr(tmp_path / sub / "footprints.zarr")["footprint"].values
+
+    fp_sync = run(False, "sync")
+    fp_async = run(True, "async")
+    assert np.array_equal(fp_sync, fp_async)
+
+
 def test_footprint_total_matches_active_particle_time(tmp_path: Path) -> None:
     """Footprint sum should equal sum(active_count) * dt / n_particles for in-domain runs.
 
@@ -1227,3 +1301,247 @@ def test_no_escapes_leaves_alive_count_full(tmp_path: Path) -> None:
     assert int(traj["escaped_this_step"].sum()) == 0
     assert (traj["alive_particles"] == 128).all()
     assert metadata["schedule"]["escaped_met_domain_total"] == 0
+
+
+# ---- Phase 2: static-shape (full-set, mask-gated) per-step path ----------------
+# (architecture.md §5). The dynamic path stays the CPU default; these tests force
+# the static path (scheme ctor flag / GLIDE_STATIC_SUBSTEPS env) and check that it
+# (a) freezes inactive particles exactly and (b) conserves footprint mass.
+
+
+def test_static_step_freezes_inactive_particles() -> None:
+    """The static (full-set) HannaScheme.step must leave inactive particles'
+    positions AND turbulence/meander state byte-for-byte unchanged, advancing only
+    the active ones (the `torch.where` write-back + `sub_dt=0` substep gating)."""
+
+    from lpdm.gpu_engine import GPUEngine
+    from lpdm.turbulence import HannaScheme
+
+    torch.manual_seed(7)
+    engine = GPUEngine(device="cpu")
+    # meander on so the meander state-gating is exercised too.
+    scheme = HannaScheme(meander_enabled=True, static_substeps=True)
+    met = _wmc_met_window(blh_m=2000.0, ustar_m_s=0.4)
+
+    n = 200
+    particles = torch.zeros(n, 4, dtype=torch.float32)
+    particles[:, 1] = 45.0
+    particles[:, 2] = torch.rand(n) * 1500.0 + 100.0
+    particles[:, 3] = 1.0
+    state = scheme.initialize_state(n, device=torch.device("cpu"), dtype=torch.float32)
+    # Seed nonzero state so "unchanged" is a real assertion (not 0 == 0).
+    for k in state:
+        state[k] = torch.randn(n) * 0.1
+
+    active = torch.zeros(n, dtype=torch.bool)
+    active[: n // 2] = True  # first half active, second half frozen
+
+    p0 = particles.clone()
+    s0 = {k: v.clone() for k, v in state.items()}
+
+    particles, state = scheme.step(
+        particles, state, met, t_alpha=0.5, dt_seconds=60.0,
+        active_mask=active, engine=engine,
+    )
+
+    inactive = ~active
+    assert torch.equal(particles[inactive], p0[inactive]), "inactive positions changed"
+    for k in s0:
+        assert torch.equal(state[k][inactive], s0[k][inactive]), f"inactive state {k} changed"
+    # Active particles actually moved vertically (turbulence applied).
+    assert not torch.equal(particles[active, 2], p0[active, 2])
+    assert torch.isfinite(particles).all()
+
+
+def test_static_path_footprint_conservation(tmp_path: Path, monkeypatch) -> None:
+    """End-to-end conservation on the STATIC per-step runtime path
+    (GLIDE_STATIC_SUBSTEPS=1): footprint sum = Σ(active_count)·dt / n_particles —
+    the same identity as the dynamic path. Validates full-set advection gating, the
+    `active_count` desync (active_particles diagnostic via `active_mask.sum()`), and
+    mask-gated accumulation in `main._run`, plus HannaScheme.step's full-set path."""
+
+    monkeypatch.setenv("GLIDE_STATIC_SUBSTEPS", "1")
+    cfg = _make_run_config(
+        release_duration_seconds=60,
+        simulation_length_seconds=3600,
+        dt_seconds=300,
+        n_particles=512,
+        release_seed=42,
+        output_uri=str(tmp_path / "out"),
+        n_time_bins=1,
+        turbulence_scheme="hanna_1982",
+        # Exercise the per-step memory-log block on the static path (it references
+        # the active count, which only the dynamic branch binds as `active_count`).
+        memory_log_every_steps=1,
+    )
+    reader = _make_hanna_reader(cfg, wind_fn=lambda _: (5.0, 0.0, 0.0))
+
+    _run(cfg, reader=reader)
+
+    traj = pd.read_parquet(tmp_path / "out" / "trajectory_diagnostics.parquet")
+    expected_total = float(
+        (traj["active_particles"].astype(float) * cfg.simulation.dt_seconds).sum()
+    ) / cfg.release.n_particles
+
+    fp = xr.open_zarr(tmp_path / "out" / "footprints.zarr")
+    actual_total = float(fp["footprint"].sum())
+
+    assert abs(actual_total - expected_total) / expected_total < 1e-3
+
+
+def test_graph_compile_substep_path_runs_on_cpu(monkeypatch) -> None:
+    """Phase 3 smoke: force the static + graph-compile path (GLIDE_STATIC_SUBSTEPS=1,
+    GLIDE_COMPILE=1) and confirm the fixed-count substep loop actually compiles +
+    runs + stays finite, with the per-method engine compile suppressed (no nesting).
+    CUDA graphs are CUDA-only, so on CPU this checks the loop is *traceable* — the
+    sm% / capture payoff is validated on the GH200, not here. max_substeps=2 keeps
+    the unrolled loop small so the one-time compile is quick."""
+
+    monkeypatch.setenv("GLIDE_STATIC_SUBSTEPS", "1")
+    monkeypatch.setenv("GLIDE_COMPILE", "1")
+
+    from lpdm.gpu_engine import GPUEngine
+    from lpdm.turbulence import HannaScheme
+
+    torch.manual_seed(3)
+    engine = GPUEngine(device="cpu")
+    assert engine._compile_hot_paths is False  # per-method compile off on the graph path
+    scheme = HannaScheme(max_substeps=2)
+    met = _wmc_met_window(blh_m=1500.0, ustar_m_s=0.4)
+
+    n = 32
+    particles = torch.zeros(n, 4, dtype=torch.float32)
+    particles[:, 1] = 45.0
+    particles[:, 2] = torch.rand(n) * 1000.0 + 100.0
+    particles[:, 3] = 1.0
+    state = scheme.initialize_state(n, device=torch.device("cpu"), dtype=torch.float32)
+    active = torch.ones(n, dtype=torch.bool)
+
+    particles, state = scheme.step(
+        particles, state, met, t_alpha=0.5, dt_seconds=60.0,
+        active_mask=active, engine=engine,
+    )
+
+    assert scheme._graph_compile_state == "ok"  # the graph-compile path engaged
+    assert torch.isfinite(particles).all()
+    assert (particles[:, 2] >= 0.0).all()  # reflection kept z >= 0
+
+
+def test_step_profiler_captures_window_and_exits(tmp_path: Path, monkeypatch) -> None:
+    """GLIDE_PROFILE captures a window of cursor-loop steps, writes a Chrome trace, and
+    exits the run early (a profiling pass doesn't need the full output)."""
+
+    trace = tmp_path / "prof.json"
+    monkeypatch.setenv("GLIDE_PROFILE", "1")
+    monkeypatch.setenv("GLIDE_PROFILE_WARMUP", "1")
+    monkeypatch.setenv("GLIDE_PROFILE_STEPS", "2")
+    monkeypatch.setenv("GLIDE_PROFILE_TRACE", str(trace))
+
+    cfg = _make_run_config(turbulence_scheme="hanna_1982", output_uri=str(tmp_path / "out"))
+    reader = _make_hanna_reader(cfg, wind_fn=lambda _: (5.0, 0.0, 0.0))
+
+    with pytest.raises(SystemExit):
+        _run(cfg, reader=reader)
+
+    assert trace.exists() and trace.stat().st_size > 0  # trace was written before exit
+
+
+def test_step_core_traces_as_one_graph_no_breaks() -> None:
+    """The whole per-step core must trace as ONE graph (no graph breaks) so it captures
+    as a single CUDA graph on GPU — otherwise the eager glue between sub-graphs keeps the
+    run launch-bound (the phase-4 failure mode). `fullgraph=True` + `backend="eager"`
+    surfaces any data-dependent break (a tensor `.item()`/`bool()`/Python control flow on
+    tensor data) as a hard error here on CPU — no GPU and no C++ codegen needed. Guards
+    against regressions like the F9 `ascending = bool(level_arr[...])` break (fixed
+    2026-06-26)."""
+
+    import torch._dynamo
+
+    from lpdm.gpu_engine import GPUEngine
+    from lpdm.turbulence import HannaScheme
+
+    torch._dynamo.reset()
+    prev = torch._dynamo.config.suppress_errors
+    torch._dynamo.config.suppress_errors = False  # make breaks raise, don't swallow
+    try:
+        engine = GPUEngine(device="cpu")
+        scheme = HannaScheme(meander_enabled=True, max_substeps=4)  # meander on → trace that path too
+        met = _wmc_met_window(blh_m=2000.0, ustar_m_s=0.4)
+
+        n = 48
+        particles = torch.zeros(n, 4, dtype=torch.float32)
+        particles[:, 1] = 45.0
+        particles[:, 2] = torch.rand(n) * 1500.0 + 100.0
+        particles[:, 3] = 1.0
+        state = scheme.initialize_state(n, device=torch.device("cpu"), dtype=torch.float32)
+        active = torch.ones(n, dtype=torch.bool)
+        inputs = scheme._gather_static_inputs(met, 0.5, torch.device("cpu"), torch.float32)
+
+        compiled = torch.compile(scheme._step_core, fullgraph=True, backend="eager")
+        out = compiled(
+            particles=particles, u_prime=state["u_prime"], v_prime=state["v_prime"],
+            w_prime=state["w_prime"], u_meander=state["u_meander"], v_meander=state["v_meander"],
+            active_mask=active, dt_seconds=60.0, n_substeps=scheme.max_substeps, engine=engine,
+            **inputs,
+        )
+        assert len(out) == 6 and all(torch.isfinite(o).all() for o in out)
+    finally:
+        torch._dynamo.config.suppress_errors = prev
+        torch._dynamo.reset()
+
+
+def test_step_core_does_not_recompile_per_step() -> None:
+    """The compiled core must NOT recompile as `alpha` and the met-field VALUES change
+    step to step (only shapes/grid are constant). Passing `alpha` (the RK2-midpoint
+    weight, different every step) as a Python float would specialize the graph per value
+    → recompile every step → blow the recompile limit → eager fallback (GH200 2026-06-26:
+    4× *slower*, GPU-busy 0.7%). `error_on_recompile` turns a recompile into a hard error
+    here on CPU — no GPU needed. The fix is passing `alpha` as a 0-d tensor."""
+
+    import torch._dynamo
+
+    from lpdm.gpu_engine import GPUEngine
+    from lpdm.turbulence import HannaScheme
+
+    torch._dynamo.reset()
+    prev_sup = torch._dynamo.config.suppress_errors
+    prev_rec = torch._dynamo.config.error_on_recompile
+    torch._dynamo.config.suppress_errors = False
+    torch._dynamo.config.error_on_recompile = True
+    try:
+        engine = GPUEngine(device="cpu")
+        scheme = HannaScheme(meander_enabled=True, max_substeps=4)
+        n = 48
+        compiled = torch.compile(scheme._step_core, fullgraph=True, backend="eager")
+
+        def call(met, t_alpha, seed):
+            torch.manual_seed(seed)
+            particles = torch.zeros(n, 4, dtype=torch.float32)
+            particles[:, 1] = 45.0
+            particles[:, 2] = torch.rand(n) * 1500.0 + 100.0
+            particles[:, 3] = 1.0
+            state = scheme.initialize_state(n, device=torch.device("cpu"), dtype=torch.float32)
+            active = torch.ones(n, dtype=torch.bool)
+            inputs = scheme._gather_static_inputs(met, t_alpha, torch.device("cpu"), torch.float32)
+            compiled(
+                particles=particles, u_prime=state["u_prime"], v_prime=state["v_prime"],
+                w_prime=state["w_prime"], u_meander=state["u_meander"], v_meander=state["v_meander"],
+                active_mask=active, dt_seconds=60.0, n_substeps=scheme.max_substeps, engine=engine,
+                **inputs,
+            )
+
+        # Same grid SHAPE (so any recompile is a genuine value-specialisation bug), but
+        # different alpha, different met-field values, AND a different per-level AGL array
+        # (`_wmc_met_window` sets level = linspace(0, max(4000, 1.5·blh_m), n_lev), so
+        # blh_m=4000 → 6000 m top vs 2000 → 4000 m). The level VALUES change every met
+        # window in production (weather-dependent geopotential); they must be a dynamic
+        # tensor, not a tuple dynamo specialises on (GH200 month run 2026-06-26).
+        met_a = _wmc_met_window(blh_m=2000.0, ustar_m_s=0.4)   # level top 4000 m
+        met_b = _wmc_met_window(blh_m=4000.0, ustar_m_s=0.6)   # level top 6000 m (different F9 axis)
+        call(met_a, 0.3, 1)   # first call: compiles once (not a recompile)
+        call(met_a, 0.7, 2)   # different alpha → must NOT recompile
+        call(met_b, 0.5, 3)   # different alpha + met values + LEVEL array → must NOT recompile
+    finally:
+        torch._dynamo.config.suppress_errors = prev_sup
+        torch._dynamo.config.error_on_recompile = prev_rec
+        torch._dynamo.reset()

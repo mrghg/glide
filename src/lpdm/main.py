@@ -11,14 +11,19 @@ The CLI surface is intentionally small: a YAML ``--config`` plus a few overrides
 from __future__ import annotations
 
 import argparse
+import contextlib
 import gc
 import logging
+import math
 import os
 import resource
 import sys
-from collections import OrderedDict
+import time
+from collections import OrderedDict, defaultdict
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Sequence
 
 import numpy as np
@@ -26,7 +31,7 @@ import torch
 
 from lpdm.config import ConcreteRelease, RunConfig, _release_point
 from lpdm.footprint_gridder import FootprintGridder
-from lpdm.gpu_engine import GPUEngine, GridInterpolationBounds
+from lpdm.gpu_engine import GPUEngine, GridInterpolationBounds, use_static_step_path
 from lpdm.met_reader import (
 	ArcoEra5ZarrReader,
 	BoundingBoxRequest,
@@ -47,6 +52,234 @@ from lpdm.convection import (
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _emit_profile_summary(prof, device: torch.device, trace_path: Path, wall_s: float) -> None:
+	"""Write a Chrome trace and print a CPU/GPU summary for a profiled step window.
+
+	The summary is built to localise *why the GPU idles*: the GPU-busy fraction, any
+	host-sync ops (``cudaStreamSynchronize`` ⇒ a stall), and the top ops by GPU and
+	CPU self-time (many tiny GPU ops ⇒ launch-bound; large CPU spans with little GPU
+	⇒ Python/met-bound). See architecture.md §5.
+	"""
+
+	try:
+		prof.export_chrome_trace(str(trace_path))
+		LOGGER.info("profiler: chrome trace -> %s (open in https://ui.perfetto.dev)", trace_path)
+	except Exception as exc:  # pragma: no cover - defensive
+		LOGGER.warning("profiler: chrome trace export failed: %s", exc)
+
+	ka = prof.key_averages()
+
+	def _dev_us(evt) -> float:
+		# PyTorch renamed self_cuda_time_total -> self_device_time_total across versions.
+		for attr in ("self_device_time_total", "self_cuda_time_total"):
+			val = getattr(evt, attr, 0) or 0
+			if val:
+				return float(val)
+		return 0.0
+
+	gpu_us = sum(_dev_us(e) for e in ka)
+	busy = 100.0 * (gpu_us / 1e6) / wall_s if wall_s > 0 else 0.0
+
+	print("\n" + "=" * 74)
+	print(f"GLIDE profiler — {device.type} — window wall {wall_s:.3f}s — GPU-busy ~{busy:.1f}%")
+	print("=" * 74)
+
+	syncs = [e for e in ka if "synchronize" in e.key.lower()]
+	if syncs:
+		print("host syncs in window (each one stalls the GPU on the CPU):")
+		for e in syncs:
+			print(f"  {e.key}: count={e.count}  cpu_total={getattr(e, 'cpu_time_total', 0) / 1000:.1f}ms")
+	else:
+		print("host syncs in window: none detected by name")
+
+	def _safe_table(sort_by: str):
+		try:
+			return ka.table(sort_by=sort_by, row_limit=20)
+		except Exception:
+			return None
+
+	gpu_tbl = _safe_table("self_cuda_time_total") or _safe_table("self_device_time_total")
+	if gpu_tbl and device.type == "cuda":
+		print("\n--- top ops by GPU (device) self-time ---")
+		print(gpu_tbl)
+	cpu_tbl = _safe_table("self_cpu_time_total")
+	if cpu_tbl:
+		print("\n--- top ops by CPU self-time (look for many calls = launch-bound) ---")
+		print(cpu_tbl)
+	print("=" * 74 + "\n")
+
+
+class _StepProfiler:
+	"""Profiles a contiguous window of cursor-loop steps when ``GLIDE_PROFILE`` is set.
+
+	Skips ``warmup`` steps (one-time ``torch.compile`` + settle), profiles the next
+	``active`` steps, writes a trace + summary, then (by default) exits the process —
+	a profiling run doesn't need the full output. Disabled = a no-op object isn't even
+	created, so steady-state runs pay nothing. Env knobs:
+
+	* ``GLIDE_PROFILE``           — enable (truthy)
+	* ``GLIDE_PROFILE_WARMUP``    — steps to skip first (default 5; lets the CUDA-graph
+	                                trees warm up so the window is steady-state replay)
+	* ``GLIDE_PROFILE_STEPS``     — steps to profile (default 20)
+	* ``GLIDE_PROFILE_TRACE``     — trace output path (default ./glide_profile_trace.json)
+	* ``GLIDE_PROFILE_CONTINUE``  — finish the run instead of exiting after the window
+	"""
+
+	def __init__(self, *, device: torch.device, warmup: int, active: int, trace_path: Path, exit_after: bool) -> None:
+		self.device = device
+		self.warmup = max(0, warmup)
+		self.active = max(1, active)
+		self.trace_path = trace_path
+		self.exit_after = exit_after
+		self.n = 0
+		self.prof = None
+		self.t0 = 0.0
+		self.done = False
+
+	def before_step(self) -> None:
+		"""Call at the TOP of the cursor-loop body: starts capture once warmup is done."""
+		if self.done or self.prof is not None or self.n < self.warmup:
+			return
+		acts = [torch.profiler.ProfilerActivity.CPU]
+		if self.device.type == "cuda":
+			acts.append(torch.profiler.ProfilerActivity.CUDA)
+		self.prof = torch.profiler.profile(activities=acts)
+		self.prof.__enter__()
+		self.t0 = time.perf_counter()
+		LOGGER.info("profiler: capturing %d steps (after %d warmup)…", self.active, self.warmup)
+
+	def after_step(self) -> None:
+		"""Call at the BOTTOM of the cursor-loop body: stops + reports once the window ends."""
+		if self.done:
+			return
+		self.n += 1
+		if self.prof is not None and self.n >= self.warmup + self.active:
+			wall = time.perf_counter() - self.t0
+			self.prof.__exit__(None, None, None)
+			_emit_profile_summary(self.prof, self.device, self.trace_path, wall)
+			self.prof = None
+			self.done = True
+			if self.exit_after:
+				LOGGER.info("profiler: window complete; exiting (GLIDE_PROFILE_CONTINUE=1 to finish the run)")
+				raise SystemExit(0)
+
+
+def _make_step_profiler(device: torch.device) -> "_StepProfiler | None":
+	"""Build the step profiler from env, or None when ``GLIDE_PROFILE`` is unset."""
+	if os.environ.get("GLIDE_PROFILE", "") in ("", "0", "false", "False"):
+		return None
+	return _StepProfiler(
+		device=device,
+		warmup=int(os.environ.get("GLIDE_PROFILE_WARMUP", "10")),
+		active=int(os.environ.get("GLIDE_PROFILE_STEPS", "20")),
+		trace_path=Path(os.environ.get("GLIDE_PROFILE_TRACE", "glide_profile_trace.json")),
+		exit_after=os.environ.get("GLIDE_PROFILE_CONTINUE", "") in ("", "0", "false", "False"),
+	)
+
+
+class _PhaseTimer:
+	"""Coarse whole-run wall-clock accountant, enabled by ``GLIDE_PHASE_TIMERS``.
+
+	Where ``_StepProfiler`` samples ~20 steps inside a SINGLE met window (so it's blind to
+	per-window met I/O and batch boundaries — the very places the GPU goes idle), this
+	accumulates wall time across the WHOLE run bucketed by phase and prints a breakdown. It
+	answers "where does the wall go over many windows/batches" — chiefly: *is the GPU idling
+	on synchronous met fetches?* The ``met_fetch`` bucket is exact (synchronous CPU/IO, GPU
+	uninvolved), so ``met_fetch / wall`` is a faithful idle-fraction even with no CUDA sync.
+
+	It also logs a running breakdown every ``log_every`` met fetches, so even a job that
+	*times out* (no final summary, no manifest) leaves the split in the log. NOTE: the
+	``step`` bucket includes the one-time ``torch.compile`` (~tens of s) charged to the first
+	step — negligible on a long run, but run long enough that it washes out (or compile-off).
+
+	Env:
+	* ``GLIDE_PHASE_TIMERS``        — enable (truthy)
+	* ``GLIDE_PHASE_TIMERS_SYNC``   — ``torch.cuda.synchronize()`` at each phase boundary so
+	                                  GPU phases (step/gridder) get real device time. This
+	                                  SERIALISES the pipeline (perturbs absolute numbers but
+	                                  cleans the step-vs-gridder split); off by default.
+	* ``GLIDE_PHASE_TIMERS_EVERY``  — log running breakdown every N met fetches (default 25)
+	"""
+
+	_NULLCTX = contextlib.nullcontext()
+
+	def __init__(self, *, enabled: bool, sync_cuda: bool, log_every: int) -> None:
+		self.enabled = enabled
+		self.sync_cuda = sync_cuda
+		self.log_every = max(0, log_every)
+		self.totals: dict[str, float] = defaultdict(float)
+		self.counts: dict[str, int] = defaultdict(int)
+		self.t_start = time.perf_counter()
+		self._fetches = 0
+
+	def phase(self, name: str):
+		"""Context manager timing a phase; a cheap shared no-op when disabled."""
+		if not self.enabled:
+			return self._NULLCTX
+		return self._timed(name)
+
+	@contextlib.contextmanager
+	def _timed(self, name: str):
+		if self.sync_cuda:
+			torch.cuda.synchronize()
+		t0 = time.perf_counter()
+		try:
+			yield
+		finally:
+			if self.sync_cuda:
+				torch.cuda.synchronize()
+			self.totals[name] += time.perf_counter() - t0
+			self.counts[name] += 1
+
+	def tick_fetch(self) -> None:
+		"""Call after each REAL met fetch (cache miss); logs a running breakdown periodically."""
+		if not self.enabled or self.log_every == 0:
+			return
+		self._fetches += 1
+		if self._fetches % self.log_every == 0:
+			wall = time.perf_counter() - self.t_start
+			parts = ", ".join(
+				f"{n}={t:.1f}s({100 * t / wall:.0f}%)"
+				for n, t in sorted(self.totals.items(), key=lambda kv: kv[1], reverse=True)
+			)
+			LOGGER.info("phase timers @ %d fetches — wall %.1fs: %s", self._fetches, wall, parts)
+
+	def summary(self, *, hour_windows: int) -> None:
+		if not self.enabled:
+			return
+		wall = time.perf_counter() - self.t_start
+		accounted = sum(self.totals.values())
+		note = "  [CUDA-synced]" if self.sync_cuda else "  [no CUDA sync: GPU phases under-counted]"
+		lines = [
+			"=" * 78,
+			f"GLIDE phase timers — total wall {wall:.1f}s  (met fetches: {hour_windows}){note}",
+			"-" * 78,
+			f"  {'phase':<22}{'total_s':>12}{'% wall':>9}{'calls':>11}{'ms/call':>13}",
+		]
+		for name, total in sorted(self.totals.items(), key=lambda kv: kv[1], reverse=True):
+			c = self.counts[name]
+			pct = 100.0 * total / wall if wall else 0.0
+			per = 1000.0 * total / c if c else 0.0
+			lines.append(f"  {name:<22}{total:>12.2f}{pct:>8.1f}%{c:>11}{per:>13.3f}")
+		resid = wall - accounted
+		lines.append(f"  {'(residual/untimed)':<22}{resid:>12.2f}{(100.0 * resid / wall if wall else 0.0):>8.1f}%")
+		lines.append("=" * 78)
+		print("\n".join(lines))
+
+
+def _make_phase_timer() -> "_PhaseTimer":
+	"""Build the phase timer from env; always returns an object (a no-op when disabled, so
+	call sites need no None-checks)."""
+	def _truthy(name: str) -> bool:
+		return os.environ.get(name, "") not in ("", "0", "false", "False")
+
+	return _PhaseTimer(
+		enabled=_truthy("GLIDE_PHASE_TIMERS"),
+		sync_cuda=_truthy("GLIDE_PHASE_TIMERS_SYNC") and torch.cuda.is_available(),
+		log_every=int(os.environ.get("GLIDE_PHASE_TIMERS_EVERY", "25")),
+	)
 
 
 FOOTPRINT_UNITS_DOC = {
@@ -481,6 +714,176 @@ def _get_hourly_met_window(
 	return met_window, 1
 
 
+def _warn_if_met_cache_thrashes(cfg: RunConfig, batches: list, sim_length_s: float) -> None:
+	"""Warn when `met_cache_max_hours` is too small to retain the met OVERLAP between
+	consecutive backward batches, so each batch RE-FETCHES it (LRU thrash — GH200 2026-06-29).
+
+	The cursor walks latest→earliest, so at a batch's end the LRU-oldest entry is the *top*
+	hour — exactly what the next batch (shifted later by one batch-advance) needs first. With
+	the cache barely large enough, the next batch's new top-hour fetches evict the overlap
+	right before it would be reused → ~zero reuse. Full reuse needs roughly one batch's met
+	span PLUS one batch's advance. Setting the cache to *exactly* the span gives NO benefit;
+	this guard catches that silent footgun at startup."""
+
+	max_hours = cfg.memory.met_cache_max_hours
+	if max_hours <= 0 or len(batches) < 2:
+		return
+
+	def _start(b) -> datetime:
+		return max(r.release_time + timedelta(seconds=r.duration_seconds) for r in b.releases)
+
+	def _terminus(b) -> datetime:
+		earliest_end = min(r.release_time + timedelta(seconds=r.duration_seconds) for r in b.releases)
+		return earliest_end - timedelta(seconds=sim_length_s)
+
+	span_h = (_start(batches[0]) - _terminus(batches[0])).total_seconds() / 3600.0
+	advance_h = abs((_start(batches[1]) - _start(batches[0])).total_seconds()) / 3600.0
+	overlap_h = span_h - advance_h
+	if overlap_h <= 0:
+		return  # batches don't overlap in met time → caching can't help, no thrash to warn about
+	threshold = math.ceil(span_h + advance_h)
+	if max_hours >= threshold:
+		return
+	LOGGER.warning(
+		"met_cache_max_hours=%d is below the cross-batch reuse threshold ~%d h (batch met span "
+		"~%.0f h + advance ~%.0f h): consecutive batches will RE-FETCH the ~%.0f h overlap "
+		"(LRU thrash, ~%.1fx redundant met I/O). Raise met_cache_max_hours to >= %d to reuse it"
+		"%s.",
+		max_hours, threshold, span_h, advance_h, overlap_h, span_h / max(advance_h, 1e-6), threshold,
+		" (cached in host RAM since met_cache_on_host=True)" if cfg.memory.met_cache_on_host else "",
+	)
+
+
+class MetPrefetcher:
+	"""Serves hourly met windows, optionally prefetching the NEXT (backward) hour on a
+	background thread so its I/O overlaps the current window's compute.
+
+	The run is met-I/O-bound (~1.6 s/fetch, GPU otherwise idle), so while the caller works
+	through hour H we prefetch H−1 (the cursor walks backward). When the caller reaches H−1
+	the fetch is already done → no stall.
+
+	Safety:
+	* a SINGLE worker thread performs EVERY reader access, so the reader is never touched
+	  concurrently (no assumption about reader thread-safety);
+	* it produces HOST tensors only — enabling prefetch requires ``met_cache_on_host`` so the
+	  worker never issues CUDA calls off the main thread;
+	* the met cache is mutated only by the caller (main thread) inside ``get`` → no cache lock;
+	* a fetch exception re-raises on the main thread via ``Future.result()``.
+
+	Bit-identical to the synchronous path: same fetch for the same hour, same cache contents.
+	Disabled (``enabled=False``) collapses to the old synchronous fetch on the main thread.
+	"""
+
+	def __init__(
+		self,
+		reader: MetReader,
+		cfg: RunConfig,
+		met_cache: "OrderedDict[datetime, HourlyMetTensors]",
+		*,
+		enabled: bool,
+	) -> None:
+		self._reader = reader
+		self._cfg = cfg
+		self._cache = met_cache
+		self._max_hours = cfg.memory.met_cache_max_hours
+		self._executor = (
+			ThreadPoolExecutor(max_workers=1, thread_name_prefix="glide-met-prefetch")
+			if enabled
+			else None
+		)
+		self._pending_key: datetime | None = None
+		self._pending_future: "Future[HourlyMetTensors] | None" = None
+
+	def _fetch(self, hour_key: datetime) -> HourlyMetTensors:
+		return self._reader.fetch_hourly_window(
+			BoundingBoxRequest(
+				spatial=_met_domain_bounds(self._cfg),
+				time=TimeBounds(start=hour_key, end=hour_key + timedelta(hours=1)),
+			)
+		)
+
+	def _cache_put(self, hour_key: datetime, window: HourlyMetTensors) -> None:
+		if self._max_hours > 0:
+			self._cache[hour_key] = window
+			while len(self._cache) > self._max_hours:
+				_, evicted = self._cache.popitem(last=False)
+				del evicted
+
+	def _cancel_pending(self) -> None:
+		if self._pending_future is not None:
+			self._pending_future.cancel()
+		self._pending_key = None
+		self._pending_future = None
+
+	def get(self, t_cursor: datetime) -> tuple[HourlyMetTensors, int]:
+		"""Return (window, fetched) for ``t_cursor``'s hour; ``fetched`` is 1 on a real read
+		(cache miss), 0 on a cache hit — same accounting as the synchronous path."""
+
+		hour_key = _hour_floor(t_cursor)
+		if self._max_hours > 0 and hour_key in self._cache:
+			self._cache.move_to_end(hour_key)
+			window, fetched = self._cache[hour_key], 0
+		elif self._executor is None:
+			window, fetched = self._fetch(hour_key), 1
+			self._cache_put(hour_key, window)
+		else:
+			if self._pending_key == hour_key and self._pending_future is not None:
+				fut, self._pending_key, self._pending_future = self._pending_future, None, None
+			else:
+				self._cancel_pending()  # stale (cursor jumped, e.g. batch boundary)
+				fut = self._executor.submit(self._fetch, hour_key)
+			window = fut.result()  # blocks iff not done yet; re-raises fetch errors
+			self._cache_put(hour_key, window)
+			fetched = 1
+		self._schedule_prefetch(hour_key)
+		return window, fetched
+
+	def _schedule_prefetch(self, hour_key: datetime) -> None:
+		if self._executor is None:
+			return
+		nxt = hour_key - timedelta(hours=1)
+		if (self._max_hours > 0 and nxt in self._cache) or self._pending_key == nxt:
+			return
+		self._cancel_pending()
+		self._pending_key = nxt
+		self._pending_future = self._executor.submit(self._fetch, nxt)
+
+	def shutdown(self) -> None:
+		self._cancel_pending()
+		if self._executor is not None:
+			self._executor.shutdown(wait=False, cancel_futures=True)
+			self._executor = None
+
+
+def _advection_alpha_wind_mean(
+	met_window: HourlyMetTensors,
+	t_cursor: datetime,
+	delta_s: float,
+	device: torch.device,
+	dtype: torch.dtype,
+) -> tuple[float, torch.Tensor]:
+	"""RK2-midpoint time-interpolation weight ``alpha`` + the grid-mean (u, v, w) wind.
+
+	Shared by the dynamic path (`_advect_active_particles`) and the static path, where
+	advection is folded into `HannaScheme._step_core` so `main._run` only needs these two
+	scalars/diagnostics. ``wind_mean`` is a (3,) device tensor (no host sync — materialised
+	once per batch for the trajectory diagnostics).
+	"""
+
+	t_start_s = met_window.metadata.time_start.timestamp()
+	t_end_s = met_window.metadata.time_end.timestamp()
+	t_eval_s = t_cursor.timestamp() - 0.5 * delta_s
+	alpha = max(0.0, min(1.0, (t_eval_s - t_start_s) / max(1.0, float(t_end_s - t_start_s))))
+
+	m_start_uvw, m_end_uvw = met_window.channels("u", "v", "w")
+	interp_wind = (
+		m_start_uvw.to(device=device, dtype=dtype) * (1.0 - alpha)
+		+ m_end_uvw.to(device=device, dtype=dtype) * alpha
+	)  # [3, Z, Y, X]
+	wind_mean = interp_wind.reshape(3, -1).mean(dim=1)
+	return alpha, wind_mean
+
+
 def _advect_active_particles(
 	engine: GPUEngine,
 	device: torch.device,
@@ -490,19 +893,14 @@ def _advect_active_particles(
 	delta_s: float,
 	dtype: torch.dtype,
 ) -> tuple[torch.Tensor, float, torch.Tensor]:
-	"""RK2 backward advection on the active particle subset.
+	"""RK2 backward advection on the active particle subset (dynamic / CPU path).
 
 	The third return is the grid-mean (u, v, w) wind as a device tensor — NOT
 	materialised to floats here, so the trajectory diagnostics can be transferred
 	to the host once per batch rather than syncing every step (matters on CUDA).
 	"""
 
-	t_start_s = met_window.metadata.time_start.timestamp()
-	t_end_s = met_window.metadata.time_end.timestamp()
-
-	t_eval_s = t_cursor.timestamp() - 0.5 * delta_s
-	alpha = (t_eval_s - t_start_s) / max(1.0, float(t_end_s - t_start_s))
-	alpha = max(0.0, min(1.0, alpha))
+	alpha, diag_wind_mean = _advection_alpha_wind_mean(met_window, t_cursor, delta_s, device, dtype)
 
 	grid_bounds = GridInterpolationBounds(
 		lon_first=float(met_window.metadata.lon[0]),
@@ -540,10 +938,6 @@ def _advect_active_particles(
 		return out
 
 	advected_active = engine.rk2_advect_backward(active_particles, dt_seconds=delta_s, wind_fn=wind_fn)
-
-	# Grid-mean wind as a 0-sync (3,) device tensor; materialised per-batch.
-	interp_wind = m_start[0] * (1 - alpha) + m_end[0] * alpha  # [3, Z, Y, X]
-	diag_wind_mean = interp_wind.reshape(3, -1).mean(dim=1)
 
 	del m_start
 	del m_end
@@ -591,6 +985,88 @@ def _convection_scheme_kwargs(cfg: RunConfig) -> dict[str, object]:
 	}
 
 
+def _compile_count() -> int:
+	"""Number of torch.compile graph compilations so far (-1 if the counter is unavailable).
+
+	Grows by one per (re)compilation. If it climbs at every batch boundary, the compiled
+	core is being RE-compiled per batch — each recompile records a NEW CUDA graph whose
+	memory the caching allocator's ``empty_cache`` cannot reclaim, so it accumulates toward
+	OOM. The usual culprit is a per-batch-varying Python scalar reaching the core (the
+	last-step clamped ``dt_seconds`` — same class as the ``alpha``/``level`` fixes)."""
+
+	try:
+		from torch._dynamo.utils import counters
+
+		return int(counters.get("frames", {}).get("ok", 0))
+	except Exception:
+		return -1
+
+
+def _log_device_memory(label: str, device: torch.device) -> None:
+	"""Log CUDA allocated/reserved/peak memory + compile count at a coarse boundary (no-op
+	off CUDA).
+
+	Used at batch boundaries to localise the per-batch GPU-memory growth that risks OOM-ing
+	a long multi-batch run (2026-06-29). `allocated` is live tensors; `reserved` is the
+	caching allocator's pool; `peak` is the in-batch high-water mark (reset each batch);
+	`compiles` is the cumulative torch.compile count (climbing per batch = recompilation)."""
+
+	if device.type != "cuda":
+		return
+	gib = 2 ** 30
+	LOGGER.info(
+		"device mem [%s]: alloc=%.2f GiB reserved=%.2f GiB peak=%.2f GiB compiles=%d",
+		label,
+		torch.cuda.memory_allocated(device) / gib,
+		torch.cuda.memory_reserved(device) / gib,
+		torch.cuda.max_memory_allocated(device) / gib,
+		_compile_count(),
+	)
+
+
+def _start_mem_history(device: torch.device) -> bool:
+	"""Begin recording the CUDA allocation history when ``GLIDE_MEM_SNAPSHOT`` is set, so we
+	can localise the per-batch device-memory growth to its exact allocation call stacks
+	(2026-06-29). Returns whether recording is active. Off by default (it has overhead)."""
+
+	if device.type != "cuda" or os.environ.get("GLIDE_MEM_SNAPSHOT", "") in ("", "0", "false", "False"):
+		return False
+	try:
+		torch.cuda.memory._record_memory_history(max_entries=200_000)
+		LOGGER.info(
+			"mem snapshot: recording allocation history; will dump after batch %s",
+			os.environ.get("GLIDE_MEM_SNAPSHOT_BATCH", "1"),
+		)
+		return True
+	except Exception as exc:  # pragma: no cover - diagnostic only
+		LOGGER.warning("mem snapshot: could not start recording: %s", exc)
+		return False
+
+
+def _maybe_dump_mem_snapshot(batch_idx: int, device: torch.device) -> None:
+	"""After the configured batch, dump a CUDA allocation snapshot (open at
+	https://pytorch.org/memory_viz — it shows each live block's allocation stack) plus a
+	pasteable allocator summary, then stop recording. No-op unless armed for this batch."""
+
+	if device.type != "cuda" or os.environ.get("GLIDE_MEM_SNAPSHOT", "") in ("", "0", "false", "False"):
+		return
+	if batch_idx != int(os.environ.get("GLIDE_MEM_SNAPSHOT_BATCH", "1")):
+		return
+	path = os.environ.get("GLIDE_MEM_SNAPSHOT_PATH", "glide_mem_snapshot.pickle")
+	try:
+		torch.cuda.memory._dump_snapshot(path)
+		LOGGER.info("mem snapshot: wrote %s — open at https://pytorch.org/memory_viz", path)
+		LOGGER.info(
+			"mem summary after batch %d:\n%s",
+			batch_idx,
+			torch.cuda.memory_summary(device, abbreviated=True),
+		)
+		torch.cuda.memory._record_memory_history(enabled=None)
+	except Exception as exc:  # pragma: no cover - diagnostic only
+		LOGGER.warning("mem snapshot: dump failed: %s", exc)
+
+
+@torch.no_grad()
 def _run(
 	cfg: RunConfig,
 	*,
@@ -620,14 +1096,40 @@ def _run(
 				*convection_scheme.required_met_keys(),
 			))
 		)
+		# Cache met windows on the HOST when requested (default): each window is a
+		# [C,Z,Y,X] stack (~hundreds of MiB), so a large met cache on the GPU consumes
+		# GiBs of HBM (snapshot 2026-06-29: 192 h ≈ 50 GiB). The per-step physics moves the
+		# active window to the device itself (its `.to(device)` calls), so the reader can
+		# stage in host RAM and keep the device free for compute. CPU runs: host == device.
+		reader_device = "cpu" if cfg.memory.met_cache_on_host else device_str
 		reader = ArcoEra5ZarrReader(
 			zarr_store=cfg.io.zarr_store,
 			channel_names=required_channels,
-			device=device_str,
+			device=reader_device,
 		)
 	engine = GPUEngine(device=device_str)
 	writer = OutputWriter()
 	device = torch.device(device_str)
+
+	# Per-step execution path (architecture.md §5). On the static path the cursor
+	# loop processes the FULL particle buffer every step and gates inactive
+	# particles with `torch.where` (no boolean indexing, no per-step host sync) —
+	# the shapes/control-flow CUDA-graph capture needs, and a win on a launch-bound
+	# GPU. On the dynamic path it boolean-indexes the active subset (cheaper on
+	# CPU). Auto: static on CUDA, dynamic elsewhere; `GLIDE_STATIC_SUBSTEPS`
+	# overrides (used to exercise the static path on CPU in tests).
+	use_static = use_static_step_path(device)
+	if use_static:
+		LOGGER.info("runtime: static-shape per-step path (full-set, mask-gated)")
+	_start_mem_history(device)
+
+	# Optional per-step profiler (GLIDE_PROFILE): captures a window of cursor-loop
+	# steps to localise where the per-step time goes (GPU kernels vs host syncs vs
+	# CPU/met). None unless GLIDE_PROFILE is set, so normal runs pay nothing.
+	step_profiler = _make_step_profiler(device)
+	# Coarse whole-run phase accountant (GLIDE_PHASE_TIMERS). Unlike the step profiler it
+	# spans every window/batch, so it catches per-window met-fetch idle. No-op when disabled.
+	phase_timer = _make_phase_timer()
 
 	# M5 stage 5: expand the schedule into batches and validate met coverage over
 	# the full schedule. Each batch is integrated independently and its footprint
@@ -649,12 +1151,22 @@ def _run(
 		len(batches),
 		cfg.batch.max_releases_per_batch,
 	)
+	_warn_if_met_cache_thrashes(cfg, batches, float(sim.length_seconds))
 
 	# Bookkeeping shared across batches.
 	diag_rows: list[dict[str, float | int | str]] = []
 	step_count = 0
 	hour_windows = 0
 	met_cache: OrderedDict[datetime, HourlyMetTensors] = OrderedDict()
+	# Background prefetch of the next backward met hour (overlaps fetch I/O with compute).
+	# Requires a HOST-resident reader (the worker must not issue CUDA calls); disabled with a
+	# warning otherwise. No-op-equivalent to the synchronous path when disabled.
+	prefetch_enabled = cfg.memory.met_prefetch and cfg.memory.met_cache_on_host
+	if cfg.memory.met_prefetch and not cfg.memory.met_cache_on_host:
+		LOGGER.warning("met prefetch disabled: requires memory.met_cache_on_host (CPU reader)")
+	if prefetch_enabled:
+		LOGGER.info("met prefetch: enabled (1 background worker, next backward hour)")
+	prefetcher = MetPrefetcher(reader, cfg, met_cache, enabled=prefetch_enabled)
 	memory_stats = MemoryStats()
 	# Endpoint particles + their release_idx accumulated across batches, concatenated
 	# once at the end so we emit one parquet covering the whole schedule.
@@ -675,6 +1187,9 @@ def _run(
 	footprint_store_created = False
 
 	for batch in batches:
+		if device.type == "cuda":
+			torch.cuda.reset_peak_memory_stats(device)
+		_log_device_memory(f"batch {batch.batch_idx} start", device)
 		particle_batch = generate_batch_particles(batch, device=device_str)
 		particles = particle_batch.particles
 		# release_idx from the batch is global; remap to batch-local for the
@@ -751,12 +1266,15 @@ def _run(
 		diag_pos_means: list[torch.Tensor] = []   # each (3,): mean lon/lat/alt over all particles
 		diag_wind_means: list[torch.Tensor] = []  # each (3,): grid-mean u/v/w (0 when no active set)
 		diag_escaped: list[torch.Tensor] = []     # each (): newly-escaped count this step
-		diag_host: list[tuple[int, int, str, int]] = []  # (step, batch_idx, iso_time, active_count)
+		diag_active: list[torch.Tensor] = []      # each (): active-particle count this step (device, no sync)
+		diag_host: list[tuple[int, int, str]] = []  # (step, batch_idx, iso_time)
 		zero_wind = torch.zeros(3, device=device, dtype=particles.dtype)
 		zero_escaped = torch.zeros((), device=device, dtype=torch.long)
 
 		t_cursor = batch_cursor_start
 		while t_cursor > batch_cursor_terminus:
+			if step_profiler is not None:
+				step_profiler.before_step()
 			delta_s = min(
 				float(sim.dt_seconds),
 				(t_cursor - batch_cursor_terminus).total_seconds(),
@@ -774,107 +1292,171 @@ def _run(
 				& (release_time_offsets_s - sim_length_s <= cursor_offset_s)
 				& alive
 			)
-			# NOTE (perf TODO #2, see CHECKPOINT 2026-06-18): this `.item()` is the
-			# one remaining per-step host sync — it gates the work below. The
-			# per-step diagnostics no longer sync (materialised per batch). When
-			# wiring up torch.compile, fold this branch away (operate on the
-			# possibly-empty active set) so the hot loop has zero host syncs.
-			active_count = int(torch.count_nonzero(active_mask).item())
-
-			if active_count > 0:
-				active_particles = particles[active_mask]
-				met_window, fetched_windows = _get_hourly_met_window(
-					reader, cfg, t_cursor, met_cache
-				)
+			# Per-step body has two device-gated paths (architecture.md S5):
+			#   static  - full buffer every step, inactive frozen via torch.where; no
+			#             per-step host sync; constant shapes for CUDA-graph capture.
+			#   dynamic - boolean-index the active subset (cheaper on CPU). Unchanged.
+			if use_static:
+				with phase_timer.phase("met_fetch"):
+					met_window, fetched_windows = prefetcher.get(t_cursor)
 				hour_windows += fetched_windows
-				advected_active, t_alpha, wind_mean = _advect_active_particles(
-					engine,
-					device,
-					active_particles,
-					met_window,
-					t_cursor,
-					delta_s,
-					particles.dtype,
+				if fetched_windows:
+					phase_timer.tick_fetch()
+				# On the static path HannaScheme folds RK2 advection into its captured
+				# graph (one graph for advect + turbulence), so the runtime must NOT
+				# advect separately. A scheme that does NOT fold advection (e.g. the
+				# placeholder, or any non-Hanna scheme on CUDA) gets the runtime's own
+				# full-set advection + where-gate here. Either way we need `t_alpha`
+				# (the RK2-midpoint weight, also used for the surface fields) and the
+				# grid-mean wind diagnostic.
+				t_alpha, wind_mean = _advection_alpha_wind_mean(
+					met_window, t_cursor, delta_s, device, particles.dtype
 				)
-				particles[active_mask] = advected_active
-
-				particles, turbulence_state = scheme.step(
-					particles=particles,
-					state=turbulence_state,
-					met_window=met_window,
-					t_alpha=t_alpha,
-					dt_seconds=delta_s,
-					active_mask=active_mask,
-					engine=engine,
-				)
-
-				# Deep convection — fired ONCE per met-update interval (when the
-				# cursor crosses into a new hourly bracket), not per timestep.
-				# The Emanuel scheme computes per-column CAPE / mass-flux matrix
-				# (expensive) and that doesn't change inside a met window.
-				bracket_start = met_window.metadata.time_start
-				if bracket_start != last_convection_bracket_start:
-					particles, convection_state = convection_scheme.maybe_convect(
+				if not scheme.step_includes_advection(engine):
+					with phase_timer.phase("advect"):
+						advected_full = _advect_active_particles(
+							engine, device, particles, met_window, t_cursor, delta_s, particles.dtype,
+						)[0]
+						particles = torch.where(active_mask.unsqueeze(1), advected_full, particles)
+				with phase_timer.phase("step"):
+					particles, turbulence_state = scheme.step(
 						particles=particles,
-						state=convection_state,
+						state=turbulence_state,
 						met_window=met_window,
 						t_alpha=t_alpha,
 						dt_seconds=delta_s,
 						active_mask=active_mask,
 						engine=engine,
 					)
+				# Convection: once per met bracket (Emanuel matrix is constant in a window).
+				bracket_start = met_window.metadata.time_start
+				if bracket_start != last_convection_bracket_start:
+					with phase_timer.phase("convection"):
+						particles, convection_state = convection_scheme.maybe_convect(
+							particles=particles,
+							state=convection_state,
+							met_window=met_window,
+							t_alpha=t_alpha,
+							dt_seconds=delta_s,
+							active_mask=active_mask,
+							engine=engine,
+						)
 					last_convection_bracket_start = bracket_start
-
-				del active_particles
-				del advected_active
-			else:
-				wind_mean = zero_wind
-
-			if active_count > 0:
-				# Per-particle time-ago bin: each particle measures elapsed time
-				# from *its own* release window's end (stage 3 semantics).
 				elapsed_s = (release_window_end_offsets_s - cursor_offset_s).clamp_(min=0.0)
 				t_idx = (elapsed_s / 3600.0).floor().to(torch.int64).clamp_(max=gridder.n_t - 1)
-				gridder.accumulate(
-					particles=particles[:, :3],
-					active_mask=active_mask,
-					weights=particles[:, 3],
-					t_idx=t_idx,
-					release_idx=release_idx_local,
-					dt_seconds=delta_s,
-				)
-
-			# Kill particles that left met_domain this step (drop-and-count). They
-			# accumulated 0 this step already (outside output_grid → dropped by the
-			# gridder's valid_mask), and `alive` excludes them from all future
-			# steps. The `alive` update is unconditional (idempotent when nothing
-			# escaped) so no per-step count `.item()` is needed; the escaped count
-			# is kept as a device tensor and summed at batch end.
-			if active_count > 0:
+				with phase_timer.phase("gridder"):
+					gridder.accumulate(
+						particles=particles[:, :3],
+						active_mask=active_mask,
+						weights=particles[:, 3],
+						t_idx=t_idx,
+						release_idx=release_idx_local,
+						dt_seconds=delta_s,
+					)
 				newly_escaped = active_mask & ~_within_met_domain(particles, cfg)
 				alive = alive & ~newly_escaped
 				escaped_count = torch.count_nonzero(newly_escaped)
 			else:
-				escaped_count = zero_escaped
+				active_count = int(torch.count_nonzero(active_mask).item())
+
+				if active_count > 0:
+					active_particles = particles[active_mask]
+					with phase_timer.phase("met_fetch"):
+						met_window, fetched_windows = prefetcher.get(t_cursor)
+					hour_windows += fetched_windows
+					if fetched_windows:
+						phase_timer.tick_fetch()
+					advected_active, t_alpha, wind_mean = _advect_active_particles(
+						engine,
+						device,
+						active_particles,
+						met_window,
+						t_cursor,
+						delta_s,
+						particles.dtype,
+					)
+					particles[active_mask] = advected_active
+
+					particles, turbulence_state = scheme.step(
+						particles=particles,
+						state=turbulence_state,
+						met_window=met_window,
+						t_alpha=t_alpha,
+						dt_seconds=delta_s,
+						active_mask=active_mask,
+						engine=engine,
+					)
+
+					# Deep convection - fired ONCE per met-update interval (when the
+					# cursor crosses into a new hourly bracket), not per timestep.
+					bracket_start = met_window.metadata.time_start
+					if bracket_start != last_convection_bracket_start:
+						particles, convection_state = convection_scheme.maybe_convect(
+							particles=particles,
+							state=convection_state,
+							met_window=met_window,
+							t_alpha=t_alpha,
+							dt_seconds=delta_s,
+							active_mask=active_mask,
+							engine=engine,
+						)
+						last_convection_bracket_start = bracket_start
+
+					del active_particles
+					del advected_active
+				else:
+					wind_mean = zero_wind
+
+				if active_count > 0:
+					# Per-particle time-ago bin: each particle measures elapsed time
+					# from *its own* release window's end (stage 3 semantics).
+					elapsed_s = (release_window_end_offsets_s - cursor_offset_s).clamp_(min=0.0)
+					t_idx = (elapsed_s / 3600.0).floor().to(torch.int64).clamp_(max=gridder.n_t - 1)
+					gridder.accumulate(
+						particles=particles[:, :3],
+						active_mask=active_mask,
+						weights=particles[:, 3],
+						t_idx=t_idx,
+						release_idx=release_idx_local,
+						dt_seconds=delta_s,
+					)
+
+				# Kill particles that left met_domain this step (drop-and-count). They
+				# accumulated 0 already (outside output_grid -> dropped by valid_mask);
+				# alive excludes them from future steps. Escaped count is a device
+				# tensor summed at batch end.
+				if active_count > 0:
+					newly_escaped = active_mask & ~_within_met_domain(particles, cfg)
+					alive = alive & ~newly_escaped
+					escaped_count = torch.count_nonzero(newly_escaped)
+				else:
+					escaped_count = zero_escaped
 
 			step_count += 1
 
-			# Accumulate diagnostics as device tensors (no host sync this step).
+			# Accumulate diagnostics as device tensors (no host sync this step);
+			# materialised once per batch below. active_mask.sum() replaces the
+			# former per-step active_count .item() in the diagnostics.
 			diag_pos_means.append(particles[:, :3].mean(dim=0))
 			diag_wind_means.append(wind_mean)
 			diag_escaped.append(escaped_count)
-			diag_host.append((step_count, batch.batch_idx, t_cursor.isoformat(), active_count))
+			diag_active.append(active_mask.sum())
+			diag_host.append((step_count, batch.batch_idx, t_cursor.isoformat()))
 
 			if mem.gc_every_steps > 0 and step_count % mem.gc_every_steps == 0:
 				gc.collect()
 
 			if mem.log_every_steps > 0 and step_count % mem.log_every_steps == 0:
 				rss_bytes, allocated, reserved = memory_stats.observe(device)
+				# Materialise the active count just for this log line (runs only every
+				# `log_every_steps`, so the sync is off the hot path). Works on both
+				# the static and dynamic paths; `active_count` itself only exists in
+				# the dynamic branch.
 				LOGGER.info(
 					"batch=%d step=%d active=%d cache_hours=%d rss=%s dev_alloc=%s dev_reserved=%s",
 					batch.batch_idx,
 					step_count,
-					active_count,
+					int(active_mask.sum().item()),
 					len(met_cache),
 					_format_gib(rss_bytes),
 					_format_gib(allocated),
@@ -898,6 +1480,9 @@ def _run(
 					reserved,
 				)
 
+			if step_profiler is not None:
+				step_profiler.after_step()
+
 			t_cursor = t_prev
 
 		# Materialise this batch's per-step diagnostics in ONE host transfer
@@ -910,9 +1495,10 @@ def _run(
 			escaped_dev = torch.stack(diag_escaped).to("cpu")
 			batch_escaped_total = int(escaped_dev.sum().item())
 			escaped_each = escaped_dev.tolist()
+			active_each = torch.stack(diag_active).to("cpu").tolist()
 			alive_each = (particles.shape[0] - torch.cumsum(escaped_dev, dim=0)).tolist()
-			for (st, bidx, iso, ac), pm, wm, esc, al in zip(
-				diag_host, pos, wind, escaped_each, alive_each
+			for (st, bidx, iso), ac, pm, wm, esc, al in zip(
+				diag_host, active_each, pos, wind, escaped_each, alive_each
 			):
 				diag_rows.append(
 					{
@@ -942,16 +1528,28 @@ def _run(
 		)
 		endpoint_particles_chunks.append(particles.detach().cpu().clone())
 		endpoint_release_idx_chunks.append(particle_batch.release_idx.detach().cpu().clone())
+		_log_device_memory(f"batch {batch.batch_idx} end (pre-reclaim)", device)
 		del gridder
 		del particles
 		del release_idx_local
 		del release_time_offsets_s
 		del release_window_end_offsets_s
 		del turbulence_state
+		del convection_state
 		del particle_batch
 		del alive
+		# Per-batch reclaim: break reference cycles (closures / compiled-fn caches retain
+		# device tensors that plain `del` + refcounting won't free) and return the freed
+		# blocks to the driver, so peak device memory stays ~one batch's worth instead of
+		# growing per batch toward OOM on a long run (2026-06-29 dev_alloc investigation).
+		if device.type == "cuda":
+			gc.collect()
+			torch.cuda.empty_cache()
+		_log_device_memory(f"batch {batch.batch_idx} end (post-reclaim)", device)
+		_maybe_dump_mem_snapshot(batch.batch_idx, device)
 		run_escaped_total += batch_escaped_total
 
+	prefetcher.shutdown()
 	for cached in met_cache.values():
 		del cached
 	met_cache.clear()
@@ -987,6 +1585,7 @@ def _run(
 	}
 	writer.write_metadata_json(outputs.metadata, metadata)
 
+	phase_timer.summary(hour_windows=hour_windows)
 	return metadata
 
 
