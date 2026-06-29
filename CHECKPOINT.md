@@ -324,9 +324,10 @@ Closing the two non-core per-step costs the GH200 profile exposed.
   to **192** (≥ span + one batch advance ≈ 168 h) fixed it: batch 1's fetch count **plateaued at
   ~168** (batch 0's 144 + ~24 new) and the periodic log went quiet = reuse working. Month
   extrapolation: ~840 vs ~4320 fetches (**~5×**), met_fetch ~63%→~30% of wall, ≈2× faster
-  overall. **Memory is cheap: ~21 MB/window host RSS (NOT the ~200 MB first guessed)** — the AGL
-  vertical subset keeps few levels; 192 h ≈ ~4 GB host RAM, can go higher freely. Current
-  recommended config value: `met_cache_max_hours: 192` (240 for margin).
+  overall. Current recommended config value: `met_cache_max_hours: 192` (240 for margin).
+  **NB on memory: a cached window is ~300 MiB (`[C,Z,Y,X]`), so 192 h ≈ ~50 GiB.** The early
+  "~21 MB/window" note was wrong (that RSS was staging, not the cache). With `met_cache_on_host`
+  (the dev_alloc fix) that ~50 GiB lives in host RAM, not HBM — so confirm Grace headroom.
 
 ### NEXT STEPS (ordered; 2026-06-29 — Matt stepping away, resume here)
 1. **⚠️ `dev_alloc` per-batch GPU-memory growth (GATES the month run) — INSTRUMENTED + MITIGATED,
@@ -347,21 +348,27 @@ Closing the two non-core per-step costs the GH200 profile exposed.
    `batch 1 start=43.48`, `batch 1 end (post-reclaim)=50.70`, **`compiles=1` throughout**. So:
    (a) NOT recompilation (compiles flat → the `dt` worry was wrong); (b) `gc`+`empty_cache` freed
    ~nothing (43.54→43.48); (c) batch 0's 43 GiB **survives every `del` into batch 1**; (d) ~**+7
-   GiB/batch** of LIVE memory (`alloc≈reserved`). Conclusion: device tensors held by a **long-
-   lived object** (only the `scheme`/compiled-fn/**cudagraph pool** outlive a batch; `empty_cache`
-   cannot reclaim a cudagraph pool). By elimination the **cudagraph trees pool growing ~7 GiB/
-   batch** is the prime suspect (likely re-recording for each batch's freshly-allocated
-   particles/state — invisible to dynamo's compile counter). At ~7 GiB/batch a 30-batch month
-   OOMs ~batch 11.
-   **Definitive localizer added (`GLIDE_MEM_SNAPSHOT=1`, main.py):** records CUDA allocation
-   history and dumps `glide_mem_snapshot.pickle` + a pasteable `memory_summary` after batch
-   `GLIDE_MEM_SNAPSHOT_BATCH` (default 1). Open the pickle at https://pytorch.org/memory_viz — it
-   names the allocation call stack of the growing memory. **Next: one 2–3 batch run with
-   `GLIDE_MEM_SNAPSHOT=1`** → the top growing allocation site → exact fix. Zero-code cross-check:
-   a 2-batch run with `GLIDE_COMPILE=0` (eager static path, no cudagraph) — if the +7 GiB/batch
-   vanishes, the cudagraph pool is confirmed. Likely fix if cudagraph: reuse persistent
-   particle/state input buffers across batches (stable cudagraph inputs → no re-record), or bound/
-   reset the pool. Do NOT disable cudagraph as the fix (step would 6× back up and dominate again).
+   GiB/batch** of LIVE memory (`alloc≈reserved`). I hypothesised cudagraph-pool growth — and was
+   WRONG; the snapshot disproved it (good thing I localised instead of "fixing" a guess).
+   **RESOLVED via `GLIDE_MEM_SNAPSHOT=1` allocation snapshot (added to main.py; open the pickle at
+   https://pytorch.org/memory_viz, or use scratch `analyze2.py` to aggregate by Python frame):**
+   the 50.7 GiB is **47.9 GiB in 336 blocks of 146 MiB, all from `met_reader.py:798
+   _dataset_to_channel_tensor`** (via `fetch_hourly_window` ← `_get_hourly_met_window`) + 2.6 GiB
+   more from the reader. Cause: the reader was built with `device=cuda`, so every cached met
+   window's `[C,Z,Y,X]` stack lived in **HBM**, and the 192 h cache held ~168 windows × ~300 MiB
+   ≈ 50 GiB on the GPU. NOT a leak — the cache doing its job on the wrong device; the "per-batch
+   growth" was the cache filling toward the cap. (Also corrects the earlier "~21 MB/window" note —
+   that host RSS was staging, not the cache; a window is ~300 MiB.) Diag lists were negligible
+   (34 k tiny blocks). **FIX: cache met on the HOST** — new `memory.met_cache_on_host` config
+   (default True) → reader built with `device="cpu"`; the per-step physics already moves the active
+   window to the device via its `.to(device)` calls (audited ALL consumers: `_advection_alpha_wind_mean`,
+   `_advect_active_particles`, `_gather_static_inputs`+`_build` closures, Emanuel `maybe_convect` —
+   every one `.to(device)`s; the CPU suite can't catch a missing one since cpu==cpu, so this was a
+   manual audit). Frees ~50 GiB HBM; the cache moves to Grace LPDDR5X (plentiful). Per-step
+   host→device copy of the active window is cheap over NVLink-C2C. Kept the no_grad wrap +
+   `del convection_state` + per-batch `gc`/`empty_cache` (cheap correctness hygiene). **Awaiting a
+   GH200 run to confirm `dev_alloc` now stays flat (~15–20 GiB) and host RSS rises by ~the cache
+   size (~50 GiB at 192 h — confirm Grace headroom).**
 2. **Add a cache guard (small, safe).** Warn at startup when `met_cache_max_hours` is below the
    thrash threshold for the batch geometry (≈ batch_met_span + batch_advance), so the
    set-cache-to-batch-span → zero-benefit footgun can't bite silently again.

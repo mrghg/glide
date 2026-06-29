@@ -340,6 +340,13 @@ class MetDomainConfig(_Frozen):
 
 class MemoryConfig(_Frozen):
     met_cache_max_hours: int = Field(2, ge=0)
+    # Cache met windows in HOST RAM instead of on the compute device. Each cached window is
+    # a [C,Z,Y,X] stack (~hundreds of MiB), so a large `met_cache_max_hours` on a GPU eats
+    # GiBs of scarce device memory (snapshot 2026-06-29: 192 h ≈ 50 GiB of HBM). Host RAM
+    # (e.g. Grace's LPDDR5X) is far larger, so we cache there and the per-step physics moves
+    # the active window to the device via its existing `.to(device)` calls (cheap over
+    # NVLink-C2C). No effect on a CPU run (host == device). Set False for the old behaviour.
+    met_cache_on_host: bool = Field(True)
     log_every_steps: int = Field(10, ge=0)
     gc_every_steps: int = Field(50, ge=0)
     guard_max_rss_gib: float | None = Field(None, gt=0)

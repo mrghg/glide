@@ -953,10 +953,16 @@ def _run(
 				*convection_scheme.required_met_keys(),
 			))
 		)
+		# Cache met windows on the HOST when requested (default): each window is a
+		# [C,Z,Y,X] stack (~hundreds of MiB), so a large met cache on the GPU consumes
+		# GiBs of HBM (snapshot 2026-06-29: 192 h ≈ 50 GiB). The per-step physics moves the
+		# active window to the device itself (its `.to(device)` calls), so the reader can
+		# stage in host RAM and keep the device free for compute. CPU runs: host == device.
+		reader_device = "cpu" if cfg.memory.met_cache_on_host else device_str
 		reader = ArcoEra5ZarrReader(
 			zarr_store=cfg.io.zarr_store,
 			channel_names=required_channels,
-			device=device_str,
+			device=reader_device,
 		)
 	engine = GPUEngine(device=device_str)
 	writer = OutputWriter()
