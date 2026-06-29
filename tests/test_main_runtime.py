@@ -6,6 +6,7 @@ accumulation, output writing) without depending on remote ERA5 data.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -843,6 +844,37 @@ def test_v1_density_weighted_well_mixed_with_F2() -> None:
         "ρ gradient is too weak to make this test discriminating; widen the "
         "pressure range or deepen the BL."
     )
+
+
+def test_met_cache_thrash_warning_fires_when_undersized(caplog) -> None:
+    """Guard must warn when met_cache_max_hours is below the cross-batch reuse threshold
+    (≈ batch met span + advance) — the LRU-thrash footgun (set cache == batch span → zero
+    benefit) that cost a GH200 run — and stay quiet when the cache is large enough."""
+
+    from types import SimpleNamespace
+
+    from lpdm.main import _warn_if_met_cache_thrashes
+
+    base = datetime(2024, 1, 1, tzinfo=timezone.utc)
+
+    def _rel(secs: int) -> SimpleNamespace:
+        return SimpleNamespace(release_time=base + timedelta(seconds=secs), duration_seconds=3600)
+
+    # Two consecutive days of hourly releases (24/batch), 5-day backward window:
+    # batch span ≈ 143 h, advance ≈ 24 h → reuse threshold ≈ 167 h.
+    b0 = SimpleNamespace(releases=[_rel(h * 3600) for h in range(24)])
+    b1 = SimpleNamespace(releases=[_rel(86400 + h * 3600) for h in range(24)])
+    sim_len = 5 * 86400.0
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        _warn_if_met_cache_thrashes(_make_run_config(met_cache_max_hours=144), [b0, b1], sim_len)
+    assert "below the cross-batch reuse threshold" in caplog.text  # 144 < 167 → warn
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        _warn_if_met_cache_thrashes(_make_run_config(met_cache_max_hours=200), [b0, b1], sim_len)
+    assert "cross-batch reuse threshold" not in caplog.text  # 200 ≥ 167 → quiet
 
 
 def test_met_prefetch_matches_synchronous_footprints(tmp_path: Path) -> None:

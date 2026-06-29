@@ -14,6 +14,7 @@ import argparse
 import contextlib
 import gc
 import logging
+import math
 import os
 import resource
 import sys
@@ -713,6 +714,46 @@ def _get_hourly_met_window(
 	return met_window, 1
 
 
+def _warn_if_met_cache_thrashes(cfg: RunConfig, batches: list, sim_length_s: float) -> None:
+	"""Warn when `met_cache_max_hours` is too small to retain the met OVERLAP between
+	consecutive backward batches, so each batch RE-FETCHES it (LRU thrash — GH200 2026-06-29).
+
+	The cursor walks latest→earliest, so at a batch's end the LRU-oldest entry is the *top*
+	hour — exactly what the next batch (shifted later by one batch-advance) needs first. With
+	the cache barely large enough, the next batch's new top-hour fetches evict the overlap
+	right before it would be reused → ~zero reuse. Full reuse needs roughly one batch's met
+	span PLUS one batch's advance. Setting the cache to *exactly* the span gives NO benefit;
+	this guard catches that silent footgun at startup."""
+
+	max_hours = cfg.memory.met_cache_max_hours
+	if max_hours <= 0 or len(batches) < 2:
+		return
+
+	def _start(b) -> datetime:
+		return max(r.release_time + timedelta(seconds=r.duration_seconds) for r in b.releases)
+
+	def _terminus(b) -> datetime:
+		earliest_end = min(r.release_time + timedelta(seconds=r.duration_seconds) for r in b.releases)
+		return earliest_end - timedelta(seconds=sim_length_s)
+
+	span_h = (_start(batches[0]) - _terminus(batches[0])).total_seconds() / 3600.0
+	advance_h = abs((_start(batches[1]) - _start(batches[0])).total_seconds()) / 3600.0
+	overlap_h = span_h - advance_h
+	if overlap_h <= 0:
+		return  # batches don't overlap in met time → caching can't help, no thrash to warn about
+	threshold = math.ceil(span_h + advance_h)
+	if max_hours >= threshold:
+		return
+	LOGGER.warning(
+		"met_cache_max_hours=%d is below the cross-batch reuse threshold ~%d h (batch met span "
+		"~%.0f h + advance ~%.0f h): consecutive batches will RE-FETCH the ~%.0f h overlap "
+		"(LRU thrash, ~%.1fx redundant met I/O). Raise met_cache_max_hours to >= %d to reuse it"
+		"%s.",
+		max_hours, threshold, span_h, advance_h, overlap_h, span_h / max(advance_h, 1e-6), threshold,
+		" (cached in host RAM since met_cache_on_host=True)" if cfg.memory.met_cache_on_host else "",
+	)
+
+
 class MetPrefetcher:
 	"""Serves hourly met windows, optionally prefetching the NEXT (backward) hour on a
 	background thread so its I/O overlaps the current window's compute.
@@ -1110,6 +1151,7 @@ def _run(
 		len(batches),
 		cfg.batch.max_releases_per_batch,
 	)
+	_warn_if_met_cache_thrashes(cfg, batches, float(sim.length_seconds))
 
 	# Bookkeeping shared across batches.
 	diag_rows: list[dict[str, float | int | str]] = []

@@ -382,9 +382,30 @@ Closing the two non-core per-step costs the GH200 profile exposed.
    `test_met_prefetch_matches_synchronous_footprints` (prefetch on vs off → identical footprints,
    spanning several met-hour boundaries). **Next: confirm on GH200 — phase-timer `met_fetch%`
    should drop sharply (it now measures only the *un-hidden* I/O = prefetch misses).**
-3. **STILL TODO — cache guard (small, safe).** Warn at startup when `met_cache_max_hours` is below
-   the thrash threshold for the batch geometry (≈ batch_met_span + batch_advance), so the
-   set-cache-to-batch-span → zero-benefit footgun can't bite silently again. The only open item.
+3. **Cache guard — DONE (2026-06-29).** `_warn_if_met_cache_thrashes` (main.py) warns at startup
+   when `met_cache_max_hours` is below the batch-geometry reuse threshold (≈ batch met span +
+   advance, computed from the first two expanded batches), so the set-cache-to-batch-span →
+   zero-benefit footgun can't recur silently. Test: `test_met_cache_thrash_warning_fires_when_undersized`.
+
+### I/O-OPTIMISATION ARC COMPLETE (2026-06-29) — all planned items shipped, full suite 217 green
+Confirmed on GH200 (2-day, 48 footprints, ~7 min): phase timers now **balanced** —
+`step 29% / convection 19% / met_fetch 15% (was 63%) / gridder 7% / residual ~29%`;
+`dev_alloc 0.2 GiB`, RSS plateau ~52 GiB. Month extrapolation ≈ **~1.5 h (was 2.5 h) and now
+completes reliably** (no OOM). Summary of the arc: cache fix (~5× fewer fetches) + host cache
+(~50 GiB HBM → host, no OOM) + async prefetch (overlap remaining I/O) + guards/diagnostics
+(phase timer, mem snapshot, recompile/break guards, cache-thrash guard).
+
+### NEW OPTIMISATION FRONTIER (if Matt wants to push further; the run is now I/O-solved + reliable)
+The bottleneck has shifted off I/O. Remaining levers, in rough order:
+- **residual ~29%** — per-step Python loop overhead + batch setup/finalize + output write; not in
+  any timed phase. Profile what's there before optimising.
+- **convection ~19%** (Emanuel) — fires once per met bracket; not yet optimised like Hanna was.
+- **step ~29%** — already the 6× CUDA-graph win; diminishing.
+- **Bigger batches** — now unlocked: GPU is ~0.2 GiB used (was the constraint). Larger
+  `max_releases_per_batch` → fewer batches → less per-batch residual + better compile
+  amortisation, traded against more inactive-particle work on the static full-buffer path
+  (step). Net unclear — measure with the phase timer.
+- REMINDER: `max_substeps=20` is still a placeholder pending Matt's convergence eval [[open-max-substeps-eval]].
 - **Fix (found on the first GH200 run, 2026-06-21):** the per-step memory-log block
   (`mem.log_every_steps`) still referenced `active_count`, which only the *dynamic*
   branch binds → `UnboundLocalError` on the static path. CPU tests missed it because
