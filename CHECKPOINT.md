@@ -406,6 +406,26 @@ The bottleneck has shifted off I/O. Remaining levers, in rough order:
   amortisation, traded against more inactive-particle work on the static full-buffer path
   (step). Net unclear — measure with the phase timer.
 - REMINDER: `max_substeps=20` is still a placeholder pending Matt's convergence eval [[open-max-substeps-eval]].
+
+### MULTI-SITE RELEASES (built 2026-06-29) — the efficient way to grow a run
+New `release.kind: "multi_point_periodic"` (`config.py`): a `sites` list (`{name, lon, lat,
+alt_agl_m}`) on a shared periodic schedule. `expand_to_batches` emits one `ConcreteRelease`
+per (time, site) in **TIME-MAJOR** order, so chunking by `max_releases_per_batch` gives batches
+of contiguous-times × ALL sites — a dense active set sharing one met fetch/hour (amortises the
+per-window fixed costs that dominate the wall). Keep `max_releases_per_batch` a multiple of
+n_sites. The particle/runtime/gridder/prefetch machinery was ALREADY per-release-location
+(`generate_batch_particles` uses each `rel.lon/lat/alt`), so this was mostly config + output.
+Why flat not 6D: the flat `release` axis is the general case — it also fits the planned
+**satellite** workflow (irregular (lon,lat,time) soundings), which a `site×time` grid cannot
+represent. **OUTPUT SCHEMA CHANGED (all runs):** footprint leading dim `release_time` → `release`,
+with `release_time`/`release_lon`/`release_lat`/`release_alt_agl_m`/`site` as per-release COORDS
+(was scalar attrs). Recover a per-site cube:
+`fp["footprint"].set_index(release=["site","release_time"]).unstack("release").sel(site="MHD")`.
+Example: `configs/example_multisite_january.yaml` (MHD/RGL/TAC). Tests:
+`test_multi_site_*` (expand time-major; run emits per-site coords + unstacks), config-validation
+tests (site-in-domain, unique names), updated `test_output_writer`/periodic tests for the dim
+rename. Notebook `flexpart_comparison.ipynb` cmp-03 updated (`swap_dims` to release_time + read
+location from coords). `ConcreteRelease` gained an optional `label` (site name).
 - **Fix (found on the first GH200 run, 2026-06-21):** the per-step memory-log block
   (`mem.log_every_steps`) still referenced `active_count`, which only the *dynamic*
   branch binds → `UnboundLocalError` on the static path. CPU tests missed it because
