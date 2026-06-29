@@ -881,6 +881,48 @@ def _log_device_memory(label: str, device: torch.device) -> None:
 	)
 
 
+def _start_mem_history(device: torch.device) -> bool:
+	"""Begin recording the CUDA allocation history when ``GLIDE_MEM_SNAPSHOT`` is set, so we
+	can localise the per-batch device-memory growth to its exact allocation call stacks
+	(2026-06-29). Returns whether recording is active. Off by default (it has overhead)."""
+
+	if device.type != "cuda" or os.environ.get("GLIDE_MEM_SNAPSHOT", "") in ("", "0", "false", "False"):
+		return False
+	try:
+		torch.cuda.memory._record_memory_history(max_entries=200_000)
+		LOGGER.info(
+			"mem snapshot: recording allocation history; will dump after batch %s",
+			os.environ.get("GLIDE_MEM_SNAPSHOT_BATCH", "1"),
+		)
+		return True
+	except Exception as exc:  # pragma: no cover - diagnostic only
+		LOGGER.warning("mem snapshot: could not start recording: %s", exc)
+		return False
+
+
+def _maybe_dump_mem_snapshot(batch_idx: int, device: torch.device) -> None:
+	"""After the configured batch, dump a CUDA allocation snapshot (open at
+	https://pytorch.org/memory_viz — it shows each live block's allocation stack) plus a
+	pasteable allocator summary, then stop recording. No-op unless armed for this batch."""
+
+	if device.type != "cuda" or os.environ.get("GLIDE_MEM_SNAPSHOT", "") in ("", "0", "false", "False"):
+		return
+	if batch_idx != int(os.environ.get("GLIDE_MEM_SNAPSHOT_BATCH", "1")):
+		return
+	path = os.environ.get("GLIDE_MEM_SNAPSHOT_PATH", "glide_mem_snapshot.pickle")
+	try:
+		torch.cuda.memory._dump_snapshot(path)
+		LOGGER.info("mem snapshot: wrote %s — open at https://pytorch.org/memory_viz", path)
+		LOGGER.info(
+			"mem summary after batch %d:\n%s",
+			batch_idx,
+			torch.cuda.memory_summary(device, abbreviated=True),
+		)
+		torch.cuda.memory._record_memory_history(enabled=None)
+	except Exception as exc:  # pragma: no cover - diagnostic only
+		LOGGER.warning("mem snapshot: dump failed: %s", exc)
+
+
 @torch.no_grad()
 def _run(
 	cfg: RunConfig,
@@ -930,6 +972,7 @@ def _run(
 	use_static = use_static_step_path(device)
 	if use_static:
 		LOGGER.info("runtime: static-shape per-step path (full-set, mask-gated)")
+	_start_mem_history(device)
 
 	# Optional per-step profiler (GLIDE_PROFILE): captures a window of cursor-loop
 	# steps to localise where the per-step time goes (GPU kernels vs host syncs vs
@@ -1348,6 +1391,7 @@ def _run(
 			gc.collect()
 			torch.cuda.empty_cache()
 		_log_device_memory(f"batch {batch.batch_idx} end (post-reclaim)", device)
+		_maybe_dump_mem_snapshot(batch.batch_idx, device)
 		run_escaped_total += batch_escaped_total
 
 	for cached in met_cache.values():

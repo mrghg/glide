@@ -343,12 +343,25 @@ Closing the two non-core per-step costs the GH200 profile exposed.
      and return blocks to the driver.
    - **Batch-boundary diagnostics**: `_log_device_memory` logs alloc/reserved/peak + **compile
      count** at `batch N start`, `end (pre-reclaim)`, `end (post-reclaim)`.
-   **What to read on the next run:** if `end (post-reclaim)` alloc returns to ~the `batch 0 start`
-   baseline each batch → fixed (it was cycles/allocator). If it keeps climbing AND `compiles`
-   increments every batch → per-batch recompilation (last-step clamped `dt_seconds` specialising
-   the graph, same class as `alpha`/`level`); `empty_cache` can't reclaim cudagraph pools, so the
-   fix is to pass `dt_seconds` as a 0-d tensor (note: `_substep_counts` has a `float(dt_seconds)`
-   to convert too). Also watch the `.err` for a `recompile_limit` warning citing `dt_seconds`.
+   **Data from the 2-day run (2026-06-29):** `batch 0 end (post-reclaim) alloc=43.48 GiB`,
+   `batch 1 start=43.48`, `batch 1 end (post-reclaim)=50.70`, **`compiles=1` throughout**. So:
+   (a) NOT recompilation (compiles flat → the `dt` worry was wrong); (b) `gc`+`empty_cache` freed
+   ~nothing (43.54→43.48); (c) batch 0's 43 GiB **survives every `del` into batch 1**; (d) ~**+7
+   GiB/batch** of LIVE memory (`alloc≈reserved`). Conclusion: device tensors held by a **long-
+   lived object** (only the `scheme`/compiled-fn/**cudagraph pool** outlive a batch; `empty_cache`
+   cannot reclaim a cudagraph pool). By elimination the **cudagraph trees pool growing ~7 GiB/
+   batch** is the prime suspect (likely re-recording for each batch's freshly-allocated
+   particles/state — invisible to dynamo's compile counter). At ~7 GiB/batch a 30-batch month
+   OOMs ~batch 11.
+   **Definitive localizer added (`GLIDE_MEM_SNAPSHOT=1`, main.py):** records CUDA allocation
+   history and dumps `glide_mem_snapshot.pickle` + a pasteable `memory_summary` after batch
+   `GLIDE_MEM_SNAPSHOT_BATCH` (default 1). Open the pickle at https://pytorch.org/memory_viz — it
+   names the allocation call stack of the growing memory. **Next: one 2–3 batch run with
+   `GLIDE_MEM_SNAPSHOT=1`** → the top growing allocation site → exact fix. Zero-code cross-check:
+   a 2-batch run with `GLIDE_COMPILE=0` (eager static path, no cudagraph) — if the +7 GiB/batch
+   vanishes, the cudagraph pool is confirmed. Likely fix if cudagraph: reuse persistent
+   particle/state input buffers across batches (stable cudagraph inputs → no re-record), or bound/
+   reset the pool. Do NOT disable cudagraph as the fix (step would 6× back up and dominate again).
 2. **Add a cache guard (small, safe).** Warn at startup when `met_cache_max_hours` is below the
    thrash threshold for the batch geometry (≈ batch_met_span + batch_advance), so the
    set-cache-to-batch-span → zero-benefit footgun can't bite silently again.
