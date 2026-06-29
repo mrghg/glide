@@ -310,14 +310,53 @@ Closing the two non-core per-step costs the GH200 profile exposed.
   `met_fetch` is exact (synchronous CPU/IO), so `met_fetch / wall` is a faithful GPU-idle
   fraction even with no CUDA sync; `GLIDE_PHASE_TIMERS_SYNC=1` adds per-phase `cuda.synchronize`
   for clean step-vs-gridder attribution (serialises → perturbs totals). Wired on both step
-  paths; no-op when disabled. **Next: run it to confirm met_fetch% + fetch count, THEN pick the
-  fix** — re-fetch thrash → bigger `met_cache_max_hours` (host-side cache; free-ish); genuine
-  per-fetch latency with fetch < compute → async prefetch; latency ≫ compute → parallel fetches.
-- **Async prefetch — NOT YET BUILT (measure first).** Single-window-ahead prefetch is bounded by
-  `min(fetch, compute)`; compute is now ~0.3 s/window, so if fetch ≫ that it caps out and we'd
-  need parallel fetches instead. Dangers when we do build it: met_cache thread race; keep the
-  fetch thread CPU-only (no CUDA off-thread); exception propagation; thread cleanup on
-  timeout/SIGTERM; bit-equivalence (needs an async==sync footprint test). Build behind a flag.
+  paths; no-op when disabled.
+- **MEASURED (2026-06-29, 2-day GH200 run): I/O-bound.** `met_fetch=63% of wall, ~1.6 s/fetch`;
+  step+gridder only ~15%. The 6× physics win was real but irrelevant to the wall — the GPU
+  idles ~2/3 of the time on `fetch_hourly_window`. So the fix is fetch reduction + overlap, not
+  more GPU work.
+- **CACHE FIX CONFIRMED (2026-06-29): `met_cache_max_hours` must EXCEED one batch's met span,
+  not equal it.** Bumping 2→**144** (= exactly one batch span: 120 h backward + 24 h release
+  span) gave **zero** benefit — batch 1 still re-fetched its whole range. Cause: **LRU thrash**.
+  The cursor walks latest→earliest, so at a batch's end the LRU-oldest entry is the *top* hour —
+  exactly what the next batch (starting 24 h later) needs first. With the cache exactly full,
+  batch N+1's first new fetches evict the overlap hours right before they'd be reused. Bumping
+  to **192** (≥ span + one batch advance ≈ 168 h) fixed it: batch 1's fetch count **plateaued at
+  ~168** (batch 0's 144 + ~24 new) and the periodic log went quiet = reuse working. Month
+  extrapolation: ~840 vs ~4320 fetches (**~5×**), met_fetch ~63%→~30% of wall, ≈2× faster
+  overall. **Memory is cheap: ~21 MB/window host RSS (NOT the ~200 MB first guessed)** — the AGL
+  vertical subset keeps few levels; 192 h ≈ ~4 GB host RAM, can go higher freely. Current
+  recommended config value: `met_cache_max_hours: 192` (240 for margin).
+
+### NEXT STEPS (ordered; 2026-06-29 — Matt stepping away, resume here)
+1. **⚠️ `dev_alloc` per-batch GPU-memory growth (GATES the month run) — INSTRUMENTED + MITIGATED,
+   2026-06-29; awaiting a GH200 run to confirm.** Observed 29.7→43.5 GiB across batches
+   (`cache=144`), 45 GiB at batch 1 (`cache=192`) — *device* memory, not the host cache; and
+   `alloc ≈ reserved` so it's LIVE tensors, ~40 GiB more than one batch needs (~1 GiB) → real
+   accumulation. If ~linear a 30-batch month OOMs ~batch 7–8 (likely why earlier long runs died).
+   Changes made in `main.py`:
+   - **`@torch.no_grad()` on `_run`** — the whole batch loop ran with autograd live; correct for
+     an inference model and rules out grad-graph retention. (Tests still pass — values unchanged.)
+   - **Per-batch reclaim** at batch end: `del convection_state` (was leaked — only
+     `turbulence_state` was deleted) + `gc.collect()` + `torch.cuda.empty_cache()` (CUDA only) to
+     break reference cycles (closures / compiled-fn caches retain device tensors past plain `del`)
+     and return blocks to the driver.
+   - **Batch-boundary diagnostics**: `_log_device_memory` logs alloc/reserved/peak + **compile
+     count** at `batch N start`, `end (pre-reclaim)`, `end (post-reclaim)`.
+   **What to read on the next run:** if `end (post-reclaim)` alloc returns to ~the `batch 0 start`
+   baseline each batch → fixed (it was cycles/allocator). If it keeps climbing AND `compiles`
+   increments every batch → per-batch recompilation (last-step clamped `dt_seconds` specialising
+   the graph, same class as `alpha`/`level`); `empty_cache` can't reclaim cudagraph pools, so the
+   fix is to pass `dt_seconds` as a 0-d tensor (note: `_substep_counts` has a `float(dt_seconds)`
+   to convert too). Also watch the `.err` for a `recompile_limit` warning citing `dt_seconds`.
+2. **Add a cache guard (small, safe).** Warn at startup when `met_cache_max_hours` is below the
+   thrash threshold for the batch geometry (≈ batch_met_span + batch_advance), so the
+   set-cache-to-batch-span → zero-benefit footgun can't bite silently again.
+3. **Build async prefetch (the endgame, behind a flag + async==sync footprint test).** Numbers
+   are now balanced — ~1.58 s fetch/window ≈ ~1.2 s compute/window — so single-window-ahead
+   prefetch (load N+1 on a CPU thread while stepping N) can hide most of the remaining ~22 min
+   month I/O → ~1.75× more. Dangers: met_cache thread race; fetch thread must NEVER touch CUDA;
+   exception re-raise on main thread; clean shutdown on exit/timeout; 1-deep handoff is enough.
 - **Fix (found on the first GH200 run, 2026-06-21):** the per-step memory-log block
   (`mem.log_every_steps`) still referenced `active_count`, which only the *dynamic*
   branch binds → `UnboundLocalError` on the static path. CPU tests missed it because

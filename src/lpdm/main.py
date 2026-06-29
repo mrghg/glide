@@ -842,6 +842,46 @@ def _convection_scheme_kwargs(cfg: RunConfig) -> dict[str, object]:
 	}
 
 
+def _compile_count() -> int:
+	"""Number of torch.compile graph compilations so far (-1 if the counter is unavailable).
+
+	Grows by one per (re)compilation. If it climbs at every batch boundary, the compiled
+	core is being RE-compiled per batch — each recompile records a NEW CUDA graph whose
+	memory the caching allocator's ``empty_cache`` cannot reclaim, so it accumulates toward
+	OOM. The usual culprit is a per-batch-varying Python scalar reaching the core (the
+	last-step clamped ``dt_seconds`` — same class as the ``alpha``/``level`` fixes)."""
+
+	try:
+		from torch._dynamo.utils import counters
+
+		return int(counters.get("frames", {}).get("ok", 0))
+	except Exception:
+		return -1
+
+
+def _log_device_memory(label: str, device: torch.device) -> None:
+	"""Log CUDA allocated/reserved/peak memory + compile count at a coarse boundary (no-op
+	off CUDA).
+
+	Used at batch boundaries to localise the per-batch GPU-memory growth that risks OOM-ing
+	a long multi-batch run (2026-06-29). `allocated` is live tensors; `reserved` is the
+	caching allocator's pool; `peak` is the in-batch high-water mark (reset each batch);
+	`compiles` is the cumulative torch.compile count (climbing per batch = recompilation)."""
+
+	if device.type != "cuda":
+		return
+	gib = 2 ** 30
+	LOGGER.info(
+		"device mem [%s]: alloc=%.2f GiB reserved=%.2f GiB peak=%.2f GiB compiles=%d",
+		label,
+		torch.cuda.memory_allocated(device) / gib,
+		torch.cuda.memory_reserved(device) / gib,
+		torch.cuda.max_memory_allocated(device) / gib,
+		_compile_count(),
+	)
+
+
+@torch.no_grad()
 def _run(
 	cfg: RunConfig,
 	*,
@@ -945,6 +985,9 @@ def _run(
 	footprint_store_created = False
 
 	for batch in batches:
+		if device.type == "cuda":
+			torch.cuda.reset_peak_memory_stats(device)
+		_log_device_memory(f"batch {batch.batch_idx} start", device)
 		particle_batch = generate_batch_particles(batch, device=device_str)
 		particles = particle_batch.particles
 		# release_idx from the batch is global; remap to batch-local for the
@@ -1287,14 +1330,24 @@ def _run(
 		)
 		endpoint_particles_chunks.append(particles.detach().cpu().clone())
 		endpoint_release_idx_chunks.append(particle_batch.release_idx.detach().cpu().clone())
+		_log_device_memory(f"batch {batch.batch_idx} end (pre-reclaim)", device)
 		del gridder
 		del particles
 		del release_idx_local
 		del release_time_offsets_s
 		del release_window_end_offsets_s
 		del turbulence_state
+		del convection_state
 		del particle_batch
 		del alive
+		# Per-batch reclaim: break reference cycles (closures / compiled-fn caches retain
+		# device tensors that plain `del` + refcounting won't free) and return the freed
+		# blocks to the driver, so peak device memory stays ~one batch's worth instead of
+		# growing per batch toward OOM on a long run (2026-06-29 dev_alloc investigation).
+		if device.type == "cuda":
+			gc.collect()
+			torch.cuda.empty_cache()
+		_log_device_memory(f"batch {batch.batch_idx} end (post-reclaim)", device)
 		run_escaped_total += batch_escaped_total
 
 	for cached in met_cache.values():
