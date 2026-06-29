@@ -292,9 +292,32 @@ Closing the two non-core per-step costs the GH200 profile exposed.
   this class too; verified non-vacuous (forcing the tuple path → `RecompileError`). Same lesson
   as `alpha`, one level deeper: *no per-window-varying value may reach the compiled core as a
   Python scalar/tuple — only constants and tensors.*
-- **Pending (Matt, GH200):** re-run the month job — should now compile once and stay captured
-  for the whole run (no per-window recompile). The gridder scatter + cudagraph in/out copies
-  remain eager; capturing the gridder is the next lever if it's still the wall.
+- **Month run: physics fast, WALL not faster — GPU bursts (≤64% sm) then long idle (2026-06-26).**
+  The per-step capture is fast but the *job* isn't, and the dmon shows the GPU idling between
+  bursts → the bottleneck is non-GPU work *between* the captured bursts, which the 20-step
+  `GLIDE_PROFILE` window (always inside ONE met window) is structurally blind to. Prime
+  suspect: synchronous met I/O at window transitions (`reader.fetch_hourly_window`,
+  `_get_hourly_met_window`), made worse by **cross-batch met RE-FETCH**. Config analysis of
+  `example_mhd_january_periodic.yaml` (5-day backward window, 24-release/1-day batches → 30
+  batches, `met_cache_max_hours: 2`): consecutive batches' 5-day windows overlap ~4/5, and a
+  2-hour LRU keeps none of it → each met hour is fetched by ~5 batches. Est. **~4320 fetches vs
+  ~840 unique hours (~5× redundant I/O)**. Prefetch does NOT fix the *count* — that's a cache
+  (or batch-size) change. Whether it matters depends on per-fetch latency (local zarr vs GCS).
+- **Built `_PhaseTimer` (`GLIDE_PHASE_TIMERS`, main.py) to settle it.** Whole-run wall-clock
+  accountant bucketed by phase (met_fetch / step / advect / convection / gridder + residual),
+  printed at run end AND logged every `GLIDE_PHASE_TIMERS_EVERY` (default 25) fetches — so a
+  TIMED-OUT job still leaves the split in the .out log (the last run timed out, no manifest).
+  `met_fetch` is exact (synchronous CPU/IO), so `met_fetch / wall` is a faithful GPU-idle
+  fraction even with no CUDA sync; `GLIDE_PHASE_TIMERS_SYNC=1` adds per-phase `cuda.synchronize`
+  for clean step-vs-gridder attribution (serialises → perturbs totals). Wired on both step
+  paths; no-op when disabled. **Next: run it to confirm met_fetch% + fetch count, THEN pick the
+  fix** — re-fetch thrash → bigger `met_cache_max_hours` (host-side cache; free-ish); genuine
+  per-fetch latency with fetch < compute → async prefetch; latency ≫ compute → parallel fetches.
+- **Async prefetch — NOT YET BUILT (measure first).** Single-window-ahead prefetch is bounded by
+  `min(fetch, compute)`; compute is now ~0.3 s/window, so if fetch ≫ that it caps out and we'd
+  need parallel fetches instead. Dangers when we do build it: met_cache thread race; keep the
+  fetch thread CPU-only (no CUDA off-thread); exception propagation; thread cleanup on
+  timeout/SIGTERM; bit-equivalence (needs an async==sync footprint test). Build behind a flag.
 - **Fix (found on the first GH200 run, 2026-06-21):** the per-step memory-log block
   (`mem.log_every_steps`) still referenced `active_count`, which only the *dynamic*
   branch binds → `UnboundLocalError` on the static path. CPU tests missed it because

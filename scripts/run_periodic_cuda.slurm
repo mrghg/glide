@@ -119,6 +119,18 @@ fi
 # or just paste the printed summary. Knobs: GLIDE_PROFILE_STEPS / _WARMUP / _TRACE;
 # GLIDE_PROFILE_CONTINUE=1 to finish the run instead of exiting. Best on the smoke
 # config:  GLIDE_PROFILE=1 sbatch scripts/run_periodic_cuda.slurm configs/smoke_mhd_single_release.yaml
+#
+# WHOLE-RUN PHASE TIMERS (when the per-step capture looks fast but the JOB is slow —
+# i.e. the GPU bursts then idles): submit with GLIDE_PHASE_TIMERS=1. Unlike GLIDE_PROFILE
+# (which samples ~20 steps inside ONE met window), this accumulates wall time across EVERY
+# window/batch and prints a phase breakdown (met_fetch / step / gridder / advect / convection
+# + residual) at the end, AND logs a running breakdown every 25 met fetches — so even a job
+# that TIMES OUT leaves the split in the .out log. The met_fetch bucket is the GPU-idle time
+# spent on synchronous met I/O. Compare met_fetch% to wall; check the fetch COUNT vs the
+# unique hours your run spans (re-fetch thrash → bump memory.met_cache_max_hours in the
+# config). Knobs: GLIDE_PHASE_TIMERS_EVERY (log cadence); GLIDE_PHASE_TIMERS_SYNC=1 to
+# cuda-sync each phase for clean step-vs-gridder attribution (serialises — perturbs totals).
+# Leave GLIDE_PROFILE OFF for this (it exits early). Runs a normal full job.
 
 # --- Run parameters --------------------------------------------------------
 CONFIG="${1:-configs/example_mhd_january_periodic.yaml}"   # 1st arg overrides

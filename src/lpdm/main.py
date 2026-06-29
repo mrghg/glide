@@ -11,13 +11,14 @@ The CLI surface is intentionally small: a YAML ``--config`` plus a few overrides
 from __future__ import annotations
 
 import argparse
+import contextlib
 import gc
 import logging
 import os
 import resource
 import sys
 import time
-from collections import OrderedDict
+from collections import OrderedDict, defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -173,6 +174,109 @@ def _make_step_profiler(device: torch.device) -> "_StepProfiler | None":
 		active=int(os.environ.get("GLIDE_PROFILE_STEPS", "20")),
 		trace_path=Path(os.environ.get("GLIDE_PROFILE_TRACE", "glide_profile_trace.json")),
 		exit_after=os.environ.get("GLIDE_PROFILE_CONTINUE", "") in ("", "0", "false", "False"),
+	)
+
+
+class _PhaseTimer:
+	"""Coarse whole-run wall-clock accountant, enabled by ``GLIDE_PHASE_TIMERS``.
+
+	Where ``_StepProfiler`` samples ~20 steps inside a SINGLE met window (so it's blind to
+	per-window met I/O and batch boundaries — the very places the GPU goes idle), this
+	accumulates wall time across the WHOLE run bucketed by phase and prints a breakdown. It
+	answers "where does the wall go over many windows/batches" — chiefly: *is the GPU idling
+	on synchronous met fetches?* The ``met_fetch`` bucket is exact (synchronous CPU/IO, GPU
+	uninvolved), so ``met_fetch / wall`` is a faithful idle-fraction even with no CUDA sync.
+
+	It also logs a running breakdown every ``log_every`` met fetches, so even a job that
+	*times out* (no final summary, no manifest) leaves the split in the log. NOTE: the
+	``step`` bucket includes the one-time ``torch.compile`` (~tens of s) charged to the first
+	step — negligible on a long run, but run long enough that it washes out (or compile-off).
+
+	Env:
+	* ``GLIDE_PHASE_TIMERS``        — enable (truthy)
+	* ``GLIDE_PHASE_TIMERS_SYNC``   — ``torch.cuda.synchronize()`` at each phase boundary so
+	                                  GPU phases (step/gridder) get real device time. This
+	                                  SERIALISES the pipeline (perturbs absolute numbers but
+	                                  cleans the step-vs-gridder split); off by default.
+	* ``GLIDE_PHASE_TIMERS_EVERY``  — log running breakdown every N met fetches (default 25)
+	"""
+
+	_NULLCTX = contextlib.nullcontext()
+
+	def __init__(self, *, enabled: bool, sync_cuda: bool, log_every: int) -> None:
+		self.enabled = enabled
+		self.sync_cuda = sync_cuda
+		self.log_every = max(0, log_every)
+		self.totals: dict[str, float] = defaultdict(float)
+		self.counts: dict[str, int] = defaultdict(int)
+		self.t_start = time.perf_counter()
+		self._fetches = 0
+
+	def phase(self, name: str):
+		"""Context manager timing a phase; a cheap shared no-op when disabled."""
+		if not self.enabled:
+			return self._NULLCTX
+		return self._timed(name)
+
+	@contextlib.contextmanager
+	def _timed(self, name: str):
+		if self.sync_cuda:
+			torch.cuda.synchronize()
+		t0 = time.perf_counter()
+		try:
+			yield
+		finally:
+			if self.sync_cuda:
+				torch.cuda.synchronize()
+			self.totals[name] += time.perf_counter() - t0
+			self.counts[name] += 1
+
+	def tick_fetch(self) -> None:
+		"""Call after each REAL met fetch (cache miss); logs a running breakdown periodically."""
+		if not self.enabled or self.log_every == 0:
+			return
+		self._fetches += 1
+		if self._fetches % self.log_every == 0:
+			wall = time.perf_counter() - self.t_start
+			parts = ", ".join(
+				f"{n}={t:.1f}s({100 * t / wall:.0f}%)"
+				for n, t in sorted(self.totals.items(), key=lambda kv: kv[1], reverse=True)
+			)
+			LOGGER.info("phase timers @ %d fetches — wall %.1fs: %s", self._fetches, wall, parts)
+
+	def summary(self, *, hour_windows: int) -> None:
+		if not self.enabled:
+			return
+		wall = time.perf_counter() - self.t_start
+		accounted = sum(self.totals.values())
+		note = "  [CUDA-synced]" if self.sync_cuda else "  [no CUDA sync: GPU phases under-counted]"
+		lines = [
+			"=" * 78,
+			f"GLIDE phase timers — total wall {wall:.1f}s  (met fetches: {hour_windows}){note}",
+			"-" * 78,
+			f"  {'phase':<22}{'total_s':>12}{'% wall':>9}{'calls':>11}{'ms/call':>13}",
+		]
+		for name, total in sorted(self.totals.items(), key=lambda kv: kv[1], reverse=True):
+			c = self.counts[name]
+			pct = 100.0 * total / wall if wall else 0.0
+			per = 1000.0 * total / c if c else 0.0
+			lines.append(f"  {name:<22}{total:>12.2f}{pct:>8.1f}%{c:>11}{per:>13.3f}")
+		resid = wall - accounted
+		lines.append(f"  {'(residual/untimed)':<22}{resid:>12.2f}{(100.0 * resid / wall if wall else 0.0):>8.1f}%")
+		lines.append("=" * 78)
+		print("\n".join(lines))
+
+
+def _make_phase_timer() -> "_PhaseTimer":
+	"""Build the phase timer from env; always returns an object (a no-op when disabled, so
+	call sites need no None-checks)."""
+	def _truthy(name: str) -> bool:
+		return os.environ.get(name, "") not in ("", "0", "false", "False")
+
+	return _PhaseTimer(
+		enabled=_truthy("GLIDE_PHASE_TIMERS"),
+		sync_cuda=_truthy("GLIDE_PHASE_TIMERS_SYNC") and torch.cuda.is_available(),
+		log_every=int(os.environ.get("GLIDE_PHASE_TIMERS_EVERY", "25")),
 	)
 
 
@@ -791,6 +895,9 @@ def _run(
 	# steps to localise where the per-step time goes (GPU kernels vs host syncs vs
 	# CPU/met). None unless GLIDE_PROFILE is set, so normal runs pay nothing.
 	step_profiler = _make_step_profiler(device)
+	# Coarse whole-run phase accountant (GLIDE_PHASE_TIMERS). Unlike the step profiler it
+	# spans every window/batch, so it catches per-window met-fetch idle. No-op when disabled.
+	phase_timer = _make_phase_timer()
 
 	# M5 stage 5: expand the schedule into batches and validate met coverage over
 	# the full schedule. Each batch is integrated independently and its footprint
@@ -945,10 +1052,13 @@ def _run(
 			#             per-step host sync; constant shapes for CUDA-graph capture.
 			#   dynamic - boolean-index the active subset (cheaper on CPU). Unchanged.
 			if use_static:
-				met_window, fetched_windows = _get_hourly_met_window(
-					reader, cfg, t_cursor, met_cache
-				)
+				with phase_timer.phase("met_fetch"):
+					met_window, fetched_windows = _get_hourly_met_window(
+						reader, cfg, t_cursor, met_cache
+					)
 				hour_windows += fetched_windows
+				if fetched_windows:
+					phase_timer.tick_fetch()
 				# On the static path HannaScheme folds RK2 advection into its captured
 				# graph (one graph for advect + turbulence), so the runtime must NOT
 				# advect separately. A scheme that does NOT fold advection (e.g. the
@@ -960,42 +1070,46 @@ def _run(
 					met_window, t_cursor, delta_s, device, particles.dtype
 				)
 				if not scheme.step_includes_advection(engine):
-					advected_full = _advect_active_particles(
-						engine, device, particles, met_window, t_cursor, delta_s, particles.dtype,
-					)[0]
-					particles = torch.where(active_mask.unsqueeze(1), advected_full, particles)
-				particles, turbulence_state = scheme.step(
-					particles=particles,
-					state=turbulence_state,
-					met_window=met_window,
-					t_alpha=t_alpha,
-					dt_seconds=delta_s,
-					active_mask=active_mask,
-					engine=engine,
-				)
-				# Convection: once per met bracket (Emanuel matrix is constant in a window).
-				bracket_start = met_window.metadata.time_start
-				if bracket_start != last_convection_bracket_start:
-					particles, convection_state = convection_scheme.maybe_convect(
+					with phase_timer.phase("advect"):
+						advected_full = _advect_active_particles(
+							engine, device, particles, met_window, t_cursor, delta_s, particles.dtype,
+						)[0]
+						particles = torch.where(active_mask.unsqueeze(1), advected_full, particles)
+				with phase_timer.phase("step"):
+					particles, turbulence_state = scheme.step(
 						particles=particles,
-						state=convection_state,
+						state=turbulence_state,
 						met_window=met_window,
 						t_alpha=t_alpha,
 						dt_seconds=delta_s,
 						active_mask=active_mask,
 						engine=engine,
 					)
+				# Convection: once per met bracket (Emanuel matrix is constant in a window).
+				bracket_start = met_window.metadata.time_start
+				if bracket_start != last_convection_bracket_start:
+					with phase_timer.phase("convection"):
+						particles, convection_state = convection_scheme.maybe_convect(
+							particles=particles,
+							state=convection_state,
+							met_window=met_window,
+							t_alpha=t_alpha,
+							dt_seconds=delta_s,
+							active_mask=active_mask,
+							engine=engine,
+						)
 					last_convection_bracket_start = bracket_start
 				elapsed_s = (release_window_end_offsets_s - cursor_offset_s).clamp_(min=0.0)
 				t_idx = (elapsed_s / 3600.0).floor().to(torch.int64).clamp_(max=gridder.n_t - 1)
-				gridder.accumulate(
-					particles=particles[:, :3],
-					active_mask=active_mask,
-					weights=particles[:, 3],
-					t_idx=t_idx,
-					release_idx=release_idx_local,
-					dt_seconds=delta_s,
-				)
+				with phase_timer.phase("gridder"):
+					gridder.accumulate(
+						particles=particles[:, :3],
+						active_mask=active_mask,
+						weights=particles[:, 3],
+						t_idx=t_idx,
+						release_idx=release_idx_local,
+						dt_seconds=delta_s,
+					)
 				newly_escaped = active_mask & ~_within_met_domain(particles, cfg)
 				alive = alive & ~newly_escaped
 				escaped_count = torch.count_nonzero(newly_escaped)
@@ -1004,10 +1118,13 @@ def _run(
 
 				if active_count > 0:
 					active_particles = particles[active_mask]
-					met_window, fetched_windows = _get_hourly_met_window(
-						reader, cfg, t_cursor, met_cache
-					)
+					with phase_timer.phase("met_fetch"):
+						met_window, fetched_windows = _get_hourly_met_window(
+							reader, cfg, t_cursor, met_cache
+						)
 					hour_windows += fetched_windows
+					if fetched_windows:
+						phase_timer.tick_fetch()
 					advected_active, t_alpha, wind_mean = _advect_active_particles(
 						engine,
 						device,
@@ -1215,6 +1332,7 @@ def _run(
 	}
 	writer.write_metadata_json(outputs.metadata, metadata)
 
+	phase_timer.summary(hour_windows=hour_windows)
 	return metadata
 
 
