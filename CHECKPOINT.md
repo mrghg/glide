@@ -366,17 +366,25 @@ Closing the two non-core per-step costs the GH200 profile exposed.
    every one `.to(device)`s; the CPU suite can't catch a missing one since cpu==cpu, so this was a
    manual audit). Frees ~50 GiB HBM; the cache moves to Grace LPDDR5X (plentiful). Per-step
    host→device copy of the active window is cheap over NVLink-C2C. Kept the no_grad wrap +
-   `del convection_state` + per-batch `gc`/`empty_cache` (cheap correctness hygiene). **Awaiting a
-   GH200 run to confirm `dev_alloc` now stays flat (~15–20 GiB) and host RSS rises by ~the cache
-   size (~50 GiB at 192 h — confirm Grace headroom).**
-2. **Add a cache guard (small, safe).** Warn at startup when `met_cache_max_hours` is below the
-   thrash threshold for the batch geometry (≈ batch_met_span + batch_advance), so the
-   set-cache-to-batch-span → zero-benefit footgun can't bite silently again.
-3. **Build async prefetch (the endgame, behind a flag + async==sync footprint test).** Numbers
-   are now balanced — ~1.58 s fetch/window ≈ ~1.2 s compute/window — so single-window-ahead
-   prefetch (load N+1 on a CPU thread while stepping N) can hide most of the remaining ~22 min
-   month I/O → ~1.75× more. Dangers: met_cache thread race; fetch thread must NEVER touch CUDA;
-   exception re-raise on main thread; clean shutdown on exit/timeout; 1-deep handoff is enough.
+   `del convection_state` + per-batch `gc`/`empty_cache` (cheap correctness hygiene).
+   **CONFIRMED on GH200 (2026-06-29):** `dev_alloc` dropped from ~50 GiB to **~0.2 GiB**, flat
+   across the batch boundary (0.15→0.15), `compiles=1`; host RSS plateaus at **~58 GiB** (the
+   cache) once full. OOM gate cleared — ~119 GiB HBM now free (so bigger batches are an option
+   later). The non-cache GPU working set is tiny (~0.2 GiB), incl. the cudagraph workspace.
+2. **Async prefetch — BUILT (2026-06-29; `memory.met_prefetch`, default True).** `MetPrefetcher`
+   in main.py: a single background worker prefetches the next backward met hour while the
+   current window is stepped, so fetch I/O overlaps compute (~1.58 s fetch ≈ ~1.2 s compute per
+   window → up to ~1.75× on the remaining ~22 min month I/O). Safety as designed: ONE worker does
+   every reader access (no reader-concurrency assumption); requires `met_cache_on_host` so the
+   worker only makes HOST tensors (no CUDA off-thread; auto-disabled+warned otherwise); the cache
+   is mutated only by the main thread in `get()` (no lock); fetch errors re-raise via
+   `Future.result()`; `shutdown()` after the batch loop. Bit-equivalence guard:
+   `test_met_prefetch_matches_synchronous_footprints` (prefetch on vs off → identical footprints,
+   spanning several met-hour boundaries). **Next: confirm on GH200 — phase-timer `met_fetch%`
+   should drop sharply (it now measures only the *un-hidden* I/O = prefetch misses).**
+3. **STILL TODO — cache guard (small, safe).** Warn at startup when `met_cache_max_hours` is below
+   the thrash threshold for the batch geometry (≈ batch_met_span + batch_advance), so the
+   set-cache-to-batch-span → zero-benefit footgun can't bite silently again. The only open item.
 - **Fix (found on the first GH200 run, 2026-06-21):** the per-step memory-log block
   (`mem.log_every_steps`) still referenced `active_count`, which only the *dynamic*
   branch binds → `UnboundLocalError` on the static path. CPU tests missed it because

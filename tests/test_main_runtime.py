@@ -152,6 +152,8 @@ def _make_run_config(**flat_overrides: object) -> RunConfig:
         met_alt_max_m=10000.0,
         # Memory
         met_cache_max_hours=2,
+        met_cache_on_host=True,
+        met_prefetch=True,
         memory_log_every_steps=0,
         gc_every_steps=0,
         memory_guard_max_rss_gib=None,
@@ -198,6 +200,8 @@ def _make_run_config(**flat_overrides: object) -> RunConfig:
             },
             "memory": {
                 "met_cache_max_hours": flat["met_cache_max_hours"],
+                "met_cache_on_host": flat["met_cache_on_host"],
+                "met_prefetch": flat["met_prefetch"],
                 "log_every_steps": flat["memory_log_every_steps"],
                 "gc_every_steps": flat["gc_every_steps"],
                 "guard_max_rss_gib": flat["memory_guard_max_rss_gib"],
@@ -839,6 +843,37 @@ def test_v1_density_weighted_well_mixed_with_F2() -> None:
         "ρ gradient is too weak to make this test discriminating; widen the "
         "pressure range or deepen the BL."
     )
+
+
+def test_met_prefetch_matches_synchronous_footprints(tmp_path: Path) -> None:
+    """Background met prefetch must be bit-identical to the synchronous fetch path.
+
+    Prefetch only changes WHEN met I/O happens (a background thread loads the next backward
+    hour while the current window is stepped) — never the fetched data, the cache contents,
+    the compute order, or the RNG draws. So the footprints must match exactly. The run spans
+    several met-hour boundaries (3 h backward at dt=300 s, cache=2 h so it both evicts and
+    re-fetches) to actually exercise the prefetch schedule / pending-reuse / eviction paths.
+    """
+
+    def run(prefetch: bool, sub: str):
+        cfg = _make_run_config(
+            simulation_length_seconds=10800,
+            dt_seconds=300,
+            n_particles=512,
+            release_seed=42,
+            met_cache_max_hours=2,
+            met_prefetch=prefetch,
+            n_time_bins=3,
+            output_uri=str(tmp_path / sub),
+        )
+        reader = _make_reader(cfg, wind_fn=lambda _: (6.0, -3.0, 0.0))
+        torch.manual_seed(0)
+        _run(cfg, reader=reader)
+        return xr.open_zarr(tmp_path / sub / "footprints.zarr")["footprint"].values
+
+    fp_sync = run(False, "sync")
+    fp_async = run(True, "async")
+    assert np.array_equal(fp_sync, fp_async)
 
 
 def test_footprint_total_matches_active_particle_time(tmp_path: Path) -> None:

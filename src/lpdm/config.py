@@ -347,6 +347,11 @@ class MemoryConfig(_Frozen):
     # the active window to the device via its existing `.to(device)` calls (cheap over
     # NVLink-C2C). No effect on a CPU run (host == device). Set False for the old behaviour.
     met_cache_on_host: bool = Field(True)
+    # Prefetch the next (backward) met hour on a background thread so its I/O overlaps the
+    # current window's compute (the run is met-I/O-bound: ~1.6 s/fetch, GPU otherwise idle).
+    # Requires `met_cache_on_host` (the prefetch thread must produce HOST tensors — no CUDA
+    # off the main thread); auto-disabled with a warning otherwise.
+    met_prefetch: bool = Field(True)
     log_every_steps: int = Field(10, ge=0)
     gc_every_steps: int = Field(50, ge=0)
     guard_max_rss_gib: float | None = Field(None, gt=0)

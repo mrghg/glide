@@ -19,6 +19,7 @@ import resource
 import sys
 import time
 from collections import OrderedDict, defaultdict
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -712,6 +713,107 @@ def _get_hourly_met_window(
 	return met_window, 1
 
 
+class MetPrefetcher:
+	"""Serves hourly met windows, optionally prefetching the NEXT (backward) hour on a
+	background thread so its I/O overlaps the current window's compute.
+
+	The run is met-I/O-bound (~1.6 s/fetch, GPU otherwise idle), so while the caller works
+	through hour H we prefetch H−1 (the cursor walks backward). When the caller reaches H−1
+	the fetch is already done → no stall.
+
+	Safety:
+	* a SINGLE worker thread performs EVERY reader access, so the reader is never touched
+	  concurrently (no assumption about reader thread-safety);
+	* it produces HOST tensors only — enabling prefetch requires ``met_cache_on_host`` so the
+	  worker never issues CUDA calls off the main thread;
+	* the met cache is mutated only by the caller (main thread) inside ``get`` → no cache lock;
+	* a fetch exception re-raises on the main thread via ``Future.result()``.
+
+	Bit-identical to the synchronous path: same fetch for the same hour, same cache contents.
+	Disabled (``enabled=False``) collapses to the old synchronous fetch on the main thread.
+	"""
+
+	def __init__(
+		self,
+		reader: MetReader,
+		cfg: RunConfig,
+		met_cache: "OrderedDict[datetime, HourlyMetTensors]",
+		*,
+		enabled: bool,
+	) -> None:
+		self._reader = reader
+		self._cfg = cfg
+		self._cache = met_cache
+		self._max_hours = cfg.memory.met_cache_max_hours
+		self._executor = (
+			ThreadPoolExecutor(max_workers=1, thread_name_prefix="glide-met-prefetch")
+			if enabled
+			else None
+		)
+		self._pending_key: datetime | None = None
+		self._pending_future: "Future[HourlyMetTensors] | None" = None
+
+	def _fetch(self, hour_key: datetime) -> HourlyMetTensors:
+		return self._reader.fetch_hourly_window(
+			BoundingBoxRequest(
+				spatial=_met_domain_bounds(self._cfg),
+				time=TimeBounds(start=hour_key, end=hour_key + timedelta(hours=1)),
+			)
+		)
+
+	def _cache_put(self, hour_key: datetime, window: HourlyMetTensors) -> None:
+		if self._max_hours > 0:
+			self._cache[hour_key] = window
+			while len(self._cache) > self._max_hours:
+				_, evicted = self._cache.popitem(last=False)
+				del evicted
+
+	def _cancel_pending(self) -> None:
+		if self._pending_future is not None:
+			self._pending_future.cancel()
+		self._pending_key = None
+		self._pending_future = None
+
+	def get(self, t_cursor: datetime) -> tuple[HourlyMetTensors, int]:
+		"""Return (window, fetched) for ``t_cursor``'s hour; ``fetched`` is 1 on a real read
+		(cache miss), 0 on a cache hit — same accounting as the synchronous path."""
+
+		hour_key = _hour_floor(t_cursor)
+		if self._max_hours > 0 and hour_key in self._cache:
+			self._cache.move_to_end(hour_key)
+			window, fetched = self._cache[hour_key], 0
+		elif self._executor is None:
+			window, fetched = self._fetch(hour_key), 1
+			self._cache_put(hour_key, window)
+		else:
+			if self._pending_key == hour_key and self._pending_future is not None:
+				fut, self._pending_key, self._pending_future = self._pending_future, None, None
+			else:
+				self._cancel_pending()  # stale (cursor jumped, e.g. batch boundary)
+				fut = self._executor.submit(self._fetch, hour_key)
+			window = fut.result()  # blocks iff not done yet; re-raises fetch errors
+			self._cache_put(hour_key, window)
+			fetched = 1
+		self._schedule_prefetch(hour_key)
+		return window, fetched
+
+	def _schedule_prefetch(self, hour_key: datetime) -> None:
+		if self._executor is None:
+			return
+		nxt = hour_key - timedelta(hours=1)
+		if (self._max_hours > 0 and nxt in self._cache) or self._pending_key == nxt:
+			return
+		self._cancel_pending()
+		self._pending_key = nxt
+		self._pending_future = self._executor.submit(self._fetch, nxt)
+
+	def shutdown(self) -> None:
+		self._cancel_pending()
+		if self._executor is not None:
+			self._executor.shutdown(wait=False, cancel_futures=True)
+			self._executor = None
+
+
 def _advection_alpha_wind_mean(
 	met_window: HourlyMetTensors,
 	t_cursor: datetime,
@@ -1014,6 +1116,15 @@ def _run(
 	step_count = 0
 	hour_windows = 0
 	met_cache: OrderedDict[datetime, HourlyMetTensors] = OrderedDict()
+	# Background prefetch of the next backward met hour (overlaps fetch I/O with compute).
+	# Requires a HOST-resident reader (the worker must not issue CUDA calls); disabled with a
+	# warning otherwise. No-op-equivalent to the synchronous path when disabled.
+	prefetch_enabled = cfg.memory.met_prefetch and cfg.memory.met_cache_on_host
+	if cfg.memory.met_prefetch and not cfg.memory.met_cache_on_host:
+		LOGGER.warning("met prefetch disabled: requires memory.met_cache_on_host (CPU reader)")
+	if prefetch_enabled:
+		LOGGER.info("met prefetch: enabled (1 background worker, next backward hour)")
+	prefetcher = MetPrefetcher(reader, cfg, met_cache, enabled=prefetch_enabled)
 	memory_stats = MemoryStats()
 	# Endpoint particles + their release_idx accumulated across batches, concatenated
 	# once at the end so we emit one parquet covering the whole schedule.
@@ -1145,9 +1256,7 @@ def _run(
 			#   dynamic - boolean-index the active subset (cheaper on CPU). Unchanged.
 			if use_static:
 				with phase_timer.phase("met_fetch"):
-					met_window, fetched_windows = _get_hourly_met_window(
-						reader, cfg, t_cursor, met_cache
-					)
+					met_window, fetched_windows = prefetcher.get(t_cursor)
 				hour_windows += fetched_windows
 				if fetched_windows:
 					phase_timer.tick_fetch()
@@ -1211,9 +1320,7 @@ def _run(
 				if active_count > 0:
 					active_particles = particles[active_mask]
 					with phase_timer.phase("met_fetch"):
-						met_window, fetched_windows = _get_hourly_met_window(
-							reader, cfg, t_cursor, met_cache
-						)
+						met_window, fetched_windows = prefetcher.get(t_cursor)
 					hour_windows += fetched_windows
 					if fetched_windows:
 						phase_timer.tick_fetch()
@@ -1400,6 +1507,7 @@ def _run(
 		_maybe_dump_mem_snapshot(batch.batch_idx, device)
 		run_escaped_total += batch_escaped_total
 
+	prefetcher.shutdown()
 	for cached in met_cache.values():
 		del cached
 	met_cache.clear()
