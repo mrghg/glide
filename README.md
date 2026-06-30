@@ -53,7 +53,32 @@ Run configs are YAML; the schema lives in [src/lpdm/config.py](src/lpdm/config.p
 - `configs/example_mhd_january.yaml` — single-release Hanna run, FLEXPART-aligned grid for the comparison fixture in `data/FLEXPART/`.
 - `configs/example_mhd_january_periodic.yaml` — 744 hourly Mace Head releases (January 2024) in one process via the M5 multi-release path; produces a single 5D `footprints.zarr` indexed by `release_time`.
 
-The release schema supports three `kind` variants: `point` (single release, today's default), `periodic_point` (`n_releases` evenly-spaced from a `start_time`), and `point_schedule` (explicit `times: list[datetime]`). All three produce the same 5D output shape — single-release just has a length-1 `release_time` axis. See the M5 stage entries in [CHECKPOINT.md](CHECKPOINT.md) for the design and the `batch.max_releases_per_batch` knob.
+The release schema supports four `kind` variants:
+
+- `point` — single release.
+- `periodic_point` — `n_releases` evenly-spaced releases from one site.
+- `point_schedule` — explicit `times: list[datetime]` from one site.
+- `multi_point_periodic` — `n_releases` evenly-spaced releases from multiple
+  sites simultaneously. Sites share the same release schedule, so they share
+  met windows: each met fetch and the per-window fixed costs are paid once for
+  all sites together rather than once per site. This is the efficient way to
+  grow a run across a network of stations.
+
+All variants produce the same output shape with a flat `release` axis (one
+entry per site × time combination) carrying `release_time`, `release_lon`,
+`release_lat`, `release_alt_agl_m`, and `site` coordinates. Recover a
+per-site cube with:
+
+```python
+fp["footprint"].set_index(release=["site", "release_time"]).unstack("release").sel(site="MHD")
+```
+
+A generator script for the validation network is at
+`scripts/make_multisite_config.py`; `configs/multisite_validation_48h.yaml`
+covers all 56 validation sites × 48 hourly releases in one batch.
+
+See the M5/multi-site stage entries in [CHECKPOINT.md](CHECKPOINT.md) for the
+design, and `batch.max_releases_per_batch` for controlling batch size.
 
 The CLI is intentionally tiny: `--config <path>` plus `--device`, `--output-uri`, `--start-time` overrides. Everything else is set in the YAML.
 
@@ -102,6 +127,53 @@ Run the model entrypoint:
 ```bash
 python -m lpdm.main --config configs/local_smoke_test.yaml
 ```
+
+## GPU Run (Isambard AI GH200)
+
+GLIDE's hot path runs unmodified on CUDA. The SLURM scripts in `scripts/` are
+tuned for the Isambard AI Grace-Hopper nodes (aarch64, 4 × GH200 per node).
+
+**One-time setup** (do this in an interactive session on a login node):
+
+```bash
+module load cudatoolkit/24.11_12.6   # provides CUDA 12.6 runtime + nvcc/ptxas
+                                     # do NOT load cuda/12.6 — it conflicts
+uv venv --python 3.11 .venv
+uv pip install --python .venv/bin/python -e ".[dev]"
+# torch is automatically pinned to the cu126 aarch64 wheel via uv.toml
+# (requires uv >= 0.3.0 — run `uv self update` if the version is older)
+
+# Sanity check — must print True  12.6:
+.venv/bin/python -c "import torch; print(torch.cuda.is_available(), torch.version.cuda)"
+```
+
+**Submit a run:**
+
+```bash
+mkdir -p slurm_logs
+# fill in --account and --partition in the script header first
+sbatch scripts/run_periodic_cuda.slurm configs/example_mhd_january_periodic.yaml
+sbatch scripts/run_periodic_cuda.slurm configs/multisite_validation_48h.yaml
+```
+
+**Notes:**
+
+- `uv.toml` at the repo root pins `torch` to the cu126 index on aarch64 via a
+  platform marker; on x86 it falls back to PyPI (CPU-only wheel for local dev).
+  If the cluster moves to CUDA 12.8, update the `url` and `name` in `uv.toml`
+  and match the module name in the SLURM script. Requires uv >= 0.4.0 (the
+  config key is the singular `[[index]]`).
+- `module load cudatoolkit/24.11_12.6` must be the sole CUDA module loaded —
+  it supersedes the older `cuda/12.6` module and the two conflict. The SLURM
+  script handles this automatically.
+- The script prepends PyTorch's bundled NCCL to `LD_LIBRARY_PATH` after all
+  module loads; this prevents the system NCCL (older, missing `ncclCommResume`)
+  from being resolved first. Do not move this line above the module block.
+- Set `GLIDE_PHASE_TIMERS=1` at submit to get per-phase wall breakdowns in
+  the `.out` log (met_fetch / step / convection / gridder). Useful for tuning
+  `met_cache_max_hours` and batch size.
+- Set `GLIDE_COMPILE=0` to skip `torch.compile` (eager fallback, slower but
+  no Triton compile cost; useful for debugging).
 
 ## Physics Tests
 
@@ -204,7 +276,23 @@ CLI overrides are intentionally limited to the three knobs that change between r
 
 YAML schema is defined by [src/lpdm/config.py](src/lpdm/config.py). The top-level sections are `io`, `simulation`, `release`, `turbulence`, `output_grid`, `met_domain`, `memory`, and `batch`. Validation includes: `simulation.length_seconds > release.duration_seconds`, strictly ascending `output_grid.z_edges_m`, and the release point lying inside `met_domain`. The `release` block is a discriminated union on `kind`; see the M5 stage entries in [CHECKPOINT.md](CHECKPOINT.md) for the variants.
 
-Memory controls live in the `memory:` section of the YAML — `met_cache_max_hours`, `log_every_steps`, `gc_every_steps`, and three optional guard thresholds (`guard_max_rss_gib`, `guard_max_device_allocated_gib`, `guard_max_device_reserved_gib`) plus `guard_check_every_steps`. If a guard fires the run exits with a `MemoryError` and writes diagnostic metadata to `run_metadata.json`.
+Memory controls live in the `memory:` section of the YAML:
+
+- `met_cache_max_hours` — LRU cache size for met windows. For multi-batch runs
+  set this above `simulation.length_seconds/3600 + batch_advance_hours` to
+  avoid cross-batch re-fetch thrash; a startup warning fires if it is too small.
+- `met_cache_on_host` (default `true`) — keep the met cache in host RAM rather
+  than GPU memory. On a GH200 with a 192h cache this is ~50 GiB of LPDDR5X
+  instead of HBM; strongly recommended.
+- `met_prefetch` (default `true`) — overlap the next hour's met fetch with GPU
+  compute using a background worker thread. Reduces met_fetch% from ~63% to
+  ~15% of wall on a typical month run.
+- `log_every_steps`, `gc_every_steps`, `guard_check_every_steps` — diagnostic
+  cadences.
+- `guard_max_rss_gib`, `guard_max_device_allocated_gib`,
+  `guard_max_device_reserved_gib` — optional hard limits; if a guard fires the
+  run exits with a `MemoryError` and writes diagnostic metadata to
+  `run_metadata.json`.
 
 Outputs written under `io.output_uri`:
 - `endpoint_particles.parquet`

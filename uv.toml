@@ -7,9 +7,10 @@
 # which returns the CPU-only wheel — correct for local iteration/testing.
 #
 # If the cluster moves to CUDA 12.8+, update the name and url below.
-# Requires uv >= 0.3.0 (supports [[indexes]] and [sources]).
+# Requires uv >= 0.4.0 (the [[index]] / [sources] config; note the key is
+# the SINGULAR `index`, not `indexes` — the plural fails to parse).
 
-[[indexes]]
+[[index]]
 name = "pytorch-cu126"
 url = "https://download.pytorch.org/whl/cu126"
 explicit = true
