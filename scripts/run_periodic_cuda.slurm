@@ -69,7 +69,7 @@ export OPENBLAS_NUM_THREADS="${GLIDE_NUM_THREADS}"
 
 # torch.compile / CUDA-graph capture of the per-step physics. On CUDA the runtime
 # uses the static-shape per-step path (full particle buffer, mask-gated, no per-step
-# host sync — architecture.md §5), and GLIDE_COMPILE wraps the whole fixed-count
+# host sync — docs/architecture.md §5), and GLIDE_COMPILE wraps the whole fixed-count
 # Hanna substep loop with `torch.compile(mode="reduce-overhead")` so it is captured
 # as ONE CUDA graph and replayed per step. This is THE lever for the launch/
 # orchestration-bound regime (low GPU sm% in the telemetry below): it collapses the

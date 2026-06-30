@@ -2,7 +2,7 @@
 #
 # This config is intentionally aligned with the bundled FLEXPART reference fixture
 # data/FLEXPART/FLEXPART_MHD_test_202401.nc so footprints can be compared cell-for-cell
-# without regridding. See VALIDATION.md for the comparison workflow.
+# without regridding. See docs/VALIDATION.md for the comparison workflow.
 #
 # All paths are relative to the repo root unless otherwise noted.
 

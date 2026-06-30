@@ -43,7 +43,7 @@ Documented departures from full Emanuel:
 - We use the bbox-mean met column (`metadata.level`) for the parcel lift,
   rather than per-(lon,lat) columns. Convection then triggers/doesn't fire
   uniformly across the bbox — a strong approximation for large domains. See
-  the F9 follow-up in CHECKPOINT.md for the same approximation in advection.
+  the F9 follow-up in dev/CHECKPOINT.md for the same approximation in advection.
 """
 
 from __future__ import annotations

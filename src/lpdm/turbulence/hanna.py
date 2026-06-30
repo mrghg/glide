@@ -383,7 +383,7 @@ class HannaScheme(TurbulenceScheme):
 		capped at ``max_substeps`` per outer step to bound the cost for very-near-
 		surface particles. Meander has τ ≈ 1800 s so always runs at the outer dt.
 
-		``static_substeps`` selects the substep-loop implementation (architecture.md
+		``static_substeps`` selects the substep-loop implementation (docs/architecture.md
 		§5). ``None`` (default) auto-selects by device: the **static-shape** variant
 		on CUDA (every substep processes the full active set with ``sub_dt=0`` no-ops
 		for finished particles — constant kernel shapes, the prerequisite for
@@ -473,7 +473,7 @@ class HannaScheme(TurbulenceScheme):
 		device = engine.device
 		dtype = engine.dtype
 
-		# Two execution paths (architecture.md S5), chosen by device gate.
+		# Two execution paths (docs/architecture.md S5), chosen by device gate.
 		if self._use_static_substeps(engine):
 			# STATIC / compilable path. The whole per-step tensor pipeline lives in
 			# `_step_core`; only the met-field *access* (Python) is hoisted out into
@@ -674,7 +674,7 @@ class HannaScheme(TurbulenceScheme):
 		dt_seconds, n_substeps, engine,
 	):
 		"""Pure-tensor WHOLE per-step pipeline for the static path -- the torch.compile /
-		CUDA-graph target (architecture.md S5): RK2 advection + interp + column turbulence +
+		CUDA-graph target (docs/architecture.md S5): RK2 advection + interp + column turbulence +
 		drift + substep loop + meander + mask-gated write-back. All met *tensors* + bounds
 		are passed in (gathered by `_gather_static_inputs`) so nothing here touches the met
 		window. Operates on the FULL particle buffer; inactive particles are gated back to
@@ -783,7 +783,7 @@ class HannaScheme(TurbulenceScheme):
 		del T_Lu, T_Lv, T_Lw, dt_seconds  # unused
 
 	def _use_static_substeps(self, engine: GPUEngine) -> bool:
-		"""Choose the static-shape vs dynamic-masked per-step path (architecture.md §5).
+		"""Choose the static-shape vs dynamic-masked per-step path (docs/architecture.md §5).
 
 		Delegates to the shared `use_static_step_path` so the scheme and the `main`
 		runtime loop always agree on the device gate; the per-instance
@@ -920,7 +920,7 @@ class HannaScheme(TurbulenceScheme):
 		active_mask: torch.Tensor | None = None,
 		n_substeps: int | None = None,
 	) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-		"""Static-shape variant of the substep loop (architecture.md §5; device-gated).
+		"""Static-shape variant of the substep loop (docs/architecture.md §5; device-gated).
 
 		Identical physics to ``_integrate_vertical_substeps`` but every substep
 		processes the **full** active set (constant tensor shapes across iterations)

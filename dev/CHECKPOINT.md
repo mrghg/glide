@@ -1,10 +1,9 @@
 # GLIDE checkpoint and project context
 
-## Instruction ownership (rationalized)
-
-- Canonical operational coding-agent instructions live in `.github/copilot-instructions.md`.
-- This file is for project history, architecture intent, and milestone context.
-- Avoid duplicating detailed operational rules in this file.
+> Internal dev journal — chronological project history, architecture intent, and
+> milestone context. Not part of the user-facing docs. Operational agent/contributor
+> guidance lives in `../CLAUDE.md`; current-state architecture in
+> `../docs/architecture.md`.
 
 ## Project goal (north star)
 

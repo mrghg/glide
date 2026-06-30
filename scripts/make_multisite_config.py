@@ -88,7 +88,7 @@ def main() -> None:
         help="0 = one batch (n_sites × n_releases): max amortisation, tiny met cache (monotonic sweep)",
     )
     ap.add_argument("--zarr-store", default="~/data/arco-era5/EUROPE_*.zarr")
-    ap.add_argument("--output-uri", default="outputs/multisite-validation-48h")
+    ap.add_argument("--output-uri", default="outputs/icos-validation")  # matches notebooks/multisite_validation.ipynb
     ap.add_argument("-o", "--output-config", default="configs/multisite_validation_48h.yaml")
     args = ap.parse_args()
 

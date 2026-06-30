@@ -3,10 +3,10 @@
 This document records *how the code is constructed to get the most out of the
 hardware it runs on*. It is engineering/architecture reference (for the model
 write-up and for future contributors), complementary to the physics docs
-(`docs/turbulence.md`, `docs/convection.md`, `docs/LPDM_physics_spec.md`) and to
-`CHECKPOINT.md` (chronological project history). Where this doc and CHECKPOINT
-overlap, CHECKPOINT is the dated narrative; this doc is the current-state
-synthesis.
+(`turbulence.md`, `convection.md`, `LPDM_physics_spec.md`) and to
+`../dev/CHECKPOINT.md` (chronological project history). Where this doc and the
+journal overlap, the journal is the dated narrative; this doc is the
+current-state synthesis.
 
 ---
 

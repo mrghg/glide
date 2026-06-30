@@ -549,7 +549,7 @@ def test_per_window_field_cache_reuses_within_window_and_rebuilds_across() -> No
 
 
 # ---------------------------------------------------------------------------
-# Static-shape substep loop (architecture.md §5) — equivalence to the dynamic
+# Static-shape substep loop (docs/architecture.md §5) — equivalence to the dynamic
 # masked loop. The static path is the CUDA / launch-bound variant; these tests
 # force it on CPU (static_substeps=...) and check it against the proven dynamic
 # loop. Both call the integrators directly with synthetic inputs (no met window).

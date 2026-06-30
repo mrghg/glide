@@ -621,7 +621,7 @@ def test_v1_well_mixed_hanna_backward_path(static_substeps: bool) -> None:
     engine = GPUEngine(device="cpu")
     # WMC test is for in-BL Hanna only. Run it against BOTH substep-loop variants
     # so the static-shape (CUDA) path is held to the same well-mixed criterion as
-    # the dynamic (CPU) path (architecture.md §5).
+    # the dynamic (CPU) path (docs/architecture.md §5).
     scheme = HannaScheme(meander_enabled=False, static_substeps=static_substeps)
     met = _wmc_met_window(blh_m=blh, ustar_m_s=0.4)
 
@@ -961,7 +961,7 @@ def _make_periodic_config(
     # multiple of dt, the cursor skips the upper-boundary visit for the
     # earliest release in each batch and that release loses one step's
     # worth of mass — a real but small discrete-time effect documented
-    # in the M5 stage 5 entry in CHECKPOINT.md.
+    # in the M5 stage 5 entry in dev/CHECKPOINT.md.
     start_time = start_time or datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
     return RunConfig.model_validate(
         {
@@ -1406,7 +1406,7 @@ def test_no_escapes_leaves_alive_count_full(tmp_path: Path) -> None:
 
 
 # ---- Phase 2: static-shape (full-set, mask-gated) per-step path ----------------
-# (architecture.md §5). The dynamic path stays the CPU default; these tests force
+# (docs/architecture.md §5). The dynamic path stays the CPU default; these tests force
 # the static path (scheme ctor flag / GLIDE_STATIC_SUBSTEPS env) and check that it
 # (a) freezes inactive particles exactly and (b) conserves footprint mass.
 

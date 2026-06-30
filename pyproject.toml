@@ -20,7 +20,7 @@ classifiers = [
 # write outputs. NO visualisation libraries here: `cartopy` and its transitive
 # C-extension stack are notebook-only and live in the `[viz]` extras so a
 # compute node never has to compile them. See the 2026-05-31 entry in
-# CHECKPOINT.md for the rationale.
+# dev/CHECKPOINT.md for the rationale.
 dependencies = [
     # Numerical
     "numpy>=1.26",

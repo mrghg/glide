@@ -62,7 +62,7 @@ def use_static_step_path(device: torch.device, override: bool | None = None) -> 
     subset. Constant tensor shapes + no data-dependent control flow are what
     CUDA-graph capture requires, and they beat the shrinking masked subsets on a
     launch-bound GPU; the dynamic (boolean-indexed) path is cheaper on CPU where
-    launches/syncs are free. See ``architecture.md`` §5.
+    launches/syncs are free. See ``docs/architecture.md`` §5.
 
     Resolution order: an explicit ``override`` (e.g. a scheme ctor flag) wins;
     then the ``GLIDE_STATIC_SUBSTEPS`` env var; otherwise auto by device — static

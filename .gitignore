@@ -50,3 +50,9 @@ data/**
 # OS/editor noise
 .DS_Store
 .vscode/settings.json
+
+# Local agent settings (machine-specific permission allowlist)
+.claude/settings.local.json
+
+# Machine-generated run config (regenerate with scripts/make_multisite_config.py)
+configs/multisite_validation_48h.yaml

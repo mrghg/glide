@@ -4,7 +4,7 @@
 # Multi-site is the efficient way to grow a run: every site shares the same release-time
 # grid, so each met fetch (and the per-window convection matrix, 3D-field build, and the
 # per-step Python overhead) is amortised over ALL sites' particles at once — the per-window
-# fixed costs that dominate the wall (see CHECKPOINT.md "NEW OPTIMISATION FRONTIER").
+# fixed costs that dominate the wall (see dev/CHECKPOINT.md "NEW OPTIMISATION FRONTIER").
 #
 # Output: a flat `release` axis (one entry per (site, time)) carrying `site`,
 # `release_lon`, `release_lat`, `release_alt_agl_m`, and `release_time` coords. Recover a

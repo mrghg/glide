@@ -45,7 +45,7 @@ class FootprintGridder:
         # cryptic CPU/CUDA OOM during allocation. Set by env var
         # `LPDM_FOOTPRINT_MAX_GIB` if you genuinely need a bigger allocation;
         # the right long-term fix is streaming per-batch Zarr writes (flagged
-        # as an M5 follow-up in CHECKPOINT.md).
+        # as an M5 follow-up in dev/CHECKPOINT.md).
         MAX_FOOTPRINT_GIB: float = 32.0
 
         def __init__(

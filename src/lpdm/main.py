@@ -60,7 +60,7 @@ def _emit_profile_summary(prof, device: torch.device, trace_path: Path, wall_s: 
 	The summary is built to localise *why the GPU idles*: the GPU-busy fraction, any
 	host-sync ops (``cudaStreamSynchronize`` ⇒ a stall), and the top ops by GPU and
 	CPU self-time (many tiny GPU ops ⇒ launch-bound; large CPU spans with little GPU
-	⇒ Python/met-bound). See architecture.md §5.
+	⇒ Python/met-bound). See docs/architecture.md §5.
 	"""
 
 	try:
@@ -1114,7 +1114,7 @@ def _run(
 	writer = OutputWriter()
 	device = torch.device(device_str)
 
-	# Per-step execution path (architecture.md §5). On the static path the cursor
+	# Per-step execution path (docs/architecture.md §5). On the static path the cursor
 	# loop processes the FULL particle buffer every step and gates inactive
 	# particles with `torch.where` (no boolean indexing, no per-step host sync) —
 	# the shapes/control-flow CUDA-graph capture needs, and a win on a launch-bound
@@ -1288,14 +1288,14 @@ def _run(
 			# release time; lower: cursor still inside the backward window) and the
 			# liveness mask. For a single-release batch with no escapes this is
 			# identical to the pre-kill release-time check (stage 3 entry in
-			# CHECKPOINT.md).
+			# dev/CHECKPOINT.md).
 			cursor_offset_s = t_cursor.timestamp() - batch_start_ts
 			active_mask = (
 				(release_time_offsets_s >= cursor_offset_s)
 				& (release_time_offsets_s - sim_length_s <= cursor_offset_s)
 				& alive
 			)
-			# Per-step body has two device-gated paths (architecture.md S5):
+			# Per-step body has two device-gated paths (docs/architecture.md S5):
 			#   static  - full buffer every step, inactive frozen via torch.where; no
 			#             per-step host sync; constant shapes for CUDA-graph capture.
 			#   dynamic - boolean-index the active subset (cheaper on CPU). Unchanged.
