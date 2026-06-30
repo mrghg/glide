@@ -1024,6 +1024,106 @@ def _make_multi_release_reader(
     )
 
 
+def _make_multi_site_config(
+    *,
+    output_uri: str,
+    n_releases: int = 2,
+    period_seconds: int = 3600,
+    duration_seconds: int = 300,
+    n_particles_per_release: int = 128,
+    simulation_length_seconds: int = 3600,
+    max_releases_per_batch: int = 24,
+    start_time: datetime | None = None,
+    seed: int | None = 42,
+) -> RunConfig:
+    start_time = start_time or datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    return RunConfig.model_validate(
+        {
+            "io": {"zarr_store": "fake://x", "output_uri": output_uri},
+            "simulation": {
+                "start_time": start_time,
+                "length_seconds": simulation_length_seconds,
+                "dt_seconds": 300,
+                "device": "cpu",
+            },
+            "release": {
+                "kind": "multi_point_periodic",
+                "sites": [
+                    {"name": "MHD", "lon": -1.0, "lat": 0.0, "alt_agl_m": 100.0},
+                    {"name": "RGL", "lon": 1.0, "lat": 0.5, "alt_agl_m": 300.0},
+                ],
+                "start_time": start_time,
+                "period_seconds": period_seconds,
+                "n_releases": n_releases,
+                "duration_seconds": duration_seconds,
+                "n_particles_per_release": n_particles_per_release,
+                "seed": seed,
+            },
+            "turbulence": {"scheme": "placeholder_constant_ou"},
+            "output_grid": {
+                "lon_bounds": (-2.0, 2.0),
+                "lat_bounds": (-2.0, 2.0),
+                "n_x": 16,
+                "n_y": 16,
+                "z_edges_m": (0.0, 1000.0, 5000.0),
+                "n_time_bins": 3,
+            },
+            "met_domain": {
+                "lon_bounds": (-3.0, 3.0),
+                "lat_bounds": (-3.0, 3.0),
+                "alt_max_m": 10000.0,
+            },
+            "memory": {"met_cache_max_hours": 4, "log_every_steps": 0, "gc_every_steps": 0},
+            "batch": {"max_releases_per_batch": max_releases_per_batch},
+        }
+    )
+
+
+def test_multi_site_expand_is_time_major_with_per_site_locations() -> None:
+    """multi_point_periodic expands to one release per (time, site), TIME-MAJOR (all sites
+    per time), each carrying its own location + label and a distinct seed."""
+
+    cfg = _make_multi_site_config(output_uri="x", n_releases=2)
+    rels = [r for b in cfg.expand_to_batches() for r in b.releases]
+
+    assert len(rels) == 4  # 2 times × 2 sites
+    assert [r.release_idx for r in rels] == [0, 1, 2, 3]
+    assert [r.label for r in rels] == ["MHD", "RGL", "MHD", "RGL"]  # time-major
+    assert [r.lon for r in rels] == [-1.0, 1.0, -1.0, 1.0]
+    assert [r.alt_agl_m for r in rels] == [100.0, 300.0, 100.0, 300.0]
+    assert rels[0].release_time == rels[1].release_time  # both sites share t0
+    assert rels[2].release_time == rels[0].release_time + timedelta(seconds=3600)
+    assert len({r.seed for r in rels}) == 4  # distinct per (site,time)
+
+
+def test_multi_site_run_emits_per_site_footprint_coords(tmp_path: Path) -> None:
+    """End-to-end multi-site run: the footprint's `release` axis carries per-site location
+    + `site` coords, both sites accumulate mass, and it unstacks to a (site, release_time)
+    cube."""
+
+    cfg = _make_multi_site_config(
+        output_uri=str(tmp_path / "out"), n_releases=2, n_particles_per_release=128
+    )
+    reader = _make_multi_release_reader(cfg, wind_fn=lambda _: (3.0, 0.0, 0.0))
+    metadata = _run(cfg, reader=reader)
+
+    assert metadata["schedule"]["n_releases"] == 4
+    fp = xr.open_zarr(tmp_path / "out" / "footprints.zarr").load()
+    assert fp["footprint"].sizes["release"] == 4
+    assert list(fp["site"].values) == ["MHD", "RGL", "MHD", "RGL"]
+    assert np.allclose(fp["release_lon"].values, [-1.0, 1.0, -1.0, 1.0])
+    assert np.allclose(fp["release_lat"].values, [0.0, 0.5, 0.0, 0.5])
+
+    total_per_release = fp["footprint"].sum(["time_ago", "z_bin", "latitude", "longitude"]).values
+    site_vals = fp["site"].values
+    assert total_per_release[site_vals == "MHD"].sum() > 0.0
+    assert total_per_release[site_vals == "RGL"].sum() > 0.0
+
+    cube = fp["footprint"].set_index(release=["site", "release_time"]).unstack("release")
+    assert set(cube["site"].values) == {"MHD", "RGL"}
+    assert cube.sizes["release_time"] == 2
+
+
 def test_periodic_release_run_completes_and_emits_5d_footprint(tmp_path: Path) -> None:
     """End-to-end periodic_point run: outputs land, shape is 5D with the right release_time coord."""
 
@@ -1044,13 +1144,15 @@ def test_periodic_release_run_completes_and_emits_5d_footprint(tmp_path: Path) -
     out = tmp_path / "out"
     fp = xr.open_zarr(out / "footprints.zarr")
     assert fp["footprint"].dims == (
-        "release_time",
+        "release",
         "time_ago",
         "z_bin",
         "latitude",
         "longitude",
     )
-    assert fp["footprint"].sizes["release_time"] == 3
+    assert fp["footprint"].sizes["release"] == 3
+    # release_time is now a coord along `release` (so a timestamp can repeat across sites)
+    assert fp["release_time"].dims == ("release",)
 
     expected_times = [
         cfg.simulation.start_time + timedelta(seconds=i * 3600) for i in range(3)

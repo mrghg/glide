@@ -105,8 +105,13 @@ class OutputWriter:
 		encoded = json.dumps(payload, indent=2, sort_keys=True).encode("utf-8")
 		_write_bytes(path, encoded)
 
+	# Leading axis is `release` (one entry per ConcreteRelease). It carries `release_time`,
+	# `release_lon/lat`, `release_height_magl`, and (multi-site) `site` as coordinates — so a
+	# single timestamp can appear under several sites (multi-site) or every release can be a
+	# distinct location+time (satellite). Recover a site×time cube downstream by
+	# `set_index(release=["site","release_time"]).unstack("release")`.
 	FOOTPRINT_DIMS: tuple[str, str, str, str, str] = (
-		"release_time",
+		"release",
 		"time_ago",
 		"z_bin",
 		"latitude",
@@ -218,7 +223,7 @@ class OutputWriter:
 		"""Write one contiguous block of releases into an existing footprint store.
 
 		``footprint`` is shaped ``(release_stop - release_start, T, Z, Y, X)`` and
-		lands in ``release_time[release_start:release_stop]`` of the store created
+		lands in ``release[release_start:release_stop]`` of the store created
 		by :meth:`create_footprint_store`. Only the data variable is written (no
 		coords), so the call is a pure region update.
 		"""
@@ -234,4 +239,4 @@ class OutputWriter:
 			)
 
 		ds = xr.Dataset({"footprint": (dims, arr)})
-		ds.to_zarr(store=path, region={"release_time": slice(release_start, release_stop)})
+		ds.to_zarr(store=path, region={dims[0]: slice(release_start, release_stop)})

@@ -1,0 +1,82 @@
+# Example GLIDE MULTI-SITE config: several UK/Ireland DECC sites, hourly footprints,
+# January 2024, in ONE run sharing one met domain.
+#
+# Multi-site is the efficient way to grow a run: every site shares the same release-time
+# grid, so each met fetch (and the per-window convection matrix, 3D-field build, and the
+# per-step Python overhead) is amortised over ALL sites' particles at once — the per-window
+# fixed costs that dominate the wall (see CHECKPOINT.md "NEW OPTIMISATION FRONTIER").
+#
+# Output: a flat `release` axis (one entry per (site, time)) carrying `site`,
+# `release_lon`, `release_lat`, `release_alt_agl_m`, and `release_time` coords. Recover a
+# per-site cube with:
+#   fp["footprint"].set_index(release=["site","release_time"]).unstack("release")
+#   fp["footprint"].set_index(...).unstack("release").sel(site="MHD")
+#
+#   .venv/bin/python -m lpdm.main --config configs/example_multisite_january.yaml
+
+io:
+  zarr_store: ~/data/arco-era5/EUROPE_*.zarr
+  output_uri: outputs/decc-multisite-202401-hourly
+
+simulation:
+  start_time: 2024-01-01T00:00:00Z
+  length_seconds: 432000              # 5 days backward integration per release
+  dt_seconds: 60
+  device: auto
+
+release:
+  kind: multi_point_periodic
+  # All sites share the schedule below → shared met windows → the efficiency win.
+  sites:
+    - {name: MHD, lon: -9.9046, lat: 53.3267, alt_agl_m: 10.0}    # Mace Head
+    - {name: RGL, lon: -2.5400, lat: 51.9970, alt_agl_m: 90.0}    # Ridge Hill
+    - {name: TAC, lon:  1.1387, lat: 52.5176, alt_agl_m: 185.0}   # Tacolneston
+  start_time: 2024-01-01T00:00:00Z
+  period_seconds: 3600                 # one release per hour, per site
+  n_releases: 720                      # 30 days × 24 h (× 3 sites = 2160 releases total)
+  duration_seconds: 3600
+  n_particles_per_release: 20000
+  seed: 42                             # per-(site,time) seeds derive as 42 + release_idx
+
+turbulence:
+  scheme: hanna_1982
+  max_substeps: 20                      # placeholder; evaluate the converged value
+  meander:
+    enabled: true
+    coefficient: 0.16
+
+convection:
+  scheme: emanuel_reduced
+  emanuel:
+    closure_c: 0.03
+
+output_grid:
+  lon_bounds: [-98.076, 39.556]
+  lat_bounds: [10.612, 79.174]
+  n_x: 391
+  n_y: 293
+  z_edges_m: [0.0, 40.0, 1000.0, 5000.0]
+  n_time_bins: 1
+
+met_domain:
+  lon_bounds: [-100.0, 40.0]
+  lat_bounds: [10.0, 80.0]
+  alt_max_m: 15000.0
+
+# A batch is a contiguous time-chunk × ALL sites (time-major expansion). Keep
+# max_releases_per_batch a MULTIPLE of the number of sites so each batch is whole
+# days × all sites: 72 = 24 h × 3 sites = one calendar day, all sites together.
+batch:
+  max_releases_per_batch: 72
+
+memory:
+  # 5-day backward + 1-day batch advance → consecutive batches' met overlaps; size the
+  # cache above the reuse threshold (~168 h) to avoid cross-batch re-fetch thrash. The
+  # cache lives in HOST RAM (met_cache_on_host), so this is ~50 GiB of Grace LPDDR5X, NOT
+  # GPU memory. A startup guard warns if this is set too low for the batch geometry.
+  met_cache_max_hours: 192
+  met_cache_on_host: true              # cache met on host (default) — keeps HBM free
+  met_prefetch: true                   # overlap the next hour's fetch with compute (default)
+  log_every_steps: 100
+  gc_every_steps: 50
+  guard_check_every_steps: 10

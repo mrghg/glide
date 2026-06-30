@@ -29,7 +29,7 @@ from typing import Sequence
 import numpy as np
 import torch
 
-from lpdm.config import ConcreteRelease, RunConfig, _release_point
+from lpdm.config import ConcreteRelease, RunConfig
 from lpdm.footprint_gridder import FootprintGridder
 from lpdm.gpu_engine import GPUEngine, GridInterpolationBounds, use_static_step_path
 from lpdm.met_reader import (
@@ -401,16 +401,22 @@ def _build_footprint_dataset_metadata(
 	time_bin_start_h = np.arange(gridder.n_t, dtype=np.float64) * hours_per_bin
 	time_bin_end_h = time_bin_start_h + hours_per_bin
 
+	# Per-release coords ride along the `release` axis: a single timestamp may repeat across
+	# sites (multi-site) or every release may be a distinct (location, time) (satellite).
 	release_times = np.array(
 		[np.datetime64(rel.release_time.replace(tzinfo=None), "ns") for rel in releases]
 	)
-	release_durations_s = np.array(
-		[float(rel.duration_seconds) for rel in releases], dtype=np.float64
-	)
+	release_durations_s = np.array([float(r.duration_seconds) for r in releases], dtype=np.float64)
+	release_lon = np.array([float(r.lon) for r in releases], dtype=np.float64)
+	release_lat = np.array([float(r.lat) for r in releases], dtype=np.float64)
+	release_alt = np.array([float(r.alt_agl_m) for r in releases], dtype=np.float64)
 
 	coords: dict[str, object] = {
-		"release_time": release_times,
-		"release_duration_seconds": ("release_time", release_durations_s),
+		"release_time": ("release", release_times),
+		"release_duration_seconds": ("release", release_durations_s),
+		"release_lon": ("release", release_lon),
+		"release_lat": ("release", release_lat),
+		"release_alt_agl_m": ("release", release_alt),
 		"time_ago": np.arange(gridder.n_t, dtype=np.int64),
 		"time_ago_start_hours": ("time_ago", time_bin_start_h),
 		"time_ago_end_hours": ("time_ago", time_bin_end_h),
@@ -422,13 +428,10 @@ def _build_footprint_dataset_metadata(
 		"latitude_edge": ("latitude_edge", lat_edges),
 		"longitude_edge": ("longitude_edge", lon_edges),
 	}
-	lon, lat, alt_agl_m = _release_point(cfg.release)
-	attrs = {
-		"release_lon": float(lon),
-		"release_lat": float(lat),
-		"release_alt_agl_m": float(alt_agl_m),
-	}
-	return coords, attrs
+	# `site` label only when present (multi-site); single-location runs omit it.
+	if any(r.label is not None for r in releases):
+		coords["site"] = ("release", np.array([r.label or "" for r in releases]))
+	return coords, {}
 
 
 def _validate_meteorology_time_coverage(

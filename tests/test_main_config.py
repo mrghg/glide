@@ -106,6 +106,49 @@ def test_run_config_rejects_release_outside_met_domain() -> None:
         RunConfig.model_validate(_base_dict(release={"lon": 99.0}))
 
 
+def _multi_site_release(**overrides: object) -> dict[str, object]:
+    rel: dict[str, object] = {
+        "kind": "multi_point_periodic",
+        "sites": [
+            {"name": "A", "lon": 0.0, "lat": 0.0, "alt_agl_m": 100.0},
+            {"name": "B", "lon": 1.0, "lat": 1.0, "alt_agl_m": 200.0},
+        ],
+        "start_time": "2024-01-01T00:00:00Z",
+        "period_seconds": 3600,
+        "n_releases": 3,
+        "duration_seconds": 1800,
+        "n_particles_per_release": 100,
+        "seed": 42,
+    }
+    rel.update(overrides)
+    return rel
+
+
+def test_run_config_accepts_multi_point_periodic() -> None:
+    cfg = RunConfig.model_validate(_base_dict(release=_multi_site_release()))
+    rels = [r for b in cfg.expand_to_batches() for r in b.releases]
+    assert len(rels) == 6  # 2 sites × 3 times
+    assert [r.label for r in rels] == ["A", "B", "A", "B", "A", "B"]  # time-major
+
+
+def test_multi_site_rejects_site_outside_met_domain() -> None:
+    bad = _multi_site_release(
+        sites=[{"name": "A", "lon": 0.0, "lat": 0.0, "alt_agl_m": 100.0},
+               {"name": "B", "lon": 99.0, "lat": 1.0, "alt_agl_m": 200.0}]
+    )
+    with pytest.raises(ValidationError, match=r"release \(B\) lon=99.0 outside met_domain"):
+        RunConfig.model_validate(_base_dict(release=bad))
+
+
+def test_multi_site_rejects_duplicate_site_names() -> None:
+    dup = _multi_site_release(
+        sites=[{"name": "A", "lon": 0.0, "lat": 0.0, "alt_agl_m": 100.0},
+               {"name": "A", "lon": 1.0, "lat": 1.0, "alt_agl_m": 200.0}]
+    )
+    with pytest.raises(ValidationError, match="site names must be unique"):
+        RunConfig.model_validate(_base_dict(release=dup))
+
+
 def test_run_config_rejects_unknown_field() -> None:
     cfg_dict = _base_dict()
     cfg_dict["unexpected"] = "x"

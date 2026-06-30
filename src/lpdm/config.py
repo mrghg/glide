@@ -142,8 +142,55 @@ class PointScheduleReleaseConfig(_Frozen):
         return tuple(_parse_datetime_utc(t) for t in v)
 
 
+class SiteSpec(_Frozen):
+    """A named release location for multi-site runs."""
+
+    name: str = Field(..., min_length=1)
+    lon: float
+    lat: float
+    alt_agl_m: float = Field(..., ge=0)
+
+
+class MultiPointPeriodicReleaseConfig(_Frozen):
+    """Equally-spaced point releases from MULTIPLE named locations on a shared schedule.
+
+    Generates one release per (site, time) for ``n_releases`` times at
+    ``start_time + i * period_seconds`` and every site in ``sites``. All sites share the
+    time grid, so they share met windows — the efficient case (one met fetch feeds every
+    site's particles for that hour). The runtime/gridder already index by release, so each
+    (site, time) is just another release carrying its own ``(lon, lat, alt)`` and ``label``.
+    """
+
+    kind: Literal["multi_point_periodic"]
+    sites: tuple[SiteSpec, ...] = Field(..., min_length=1)
+    start_time: datetime
+    period_seconds: int = Field(..., gt=0)
+    n_releases: int = Field(..., gt=0)
+    duration_seconds: int = Field(..., gt=0)
+    n_particles_per_release: int = Field(..., gt=0)
+    seed: int | None = Field(None, ge=0)
+
+    @field_validator("start_time", mode="before")
+    @classmethod
+    def _coerce_start_time(cls, v: Any) -> datetime:
+        return _parse_datetime_utc(v)
+
+    @field_validator("sites")
+    @classmethod
+    def _unique_site_names(cls, v: tuple[SiteSpec, ...]) -> tuple[SiteSpec, ...]:
+        names = [s.name for s in v]
+        if len(set(names)) != len(names):
+            raise ValueError("site names must be unique")
+        return v
+
+
 ReleaseConfig = Annotated[
-    Union[PointReleaseConfig, PeriodicPointReleaseConfig, PointScheduleReleaseConfig],
+    Union[
+        PointReleaseConfig,
+        PeriodicPointReleaseConfig,
+        PointScheduleReleaseConfig,
+        MultiPointPeriodicReleaseConfig,
+    ],
     Field(discriminator="kind"),
 ]
 
@@ -183,6 +230,7 @@ class ConcreteRelease:
     duration_seconds: int
     n_particles: int
     seed: int | None
+    label: str | None = None  # site name for multi-site runs; None for single-location variants
 
 
 @dataclass(frozen=True)
@@ -391,19 +439,25 @@ class RunConfig(_Frozen):
     @model_validator(mode="after")
     def _check_release_inside_met_domain(self) -> "RunConfig":
         md = self.met_domain
-        lon, lat, alt_agl_m = _release_point(self.release)
-        if not (md.lon_bounds[0] <= lon <= md.lon_bounds[1]):
-            raise ValueError(
-                f"release lon={lon} outside met_domain.lon_bounds={md.lon_bounds}"
-            )
-        if not (md.lat_bounds[0] <= lat <= md.lat_bounds[1]):
-            raise ValueError(
-                f"release lat={lat} outside met_domain.lat_bounds={md.lat_bounds}"
-            )
-        if alt_agl_m > md.alt_max_m:
-            raise ValueError(
-                f"release alt_agl_m={alt_agl_m} above met_domain.alt_max_m={md.alt_max_m}"
-            )
+        if isinstance(self.release, MultiPointPeriodicReleaseConfig):
+            points = [(s.lon, s.lat, s.alt_agl_m, s.name) for s in self.release.sites]
+        else:
+            lon, lat, alt_agl_m = _release_point(self.release)
+            points = [(lon, lat, alt_agl_m, None)]
+        for lon, lat, alt_agl_m, name in points:
+            tag = f" ({name})" if name else ""
+            if not (md.lon_bounds[0] <= lon <= md.lon_bounds[1]):
+                raise ValueError(
+                    f"release{tag} lon={lon} outside met_domain.lon_bounds={md.lon_bounds}"
+                )
+            if not (md.lat_bounds[0] <= lat <= md.lat_bounds[1]):
+                raise ValueError(
+                    f"release{tag} lat={lat} outside met_domain.lat_bounds={md.lat_bounds}"
+                )
+            if alt_agl_m > md.alt_max_m:
+                raise ValueError(
+                    f"release{tag} alt_agl_m={alt_agl_m} above met_domain.alt_max_m={md.alt_max_m}"
+                )
         return self
 
     def expand_to_batches(self) -> list[ReleaseBatch]:
@@ -438,31 +492,60 @@ class RunConfig(_Frozen):
             )
             return [ReleaseBatch(batch_idx=0, releases=(concrete,))]
 
-        if isinstance(rel, PeriodicPointReleaseConfig):
+        if isinstance(rel, MultiPointPeriodicReleaseConfig):
+            # One release per (time, site), in TIME-MAJOR order so chunking by
+            # max_releases_per_batch yields batches that span contiguous times across ALL
+            # sites — a dense active set sharing one met fetch per hour (the efficiency win).
+            # Best results when max_releases_per_batch is a multiple of len(sites).
             times = tuple(
                 rel.start_time + timedelta(seconds=i * rel.period_seconds)
                 for i in range(rel.n_releases)
             )
-        elif isinstance(rel, PointScheduleReleaseConfig):
-            times = rel.times
+            seed = rel.seed
+            concretes = []
+            idx = 0
+            for t in times:
+                for site in rel.sites:
+                    concretes.append(
+                        ConcreteRelease(
+                            release_idx=idx,
+                            release_time=t,
+                            lon=float(site.lon),
+                            lat=float(site.lat),
+                            alt_agl_m=float(site.alt_agl_m),
+                            duration_seconds=int(rel.duration_seconds),
+                            n_particles=int(rel.n_particles_per_release),
+                            seed=(seed + idx) if seed is not None else None,
+                            label=site.name,
+                        )
+                    )
+                    idx += 1
         else:
-            raise TypeError(f"Unsupported release variant: {type(rel).__name__}")
+            if isinstance(rel, PeriodicPointReleaseConfig):
+                times = tuple(
+                    rel.start_time + timedelta(seconds=i * rel.period_seconds)
+                    for i in range(rel.n_releases)
+                )
+            elif isinstance(rel, PointScheduleReleaseConfig):
+                times = rel.times
+            else:
+                raise TypeError(f"Unsupported release variant: {type(rel).__name__}")
 
-        lon, lat, alt_agl_m = _release_point(rel)
-        seed = rel.seed
-        concretes = [
-            ConcreteRelease(
-                release_idx=i,
-                release_time=t,
-                lon=lon,
-                lat=lat,
-                alt_agl_m=alt_agl_m,
-                duration_seconds=int(rel.duration_seconds),
-                n_particles=int(rel.n_particles_per_release),
-                seed=(seed + i) if seed is not None else None,
-            )
-            for i, t in enumerate(times)
-        ]
+            lon, lat, alt_agl_m = _release_point(rel)
+            seed = rel.seed
+            concretes = [
+                ConcreteRelease(
+                    release_idx=i,
+                    release_time=t,
+                    lon=lon,
+                    lat=lat,
+                    alt_agl_m=alt_agl_m,
+                    duration_seconds=int(rel.duration_seconds),
+                    n_particles=int(rel.n_particles_per_release),
+                    seed=(seed + i) if seed is not None else None,
+                )
+                for i, t in enumerate(times)
+            ]
 
         batches: list[ReleaseBatch] = []
         for batch_idx, start in enumerate(range(0, len(concretes), max_per_batch)):

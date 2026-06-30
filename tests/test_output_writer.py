@@ -61,8 +61,12 @@ def test_output_writer_footprint_zarr(tmp_path: Path) -> None:
         str(zarr_path),
         footprint,
         coords={
-            "release_time": release_time,
-            "release_duration_seconds": ("release_time", np.array([3600.0], dtype=np.float64)),
+            "release_time": ("release", release_time),
+            "release_duration_seconds": ("release", np.array([3600.0], dtype=np.float64)),
+            "release_lon": ("release", np.array([-122.3], dtype=np.float64)),
+            "release_lat": ("release", np.array([37.9], dtype=np.float64)),
+            "release_alt_agl_m": ("release", np.array([500.0], dtype=np.float64)),
+            "site": ("release", np.array(["MHD"])),
             "time_ago": np.array([0, 1], dtype=np.int64),
             "time_ago_start_hours": ("time_ago", np.array([0.0, 1.0], dtype=np.float64)),
             "time_ago_end_hours": ("time_ago", np.array([1.0, 2.0], dtype=np.float64)),
@@ -74,28 +78,26 @@ def test_output_writer_footprint_zarr(tmp_path: Path) -> None:
             "latitude_edge": ("latitude_edge", np.array([35.0, 35.5, 36.0, 36.5, 37.0], dtype=np.float64)),
             "longitude_edge": ("longitude_edge", np.array([-122.75, -122.25, -121.75, -121.25, -120.75, -120.25], dtype=np.float64)),
         },
-        attrs={
-            "release_lon": -122.3,
-            "release_lat": 37.9,
-            "release_alt_agl_m": 500.0,
-        },
     )
 
     ds = xr.open_zarr(str(zarr_path), consolidated=False)
     assert "footprint" in ds
     assert ds["footprint"].shape == (1, 2, 3, 4, 5)
-    assert ds["footprint"].dims == ("release_time", "time_ago", "z_bin", "latitude", "longitude")
+    assert ds["footprint"].dims == ("release", "time_ago", "z_bin", "latitude", "longitude")
+    assert ds["release_time"].dims == ("release",)
     assert ds["release_time"].values[0] == release_time[0]
     assert np.allclose(ds["release_duration_seconds"].values, np.array([3600.0]))
+    # release location now rides on the `release` axis as coords (not scalar attrs)
+    assert ds["release_lon"].dims == ("release",) and ds["release_lon"].values[0] == -122.3
+    assert ds["release_lat"].values[0] == 37.9
+    assert ds["release_alt_agl_m"].values[0] == 500.0
+    assert ds["site"].values[0] == "MHD"
     assert np.allclose(ds["time_ago_start_hours"].values, np.array([0.0, 1.0]))
     assert np.allclose(ds["time_ago_end_hours"].values, np.array([1.0, 2.0]))
     assert np.allclose(ds["z_bottom_m"].values, np.array([0.0, 1000.0, 2000.0]))
     assert np.allclose(ds["z_top_m"].values, np.array([1000.0, 2000.0, 3000.0]))
     assert np.allclose(ds["latitude_edge"].values, np.array([35.0, 35.5, 36.0, 36.5, 37.0]))
     assert np.allclose(ds["longitude_edge"].values, np.array([-122.75, -122.25, -121.75, -121.25, -120.75, -120.25]))
-    assert ds.attrs["release_lon"] == -122.3
-    assert ds.attrs["release_lat"] == 37.9
-    assert ds.attrs["release_alt_agl_m"] == 500.0
 
 
 def test_output_writer_footprint_rejects_4d_tensor(tmp_path: Path) -> None:
@@ -161,8 +163,9 @@ def _footprint_coords(n_releases: int) -> dict:
 
     return {
         "release_time": (
+            "release",
             np.datetime64("2024-01-01T00:00:00", "ns")
-            + np.arange(n_releases) * np.timedelta64(1, "h")
+            + np.arange(n_releases) * np.timedelta64(1, "h"),
         ),
         "time_ago": np.array([0, 1], dtype=np.int64),
         "z_bin": np.array([500.0, 1500.0, 2500.0], dtype=np.float64),
@@ -195,8 +198,8 @@ def test_streaming_footprint_store_create_then_region_writes(tmp_path: Path) -> 
     ds = xr.open_zarr(path)
     fp = ds["footprint"]
     assert fp.shape == shape
-    assert fp.dims == ("release_time", "time_ago", "z_bin", "latitude", "longitude")
-    per_release = [float(fp.isel(release_time=i).mean()) for i in range(n_releases)]
+    assert fp.dims == ("release", "time_ago", "z_bin", "latitude", "longitude")
+    per_release = [float(fp.isel(release=i).mean()) for i in range(n_releases)]
     assert per_release == [1.0, 1.0, 2.0, 2.0, 3.0]
     # Coords survived the template write.
     assert np.allclose(ds["latitude_edge"].values, np.array([35.0, 35.5, 36.0, 36.5, 37.0]))
