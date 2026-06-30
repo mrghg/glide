@@ -25,11 +25,20 @@ htmlcov/
 # Jupyter
 .ipynb_checkpoints/
 
-# Local outputs/artifacts
-outputs/
+# Local outputs/artifacts. `/outputs` (no trailing slash) matches both a real
+# directory and the symlink-to-storage some devs use, so neither is committed.
+/outputs
 *.zarr/
 *.nc
 *.parquet
+
+# SLURM run logs (personal run artifacts)
+/slurm_logs/
+
+# Personal SLURM-log helper scripts (untracked dev convenience; ignore if present)
+/scripts/glogs.sh
+/scripts/logcleanup
+/scripts/loglatest
 
 # Restricted / third-party data (not redistributed; see data/README.md).
 # Ignore the data itself but keep the folder structure, README, and placeholders.
