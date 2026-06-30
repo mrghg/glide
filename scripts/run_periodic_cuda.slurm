@@ -10,14 +10,14 @@
 # CPU script for quick local iteration / parameter sweeps.
 #
 # PREREQUISITES (do these once, on Isambard AI):
-#   module load cuda/12.6
-#   # Build the venv with an ARM64 + CUDA torch wheel (NOT the x86 default):
+#   module load cudatoolkit/24.11_12.6
+#   # Build the venv with an ARM64 + CUDA 12.6 torch wheel (NOT the x86 default):
 #   uv venv .venv
 #   uv pip install --python .venv/bin/python -e .
-#   # then install a CUDA-enabled aarch64 torch matching cuda/12.6, e.g.:
-#   uv pip install --python .venv/bin/python torch --index-url https://download.pytorch.org/whl/cu126
-#   # sanity check (must print True):
-#   .venv/bin/python -c "import torch; print(torch.cuda.is_available())"
+#   # torch is pinned to the cu126 index via pyproject.toml [tool.uv.sources],
+#   # so 'uv pip install -e .' picks the right wheel automatically.
+#   # sanity check (must print True  12.6):
+#   .venv/bin/python -c "import torch; print(torch.cuda.is_available(), torch.version.cuda)"
 #
 # SUBMIT FROM THE REPO ROOT:
 #     mkdir -p slurm_logs
@@ -45,32 +45,17 @@ set -euo pipefail
 cd "${SLURM_SUBMIT_DIR:-$PWD}"
 
 # --- CUDA + Python environment ---------------------------------------------
-# Isambard AI needs the CUDA module loaded before the CUDA torch wheel will find
-# its runtime. Keep this version in sync with the torch build in the venv.
-module load cuda/12.6
+# cudatoolkit/24.11_12.6 provides the full CUDA 12.6 stack (runtime, nvcc,
+# ptxas) and supersedes the older cuda/12.6 module — the two conflict on
+# Isambard AI.  Loading cudatoolkit unconditionally avoids the conflict when it
+# is already inherited from the login shell, and means a single module load
+# covers both eager and torch.compile paths.
+module load cudatoolkit/24.11_12.6
 
 PYTHON=".venv/bin/python"
 if [[ ! -x "${PYTHON}" ]]; then
 	echo "ERROR: ${PYTHON} not found. Create the venv and editable-install first:" >&2
 	echo "  uv venv .venv && uv pip install --python .venv/bin/python -e ." >&2
-	exit 1
-fi
-
-# Prefer PyTorch's bundled NCCL over the system one loaded by the CUDA modules.
-# 'module load cuda/*' and 'cudatoolkit/*' both inject an older libnccl.so into
-# LD_LIBRARY_PATH; if that version predates the one PyTorch was compiled against
-# (ncclCommResume was added in NCCL 2.19), dlopen fails with "undefined symbol".
-# Prepending torch's own lib dir makes its bundled NCCL win the dynamic-linker
-# search without changing anything else.
-TORCH_LIB="$("${PYTHON}" -c 'import os, torch; print(os.path.dirname(torch.__file__))')/lib"
-export LD_LIBRARY_PATH="${TORCH_LIB}:${LD_LIBRARY_PATH:-}"
-
-# Fail fast (before the long preflight) if the venv torch can't see the GPU —
-# usually means an x86 or CPU-only wheel, or a missing `module load cuda/12.6`.
-if ! "${PYTHON}" -c "import torch, sys; sys.exit(0 if torch.cuda.is_available() else 1)"; then
-	echo "ERROR: torch.cuda.is_available() is False. Check that:" >&2
-	echo "  - 'module load cuda/12.6' ran (it is in this script), and" >&2
-	echo "  - the venv has an aarch64 CUDA torch wheel (see header PREREQUISITES)." >&2
 	exit 1
 fi
 
@@ -111,13 +96,28 @@ export OPENBLAS_NUM_THREADS="${GLIDE_NUM_THREADS}"
 # value (≈15–25), not the default 50 — it is now a direct per-step cost.
 export GLIDE_COMPILE="${GLIDE_COMPILE:-1}"
 if [[ "${GLIDE_COMPILE}" != "0" ]]; then
-	module load cudatoolkit/24.11_12.6
 	module load gcc-native/14.2
 	export CC=gcc
 	export CXX=g++
 	echo "compile:  ON   CC=$(command -v gcc)  CXX=$(command -v g++)"
 else
 	echo "compile:  OFF  (GLIDE_COMPILE=0)"
+fi
+
+# Prefer PyTorch's bundled NCCL over the system one loaded by cudatoolkit.
+# MUST appear after ALL module loads: modules prepend their lib paths, so if
+# this is applied earlier a subsequent module load re-seats the older NCCL.
+# cudatoolkit ships a libnccl.so that predates ncclCommResume (added in 2.19);
+# torch's bundled copy has it and must win the dynamic-linker search.
+TORCH_LIB="$("${PYTHON}" -c 'import os, torch; print(os.path.dirname(torch.__file__))')/lib"
+export LD_LIBRARY_PATH="${TORCH_LIB}:${LD_LIBRARY_PATH:-}"
+
+# Fail fast before the long preflight if the venv torch can't see the GPU.
+if ! "${PYTHON}" -c "import torch, sys; sys.exit(0 if torch.cuda.is_available() else 1)"; then
+	echo "ERROR: torch.cuda.is_available() is False. Check that:" >&2
+	echo "  - the venv has an aarch64 CUDA 12.6 torch wheel (see PREREQUISITES)," >&2
+	echo "  - torch.__version__ ends in '+cu126' (run: ${PYTHON} -c 'import torch; print(torch.version.cuda)')." >&2
+	exit 1
 fi
 
 # PROFILING PASS (when sm% stays low and you need to know WHY the GPU idles):
