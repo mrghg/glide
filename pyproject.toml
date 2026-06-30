@@ -72,22 +72,3 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-
-# ---------------------------------------------------------------------------
-# uv: pin torch to the CUDA 12.6 wheel index.
-#
-# `explicit = true` means uv only looks at this index for packages that
-# explicitly name it — torch can never accidentally resolve from PyPI (which
-# ships CPU-only or cu128 builds). Any `uv pip install` or `uv sync` on this
-# repo will always pull the cu126 wheel without needing the --index-url flag.
-#
-# If the system ever moves to a newer CUDA toolkit, update the name and url
-# below (and re-run `uv lock --upgrade-package torch` to refresh the lockfile).
-# ---------------------------------------------------------------------------
-[[tool.uv.indexes]]
-name = "pytorch-cu126"
-url = "https://download.pytorch.org/whl/cu126"
-explicit = true
-
-[tool.uv.sources]
-torch = { index = "pytorch-cu126" }

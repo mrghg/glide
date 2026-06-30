@@ -1,0 +1,20 @@
+# uv configuration — read only by uv, ignored by setuptools / pip / other tools.
+# pyproject.toml is intentionally kept clean of uv-specific TOML (array-of-tables
+# syntax in [tool.uv.*] triggers parse errors in some TOML readers).
+
+# Pin torch to the CUDA 12.6 wheel index on aarch64 (Isambard AI GH200).
+# On x86 (dev workstation) the marker is false so torch falls through to PyPI,
+# which returns the CPU-only wheel — correct for local iteration/testing.
+#
+# If the cluster moves to CUDA 12.8+, update the name and url below.
+# Requires uv >= 0.3.0 (supports [[indexes]] and [sources]).
+
+[[indexes]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[sources]
+torch = [
+  { index = "pytorch-cu126", marker = "platform_machine == 'aarch64'" },
+]
