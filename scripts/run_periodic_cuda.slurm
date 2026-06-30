@@ -56,6 +56,15 @@ if [[ ! -x "${PYTHON}" ]]; then
 	exit 1
 fi
 
+# Prefer PyTorch's bundled NCCL over the system one loaded by the CUDA modules.
+# 'module load cuda/*' and 'cudatoolkit/*' both inject an older libnccl.so into
+# LD_LIBRARY_PATH; if that version predates the one PyTorch was compiled against
+# (ncclCommResume was added in NCCL 2.19), dlopen fails with "undefined symbol".
+# Prepending torch's own lib dir makes its bundled NCCL win the dynamic-linker
+# search without changing anything else.
+TORCH_LIB="$("${PYTHON}" -c 'import os, torch; print(os.path.dirname(torch.__file__))')/lib"
+export LD_LIBRARY_PATH="${TORCH_LIB}:${LD_LIBRARY_PATH:-}"
+
 # Fail fast (before the long preflight) if the venv torch can't see the GPU —
 # usually means an x86 or CPU-only wheel, or a missing `module load cuda/12.6`.
 if ! "${PYTHON}" -c "import torch, sys; sys.exit(0 if torch.cuda.is_available() else 1)"; then
