@@ -1004,3 +1004,78 @@ benchmark/perf-note will live there.
 - Ensure shell PATH is refreshed if `uv` was installed in-session.
 - For public GCS Zarr buckets, ADC is not required when opening with anonymous token mode (`token="anon"`).
 - Zarr v3 writes can fail if source dataset encodings contain v2 codec objects (for example `numcodecs.Blosc`); clear inherited encodings before writing v3.
+
+## Public-release readiness audit (2026-06-30)
+
+Goal: get the repo into a state where colleagues can look at / use it. Survey done
+2026-06-30; repo is already fairly clean (sensible `.gitignore`, no tracked caches/build
+artifacts, no personal absolute paths in `src/`). Outstanding items, by priority:
+
+### Blockers — decisions required before going public
+- **No LICENSE file.** Without one the code is all-rights-reserved; "public" ≠ usable.
+  Pick one (MIT / BSD-3 typical for scientific tools; Apache-2.0 for explicit patent
+  grant). This shapes everything else — decide first.
+- **Third-party data redistribution rights.** `data/` (30 MB, tracked) holds derived
+  products we may not have the right to redistribute:
+  - `data/validation-timeseries/*.csv` (100 files) — CH₄ enhancements from **NAME** (UK
+    Met Office) and **FLEXPART** footprints. NAME output is typically not freely
+    redistributable.
+  - `data/FLEXPART/FLEXPART_MHD_test_202401.nc` — FLEXPART footprint fixture.
+  - EDGAR is CC-BY but needs attribution.
+  Options: confirm permission, OR replace with a small synthetic fixture for
+  tests/notebooks, OR host externally + download script (cf. `download_sample_cube.py`).
+  Tests and notebooks depending on these need a graceful "data not present" path.
+
+### Personal / environment leakage
+- **`outputs` symlink → `/user/home/chxmr/data/glide/outputs/`** — tracked symlink into
+  personal storage. Remove; let `outputs/` be a normal gitignored dir.
+- **`glide_feature.png`** (713 KB, untracked, created 2026-06-30) — decide README asset
+  (→ `docs/img/`) vs scratch (delete).
+- **Personal SLURM-log helpers** `scripts/glogs.sh`, `scripts/logcleanup`,
+  `scripts/loglatest` (untracked) — keep untracked (add to `.gitignore`) or remove.
+
+### Stale GCP/Cloud-Run framing vs actual HPC (Isambard AI / SLURM / GH200) reality
+- **`deploy.sh` + `Dockerfile`** — Cloud Run deployment, `cu124` wheel (contradicts the
+  new `cu126` pin), `PORT=8080` for a batch job with no HTTP server. Delete or mark
+  clearly experimental/unsupported.
+- **README inaccuracies:**
+  - "Project Layout" still calls `footprint_gridder.py`, `output_writer.py`, `main.py`
+    **"placeholder"** — all fully implemented now; badly undersells the project.
+  - GCP-centric framing: "Minimal Trajectory Run (Local or **Vertex Notebook**)",
+    `deploy.sh`/Cloud Run section.
+  - "Three examples ship" but there are now **six** configs.
+
+### Internal dev docs not meant for public consumption
+- **`CHECKPOINT.md` (this file, ~1000 lines)** — stream-of-consciousness dev journal;
+  reads as internal scratch to outsiders. Move to `dev/` or `.github/`, or distil durable
+  decisions into `architecture.md` and drop the journal. Shouldn't be top-level next to
+  README.
+- **AI-agent artifacts** — `.github/copilot-instructions.md`, `.claude/`. Harmless but
+  signal WIP; decide keep vs relocate.
+
+### Config & script tidying
+- **Config sprawl (6, overlapping):** `example_mhd_january{,_periodic}.yaml`,
+  `example_multisite_january.yaml`, `multisite_validation_48h.yaml`, two smoke tests.
+  Trim to a clear ladder: one local smoke (no external data), one single-site example,
+  one multi-site example. Move machine-generated `multisite_validation_48h.yaml` out of
+  the curated set (regenerate on demand via `scripts/make_multisite_config.py`).
+- **Path drift:** `configs/multisite_validation_48h.yaml` has
+  `output_uri: outputs/multisite-validation-48h` but the actual run used
+  `outputs/icos-validation` (what `notebooks/multisite_validation.ipynb` reads).
+  Reconcile.
+
+### Quick hygiene wins
+- Add `CONTRIBUTING.md` + a one-line "does it work?" install-and-test in the README intro.
+- Note **uv >= 0.4.0** requirement (the `[[tool.uv.index]]` pin) in the main install
+  section, not just the GPU section.
+- Update README "Documentation Governance" after any doc reshuffle.
+
+### Suggested order of operations
+1. License + data rights (blockers) — decide first; they shape the rest.
+2. De-personalize: drop `outputs` symlink, sort `glide_feature.png` + log scripts.
+3. Reframe README ("placeholder" labels, GCP framing); decide deploy.sh/Dockerfile fate.
+4. Docs: relocate/distil CHECKPOINT.md.
+5. Configs: trim to a clean example ladder.
+
+Lowest-risk first pass (no judgment calls needed): README accuracy fixes + de-personalizing
+(#2–3). License (#1) and data rights (blockers) need Matt's decision before touching.

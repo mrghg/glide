@@ -31,6 +31,13 @@ outputs/
 *.nc
 *.parquet
 
+# Restricted / third-party data (not redistributed; see data/README.md).
+# Ignore the data itself but keep the folder structure, README, and placeholders.
+data/**
+!data/README.md
+!data/*/
+!data/**/.gitkeep
+
 # OS/editor noise
 .DS_Store
 .vscode/settings.json

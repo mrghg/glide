@@ -8,6 +8,13 @@ version = "0.1.0"
 description = "GPU-accelerated backward LPDM"
 readme = "README.md"
 requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Matt Rigby", email = "matt.rigby@bristol.ac.uk" }]
+classifiers = [
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Scientific/Engineering :: Atmospheric Science",
+]
 
 # Core runtime deps — the bare minimum to run the simulation, load met, and
 # write outputs. NO visualisation libraries here: `cartopy` and its transitive
