@@ -1,90 +1,87 @@
-# GPU-accelerated Lagrangian Inversion & Dispersion Engine (GLIDE)
+# GLIDE — GPU-accelerated Lagrangian Inversion & Dispersion Engine
 
-Backward-in-time Lagrangian Particle Dispersion Model (LPDM) scaffold for GPU-first execution.
+A backward-in-time Lagrangian Particle Dispersion Model (LPDM) for trace gas
+footprints, written in PyTorch.
+
+**This model is a work in progress, shared for input from the research community. Do not use for production purposes.**
+
+![GLIDE footprint](docs/img/glide_feature.png)
+*GLIDE 5-day integrated footprints for ICOS tall-tower sites in Europe, 20th January 2024. The overall run batched 48 hours x 56 sites (2688 footprints), which took about 25 minutes on a single NVIDIA GH200 Grace Hopper node (~2s per footprint).*
+
+## Purpose
+
+GLIDE was built to answer a specific question: can a backward LPDM be made
+*scalable* and *flexible* by rethinking its two traditional bottlenecks — I/O and
+single-threaded CPU physics?
+
+- **ARCO Zarr I/O.** Instead of reading whole NetCDF/GRIB met files, GLIDE streams
+  [analysis-ready, cloud-optimised (ARCO) ERA5](https://cloud.google.com/storage/docs/public-datasets/era5)
+  directly from a Zarr store, fetching only the chunks a run actually needs. The
+  chunked layout means a regional, time-bounded run reads a small fraction of the
+  archive rather than paging through monolithic files.
+- **GPU physics.** The hot path — `grid_sample` interpolation of the wind/turbulence
+  fields plus the elementwise Ornstein–Uhlenbeck turbulence step — is exactly the
+  kind of dense, data-parallel work a GPU accelerates. The whole engine is
+  device-agnostic (CUDA / MPS / CPU) and the per-step physics can be captured as a
+  CUDA graph via `torch.compile`.
+
+The ultimate aim is a model that is **more scalable and more flexible** than existing
+CPU / NetCDF / GRIB-based LPDMs: able to launch large multi-site networks in a single
+run, grow naturally onto larger accelerators, and adapt to new release geometries
+(in-situ towers today; column and satellite releases on the roadmap).
+
+> **Status:** research code under active development. The core backward model,
+> Hanna (1982) turbulence, reduced-Emanuel convection, multi-site releases, and
+> streaming Zarr output are implemented and tested, **but the physics has not been fully validated. I would NOT recommend using for production purposes at this stage.** See [Next Steps](#next-steps)
+> for what's still ahead.
 
 ## Project Layout
 
-- `src/lpdm/met_reader.py`: Meteorological I/O interface and ARCO ERA5 reader skeleton.
-- `src/lpdm/gpu_engine.py`: GPU physics/advection utilities and turbulence stepping helpers.
-- `src/lpdm/footprint_gridder.py`: Footprint accumulation placeholder.
-- `src/lpdm/release_generator.py`: Particle release generators.
-- `src/lpdm/output_writer.py`: Storage/output placeholder.
-- `src/lpdm/main.py`: Orchestrator placeholder.
-- `src/lpdm/visualize.py`: Plotly and Matplotlib diagnostics.
-- `tests/test_physics.py`: Physics unit tests with analytical/mock met fields.
-- `Dockerfile`: GPU-enabled runtime image.
-- `deploy.sh`: Artifact Registry build + Cloud Run GPU deployment.
-
-## Documentation Governance
-
-Use the following source-of-truth split to avoid drift:
-
-- `.github/copilot-instructions.md`: operational coding-agent behavior, guardrails, and workflow expectations.
-- `CHECKPOINT.md`: project goal, architecture intent, milestone history, and next recommended technical priorities.
-- `README.md`: user-facing setup, run commands, flags, and output contracts.
-- `VALIDATION.md`: validation suite scope, test tolerances and seeds, and which metrics are placeholder pending later milestones.
-- `docs/turbulence.md`: turbulence parameterization spec — modular architecture, scheme math, and the M1 implementation/validation plan.
-
-If behavior or interfaces change, update both the implementation and the matching documentation source above in the same PR.
+| Path | Purpose |
+| --- | --- |
+| `src/lpdm/main.py` | Orchestrator + thin CLI entrypoint. |
+| `src/lpdm/config.py` | Pydantic run-config schema (loaded from YAML). |
+| `src/lpdm/met_reader.py` | ARCO ERA5 Zarr meteorology reader + met-window caching/prefetch. |
+| `src/lpdm/gpu_engine.py` | Core GPU advection, coordinate transforms, field interpolation. |
+| `src/lpdm/turbulence/` | Turbulence schemes (Hanna 1982) behind a common interface. |
+| `src/lpdm/convection/` | Convective transport (reduced Emanuel) behind a common interface. |
+| `src/lpdm/release_generator.py` | Particle release generators (point, periodic, multi-site). |
+| `src/lpdm/footprint_gridder.py` | Accumulates particle residence time onto the output grid. |
+| `src/lpdm/output_writer.py` | Streaming Zarr footprint + Parquet endpoint/diagnostic writers. |
+| `src/lpdm/comparison.py` | STILT-style footprint conversion for validation against other LPDMs. |
+| `configs/` | Example YAML run configs (see below). |
+| `scripts/` | Met-download helpers and SLURM run scripts. |
+| `notebooks/` | Exploration and validation notebooks. |
+| `docs/` | Physics specifications (turbulence, convection, LPDM core). |
+| `tests/` | Physics unit tests and end-to-end runtime/config tests. |
 
 ## Quick Start
 
 ```bash
-python -m venv .venv
+uv venv --python 3.11 .venv
 source .venv/bin/activate
-pip install -e .                  # core install (simulation only)
-# pip install -e ".[viz,dev]"     # add notebook plotting stack + pytest
-python -m lpdm.main --config configs/local_smoke_test.yaml
+uv pip install -e .                  # core (simulation only)
+# uv pip install -e ".[viz,dev]"     # add notebook plotting stack + pytest
+.venv/bin/python -m lpdm.main --config configs/local_smoke_test.yaml
 ```
+
+`uv` is recommended (and required ≥ 0.4.0 for the torch wheel pin used on GPU
+hosts — see [GPU Run](#gpu-run-isambard-ai-gh200)). Plain `python -m venv` +
+`pip install -e .` also works for CPU-only use.
 
 The dependency surface is split into a small core (`numpy`, `torch`, `xarray`,
 `zarr`, `pydantic`, …) and two optional extras:
 
 - `[viz]` — `hvplot`, `geoviews`, `jupyter_bokeh`, `matplotlib`, `ipykernel`,
-  `nbformat`, plus `h5netcdf`/`h5py` for loading the FLEXPART `.nc` reference
-  fixtures. Pulls in `cartopy` (C-extension heavy); if no binary wheel is
-  available for your cpython / OS / arch you'll need `python3-dev` and
-  `libgeos-dev` (or the equivalent on your distro). Skip this on headless
-  compute nodes that never open the notebooks.
+  `nbformat`, plus `h5netcdf`/`h5py` for the comparison notebooks. Pulls in
+  `cartopy` (C-extension heavy); if no binary wheel exists for your
+  cpython / OS / arch you'll need `python3-dev` and `libgeos-dev` (or your
+  distro's equivalent). Skip on headless compute nodes.
 - `[dev]` — `pytest`.
 
-Run configs are YAML; the schema lives in [src/lpdm/config.py](src/lpdm/config.py). Three examples ship with the repo:
-- `configs/local_smoke_test.yaml` — small backward run against `data/sample_met.zarr`.
-- `configs/example_mhd_january.yaml` — single-release Hanna run, FLEXPART-aligned grid for the comparison fixture in `data/FLEXPART/`.
-- `configs/example_mhd_january_periodic.yaml` — 744 hourly Mace Head releases (January 2024) in one process via the M5 multi-release path; produces a single 5D `footprints.zarr` indexed by `release_time`.
+### One-command bootstrap
 
-The release schema supports four `kind` variants:
-
-- `point` — single release.
-- `periodic_point` — `n_releases` evenly-spaced releases from one site.
-- `point_schedule` — explicit `times: list[datetime]` from one site.
-- `multi_point_periodic` — `n_releases` evenly-spaced releases from multiple
-  sites simultaneously. Sites share the same release schedule, so they share
-  met windows: each met fetch and the per-window fixed costs are paid once for
-  all sites together rather than once per site. This is the efficient way to
-  grow a run across a network of stations.
-
-All variants produce the same output shape with a flat `release` axis (one
-entry per site × time combination) carrying `release_time`, `release_lon`,
-`release_lat`, `release_alt_agl_m`, and `site` coordinates. Recover a
-per-site cube with:
-
-```python
-fp["footprint"].set_index(release=["site", "release_time"]).unstack("release").sel(site="MHD")
-```
-
-A generator script for the validation network is at
-`scripts/make_multisite_config.py`; `configs/multisite_validation_48h.yaml`
-covers all 56 validation sites × 48 hourly releases in one batch.
-
-See the M5/multi-site stage entries in [CHECKPOINT.md](CHECKPOINT.md) for the
-design, and `batch.max_releases_per_batch` for controlling batch size.
-
-The CLI is intentionally tiny: `--config <path>` plus `--device`, `--output-uri`, `--start-time` overrides. Everything else is set in the YAML.
-
-## One-Command Bootstrap (Recommended)
-
-After cloning on any machine:
+`scripts/setup.sh` wraps the above and creates the venv with the right extras:
 
 ```bash
 chmod +x scripts/setup.sh
@@ -92,59 +89,67 @@ chmod +x scripts/setup.sh
 ./scripts/setup.sh --with-viz --run-tests   # full notebook workstation
 ```
 
-What this does:
-- Uses `uv` if available (falls back to `venv + pip` automatically).
-- Creates `.venv` with Python 3.11 by default.
-- Installs the package via `pip install -e .` with the right extras for the
-  flags you pass (`--with-viz` adds `[viz]`; `--run-tests` adds `[dev]`).
-- Optionally runs `tests/test_physics.py` when `--run-tests` is passed.
+It uses `uv` when available (falling back to `venv + pip`), targets Python 3.11
+by default (override with `--python`), and runs the physics tests when
+`--run-tests` is passed.
 
-Custom Python executable:
+## Configs and the release schema
 
-```bash
-./scripts/setup.sh --python python3.11 --run-tests
+Runs are driven by YAML; the schema is defined and validated in
+[src/lpdm/config.py](src/lpdm/config.py). The CLI is intentionally tiny —
+`--config <path>` plus `--device`, `--output-uri`, and `--start-time` overrides;
+everything else lives in the YAML.
+
+Example configs ship as a ladder from "no external data" to "full network":
+
+| Config | What it runs |
+| --- | --- |
+| `local_smoke_test.yaml` | 3 h backward run against the small local `data/sample_met.zarr` — no remote data needed. |
+| `smoke_mhd_single_release.yaml` | A single Mace Head release; quick GPU/path smoke test. |
+| `example_mhd_january.yaml` | Single-release Hanna run on the FLEXPART-aligned grid. |
+| `example_mhd_january_periodic.yaml` | Hourly Mace Head releases over January 2024 in one process → a single 5-D `footprints.zarr`. |
+| `example_multisite_january.yaml` | A handful of sites released together (multi-site path). |
+| `multisite_validation_48h.yaml` | All validation sites × 48 hourly releases; machine-generated by `scripts/make_multisite_config.py`. |
+
+The `release` block is a discriminated union on `kind`:
+
+- `point` — single release.
+- `periodic_point` — `n_releases` evenly-spaced releases from one site.
+- `point_schedule` — explicit `times: list[datetime]` from one site.
+- `multi_point_periodic` — `n_releases` evenly-spaced releases from **multiple
+  sites simultaneously**. Sites share one release schedule, so they share met
+  windows: each met fetch (and the per-window convection matrix, field build, and
+  per-step overhead) is paid once for all sites rather than once per site. This is
+  the efficient way to grow a run across a network of stations.
+
+All variants produce the same output with a flat `release` axis (one entry per
+site × time) carrying `release_time`, `release_lon`, `release_lat`,
+`release_alt_agl_m`, and `site` coordinates. Recover a per-site cube with:
+
+```python
+fp["footprint"].set_index(release=["site", "release_time"]).unstack("release").sel(site="MHD")
 ```
 
-## Install With UV
-
-Install UV (if not already installed):
-
-```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
-```
-
-Create a virtual environment and install:
-
-```bash
-uv venv --python 3.11
-source .venv/bin/activate
-uv pip install -e .                  # core (simulation only)
-# uv pip install -e ".[viz,dev]"     # full (notebooks + pytest)
-```
-
-Run the model entrypoint:
-
-```bash
-python -m lpdm.main --config configs/local_smoke_test.yaml
-```
+`batch.max_releases_per_batch` controls how many releases are integrated together
+in one engine pass (keep it a multiple of the site count for multi-site runs).
 
 ## GPU Run (Isambard AI GH200)
 
 GLIDE's hot path runs unmodified on CUDA. The SLURM scripts in `scripts/` are
 tuned for the Isambard AI Grace-Hopper nodes (aarch64, 4 × GH200 per node).
 
-**One-time setup** (do this in an interactive session on a login node):
+**One-time setup** (in an interactive session on a login node):
 
 ```bash
 module load cudatoolkit/24.11_12.6   # provides CUDA 12.6 runtime + nvcc/ptxas
-                                     # do NOT load cuda/12.6 — it conflicts
+                                     # do NOT also load cuda/12.6 — they conflict
 uv venv --python 3.11 .venv
 uv pip install --python .venv/bin/python -e ".[dev]"
 # torch is automatically pinned to the cu126 aarch64 wheel via the
 # [tool.uv.index]/[tool.uv.sources] tables in pyproject.toml
 # (requires uv >= 0.4.0 — run `uv self update` if the version is older)
 
-# Sanity check — must print True  12.6:
+# Sanity check — must print: True 12.6
 .venv/bin/python -c "import torch; print(torch.cuda.is_available(), torch.version.cuda)"
 ```
 
@@ -159,152 +164,146 @@ sbatch scripts/run_periodic_cuda.slurm configs/multisite_validation_48h.yaml
 
 **Notes:**
 
-- `pyproject.toml` (`[tool.uv.index]` + `[tool.uv.sources]`) pins `torch` to
-  the cu126 index on aarch64 via a platform marker; on x86 it falls back to
-  PyPI (CPU-only wheel for local dev). These tables are read only by uv —
-  setuptools and pip ignore them. If the cluster moves to CUDA 12.8, update the
-  `url` and `name` there and match the module name in the SLURM script.
-  Requires uv >= 0.4.0 (the config key is the singular `[[tool.uv.index]]`).
-- `module load cudatoolkit/24.11_12.6` must be the sole CUDA module loaded —
-  it supersedes the older `cuda/12.6` module and the two conflict. The SLURM
-  script handles this automatically.
-- The script prepends PyTorch's bundled NCCL to `LD_LIBRARY_PATH` after all
-  module loads; this prevents the system NCCL (older, missing `ncclCommResume`)
-  from being resolved first. Do not move this line above the module block.
-- Set `GLIDE_PHASE_TIMERS=1` at submit to get per-phase wall breakdowns in
-  the `.out` log (met_fetch / step / convection / gridder). Useful for tuning
+- `pyproject.toml` (`[tool.uv.index]` + `[tool.uv.sources]`) pins `torch` to the
+  cu126 index on aarch64 via a platform marker; on x86 it falls back to PyPI (the
+  CPU-only wheel for local dev). These tables are read only by uv — setuptools and
+  pip ignore them. If the cluster moves to CUDA 12.8, update the `url`/`name` there
+  and the module name in the SLURM script. Requires uv ≥ 0.4.0 (the config key is
+  the singular `[[tool.uv.index]]`).
+- `module load cudatoolkit/24.11_12.6` must be the sole CUDA module loaded — it
+  supersedes the older `cuda/12.6` module and the two conflict. The SLURM script
+  handles this automatically.
+- The script prepends PyTorch's bundled NCCL to `LD_LIBRARY_PATH` after all module
+  loads, so the system NCCL (older, missing `ncclCommResume`) isn't resolved first.
+  Do not move that line above the module block.
+- `GLIDE_PHASE_TIMERS=1` at submit prints per-phase wall breakdowns in the `.out`
+  log (met_fetch / step / convection / gridder) — useful for tuning
   `met_cache_max_hours` and batch size.
-- Set `GLIDE_COMPILE=0` to skip `torch.compile` (eager fallback, slower but
-  no Triton compile cost; useful for debugging).
+- `GLIDE_COMPILE=0` skips `torch.compile` (eager fallback: slower, but no Triton
+  compile cost; handy for debugging).
 
-## Physics Tests
-
-```bash
-.venv/bin/python -m pytest -q tests/test_physics.py
-```
-
-Recommended once per environment (so imports work without `PYTHONPATH`):
+## Tests
 
 ```bash
-uv pip install --python .venv/bin/python -e .
+# once per environment, so imports resolve without PYTHONPATH:
+uv pip install --python .venv/bin/python -e ".[dev]"
+
+.venv/bin/python -m pytest -q                       # full suite
+.venv/bin/python -m pytest -q tests/test_physics.py # physics only
 ```
 
-Then run all tests from repo root:
+The physics suite includes a uniform-wind RK2 advection precision test
+(zero turbulence), a zero-wind Langevin diffusion Gaussianity test, and a
+well-mixed periodic turbulence uniformity test; each also checks particle-mass
+conservation via total weight. The wider suite covers the config schema,
+release generators, met reader, footprint gridder, output writer, convection,
+and end-to-end runtime.
 
-```bash
-.venv/bin/python -m pytest -q
-```
+## Meteorology data
 
-The suite includes:
-- Uniform wind RK2 advection precision test (zero turbulence).
-- Zero-wind Langevin diffusion Gaussianity test.
-- Well-mixed periodic turbulence uniformity test.
+GLIDE reads ERA5 from a Zarr store (`io.zarr_store` in the config). For local
+development, download a cropped subset ("data cube") of only your area and time
+window with [scripts/download_sample_cube.py](scripts/download_sample_cube.py).
+Two modes:
 
-Each test also verifies particle mass conservation by checking total weight.
-
-## Minimal Trajectory Run (Local or Vertex Notebook)
-
-### Downloading Local Sample Data
-
-For local development or rapid testing, reading from the remote ARCO ERA5 Zarr store can be slow or memory-intensive. Download a cropped subset of the dataset (a "data cube") covering only your area and time of interest with [scripts/download_sample_cube.py](scripts/download_sample_cube.py). The script has two modes.
-
-**Named domain + month** — for the long-running comparison archives. One Zarr per month, named `<DOMAIN>_<YYYYMM>.zarr` under `--out-dir` (default `data/era5/`). The domain bbox is registered in the `DOMAINS` dict at the top of the script; today only `EUROPE` is defined (matches the FLEXPART comparison fixture under `data/FLEXPART/`).
+**Named domain + month** — one Zarr per month, named `<DOMAIN>_<YYYYMM>.zarr`
+under `--out-dir`. Domains are registered in the `DOMAINS` dict at the top of the
+script (today: `EUROPE`, matching the validation grid):
 
 ```bash
 .venv/bin/python scripts/download_sample_cube.py --domain EUROPE --year-month 202401
-.venv/bin/python scripts/download_sample_cube.py --domain EUROPE --year-month 202312
 ```
 
-Produces `data/era5/EUROPE_202401.zarr` and `data/era5/EUROPE_202312.zarr`. The EUROPE domain at 37 pressure levels is roughly 80 GB per month uncompressed (~25–30 GB on disk). Each month is its own store so the download is resumable and shareable.
+The EUROPE domain at 37 pressure levels is ~80 GB/month uncompressed
+(~25–30 GB on disk). Each month is a separate, resumable store.
 
-To write a named-domain download to a custom location (external drive, mounted volume, etc.), point `--out-dir` at it. The filename is always auto-generated as `<DOMAIN>_<YYYYMM>.zarr` inside that directory — this is intentional, to prevent on-disk names drifting out of sync with the domain registry:
-
-```bash
-.venv/bin/python scripts/download_sample_cube.py \
-    --domain EUROPE --year-month 202401 \
-    --out-dir /Volumes/external/met
-```
-
-**Ad-hoc subset** — for SF-area smoke tests and other one-offs. Provide an explicit `--out-path`, time window, and lon/lat bounds:
+**Ad-hoc subset** — explicit path, time window, and lon/lat bounds:
 
 ```bash
 .venv/bin/python scripts/download_sample_cube.py \
     --out-path data/sample_met.zarr \
     --time-start 2023-12-29T18:00:00 --time-end 2024-01-01T06:00:00 \
-    --lon-min -127.0 --lon-max -117.0 \
-    --lat-min 33.0 --lat-max 43.0
+    --lon-min -127.0 --lon-max -117.0 --lat-min 33.0 --lat-max 43.0
 ```
 
-Notes:
-- Public ARCO buckets are opened anonymously, so ADC credentials are not required.
-- To choose output store format explicitly, pass `--zarr-version 2` (default) or `--zarr-version 3`.
-- The validator streams finite-value checks via dask so large stores don't OOM.
+Public ARCO buckets are opened anonymously (no credentials needed). Pass
+`--zarr-version 2` (default) or `3` to choose the output store format.
 
-After downloading the sample data, either:
-- run `python -m lpdm.main --config configs/local_smoke_test.yaml` directly, or
-- use VS Code Run/Debug profile `GLIDE: lpdm.main (Local Sample Met)` from `.vscode/launch.json` (which uses that same config).
+> The validation/comparison datasets (NAME, FLEXPART, EDGAR) are **not**
+> redistributed with this repo — see [data/README.md](data/README.md). The core
+> model runs end-to-end on the ERA5 smoke test without them.
 
-### Local Smoke Test (Using Downloaded Sample)
+## Running the model
 
-`configs/local_smoke_test.yaml` is wired to `data/sample_met.zarr` with a 3 h backward run. Use it to validate the local meteorology path end-to-end:
-
-```bash
-.venv/bin/python -m lpdm.main --config configs/local_smoke_test.yaml
-```
-
-Expected outputs under `outputs/demo-run-local`:
-- `endpoint_particles.parquet`
-- `trajectory_diagnostics.parquet`
-- `footprints.zarr`
-- `run_metadata.json`
-
-### Running the Model
-
-Author a YAML config (start from one of the examples in `configs/`) and pass it via `--config`:
+Author a YAML config (start from `configs/`) and pass it via `--config`:
 
 ```bash
 .venv/bin/python -m lpdm.main --config configs/example_mhd_january.yaml
 ```
 
-CLI overrides are intentionally limited to the three knobs that change between runs of the same physics config:
+CLI overrides are limited to the knobs that change between runs of the same
+physics config:
 
 ```bash
 .venv/bin/python -m lpdm.main \
-	--config configs/example_mhd_january.yaml \
-	--device cuda \
-	--output-uri outputs/run-A \
-	--start-time 2024-01-10T00:00:00Z
+    --config configs/example_mhd_january.yaml \
+    --device cuda \
+    --output-uri outputs/run-A \
+    --start-time 2024-01-10T00:00:00Z
 ```
 
-YAML schema is defined by [src/lpdm/config.py](src/lpdm/config.py). The top-level sections are `io`, `simulation`, `release`, `turbulence`, `output_grid`, `met_domain`, `memory`, and `batch`. Validation includes: `simulation.length_seconds > release.duration_seconds`, strictly ascending `output_grid.z_edges_m`, and the release point lying inside `met_domain`. The `release` block is a discriminated union on `kind`; see the M5 stage entries in [CHECKPOINT.md](CHECKPOINT.md) for the variants.
+Top-level config sections: `io`, `simulation`, `release`, `turbulence`,
+`convection`, `output_grid`, `met_domain`, `memory`, `batch`. Validation includes
+`simulation.length_seconds > release.duration_seconds`, strictly ascending
+`output_grid.z_edges_m`, and every release point lying inside `met_domain`.
 
-Memory controls live in the `memory:` section of the YAML:
+Memory controls (`memory:` section):
 
-- `met_cache_max_hours` — LRU cache size for met windows. For multi-batch runs
-  set this above `simulation.length_seconds/3600 + batch_advance_hours` to
-  avoid cross-batch re-fetch thrash; a startup warning fires if it is too small.
-- `met_cache_on_host` (default `true`) — keep the met cache in host RAM rather
-  than GPU memory. On a GH200 with a 192h cache this is ~50 GiB of LPDDR5X
-  instead of HBM; strongly recommended.
+- `met_cache_max_hours` — LRU cache size for met windows. For multi-batch runs set
+  it above `simulation.length_seconds/3600 + batch_advance_hours` to avoid
+  cross-batch re-fetch thrash; a startup warning fires if it's too small.
+- `met_cache_on_host` (default `true`) — keep the met cache in host RAM, not GPU
+  memory. On a GH200 a 192 h cache is ~50 GiB of LPDDR5X instead of HBM.
 - `met_prefetch` (default `true`) — overlap the next hour's met fetch with GPU
-  compute using a background worker thread. Reduces met_fetch% from ~63% to
-  ~15% of wall on a typical month run.
+  compute on a background thread.
 - `log_every_steps`, `gc_every_steps`, `guard_check_every_steps` — diagnostic
   cadences.
 - `guard_max_rss_gib`, `guard_max_device_allocated_gib`,
-  `guard_max_device_reserved_gib` — optional hard limits; if a guard fires the
-  run exits with a `MemoryError` and writes diagnostic metadata to
-  `run_metadata.json`.
+  `guard_max_device_reserved_gib` — optional hard limits; a tripped guard exits
+  with `MemoryError` and writes diagnostics to `run_metadata.json`.
 
 Outputs written under `io.output_uri`:
-- `endpoint_particles.parquet`
-- `trajectory_diagnostics.parquet`
-- `footprints.zarr`
-- `run_metadata.json`
 
-## Deploy
+- `footprints.zarr` — the 5-D footprint store (`release × time_ago × z × lat × lon`).
+- `endpoint_particles.parquet` — final particle states.
+- `trajectory_diagnostics.parquet` — per-run diagnostics.
+- `run_metadata.json` — provenance, config echo, timing, and any guard report.
 
-```bash
-chmod +x deploy.sh
-PROJECT_ID=my-project REGION=us-central1 ./deploy.sh
-```
+## Next Steps
+
+GLIDE is research code; the near-term roadmap:
+
+- **Physics validation.** The transport physics still needs thorough validation
+  against external data — both established LPDMs (NAME, FLEXPART) and observations.
+  The comparison machinery exists (`src/lpdm/comparison.py`, the validation
+  notebooks), but a systematic evaluation has not yet been completed; treat current
+  results as indicative, not verified.
+- **Alternative turbulence / convection schemes.** Turbulence and convection sit
+  behind common interfaces (`src/lpdm/turbulence/`, `src/lpdm/convection/`) with
+  one scheme each today (Hanna 1982, reduced Emanuel). Additional schemes will be
+  added so configurations can be compared and the best one chosen per application.
+- **Column releases (in-situ).** Vertically-distributed releases (e.g. tall-tower
+  inlets, aircraft profiles) using importance sampling over a pressure-weighted
+  vertical PDF, rather than the current point releases.
+- **Satellite-style releases.** Many irregular soundings per overpass, each with
+  its own averaging kernel — the flat `release` axis already accommodates this
+  geometry; the generator and weighting remain to be added.
+- **Cloud deployment.** A containerised, cloud-runnable packaging will return once
+  the architecture has settled (the earlier Docker/Cloud Run scaffolding was
+  removed for now as it had drifted from the current code).
+- **Performance.** Continued work on CUDA-graph capture, particle aggregation, and
+  larger batch sizes to push GPU utilisation further.
+
+## License
+
+Apache License 2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
