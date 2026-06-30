@@ -140,8 +140,9 @@ module load cudatoolkit/24.11_12.6   # provides CUDA 12.6 runtime + nvcc/ptxas
                                      # do NOT load cuda/12.6 — it conflicts
 uv venv --python 3.11 .venv
 uv pip install --python .venv/bin/python -e ".[dev]"
-# torch is automatically pinned to the cu126 aarch64 wheel via uv.toml
-# (requires uv >= 0.3.0 — run `uv self update` if the version is older)
+# torch is automatically pinned to the cu126 aarch64 wheel via the
+# [tool.uv.index]/[tool.uv.sources] tables in pyproject.toml
+# (requires uv >= 0.4.0 — run `uv self update` if the version is older)
 
 # Sanity check — must print True  12.6:
 .venv/bin/python -c "import torch; print(torch.cuda.is_available(), torch.version.cuda)"
@@ -158,11 +159,12 @@ sbatch scripts/run_periodic_cuda.slurm configs/multisite_validation_48h.yaml
 
 **Notes:**
 
-- `uv.toml` at the repo root pins `torch` to the cu126 index on aarch64 via a
-  platform marker; on x86 it falls back to PyPI (CPU-only wheel for local dev).
-  If the cluster moves to CUDA 12.8, update the `url` and `name` in `uv.toml`
-  and match the module name in the SLURM script. Requires uv >= 0.4.0 (the
-  config key is the singular `[[index]]`).
+- `pyproject.toml` (`[tool.uv.index]` + `[tool.uv.sources]`) pins `torch` to
+  the cu126 index on aarch64 via a platform marker; on x86 it falls back to
+  PyPI (CPU-only wheel for local dev). These tables are read only by uv —
+  setuptools and pip ignore them. If the cluster moves to CUDA 12.8, update the
+  `url` and `name` there and match the module name in the SLURM script.
+  Requires uv >= 0.4.0 (the config key is the singular `[[tool.uv.index]]`).
 - `module load cudatoolkit/24.11_12.6` must be the sole CUDA module loaded —
   it supersedes the older `cuda/12.6` module and the two conflict. The SLURM
   script handles this automatically.

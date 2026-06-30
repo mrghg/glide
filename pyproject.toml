@@ -72,3 +72,27 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+# ---------------------------------------------------------------------------
+# uv: pin torch to the CUDA 12.6 wheel index on aarch64 (Isambard AI GH200).
+#
+# These [tool.uv.*] tables are read only by uv; setuptools and pip ignore them,
+# so the file stays portable. Requires uv >= 0.4.0. NOTE the key is the SINGULAR
+# `index` (not `indexes`) — uv rejects unknown keys as a TOML parse error. The
+# `sources` block must live here in pyproject.toml; uv forbids it in uv.toml.
+#
+# `explicit = true` -> the index is consulted ONLY for packages that reference
+# it below. The platform marker means torch resolves from the cu126 index on
+# aarch64 (the GH200 nodes) and falls back to PyPI on x86 (the CPU-only dev
+# wheel for local iteration). If the cluster moves to CUDA 12.8+, bump the
+# name and url here and the module name in scripts/run_periodic_cuda.slurm.
+# ---------------------------------------------------------------------------
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[tool.uv.sources]
+torch = [
+  { index = "pytorch-cu126", marker = "platform_machine == 'aarch64'" },
+]
