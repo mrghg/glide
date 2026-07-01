@@ -6,7 +6,7 @@ footprints, written in PyTorch.
 **This model is a work in progress, shared for input from the research community. Do not use for production purposes.**
 
 ![GLIDE footprint](docs/img/glide_feature.png)
-*GLIDE 5-day integrated footprints for ICOS tall-tower sites in Europe, 20th January 2024. The overall run batched 48 hours x 56 sites (2688 footprints), which took about 25 minutes on a single NVIDIA GH200 Grace Hopper node (~2s per footprint).*
+*GLIDE 5-day integrated footprints for ICOS tall-tower sites in Europe, 20th January 2024. The overall run batched 48 hours x 56 sites (2688 footprints), which took about 25 minutes on a single NVIDIA GH200 Grace Hopper node.*
 
 ## Purpose
 
@@ -15,7 +15,7 @@ GLIDE was built to answer a specific question: can a backward LPDM be made
 single-threaded CPU physics?
 
 - **ARCO Zarr I/O.** Instead of reading whole NetCDF/GRIB met files, GLIDE streams
-  [analysis-ready, cloud-optimised (ARCO) ERA5](https://cloud.google.com/storage/docs/public-datasets/era5)
+  [analysis-ready, cloud-optimised (ARCO)](https://www.frontiersin.org/journals/climate/articles/10.3389/fclim.2021.782909/full) [ERA5](https://cloud.google.com/storage/docs/public-datasets/era5)
   directly from a Zarr store, fetching only the chunks a run actually needs. The
   chunked layout means a regional, time-bounded run reads a small fraction of the
   archive rather than paging through monolithic files.
