@@ -1026,7 +1026,7 @@ artifacts, no personal absolute paths in `src/`). Outstanding items, by priority
   Tests and notebooks depending on these need a graceful "data not present" path.
 
 ### Personal / environment leakage
-- **`outputs` symlink → `/user/home/chxmr/data/glide/outputs/`** — tracked symlink into
+- **`outputs` symlink ** — tracked symlink into
   personal storage. Remove; let `outputs/` be a normal gitignored dir.
 - **`glide_feature.png`** (713 KB, untracked, created 2026-06-30) — decide README asset
   (→ `docs/img/`) vs scratch (delete).
