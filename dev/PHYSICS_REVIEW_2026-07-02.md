@@ -6,11 +6,14 @@
 >   share)** — DONE (`fix(convection): non-divergent mass-flux matrix …`).
 > - **Findings 4+5+6 (Hanna σ/T_L: FLEXPART v11 coefficients, |f| Coriolis,
 >   stable-SL σ_w) + Finding 7 minor items (t_idx clamp, Z_MIN_M)** — DONE.
-> - **DEFERRED follow-ups** (documented in `docs/turbulence.md` §3.2.2/§3.2.4):
->   FLEXPART's Lagrangian-timescale floors (10/10/30 s) and REMOVING the MO
->   surface-layer override to fully match FLEXPART v11. Both interact with the
->   adaptive-substep machinery (which keys off the small near-surface `T_Lw`), so
->   they need their own validation pass rather than being bundled here.
+> - **Follow-ups IMPLEMENTED 2026-07-02 (after v2 validation):** FLEXPART's
+>   Lagrangian-timescale floors and the removal of the MO surface-layer override
+>   are now the DEFAULTS (`turbulence.flexpart_tl_floors: true`,
+>   `surface_layer_override: false`), motivated by the v2 48-h run: GLIDE
+>   over-estimated mean enhancements at polluted low-inlet sites (~120 vs
+>   <60 ppb) — traced to near-surface K = σ_w²·T_Lw being 3–8× smaller than
+>   FLEXPART's below ~15 m on stable nights. Legacy behaviour retained behind the
+>   two config flags for A/B.
 > - Finding 7's hardcoded convection interval (3600 s) left as-is (documented
 >   in-code; all shipped configs are hourly).
 

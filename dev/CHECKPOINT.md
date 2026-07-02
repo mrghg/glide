@@ -1114,3 +1114,18 @@ hardcoded 3600 s interval also left as a documented follow-up. **Next: the GH200
 validation re-run (Finding 1 acceptance) — re-run the 56-site config and compare
 against the 2026-06-30 baseline (FLEXPART 0.67, NAME-UMG 0.74, NAME-UKV 0.85;
 GLIDE means 13–19% high).**
+
+**v2 validation (2026-07-02, `outputs/icos-validation-v2`, 48 h):** GLIDE now
+over-estimates mean enhancements, worst at polluted low-inlet sites (up to
+~120 ppb vs <60 for NAME/FLEXPART) — the SHF fix restored correct nocturnal
+stability and unmasked weak near-surface vertical mixing: with the 1 s T_L floor
+and the MO surface-layer override, K = σ_w²·T_Lw is 3–8× below FLEXPART's in the
+lowest ~15 m on stable nights, inflating near-field surface residence exactly at
+near-source sites. In response, the two deferred items are now IMPLEMENTED and
+DEFAULT: `turbulence.flexpart_tl_floors: true` (10/10/30 s) and
+`surface_layer_override: false` (regime formulas to the ground, per FLEXPART
+v11). Legacy behaviour kept behind the flags for A/B. Side-effect: with
+T_Lw ≥ 30 s the substep cap rarely binds (max_substeps pressure eases). **Next:
+v3 GH200 run with the new defaults; expect polluted-site means to drop toward
+the reference range. Also check the v2 log for any "Emanuel convection: fires"
+lines (bbox-mean January column should not trigger).**

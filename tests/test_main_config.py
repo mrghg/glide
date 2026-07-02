@@ -416,6 +416,10 @@ def test_scheme_kwargs_forwards_meander_only_for_hanna() -> None:
         # Substepping knobs default to the historical hardcoded values.
         "substep_c": 0.5,
         "max_substeps": 50,
+        # Near-surface mixing knobs default to the FLEXPART-matching behaviour
+        # (T_L floors on, legacy surface-layer override off).
+        "flexpart_tl_floors": True,
+        "surface_layer_override": False,
     }
 
     # Non-Hanna schemes take no kwargs (would reject meander), so forward nothing.

@@ -964,6 +964,8 @@ def _scheme_kwargs(cfg: RunConfig) -> dict[str, object]:
 		"meander_stencil_radius": m.stencil_radius,
 		"substep_c": cfg.turbulence.substep_c,
 		"max_substeps": cfg.turbulence.max_substeps,
+		"flexpart_tl_floors": cfg.turbulence.flexpart_tl_floors,
+		"surface_layer_override": cfg.turbulence.surface_layer_override,
 	}
 	if m.timescale_seconds is not None:
 		kwargs["meander_timescale_seconds"] = m.timescale_seconds

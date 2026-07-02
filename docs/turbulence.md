@@ -199,10 +199,15 @@ T_Lw = 0.10 z / (σ_w (0.55 - 0.38 |z/L|))   for |z/L| < 1     (near-surface)
      = 0.15 h / σ_w (1 - exp(-5 ζ))          otherwise         (bulk)
 ```
 
-**Deferred (documented follow-ups):** FLEXPART's Lagrangian-timescale floors
-(T_Lu, T_Lv ≥ 10 s; T_Lw ≥ 30 s) are not yet applied — GLIDE keeps the smaller
-1 s floor because the adaptive-substep machinery keys off the near-surface T_Lw
-and raising the floor interacts with it. See §3.2.4/§3.2.7.
+**T_L floors (`turbulence.flexpart_tl_floors`, default `true`):** FLEXPART's
+Lagrangian-timescale floors (T_Lu, T_Lv ≥ 10 s; T_Lw ≥ 30 s) are applied to the
+BL profile (before the free-troposphere override, whose (σ_w, T_Lw) pair defines
+K and must not be re-floored). Without them the T_Lw formulas vanish as z → 0,
+collapsing the near-surface K = σ_w²·T_Lw and trapping particles in the lowest
+metres — the GLIDE ≫ NAME/FLEXPART enhancement over-estimation at polluted
+low-inlet sites (v2 validation, 2026-07-02). A convenient side-effect: with
+T_Lw ≥ 30 s the adaptive-substep cap (§3.2.7) rarely binds. Set `false` only for
+legacy A/B comparisons.
 
 #### 3.2.3 Above-BL (z > h) — gradient-Richardson closure
 
@@ -240,27 +245,27 @@ is handled by a separate process — see §3.2.8. Implemented as free functions
 
 #### 3.2.4 Surface-layer treatment
 
-When `z < z_sl` (surface-layer top, taken as `0.1 h`), GLIDE applies a
-Monin-Obukhov surface-layer scaling rather than the full in-BL formulae:
+**Default: no surface-layer override** (`turbulence.surface_layer_override:
+false`). FLEXPART v11 `subroutine hanna` has no separate surface-layer treatment
+— the §3.2.2 regime formulas run to the ground, bounded by the T_L floors — and
+GLIDE now follows it. The previous GLIDE-only MO override both undercut the
+floors near the surface (its `T_L = κz/σ` → seconds as z → 0) and put a K
+discontinuity at the `0.1 h` seam.
+
+When enabled (legacy / A/B comparisons only), the override applies below
+`z_sl = 0.1 h`:
 
 ```
 σ_w = 1.3 u* (1 - 3 z/L)^(1/3)   (unstable; Flesch et al. 1995 App. B)
 σ_w = 1.3 u*                     (stable / neutral — CONSTANT in height)
 σ_u = σ_v as in §3.2.2 with z → max(z, z_sl)
-T_L  = κ z / σ
+T_L  = κ z / σ                    (then floored per §3.2.2 if floors are on)
 ```
 
 The stable σ_w is height-independent (σ_w/u* ≈ 1.3 in the stable surface layer).
-The previous `1.3 u*(1 + 5 z/L)` form GREW with stability — that is the φ_m
+An earlier `1.3 u*(1 + 5 z/L)` form GREW with stability — that is the φ_m
 momentum-gradient function, not a σ_w scaling — and over-mixed the nocturnal
 near-surface layer (Finding 6 of the 2026-07-02 review).
-
-**Note:** this MO surface-layer override is a GLIDE addition; FLEXPART v11
-`subroutine hanna` has NO separate surface-layer treatment (the regime formulas
-of §3.2.2 run to the ground, with the T_L floors). Dropping the override to match
-FLEXPART exactly is a documented follow-up — it interacts with the
-adaptive-substep machinery (§3.2.7), which keys off the small near-surface
-`T_L = κ z / σ`.
 
 **Reflection (Wilson & Flesch 1993 §6).** Smooth-wall reflection at `z = 0` is the
 joint mapping `(z, w) → (2·z_surf − z, −w)` — **both** position and vertical
@@ -480,8 +485,8 @@ tests.
 ## 6. Open questions / known limitations
 
 - Above-BL turbulence uses a gradient-Richardson closure (§3.2.3), not a constant-K placeholder.
-- Surface-layer transition altitude `z_sl = 0.1 h` is a heuristic and may need tuning per regime. The MO surface-layer override itself is a GLIDE addition beyond FLEXPART v11 (see §3.2.4) — a candidate for removal in a future FLEXPART-matching pass.
-- The in-BL σ/T_L coefficients follow FLEXPART v11 (§3.2.2), but its Lagrangian-timescale floors (10/10/30 s) are not yet applied — a documented follow-up (§3.2.2). Strong σ-gradients (e.g. through the BL top) are carried by the well-mixed drift (§3.2.5) with σ re-evaluated each step.
+- The legacy MO surface-layer override (`surface_layer_override: true`) and the pre-floor 1 s T_L minimum (`flexpart_tl_floors: false`) are retained only for A/B comparisons (§3.2.2/§3.2.4); the defaults follow FLEXPART v11. Remove the legacy paths once the v2-vs-v3 validation confirms the defaults.
+- The in-BL σ/T_L coefficients and T_L floors follow FLEXPART v11 (§3.2.2). Strong σ-gradients (e.g. through the BL top) are carried by the well-mixed drift (§3.2.5) with σ re-evaluated each step.
 - Coriolis `f` is computed from each particle's instantaneous latitude (using `|f|`); we don't average across the trajectory.
 - `T_v` is approximated as `T` for the Obukhov-length calculation; humidity correction is small and deferred.
 - Initial perturbation velocities are zero rather than sampled from the local σ; particles equilibrate within `T_L`.

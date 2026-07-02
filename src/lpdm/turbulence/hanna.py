@@ -12,9 +12,11 @@ the specific equation attributions. This is the same set of parameterisations
 FLEXPART uses in `src/turbulence_mod.f90` `subroutine hanna`; GLIDE adopts them
 (coefficients checked against that reference on 2026-07-02, Finding 5 of the
 physics review) so its boundary-layer turbulence is directly comparable to
-FLEXPART's. FLEXPART's Lagrangian-timescale floors (10/10/30 s) and its lack of a
-separate surface-layer override are noted as follow-ups in `docs/turbulence.md`
-§3.2.2/§3.2.4.
+FLEXPART's. By default GLIDE also applies FLEXPART's Lagrangian-timescale floors
+(10/10/30 s; ``flexpart_tl_floors``) and, like FLEXPART, runs the regime formulas
+to the ground with no surface-layer override (``surface_layer_override=False``);
+the legacy behaviour is retained behind those two flags for A/B comparisons.
+See `docs/turbulence.md` §3.2.2/§3.2.4.
 """
 
 from __future__ import annotations
@@ -58,6 +60,17 @@ T_L_MIN_S = 1.0
 USTAR_MIN_M_S = 1e-3
 BLH_MIN_M = 50.0
 Z_MIN_M = 1.0  # height floor (metres) for near-surface z in gradient/timescale lookups
+
+# FLEXPART v11 Lagrangian-timescale floors (turbulence_mod.f90 subroutine hanna:
+# tlu=max(10.,tlu); tlv=max(10.,tlv); tlw=max(30.,tlw)). These keep the
+# near-surface vertical diffusivity K = σ_w²·T_Lw from collapsing as z → 0
+# (T_Lw formulas vanish with z), which otherwise traps particles in the lowest
+# metres and inflates near-field surface footprints — the GLIDE-vs-NAME/FLEXPART
+# over-estimation seen at polluted low-inlet sites (2026-07-02 v2 validation).
+# Applied when HannaScheme(flexpart_tl_floors=True), the default.
+T_LU_FLOOR_FLEXPART_S = 10.0
+T_LV_FLOOR_FLEXPART_S = 10.0
+T_LW_FLOOR_FLEXPART_S = 30.0
 
 # Free-troposphere (above-BL) gradient-Richardson closure constants (docs/turbulence.md §3.2.3).
 P0_PA = 100000.0                  # reference pressure for potential temperature
@@ -422,6 +435,8 @@ class HannaScheme(TurbulenceScheme):
 		max_substeps: int = MAX_SUBSTEPS_DEFAULT,
 		z_ubl_m: float = Z_UBL_DEFAULT_M,
 		static_substeps: bool | None = None,
+		flexpart_tl_floors: bool = True,
+		surface_layer_override: bool = False,
 	) -> None:
 		"""Construct the scheme.
 
@@ -434,6 +449,22 @@ class HannaScheme(TurbulenceScheme):
 		substepped so its effective sub-dt satisfies ``sub_dt < substep_c · T_Lw``,
 		capped at ``max_substeps`` per outer step to bound the cost for very-near-
 		surface particles. Meander has τ ≈ 1800 s so always runs at the outer dt.
+
+		``flexpart_tl_floors`` (default True) applies FLEXPART v11's Lagrangian-
+		timescale floors (T_Lu, T_Lv ≥ 10 s; T_Lw ≥ 30 s) after the profile
+		assembly. Without them the near-surface T_Lw → 0 with z, collapsing the
+		vertical diffusivity K = σ_w²·T_Lw in the lowest metres and inflating
+		near-field surface footprints (the GLIDE ≫ NAME/FLEXPART bias at polluted
+		low-inlet sites, 2026-07-02 v2 validation). Set False for the legacy 1 s
+		floor (A/B comparisons).
+
+		``surface_layer_override`` (default False) enables the GLIDE-only
+		Monin-Obukhov surface-layer treatment below 0.1 h (σ_w from MO scaling,
+		T_L = κz/σ). FLEXPART v11 has no such override — its regime formulas plus
+		the T_L floors run to the ground — and the override both undercuts the
+		floors (κz/σ → seconds near the surface) and introduces a K discontinuity
+		at the 0.1 h seam. Kept as an opt-in for A/B comparisons. Floors are
+		applied AFTER the override, so enabling both still bounds T_L.
 
 		``static_substeps`` selects the substep-loop implementation (docs/architecture.md
 		§5). ``None`` (default) auto-selects by device: the **static-shape** variant
@@ -466,6 +497,8 @@ class HannaScheme(TurbulenceScheme):
 		self.meander_timescale_seconds = float(meander_timescale_seconds)
 		self.substep_c = float(substep_c)
 		self.max_substeps = int(max_substeps)
+		self.flexpart_tl_floors = bool(flexpart_tl_floors)
+		self.surface_layer_override = bool(surface_layer_override)
 		self._static_substeps = static_substeps
 		# F4 Tier 1 (audit 2026-05-30): once-per-instance warning when dt is large
 		# vs the smallest active T_L. After F4 Tier 2 substepping, this warning
@@ -1215,30 +1248,46 @@ class HannaScheme(TurbulenceScheme):
 	) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
 		"""Per-particle (σ_u, σ_v, σ_w, T_Lu, T_Lv, T_Lw) at height ``z_query``.
 
-		Assembles the three regimes — in-BL (Hanna), surface-layer override
-		(z < 0.1 h), and free-troposphere override (z > h, Richardson closure
-		interpolated from ``ft_fields``) — selected per particle by where
-		``z_query`` falls. Floors applied. Callable at arbitrary z so the
-		well-mixed drift can finite-difference σ_w through the regime transitions.
+		Assembles the regimes — in-BL (Hanna, run to the ground by default per
+		FLEXPART v11), the optional Monin-Obukhov surface-layer override
+		(``surface_layer_override``, z < 0.1 h), and the free-troposphere override
+		(z > h, Richardson closure interpolated from ``ft_fields``) — selected per
+		particle by where ``z_query`` falls. T_L floors: FLEXPART's 10/10/30 s when
+		``flexpart_tl_floors`` (default), else the legacy 1 s. Callable at
+		arbitrary z so the well-mixed drift can finite-difference σ_w through the
+		regime transitions.
 		"""
 
 		sigma_u, sigma_v, sigma_w, T_Lu, T_Lv, T_Lw = in_bl_sigma_TL(
 			z_query, blh, ustar, w_star, h_over_L, lat,
 		)
 
-		# Surface-layer override for z < 0.1 h.
-		z_sl = SURFACE_LAYER_FRACTION * blh
-		in_sl = z_query < z_sl
-		sigma_w_sl = surface_layer_sigma_w(z_query, ustar, L)
-		z_clamped = torch.maximum(z_query, z_sl)
-		su_cl, sv_cl, _, _, _, _ = in_bl_sigma_TL(z_clamped, blh, ustar, w_star, h_over_L, lat)
-		sigma_u = torch.where(in_sl, su_cl, sigma_u)
-		sigma_v = torch.where(in_sl, sv_cl, sigma_v)
-		sigma_w = torch.where(in_sl, sigma_w_sl, sigma_w)
-		z_for_TL = z_query.clamp(min=Z_MIN_M)
-		T_Lu = torch.where(in_sl, KARMAN * z_for_TL / sigma_u.clamp(min=SIGMA_MIN_M_S), T_Lu)
-		T_Lv = torch.where(in_sl, KARMAN * z_for_TL / sigma_v.clamp(min=SIGMA_MIN_M_S), T_Lv)
-		T_Lw = torch.where(in_sl, KARMAN * z_for_TL / sigma_w.clamp(min=SIGMA_MIN_M_S), T_Lw)
+		# OPTIONAL Monin-Obukhov surface-layer override for z < 0.1 h (GLIDE
+		# addition; off by default — FLEXPART v11 runs the regime formulas to the
+		# ground). The T_L = κz/σ scaling undercuts the FLEXPART floors near the
+		# surface and puts a K discontinuity at the 0.1 h seam; keep only for A/B.
+		if self.surface_layer_override:
+			z_sl = SURFACE_LAYER_FRACTION * blh
+			in_sl = z_query < z_sl
+			sigma_w_sl = surface_layer_sigma_w(z_query, ustar, L)
+			z_clamped = torch.maximum(z_query, z_sl)
+			su_cl, sv_cl, _, _, _, _ = in_bl_sigma_TL(z_clamped, blh, ustar, w_star, h_over_L, lat)
+			sigma_u = torch.where(in_sl, su_cl, sigma_u)
+			sigma_v = torch.where(in_sl, sv_cl, sigma_v)
+			sigma_w = torch.where(in_sl, sigma_w_sl, sigma_w)
+			z_for_TL = z_query.clamp(min=Z_MIN_M)
+			T_Lu = torch.where(in_sl, KARMAN * z_for_TL / sigma_u.clamp(min=SIGMA_MIN_M_S), T_Lu)
+			T_Lv = torch.where(in_sl, KARMAN * z_for_TL / sigma_v.clamp(min=SIGMA_MIN_M_S), T_Lv)
+			T_Lw = torch.where(in_sl, KARMAN * z_for_TL / sigma_w.clamp(min=SIGMA_MIN_M_S), T_Lw)
+
+		# FLEXPART v11 T_L floors (tlu/tlv >= 10 s, tlw >= 30 s) on the BL profile.
+		# Applied BEFORE the free-troposphere override: the FT closure derives
+		# (σ_w, T_Lw) as a pair satisfying K = σ_w²·T_Lw, so flooring its T_L after
+		# the fact would silently change K. FLEXPART likewise floors only in hanna.
+		if self.flexpart_tl_floors:
+			T_Lu = T_Lu.clamp(min=T_LU_FLOOR_FLEXPART_S)
+			T_Lv = T_Lv.clamp(min=T_LV_FLOOR_FLEXPART_S)
+			T_Lw = T_Lw.clamp(min=T_LW_FLOOR_FLEXPART_S)
 
 		# Free-troposphere override for z > h. Applied unconditionally (the
 		# `torch.where` is a no-op where `above_bl` is false) rather than guarded

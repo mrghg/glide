@@ -362,7 +362,12 @@ def test_substep_cap_warning_fires_once(caplog) -> None:
     )
 
     engine = GPUEngine(device="cpu")
-    scheme = HannaScheme()
+    # Legacy near-surface configuration (1 s T_L floor + MO surface-layer
+    # override): that is the combination whose κz/σ_w timescale collapses to
+    # ~1 s at z=1 m and trips the substep cap. With the default FLEXPART floors
+    # (T_Lw ≥ 30 s) the cap never binds at dt=300 — covered by
+    # test_flexpart_tl_floors_prevent_substep_cap below.
+    scheme = HannaScheme(flexpart_tl_floors=False, surface_layer_override=True)
     n = 8
     particles = torch.zeros(n, 4, dtype=torch.float32)
     particles[:, 2] = 1.0  # release at z=1 m → T_Lw ~ κ·z/σ_w ~ 1 s, far below 5·dt
@@ -381,6 +386,66 @@ def test_substep_cap_warning_fires_once(caplog) -> None:
     assert len(warnings) == 1, f"expected exactly one substep-cap warning, got {len(warnings)}"
     assert "Hanna turbulence" in warnings[0].getMessage()
     assert scheme._warned_substep_cap is True
+
+
+def test_flexpart_tl_floors_prevent_substep_cap(caplog) -> None:
+    """With the DEFAULT near-surface treatment (FLEXPART T_L floors on, legacy
+    surface-layer override off), a z=1 m release at dt=300 s must NOT trip the
+    substep cap: T_Lw is floored at 30 s, so k = ceil(300/(0.5·30)) = 20 ≤ 50.
+    This pins the floors actually reaching the substep schedule — the same
+    scenario trips the cap under the legacy combination
+    (test_substep_cap_warning_fires_once)."""
+
+    import logging
+    from datetime import datetime, timedelta, timezone
+
+    from lpdm.gpu_engine import GPUEngine
+    from lpdm.met_reader import HourlyMetTensors, MetFieldMetadata
+
+    n_lev, n_lat, n_lon = 4, 4, 4
+    shape = (n_lev, n_lat, n_lon)
+    chans = {
+        "u": torch.zeros(shape), "v": torch.zeros(shape), "w": torch.zeros(shape),
+        "blh": torch.full(shape, 1500.0), "sp": torch.full(shape, 101325.0),
+        "t": torch.full(shape, 280.0), "ustar": torch.full(shape, 0.4),
+        "shf": torch.zeros(shape),
+    }
+    names = ("u", "v", "w", "blh", "sp", "t", "ustar", "shf")
+    fields = torch.stack([chans[n] for n in names], dim=0)
+    level = np.linspace(0.0, 4000.0, n_lev)
+    t0 = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    metadata = MetFieldMetadata(
+        lon=np.linspace(-2.0, 2.0, n_lon), lat=np.linspace(-2.0, 2.0, n_lat),
+        level=level, pressure_level_hpa=np.linspace(1000.0, 600.0, n_lev),
+        time_start=t0, time_end=t0 + timedelta(hours=1),
+        variable_units={n: "m/s" for n in names},
+    )
+    height = torch.as_tensor(level, dtype=torch.float32).view(n_lev, 1, 1).expand(shape).contiguous()
+    met = HourlyMetTensors(
+        hour_start=fields, hour_end=fields, metadata=metadata,
+        channel_names=names, height_agl_m=height,
+    )
+
+    engine = GPUEngine(device="cpu")
+    scheme = HannaScheme()  # defaults: flexpart_tl_floors=True, surface_layer_override=False
+    assert scheme.flexpart_tl_floors is True
+    assert scheme.surface_layer_override is False
+    n = 8
+    particles = torch.zeros(n, 4, dtype=torch.float32)
+    particles[:, 2] = 1.0
+    particles[:, 3] = 1.0
+    state = scheme.initialize_state(n, device=torch.device("cpu"), dtype=torch.float32)
+    active = torch.ones(n, dtype=torch.bool)
+
+    with caplog.at_level(logging.WARNING, logger="lpdm.turbulence.hanna"):
+        for _ in range(3):
+            particles, state = scheme.step(
+                particles, state, met, t_alpha=0.5, dt_seconds=300.0,
+                active_mask=active, engine=engine,
+            )
+
+    warnings = [r for r in caplog.records if "max_substeps" in r.getMessage()]
+    assert len(warnings) == 0, "FLEXPART T_L floors should keep the substep cap from binding"
 
 
 def test_substep_cap_warning_silent_when_dt_is_small(caplog) -> None:
