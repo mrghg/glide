@@ -1100,3 +1100,17 @@ convection well-mixed test; (3) sub-LCL mass-flux rows each carry full M_b
 (6) stable surface-layer σ_w grows with height (φ_m misapplied). The core
 Langevin/WMC machinery (drift + density term + backward signs, reflection,
 implicit position update, ω→w) audited CORRECT.
+
+**All findings implemented on branch `physics-fixes-jul02` (2026-07-02), full
+suite 224 passed.** Four commits: (a) SHF sign flip + regression; (b) convection
+non-divergent mass-flux matrix (updraft + compensating subsidence) with the
+FLEXPART backward-transpose sampling and mass-weighted BL entrainment, gated by
+deterministic well-mixed (mᵀP=mᵀ) tests; (c) Hanna σ/T_L overhaul to FLEXPART
+v11 coefficients + |f| Coriolis + constant stable-SL σ_w + the t_idx/Z_MIN_M
+minor items. DEFERRED (documented in docs/turbulence.md §3.2.2/§3.2.4): FLEXPART's
+10/10/30 s T_L floors and removing the MO surface-layer override — both interact
+with the adaptive-substep machinery and need their own validation. Convection's
+hardcoded 3600 s interval also left as a documented follow-up. **Next: the GH200
+validation re-run (Finding 1 acceptance) — re-run the 56-site config and compare
+against the 2026-06-30 baseline (FLEXPART 0.67, NAME-UMG 0.74, NAME-UKV 0.85;
+GLIDE means 13–19% high).**
