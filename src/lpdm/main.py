@@ -1346,7 +1346,12 @@ def _run(
 						)
 					last_convection_bracket_start = bracket_start
 				elapsed_s = (release_window_end_offsets_s - cursor_offset_s).clamp_(min=0.0)
-				t_idx = (elapsed_s / 3600.0).floor().to(torch.int64).clamp_(max=gridder.n_t - 1)
+				t_idx = (elapsed_s / 3600.0).floor().to(torch.int64)
+				# Single-bin footprint = time-integrated: lump ALL residence ages into
+				# bin 0. Multi-bin: leave out-of-range ages for the gridder to DROP
+				# (clamping them into the last bin would contradict time_ago_end_hours).
+				if gridder.n_t == 1:
+					t_idx.clamp_(max=0)
 				with phase_timer.phase("gridder"):
 					gridder.accumulate(
 						particles=particles[:, :3],
@@ -1414,7 +1419,12 @@ def _run(
 					# Per-particle time-ago bin: each particle measures elapsed time
 					# from *its own* release window's end (stage 3 semantics).
 					elapsed_s = (release_window_end_offsets_s - cursor_offset_s).clamp_(min=0.0)
-					t_idx = (elapsed_s / 3600.0).floor().to(torch.int64).clamp_(max=gridder.n_t - 1)
+					t_idx = (elapsed_s / 3600.0).floor().to(torch.int64)
+					# Single-bin footprint = time-integrated: lump ALL residence ages into
+					# bin 0. Multi-bin: leave out-of-range ages for the gridder to DROP
+					# (clamping them into the last bin would contradict time_ago_end_hours).
+					if gridder.n_t == 1:
+						t_idx.clamp_(max=0)
 					gridder.accumulate(
 						particles=particles[:, :3],
 						active_mask=active_mask,

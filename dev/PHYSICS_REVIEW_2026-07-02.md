@@ -1,5 +1,19 @@
 # Physics review findings — 2026-07-02 (handoff document)
 
+> **Implementation status (branch `physics-fixes-jul02`):**
+> - **Finding 1 (SHF sign)** — DONE (`fix(met): flip ERA5 sensible-heat-flux sign`).
+> - **Findings 2+3 (convection non-divergent matrix + backward transpose + M_b
+>   share)** — DONE (`fix(convection): non-divergent mass-flux matrix …`).
+> - **Findings 4+5+6 (Hanna σ/T_L: FLEXPART v11 coefficients, |f| Coriolis,
+>   stable-SL σ_w) + Finding 7 minor items (t_idx clamp, Z_MIN_M)** — DONE.
+> - **DEFERRED follow-ups** (documented in `docs/turbulence.md` §3.2.2/§3.2.4):
+>   FLEXPART's Lagrangian-timescale floors (10/10/30 s) and REMOVING the MO
+>   surface-layer override to fully match FLEXPART v11. Both interact with the
+>   adaptive-substep machinery (which keys off the small near-surface `T_Lw`), so
+>   they need their own validation pass rather than being bundled here.
+> - Finding 7's hardcoded convection interval (3600 s) left as-is (documented
+>   in-code; all shipped configs are hourly).
+
 Full physics audit of docs (`docs/turbulence.md`, `docs/convection.md`,
 `docs/LPDM_physics_spec.md`) against the implementation (`hanna.py`,
 `gpu_engine.py`, `emanuel.py`, `footprint_gridder.py`, `comparison.py`,

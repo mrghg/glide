@@ -103,7 +103,9 @@ def test_convective_velocity_zero_when_stable_or_neutral() -> None:
 
 
 def test_in_bl_sigma_at_z_zero_matches_ustar_scaling() -> None:
-    """Both stable and neutral regimes give sigma_w = 1.3 u*, sigma_uv = 2.0 u* at z=0."""
+    """At z=0, FLEXPART v11 hanna gives σ_u = 2.0 u* and σ_v = σ_w = 1.3 u* in
+    the stable and neutral regimes (Hanna 1982 Eqs 7.19-7.20, 7.25-7.26). σ_v
+    tracks σ_w (1.3), NOT σ_u — a change from the old σ_u = σ_v assumption."""
 
     z = torch.tensor([0.0, 0.0, 0.0], dtype=torch.float64)
     blh = torch.tensor([1000.0, 1000.0, 1000.0], dtype=torch.float64)
@@ -115,21 +117,23 @@ def test_in_bl_sigma_at_z_zero_matches_ustar_scaling() -> None:
 
     sigma_u, sigma_v, sigma_w, T_Lu, T_Lv, T_Lw = in_bl_sigma_TL(z, blh, ustar, w_star, h_over_L, lat)
 
-    # Stable z=0: sigma_w = 1.3 u*
-    assert abs(sigma_w[0].item() - 1.3 * 0.5) < 1e-9
+    # Stable z=0: σ_u = 2.0 u*, σ_v = σ_w = 1.3 u*.
     assert abs(sigma_u[0].item() - 2.0 * 0.5) < 1e-9
-    # Neutral z=0: sigma_w = 1.3 u* (exp factor = 1)
+    assert abs(sigma_w[0].item() - 1.3 * 0.5) < 1e-9
+    assert abs(sigma_v[0].item() - 1.3 * 0.5) < 1e-9
+    # Neutral z=0: exp factor = 1 → σ_u = 2.0 u*, σ_v = σ_w = 1.3 u*.
+    assert abs(sigma_u[1].item() - 2.0 * 0.5) < 1e-9
     assert abs(sigma_w[1].item() - 1.3 * 0.5) < 1e-9
-    # Unstable z=0: sigma_w^2 has only the u* term (z/h=0 kills the w* term)
-    expected_sigma_w_unstable = math.sqrt(1.5 * 0.5 ** 2)
+    assert abs(sigma_v[1].item() - 1.3 * 0.5) < 1e-9
+    # Unstable z=0: σ_w² = (1.8 − 1.4·0)·u*² (ζ=0 kills the w* term).
+    expected_sigma_w_unstable = math.sqrt(1.8 * 0.5 ** 2)
     assert abs(sigma_w[2].item() - expected_sigma_w_unstable) < 1e-6
-    # σ_u = σ_v in Hanna
-    assert torch.allclose(sigma_u, sigma_v)
-    assert torch.allclose(T_Lu, T_Lv)
+    # σ_v tracks σ_w, so it must differ from σ_u wherever u* > 0.
+    assert not torch.allclose(sigma_u, sigma_v)
 
 
 def test_in_bl_stable_sigma_vanishes_at_top_of_bl() -> None:
-    """Stable: sigma_w = 1.3 u* (1 - z/h)^(3/4) -> 0 at z=h."""
+    """Stable: sigma_w = 1.3 u* (1 - z/h) -> 0 at z=h (FLEXPART v11, linear)."""
 
     z = torch.tensor([1000.0], dtype=torch.float64)
     blh = torch.tensor([1000.0], dtype=torch.float64)
@@ -160,14 +164,16 @@ def test_in_bl_regime_selection_at_boundaries() -> None:
     sigma_u_unst, _, _, _, _, _ = in_bl_sigma_TL(z[2:3], blh[2:3], ustar[2:3], w_star[2:3], h_over_L[2:3], lat[2:3])
     sigma_u_deep, _, _, _, _, _ = in_bl_sigma_TL(z[3:], blh[3:], ustar[3:], w_star[3:], h_over_L[3:], lat[3:])
 
-    # sigma_u in unstable regime grows with |h/L|: (12 - 0.5*h/L)^(2/3) * u*^2
+    # sigma_u in unstable regime grows with |h/L|: u* (12 - 0.5*h/L)^(1/3)
     assert sigma_u_deep.item() > sigma_u_unst.item() > 0
     # Neutral and stable should give different values (different formula structure)
     assert sigma_u_neu.item() != sigma_u_stab.item()
 
 
 def test_surface_layer_sigma_w_regimes() -> None:
-    """SL formulae: 1.3u* in neutral, 1.3u*(1-2z/L)^(1/3) unstable, 1.3u*(1+5z/L) stable."""
+    """SL formulae (Flesch et al. 1995 App. B): 1.3u* neutral, 1.3u*(1-3z/L)^(1/3)
+    unstable, and 1.3u* CONSTANT in stable (σ_w/u* is height-independent in the
+    stable surface layer — Finding 6, the old 1+5z/L growth was wrong)."""
 
     z = torch.tensor([10.0, 10.0, 10.0], dtype=torch.float64)
     ustar = torch.tensor([0.5, 0.5, 0.5], dtype=torch.float64)
@@ -176,24 +182,25 @@ def test_surface_layer_sigma_w_regimes() -> None:
     sigma_w = surface_layer_sigma_w(z, ustar, L)
     # Neutral: 1.3 * 0.5 = 0.65
     assert abs(sigma_w[0].item() - 0.65) < 1e-6
-    # Unstable: 1.3 * 0.5 * (1 - 2*10/-100)^(1/3) = 0.65 * (1.2)^(1/3)
-    expected_unstable = 0.65 * (1.2 ** (1.0 / 3.0))
+    # Unstable: 1.3 * 0.5 * (1 - 3*10/-100)^(1/3) = 0.65 * (1.3)^(1/3)
+    expected_unstable = 0.65 * (1.3 ** (1.0 / 3.0))
     assert abs(sigma_w[1].item() - expected_unstable) < 1e-6
-    # Stable: 1.3 * 0.5 * (1 + 5*10/200) = 0.65 * 1.25
-    expected_stable = 0.65 * 1.25
-    assert abs(sigma_w[2].item() - expected_stable) < 1e-6
+    # Stable: constant 1.3 * 0.5 = 0.65 (no z/L dependence).
+    assert abs(sigma_w[2].item() - 0.65) < 1e-6
 
 
-def test_surface_layer_sigma_w_caps_in_very_stable() -> None:
-    """Stable SL is capped at 1.3 u* * 6 to avoid runaway in very-stable regimes."""
+def test_surface_layer_sigma_w_stable_is_constant_in_height() -> None:
+    """Stable SL σ_w stays at 1.3 u* regardless of stability / height — it must NOT
+    grow with z/L (Finding 6: the previous 1+5z/L form inflated nocturnal mixing)."""
 
-    z = torch.tensor([100.0], dtype=torch.float64)
-    ustar = torch.tensor([0.5], dtype=torch.float64)
-    L = torch.tensor([5.0], dtype=torch.float64)  # very stable -> z/L = 20 -> uncapped = 1.3*0.5*101
+    ustar = torch.tensor([0.5, 0.5], dtype=torch.float64)
+    # Weakly and very stable, at different heights: σ_w must be identical.
+    z = torch.tensor([10.0, 100.0], dtype=torch.float64)
+    L = torch.tensor([200.0, 5.0], dtype=torch.float64)
 
     sigma_w = surface_layer_sigma_w(z, ustar, L)
-    cap = 1.3 * 0.5 * 6.0
-    assert abs(sigma_w[0].item() - cap) < 1e-9
+    assert abs(sigma_w[0].item() - 0.65) < 1e-9
+    assert abs(sigma_w[1].item() - 0.65) < 1e-9
 
 
 def test_hanna_above_bl_constants_used() -> None:

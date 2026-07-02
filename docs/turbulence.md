@@ -7,8 +7,8 @@ Specification for the M1 turbulence rewrite: scope, modular architecture, scheme
 - Replace the M0 placeholder constant-OU vertical scheme with met-driven Hanna 1982 turbulence (the FLEXPART formulation), in three stability regimes.
 - Add horizontal stochastic diffusion (currently missing entirely).
 - Make scheme selection modular — alternative schemes (Wilson-Sawford, hybrid Hanna-Degrazia, future ML schemes) should land as plug-in subclasses without touching the runtime loop.
-- Above-BL turbulence is in scope from day 1 (simple constant-diffusivity placeholder; future refinement noted as M1.x).
-- Backward integration uses FLEXPART-style piecewise-homogeneous treatment (no explicit Thomson 1987 drift term).
+- Above-BL turbulence is in scope from day 1 (now a gradient-Richardson closure — see §3.2.3; the original constant-diffusivity placeholder was superseded 2026-05-29).
+- Backward integration carries the full Thomson (1987) well-mixed drift with the Stohl-Thomson (1999) density correction, sign-flipped for the backward Langevin (see §3.2.5). (An earlier version used a piecewise-homogeneous no-drift treatment; that under-dispersed the surface footprint and was replaced.)
 - Keep the existing constant-OU behaviour available as a registered scheme (`PlaceholderConstantOU`) so the M0 baselines remain reproducible and regression-pinnable.
 
 ## 2. Architecture
@@ -110,10 +110,9 @@ The reader currently slices off all but the first three channels (`met_window.ho
 
 Two paths, both first-class:
 
-- CLI flag `--turbulence-scheme=<name>` (default during M1 transition: `placeholder_constant_ou`; switch default to `hanna_1982` once validated).
+- YAML config: `turbulence.scheme: hanna_1982` (the `turbulence:` block owns this
+  surface; resolved via `lpdm.turbulence.get_scheme(name)`).
 - Programmatic: pass a `TurbulenceScheme` instance directly to `_run(cfg, *, reader, scheme=...)`. This is what tests use.
-
-Environment variable `LPDM_TURBULENCE_SCHEME` mirrors the CLI flag. Future M4 YAML config will own this surface; for M1 the CLI flag is sufficient.
 
 ### 2.6 Channel access (small refactor)
 
@@ -163,31 +162,45 @@ Regime selection by `h / L`:
 
 #### 3.2.2 In-BL formulae (z < h)
 
-Stable BL:
+Transcribed from **FLEXPART v11** `src/turbulence_mod.f90` `subroutine hanna`
+(cross-checked 2026-07-02; Finding 5 of the physics review). ζ = z/h. Note
+`σ_v` tracks `σ_w` (both 1.3 u*), not `σ_u`, and the neutral/stable T_L
+components differ per component.
+
+Stable BL (Hanna 1982 Eqs 7.19–7.24):
 ```
-σ_w = 1.3 u* (1 - z/h)^(3/4)
-σ_u = σ_v = 2.0 u* (1 - z/h)^(3/4)
-T_Lw = 0.10 h / σ_w · (z/h)^(0.8)
-T_Lu = T_Lv = 0.15 h / σ_u · (z/h)^(0.5)
+σ_u = 2.0 u* (1 - ζ)
+σ_v = σ_w = 1.3 u* (1 - ζ)          # LINEAR in (1-ζ), not (1-ζ)^¾
+T_Lu = 0.15 h / σ_u · √ζ
+T_Lv = 0.467 T_Lu
+T_Lw = 0.10 h / σ_w · ζ^0.8
 ```
 
-Neutral BL (with Coriolis `f` at the particle's latitude):
+Neutral BL (Hanna 1982 Eqs 7.25–7.27; per-particle |f|):
 ```
-σ_w = 1.3 u* exp(-2 f z / u*)
-σ_u = σ_v = 2.0 u* exp(-2 f z / u*)
-T_Lw = 0.5 z / σ_w / (1 + 15 f z / u*)
-T_Lu = T_Lv = T_Lw / 1.5
+σ_u = 2.0 u* exp(-3 |f| z / u*)     # note 3|f| for σ_u
+σ_v = σ_w = 1.3 u* exp(-2 |f| z / u*)
+T_Lu = T_Lv = T_Lw = 0.5 z / σ_w / (1 + 15 |f| z / u*)
 ```
+FLEXPART hardcodes f = 1e-4 s⁻¹; GLIDE uses the per-latitude Coriolis but takes
+`|f|` (with a ~1e-5 floor) so the Ekman-decay exponents don't flip sign in the
+Southern Hemisphere (Finding 4).
 
-Unstable / convective BL:
+Unstable / convective BL (Caughey 1982 Eq 4.15; Ryall & Maryon 1998; Hanna 1982
+Eq 7.17):
 ```
-σ_w² = 1.5 u*² (1 - 0.95 z/h)^(2/3) + 1.6 w*² (z/h)^(2/3) (1 - z/h)^2
-σ_u² = σ_v² = (12 - 0.5 h/L)^(2/3) u*²
-T_Lw = 0.15 h / σ_w
+σ_u = σ_v = u* (12 - 0.5 h/L)^(1/3)
+σ_w = √(1.2 w*² (1 - 0.9 ζ) ζ^(2/3) + (1.8 - 1.4 ζ) u*²)
 T_Lu = T_Lv = 0.15 h / σ_u
+T_Lw = 0.10 z / (σ_w (0.55 - 0.38 |z/L|))   for |z/L| < 1     (near-surface)
+     = 0.59 z / σ_w                          for ζ < 0.1       (shallow)
+     = 0.15 h / σ_w (1 - exp(-5 ζ))          otherwise         (bulk)
 ```
 
-Constants reproduced from Hanna 1982 (Table 1 / Eqs. 11–24) and FLEXPART's manual sections 4.3.1–4.3.3. **Implementation MUST cross-check exact constants against the FLEXPART source tree before merging**, since secondary references occasionally diverge by ~10% on minor coefficients.
+**Deferred (documented follow-ups):** FLEXPART's Lagrangian-timescale floors
+(T_Lu, T_Lv ≥ 10 s; T_Lw ≥ 30 s) are not yet applied — GLIDE keeps the smaller
+1 s floor because the adaptive-substep machinery keys off the near-surface T_Lw
+and raising the floor interacts with it. See §3.2.4/§3.2.7.
 
 #### 3.2.3 Above-BL (z > h) — gradient-Richardson closure
 
@@ -225,16 +238,27 @@ is handled by a separate process — see §3.2.8. Implemented as free functions
 
 #### 3.2.4 Surface-layer treatment
 
-When `z < z_sl` (surface-layer top, taken as `0.1 h` in FLEXPART), use Monin-Obukhov surface-layer scaling rather than the full in-BL formulae:
+When `z < z_sl` (surface-layer top, taken as `0.1 h`), GLIDE applies a
+Monin-Obukhov surface-layer scaling rather than the full in-BL formulae:
 
 ```
-σ_w = 1.3 u* (1 - 2 z/L)^(1/3)   (unstable)
-σ_w = 1.3 u* (1 + 5 z/L)         (stable, capped to 1.3 u* · 6 in very stable)
+σ_w = 1.3 u* (1 - 3 z/L)^(1/3)   (unstable; Flesch et al. 1995 App. B)
+σ_w = 1.3 u*                     (stable / neutral — CONSTANT in height)
 σ_u = σ_v as in §3.2.2 with z → max(z, z_sl)
 T_L  = κ z / σ
 ```
 
-Implementation matches FLEXPART `mod_par_var_pbl.f90` / `hanna.f90` (or equivalent) so the surface layer behaves consistently with the reference.
+The stable σ_w is height-independent (σ_w/u* ≈ 1.3 in the stable surface layer).
+The previous `1.3 u*(1 + 5 z/L)` form GREW with stability — that is the φ_m
+momentum-gradient function, not a σ_w scaling — and over-mixed the nocturnal
+near-surface layer (Finding 6 of the 2026-07-02 review).
+
+**Note:** this MO surface-layer override is a GLIDE addition; FLEXPART v11
+`subroutine hanna` has NO separate surface-layer treatment (the regime formulas
+of §3.2.2 run to the ground, with the T_L floors). Dropping the override to match
+FLEXPART exactly is a documented follow-up — it interacts with the
+adaptive-substep machinery (§3.2.7), which keys off the small near-surface
+`T_L = κ z / σ`.
 
 **Reflection (Wilson & Flesch 1993 §6).** Smooth-wall reflection at `z = 0` is the
 joint mapping `(z, w) → (2·z_surf − z, −w)` — **both** position and vertical
@@ -453,10 +477,10 @@ tests.
 
 ## 6. Open questions / known limitations
 
-- Above-BL constant-K is a placeholder; M1.x can refine using N² and Ri.
-- Surface-layer transition altitude `z_sl = 0.1 h` is a heuristic and may need tuning per regime.
-- We use FLEXPART's piecewise-homogeneous treatment, not Thomson 1987 explicit drift. Strong σ-gradients (e.g. through the BL top) are captured only by re-evaluating σ each step.
-- Coriolis `f` is computed from each particle's instantaneous latitude; we don't average across the trajectory.
+- Above-BL turbulence uses a gradient-Richardson closure (§3.2.3), not a constant-K placeholder.
+- Surface-layer transition altitude `z_sl = 0.1 h` is a heuristic and may need tuning per regime. The MO surface-layer override itself is a GLIDE addition beyond FLEXPART v11 (see §3.2.4) — a candidate for removal in a future FLEXPART-matching pass.
+- The in-BL σ/T_L coefficients follow FLEXPART v11 (§3.2.2), but its Lagrangian-timescale floors (10/10/30 s) are not yet applied — a documented follow-up (§3.2.2). Strong σ-gradients (e.g. through the BL top) are carried by the well-mixed drift (§3.2.5) with σ re-evaluated each step.
+- Coriolis `f` is computed from each particle's instantaneous latitude (using `|f|`); we don't average across the trajectory.
 - `T_v` is approximated as `T` for the Obukhov-length calculation; humidity correction is small and deferred.
 - Initial perturbation velocities are zero rather than sampled from the local σ; particles equilibrate within `T_L`.
 
