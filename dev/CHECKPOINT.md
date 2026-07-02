@@ -1078,3 +1078,25 @@ artifacts, no personal absolute paths in `src/`). Outstanding items, by priority
 
 Lowest-risk first pass (no judgment calls needed): README accuracy fixes + de-personalizing
 (#2–3). License (#1) and data rights (blockers) need Matt's decision before touching.
+
+**Status 2026-06-30/07-02:** steps 1–5 all executed (Apache-2.0 + NOTICE; data
+untracked with data/README.md; README rewritten, Docker removed; docs consolidated
+under docs/ + CLAUDE.md at root + this journal moved to dev/; configs trimmed to a
+5-example ladder; CONTRIBUTING.md added).
+
+## Physics review (2026-07-02) — findings handed off
+
+Full physics audit (docs vs code vs literature) completed 2026-07-02. Six numbered
+findings + minor items, with evidence, locations, fix guidance, commit order, and a
+"verified correct — do not touch" list, all in
+**`dev/PHYSICS_REVIEW_2026-07-02.md`** (the work order for the fixes).
+
+Headlines: (1) ERA5 SHF sign convention inverted → stability classification flips
+on real met (CONFIRMED against the local EUROPE store — fix first, one line);
+(2) convection backward kernel not time-reversed + no compensating subsidence, no
+convection well-mixed test; (3) sub-LCL mass-flux rows each carry full M_b
+(BL venting ~n_BL× overcounted); (4) neutral-regime signed Coriolis breaks SH;
+(5) Hanna coefficients diverge from FLEXPART reference (cross-check never done);
+(6) stable surface-layer σ_w grows with height (φ_m misapplied). The core
+Langevin/WMC machinery (drift + density term + backward signs, reflection,
+implicit position update, ω→w) audited CORRECT.
