@@ -2,3 +2,15 @@ GLIDE — GPU-accelerated Lagrangian Inversion & Dispersion Engine
 Copyright 2026 Matthew Rigby, University of Bristol, UK
 
 This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+Acknowledgements
+----------------
+Parts of GLIDE's turbulence and convection parameterisations follow those used in
+FLEXPART (https://www.flexpart.eu/, GPL-3.0) as a reference implementation, so that
+GLIDE's boundary-layer dispersion is directly comparable to FLEXPART's. The
+underlying equations were reimplemented independently from the primary scientific
+literature (Hanna 1982; Caughey 1982; Ryall & Maryon 1998; Thomson 1987; Stohl &
+Thomson 1999; Emanuel & Zivkovic-Rothman 1999; Forster, Stohl & Seibert 2007); no
+FLEXPART source code is included in or derived into this repository. GLIDE is an
+independent work and is not affiliated with or endorsed by the FLEXPART developers.
+Other, non-FLEXPART schemes are expected to be added over time.

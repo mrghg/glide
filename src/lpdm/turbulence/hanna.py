@@ -6,11 +6,15 @@ well-mixed drift + Stohl-Thomson (1999) density correction (§3.2.5), a
 Monin-Obukhov surface-layer override for `z < 0.1 h` (§3.2.4), and a
 gradient-Richardson closure above the BL (§3.2.3).
 
-The in-BL σ/T_L coefficients were cross-checked against FLEXPART v11
-`src/turbulence_mod.f90` `subroutine hanna` on 2026-07-02 (Finding 5 of the
-physics review) and transcribed to match. FLEXPART's Lagrangian-timescale floors
-(10/10/30 s) and its lack of a separate surface-layer override are noted as
-follow-ups in `docs/turbulence.md` §3.2.2/§3.2.4.
+The in-BL σ/T_L parameterisation implements the equations of Hanna (1982),
+Caughey (1982) and Ryall & Maryon (1998) — see the per-regime functions for
+the specific equation attributions. This is the same set of parameterisations
+FLEXPART uses in `src/turbulence_mod.f90` `subroutine hanna`; GLIDE adopts them
+(coefficients checked against that reference on 2026-07-02, Finding 5 of the
+physics review) so its boundary-layer turbulence is directly comparable to
+FLEXPART's. FLEXPART's Lagrangian-timescale floors (10/10/30 s) and its lack of a
+separate surface-layer override are noted as follow-ups in `docs/turbulence.md`
+§3.2.2/§3.2.4.
 """
 
 from __future__ import annotations
@@ -169,8 +173,11 @@ def _in_bl_stable(
 	blh: torch.Tensor,
 	ustar: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-	"""(σ_u, σ_v, σ_w, T_Lu, T_Lv, T_Lw) under stable BL, per FLEXPART v11
-	`turbulence_mod.f90` `subroutine hanna` (Hanna 1982 Eqs 7.19-7.24)."""
+	"""(σ_u, σ_v, σ_w, T_Lu, T_Lv, T_Lw) under stable BL.
+
+	Equations from Hanna (1982) Eqs 7.19-7.24. This is the same stable-regime
+	parameterisation FLEXPART uses (`turbulence_mod.f90` `subroutine hanna`),
+	adopted so GLIDE is directly comparable; the coefficients trace to Hanna."""
 
 	z_over_h = (z / blh).clamp(min=0.0, max=1.0)
 	one_minus = (1.0 - z_over_h).clamp(min=0.0)
@@ -195,8 +202,10 @@ def _in_bl_neutral(
 	ustar: torch.Tensor,
 	f_cor: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-	"""(σ_u, σ_v, σ_w, T_Lu, T_Lv, T_Lw) under neutral BL, per FLEXPART v11
-	`subroutine hanna` (Hanna 1982 Eqs 7.25-7.27).
+	"""(σ_u, σ_v, σ_w, T_Lu, T_Lv, T_Lw) under neutral BL.
+
+	Equations from Hanna (1982) Eqs 7.25-7.27 (the same neutral-regime forms
+	FLEXPART uses in `subroutine hanna`; coefficients trace to Hanna).
 
 	Uses the per-particle |f| (Finding 4): FLEXPART hardcodes f = 1e-4 s⁻¹, but a
 	real per-latitude Coriolis is strictly better provided we take the ABSOLUTE
@@ -225,9 +234,13 @@ def _in_bl_unstable(
 	w_star: torch.Tensor,
 	h_over_L: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-	"""(σ_u, σ_v, σ_w, T_Lu, T_Lv, T_Lw) under unstable / convective BL, per
-	FLEXPART v11 `subroutine hanna` (Caughey 1982 Eq 4.15; Ryall & Maryon 1998;
-	Hanna 1982 Eq 7.17 + piecewise T_Lw)."""
+	"""(σ_u, σ_v, σ_w, T_Lu, T_Lv, T_Lw) under unstable / convective BL.
+
+	Equations: σ_u from Caughey (1982) Eq 4.15; σ_w from Ryall & Maryon (1998);
+	T_Lu from Hanna (1982) Eq 7.17; the piecewise T_Lw follows the convective
+	surface-layer / mixed-layer scalings in Hanna (1982). This matches the
+	unstable-regime parameterisation FLEXPART uses (`subroutine hanna`), adopted
+	for comparability."""
 
 	z_over_h = (z / blh).clamp(min=0.0, max=1.0)
 

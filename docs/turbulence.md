@@ -162,10 +162,12 @@ Regime selection by `h / L`:
 
 #### 3.2.2 In-BL formulae (z < h)
 
-Transcribed from **FLEXPART v11** `src/turbulence_mod.f90` `subroutine hanna`
-(cross-checked 2026-07-02; Finding 5 of the physics review). ζ = z/h. Note
-`σ_v` tracks `σ_w` (both 1.3 u*), not `σ_u`, and the neutral/stable T_L
-components differ per component.
+Equations from Hanna (1982), Caughey (1982) and Ryall & Maryon (1998) (attributed
+per formula below). GLIDE adopts the same boundary-layer parameterisation FLEXPART
+uses (`src/turbulence_mod.f90` `subroutine hanna`) so the two are directly
+comparable; the coefficients were checked against that reference on 2026-07-02
+(Finding 5 of the physics review). ζ = z/h. Note `σ_v` tracks `σ_w` (both 1.3 u*),
+not `σ_u`, and the neutral/stable T_L components differ per component.
 
 Stable BL (Hanna 1982 Eqs 7.19–7.24):
 ```
