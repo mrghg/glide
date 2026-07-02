@@ -939,15 +939,35 @@ class ArcoEra5ZarrReader(MetReader):
         }
 
     def _convert_shf_to_w_per_m2(self, arr: np.ndarray, units: str) -> np.ndarray:
-        """Return SHF in W/m^2 regardless of source units.
+        """Return sensible heat flux in W/m^2, POSITIVE UPWARD.
 
-        Accumulated J/m^2 fluxes are de-accumulated by dividing by
-        `accumulation_seconds`. Instantaneous W/m^2 fluxes pass through unchanged.
+        Two conversions happen here:
+
+        1. De-accumulation: ECMWF/ARCO ERA5 stores `surface_sensible_heat_flux`
+           accumulated over the hour (J/m^2); dividing by `accumulation_seconds`
+           gives the mean W/m^2. Instantaneous W/m^2 fields pass through.
+        2. Sign flip: ECMWF uses the convention **positive = downward** for
+           surface energy fluxes, so a daytime (upward) sensible heat flux is
+           stored NEGATIVE. GLIDE's boundary-layer physics
+           (`obukhov_length`, `convective_velocity` in `turbulence/hanna.py`)
+           assumes **positive = upward**. We negate here so the whole downstream
+           pipeline sees the physics convention.
+
+        NOTE: the ARCO store's CF `standard_name` is
+        `surface_upward_sensible_heat_flux`, which is MISLABELLED — the data
+        follows the ECMWF downward-positive convention (verified against the
+        EUROPE store 2026-07-02: midday-over-land sshf is negative). Trust the
+        convention, not the attribute. The de-accumulated
+        `instantaneous_surface_sensible_heat_flux` alternative uses the same
+        downward-positive convention, so the flip applies to both unit branches.
         """
 
         norm = self._normalize_units(units)
         if self._is_flux_density_units(norm):
-            return arr
-        if self._is_flux_accumulated_units(norm):
-            return arr / float(self.accumulation_seconds)
-        raise ValueError(f"Unsupported units {units!r} for surface_sensible_heat_flux")
+            flux_w_m2 = arr
+        elif self._is_flux_accumulated_units(norm):
+            flux_w_m2 = arr / float(self.accumulation_seconds)
+        else:
+            raise ValueError(f"Unsupported units {units!r} for surface_sensible_heat_flux")
+        # ECMWF downward-positive -> GLIDE upward-positive.
+        return -flux_w_m2
