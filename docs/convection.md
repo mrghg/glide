@@ -134,45 +134,63 @@ unphysically large M_b (much greater than FLEXPART's 0.05–0.5 kg/m²/s
 realistic range). The 5 m/s cap represents a typical updraft-cell peak
 rather than the rare 15 m/s extreme.
 
-### 3.5 Mass-flux matrix `MA[i, j]`
+### 3.5 Mass-flux matrix `fmass[i, j]` (non-divergent)
 
-`compute_mass_flux_matrix` builds the [Z, Z] matrix with three groups of
-source rows:
+`compute_mass_flux_matrix` builds a **non-divergent** off-diagonal flux matrix —
+a coherent BL→cloud updraft plus compensating environmental subsidence — so that
+the total mass leaving every layer equals the total entering it
+(`Σ_j fmass[i,j] == Σ_j fmass[j,i]`). That property is what makes the
+redistribution well-mixed-preserving (§3.7); the pre-2026-07-02 matrix had
+updraft only and was divergent (Finding 2 of the physics review).
 
-- **Sub-LCL (i < LCL)** — surface-updraft path. The BL acts as a single
-  source feeding the cloud base; `MA[i, j] = M_b · profile(j)` for
-  `j ∈ [LCL, LNB]`, normalised so row sum equals `M_b` exactly.
-- **In-cloud (i ∈ [LCL, LNB])** — Emanuel buoyancy-sorting per Forster 2007
-  Eq 35-36. Mixing fraction
-  `ε_{i,j} = (θ_j − θ_lp_{i,j}) / (θ_l_{i,j} − θ_lp_{i,j})`;
-  `MA[i, j]` from Eq 35 normalised so the row sums to `M_b · profile(i)`
-  (with profile linearly decaying from M_b at LCL to 0 at LNB).
-- **Above LNB (i > LNB)** — zero. Particles above the cloud top stay put.
+Construction (levels ascending, surface at 0; cloud = [LCL, LNB]):
+
+- **Entrainment** `e[i]` — the boundary layer `[0, LCL)` feeds the updraft,
+  shared across BL layers **by air mass** so the total entrained equals `M_b`.
+  (Fixes Finding 3: previously each BL layer sourced the full `M_b`, over-venting
+  the BL by a factor of the layer count.)
+- **Detrainment** `d[j]` — the updraft deposits mass across the cloud with a
+  linear-decay profile, total `M_b`.
+- **Direct updraft** `U[i,j] = e[i]·d[j]/M_b` — BL source → cloud, non-local
+  (the coherent deep-lofting transport).
+- **Compensating subsidence** — the net upward flux across the interface below
+  layer `k+1` is `Φ[k] = Σ_{i≤k} e[i] − Σ_{j≤k} d[j]` (≥ 0); the environment
+  sinks at the same rate, `fmass[k+1, k] += Φ[k]`.
+
+A single-scalar CFL cap scales the matrix so no layer sheds more than 90 % of its
+mass per event (preserves non-divergence). Zero when there is no cloud.
 
 ### 3.6 Particle redistribution
 
-For each eligible particle (host level ≤ LNB):
+Following FLEXPART `calcmatrix`/`redist`: apply the **diagonal closure** so each
+row of `fmassfrac` sums to the layer air mass `m_i` (the diagonal is the "stay"
+mass), then the per-particle destination distribution is
 
 ```
-prob(stay) = 1 − Σ_j MA[host, j] / m_host
-prob(move to j) = MA[host, j] / m_host
+forward  (ldirect=+1):  P[host → j] = fmassfrac[host, j] / m_host   (matrix row)
+backward (ldirect=−1):  P[host → j] = fmassfrac[j, host] / m_host   (matrix column)
 ```
 
-`m_host` is the layer mass per area (`Δp/g`). Sample a uniform `u ∈ [0, 1]`;
-if `u < total_move`, find destination via cumulative-sum search; place at a
-uniformly random height within the destination layer (sub-bin placement).
-
-Total move probability is clamped at 0.99 (numerical safety; rare for
-realistic closures).
+GLIDE runs backward, so it samples the **column**. Sample a uniform `u ∈ [0, 1]`,
+find the destination via cumulative-sum search (the distribution includes the
+stay-diagonal), and place movers at a uniformly random height within the
+destination layer (sub-bin placement). Non-divergence makes both the row- and
+column-normalised transitions valid probability distributions, so no ad-hoc
+move-probability clamp is needed.
 
 ### 3.7 Backward mode
 
-The same matrix is applied in backward integration. The mass-flux matrix is
-constructed to preserve the well-mixed criterion under either time direction
-(Forster 2007 §3 + Fig 2 in the paper): an initially well-mixed tracer remains
-well-mixed after convection in BOTH forward and backward runs. The redistribution
-is symmetric under time reversal because mixing fractions sum to mass-conserving
-matrices.
+Backward sampling uses the transposed (column) transition — the adjoint of the
+forward updraft: forward convection lofts surface air to the cloud top, so the
+backward (footprint) operator traces a particle that is aloft *now* down to the
+BL air it came from. Because `fmass` is non-divergent, the layer-mass vector is a
+stationary distribution of BOTH the forward (row) and backward (column)
+transitions: an initially well-mixed (mass-proportional) ensemble stays
+well-mixed after convection in either time direction (Forster 2007 §3 + Fig 2).
+This is verified deterministically by
+`tests/test_convection.py::test_convection_transition_preserves_mass_distribution_both_directions`
+(mᵀP = mᵀ) and behaviourally by
+`test_emanuel_backward_connects_aloft_particles_to_the_surface`.
 
 ## 4. Documented departures from full Emanuel
 
@@ -184,28 +202,29 @@ matrices.
    it can over- or under-trigger compared to FLEXPART. Mirrors the F9
    approximation used in advection (see CHECKPOINT 2026-05-31 entry).
 
-2. **Buoyancy-sorting matrix simplified**. Forster 2007 Eq 36's mixing
-   fraction uses liquid-water potential temperature with full microphysics;
-   we approximate `θ_l ≈ θ` (latent-heat reservoir implicit in `q_sat`).
-   Few-percent effect on the redistribution profile.
+2. **Linear detrainment profile**, not the Emanuel buoyancy-sorting spectrum
+   (Forster 2007 Eq 35-36). The updraft detrains with `d(z) ∝ (1 − (z−LCL)/
+   (LNB−LCL))`. This sets only WHERE the updraft deposits mass, not the
+   mass-conservation structure — non-divergence (hence the well-mixed property)
+   is guaranteed by the compensating subsidence regardless of the profile shape.
+   The earlier code used the buoyancy-sorting fractions in a divergent matrix
+   that violated the well-mixed criterion; that was replaced 2026-07-02.
 
-3. **No saturated-downdraft branch**. Emanuel 1991 §4.b includes a separate
-   downdraft mass-flux matrix; we fold this into the mass conservation
-   residual rather than modelling explicitly. Few-percent effect.
+3. **No explicit saturated-downdraft branch**. Emanuel 1991 §4.b includes a
+   separate downdraft mass-flux matrix; the compensating environmental
+   subsidence carries the return flux instead. Few-percent effect.
 
-4. **Linear M-profile**, not the buoyancy-driven profile from the full
-   scheme. `M(z) = M_b · (1 − (z−LCL)/(LNB−LCL))` is a simple closure that
-   matches the order of magnitude of the full Emanuel profile.
-
-5. **Capped buoyancy velocity** at 5 m/s in the closure. The full scheme
+4. **Capped buoyancy velocity** at 5 m/s in the closure. The full scheme
    has a quasi-equilibrium closure (Emanuel's mass-flux balances large-scale
    destabilisation); we cap `√(2·CAPE)` to keep M_b in the realistic range.
 
-6. **Forster 2007's "subsidence velocity" not modelled**. The compensating
-   subsidence in convectively undisturbed cells is implicit in our scheme
-   (mass conservation handles it). FLEXPART models it as a downward velocity
-   for non-displaced particles. Effect: slight bias in the vertical
-   distribution of *non-displaced* particles in convective columns.
+5. **Compensating subsidence is adjacent-layer**. The environmental return flux
+   moves mass one layer down per event (`fmass[k+1, k] = Φ[k]`), whereas the
+   updraft is non-local (BL → any cloud level in one event). Physically apt
+   (fast coherent updraft, slow broad subsidence), but the subsidence descent of
+   *non-displaced* environmental air is a random walk rather than a prescribed
+   velocity. This is now modelled explicitly (it was absent before 2026-07-02),
+   which is what makes the scheme well-mixed-preserving.
 
 ## 5. Tests (tests/test_convection.py)
 
@@ -214,12 +233,14 @@ matrices.
   humidity, moist-adiabat lift (θ_e conserved through lift to a higher level).
 - **CAPE / LCL / LNB**: synthetic moist-unstable column produces CAPE > 100
   J/kg and meaningful LCL/LNB indices; dry-stable column produces CAPE ≈ 0.
-- **Mass-flux matrix**: zero when no cloud (`i_lcl < 0`); non-zero entries
-  confined to source rows ≤ LNB and destination columns ∈ [LCL, LNB];
-  in-cloud row sums equal the M-profile; BL rows sum to M_b exactly.
-- **Scheme-level**: `NoConvection` pass-through; end-to-end lofting of BL
-  particles to mid-troposphere in a convective column; no displacement on a
-  stable sounding; constructor validation.
+- **Mass-flux matrix**: zero when no cloud (`i_lcl < 0`); no transport above the
+  cloud top; **non-divergent** (row sum = column sum per layer, i.e. compensating
+  subsidence present); and the derived transition matrix leaves the layer-mass
+  vector stationary (`mᵀP = mᵀ`) for BOTH forward and backward — the well-mixed
+  criterion, proven deterministically.
+- **Scheme-level**: `NoConvection` pass-through; end-to-end **backward** transport
+  connecting aloft particles to the boundary-layer source (net downward, mass
+  conserved); no displacement on a stable sounding; constructor validation.
 
 ## 6. Acceptance / next steps
 

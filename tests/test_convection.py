@@ -25,6 +25,7 @@ from lpdm.convection import (
 	list_schemes,
 )
 from lpdm.convection.emanuel import (
+	_layer_masses_per_area,
 	compute_lcl_lnb_cape,
 	compute_mass_flux_matrix,
 	equivalent_potential_temperature,
@@ -234,60 +235,77 @@ def test_mass_flux_matrix_zero_when_no_cloud() -> None:
 	assert torch.all(ma2 == 0.0)
 
 
-def test_mass_flux_matrix_nonzero_only_in_or_below_cloud_top() -> None:
-	"""Non-zero MA entries should be confined to source rows i ≤ LNB (above-LNB
-	particles aren't displaced) and destination columns in [LCL, LNB] (particles
-	always detrain into the cloud layer)."""
+def test_mass_flux_matrix_no_transport_above_cloud_top() -> None:
+	"""Convection touches nothing above the cloud top: every entry with a source
+	row OR destination column strictly above LNB must be zero (updraft detrains
+	within [LCL, LNB]; compensating subsidence acts only within the circulation
+	below LNB). Entries in BL destination columns (< LCL) ARE expected now — that
+	is the compensating subsidence, absent from the pre-2026-07-02 matrix."""
 
 	t, q, p = _moist_unstable_column()
 	i_lcl, i_lnb, _cape, _ = compute_lcl_lnb_cape(t, q, p)
-	ma = compute_mass_flux_matrix(t, q, p, i_lcl=int(i_lcl), i_lnb=int(i_lnb), m_b=1.0)
-	n = ma.shape[0]
-	# Rows above LNB must be all zero.
+	fmass = compute_mass_flux_matrix(t, q, p, i_lcl=int(i_lcl), i_lnb=int(i_lnb), m_b=0.05)
+	n = fmass.shape[0]
 	for r in range(int(i_lnb) + 1, n):
-		assert torch.all(ma[r, :] == 0.0), f"above-LNB row {r} should be all zero"
-	# Destination columns outside [LCL, LNB] must be zero everywhere.
-	for c in range(n):
-		if not (int(i_lcl) <= c <= int(i_lnb)):
-			assert torch.all(ma[:, c] == 0.0), (
-				f"column {c} (outside [LCL={int(i_lcl)}, LNB={int(i_lnb)}]) should be all zero"
-			)
+		assert torch.all(fmass[r, :] == 0.0), f"above-LNB source row {r} should be all zero"
+		assert torch.all(fmass[:, r] == 0.0), f"above-LNB destination column {r} should be all zero"
+	# Compensating subsidence must actually be present (some BL-column entry > 0).
+	assert float(fmass[:, : int(i_lcl)].sum()) > 0.0, "expected compensating subsidence into BL layers"
 
 
-def test_mass_flux_matrix_bl_rows_sum_to_m_b() -> None:
-	"""Sub-LCL source rows (the surface updraft path) must sum to M_b — the
-	total mass flux carried from the BL pool into the cloud per unit area."""
-
-	t, q, p = _moist_unstable_column()
-	i_lcl_t, i_lnb_t, _cape, _ = compute_lcl_lnb_cape(t, q, p)
-	i_lcl = int(i_lcl_t)
-	m_b = 0.1
-	ma = compute_mass_flux_matrix(t, q, p, i_lcl=i_lcl, i_lnb=int(i_lnb_t), m_b=m_b)
-	for i in range(0, i_lcl):
-		row_sum = float(ma[i, :].sum())
-		assert abs(row_sum - m_b) < 1e-9, (
-			f"BL row {i} sum {row_sum:.6f} != M_b {m_b:.6f}"
-		)
-
-
-def test_mass_flux_matrix_rows_sum_to_mass_profile() -> None:
-	"""Each row's sum equals M_i (the mass fraction lifted to level i), which
-	for our linear-decay profile is `M_b · (1 − (i − LCL)/depth)`. This is the
-	mass-conservation property of the matrix construction."""
+def test_mass_flux_matrix_is_non_divergent() -> None:
+	"""Well-mixed guarantee (Finding 2, 2026-07-02 review): the convective flux
+	matrix must be NON-DIVERGENT — every layer's row sum equals its column sum
+	(mass leaving a layer = mass entering it). The diagonal closure makes each row
+	sum to the layer air mass m_i; non-divergence then forces each COLUMN to sum
+	to m_i too, which is exactly what makes the redistribution preserve a
+	mass-proportional (well-mixed) distribution in BOTH time directions.
+	Compensating subsidence is what closes the circulation. The pre-fix matrix
+	(updraft only, no subsidence) was divergent and failed this."""
 
 	t, q, p = _moist_unstable_column()
 	i_lcl_t, i_lnb_t, _cape, _ = compute_lcl_lnb_cape(t, q, p)
 	i_lcl, i_lnb = int(i_lcl_t), int(i_lnb_t)
-	m_b = 0.1
-	ma = compute_mass_flux_matrix(t, q, p, i_lcl=i_lcl, i_lnb=i_lnb, m_b=m_b)
-	depth = i_lnb - i_lcl
-	for i in range(i_lcl, i_lnb + 1):
-		expected = m_b * (1.0 - (i - i_lcl) / depth)
-		got = float(ma[i, :].sum())
-		# Rows summed to expected ±1e-9 by construction (matrix is normalised).
-		assert abs(got - expected) < 1e-9, (
-			f"row {i} sum {got:.6f} != expected {expected:.6f}"
-		)
+	# compute_mass_flux_matrix returns the OFF-DIAGONAL flux matrix fmass[i,j]
+	# (mass from layer i to j); the redistribution adds the stay-diagonal.
+	fmass = compute_mass_flux_matrix(t, q, p, i_lcl=i_lcl, i_lnb=i_lnb, m_b=0.05)
+
+	assert torch.allclose(fmass.diagonal(), torch.zeros_like(fmass.diagonal())), "matrix holds off-diagonal fluxes only"
+	flux_out = fmass.sum(dim=1)  # mass leaving each layer
+	flux_in = fmass.sum(dim=0)   # mass entering each layer
+	assert torch.allclose(flux_out, flux_in, rtol=1e-5, atol=1e-9), "divergent matrix (no compensating subsidence) → not well-mixed"
+
+
+def test_convection_transition_preserves_mass_distribution_both_directions() -> None:
+	"""V1 well-mixed test, proven exactly at the transition-matrix level (Finding 2
+	acceptance): the layer-mass vector m must be a stationary distribution of the
+	redistribution Markov operator, for BOTH the forward (row-sampled) and backward
+	(column-sampled, GLIDE's mode) transitions. i.e. mᵀP = mᵀ. This is the V1
+	condition (a mass-proportional ensemble stays mass-proportional) with the
+	Monte-Carlo noise removed."""
+
+	t, q, p = _moist_unstable_column()
+	i_lcl_t, i_lnb_t, _cape, _ = compute_lcl_lnb_cape(t, q, p)
+	i_lcl, i_lnb = int(i_lcl_t), int(i_lnb_t)
+	m = _layer_masses_per_area(p)
+	fmass = compute_mass_flux_matrix(t, q, p, i_lcl=i_lcl, i_lnb=i_lnb, m_b=0.05)
+
+	# Diagonal closure (FLEXPART calcmatrix): each row sums to the layer mass.
+	fmassfrac = fmass.clone()
+	fmassfrac += torch.diag(m - fmass.sum(dim=1))
+
+	# Forward transition P[i→j] = fmassfrac[i,j]/m_i (rows are the source).
+	p_fwd = fmassfrac / m.unsqueeze(1)
+	assert torch.allclose(p_fwd.sum(dim=1), torch.ones_like(m), atol=1e-6), "forward rows must be probability distributions"
+	assert (p_fwd >= -1e-9).all(), "forward transition probabilities must be non-negative (CFL)"
+	assert torch.allclose(m @ p_fwd, m, rtol=1e-5, atol=1e-9), "m must be stationary under the forward transition"
+
+	# Backward transition P[i→j] = fmassfrac[j,i]/m_i (transpose; FLEXPART redist,
+	# ldirect=-1) — this is the mode GLIDE actually runs.
+	p_bwd = fmassfrac.t() / m.unsqueeze(1)
+	assert torch.allclose(p_bwd.sum(dim=1), torch.ones_like(m), atol=1e-6), "backward rows must be probability distributions"
+	assert (p_bwd >= -1e-9).all(), "backward transition probabilities must be non-negative (CFL)"
+	assert torch.allclose(m @ p_bwd, m, rtol=1e-5, atol=1e-9), "m must be stationary under the backward transition"
 
 
 # ---------------------------------------------------------------------------
@@ -384,29 +402,42 @@ def _build_convective_met_window(blh_m: float = 1500.0) -> "HourlyMetTensors":
 	)
 
 
-def test_emanuel_triggers_on_convective_column_and_loft_particles() -> None:
-	"""End-to-end: build a convectively unstable column, place 1000 particles in
-	the boundary layer, call ``maybe_convect``, assert (a) at least some
-	particles displaced, (b) displaced particles ended up higher than they
-	started (lofted), (c) particle count is conserved."""
+def test_emanuel_backward_connects_aloft_particles_to_the_surface() -> None:
+	"""End-to-end backward convection: build a convectively unstable column, place
+	particles in the cloud/free troposphere, call ``maybe_convect`` (which runs in
+	GLIDE's backward mode), and assert (a) some are displaced, (b) mass is
+	conserved, (c) the coherent jumps are DOWNWARD — aloft particles are traced
+	back to the boundary-layer source.
+
+	This is the adjoint of forward updraft: forward convection lofts surface air to
+	the cloud top, so the backward (footprint) operator must move a particle that
+	is aloft *now* down to the surface it came from. Getting this direction wrong
+	(applying the forward row instead of the transposed column) would instead push
+	aloft particles further up and starve the surface footprint."""
 
 	from lpdm.gpu_engine import GPUEngine
 
 	torch.manual_seed(20260601)
 	met = _build_convective_met_window()
 	engine = GPUEngine(device="cpu")
-	# Default `trigger_dtv_k = 0.9 K` is calibrated for realistic 60-level
-	# ECMWF columns where the LCL-to-LCL+1 lift accumulates substantial
-	# buoyancy. Our synthetic 12-level test column underestimates the
-	# buoyancy excess at LCL+1, so we relax the trigger here — the test's
-	# purpose is to validate the *redistribution* once the scheme fires,
-	# not to validate the trigger threshold (covered separately by
-	# `test_emanuel_does_not_fire_on_stable_column`).
+	# Relaxed trigger: the synthetic 12-level column underestimates the LCL+1
+	# buoyancy that the default 0.9 K threshold is tuned for on 60-level ECMWF
+	# columns. This test validates redistribution once fired, not the threshold
+	# (covered by test_emanuel_does_not_fire_on_stable_column).
 	scheme = EmanuelReducedConvection(closure_c=0.1, trigger_dtv_k=0.1)
 
-	n = 1000
+	# Cloud extent for this column, so we can place particles inside it.
+	t_col, q_col, p_col = _moist_unstable_column(n_lev=12)
+	i_lcl_t, i_lnb_t, _cape, _ = compute_lcl_lnb_cape(t_col, q_col, p_col)
+	i_lcl, i_lnb = int(i_lcl_t), int(i_lnb_t)
+	height = torch.as_tensor(met.metadata.level, dtype=torch.float32)
+	z_cloud_base = float(height[i_lcl])
+	z_cloud_top = float(height[i_lnb])
+
+	n = 2000
 	particles = torch.zeros(n, 4, dtype=torch.float32)
-	particles[:, 2] = torch.empty(n).uniform_(50.0, 800.0)  # boundary layer
+	# Place particles up in the cloud layer (aloft).
+	particles[:, 2] = torch.empty(n).uniform_(z_cloud_base, z_cloud_top)
 	particles[:, 3] = 1.0 / n
 	z_initial = particles[:, 2].clone()
 	state = scheme.initialize_state(n, device=torch.device("cpu"), dtype=torch.float32)
@@ -417,23 +448,29 @@ def test_emanuel_triggers_on_convective_column_and_loft_particles() -> None:
 		active_mask=active, engine=engine,
 	)
 
-	displaced = (particles_out[:, 2] - z_initial).abs() > 0.1
+	displacement = particles_out[:, 2] - z_initial
+	displaced = displacement.abs() > 0.1
 	n_displaced = int(displaced.sum().item())
 	assert n_displaced > 0, "Expected at least some particles to be redistributed by deep convection"
 
-	# Particle count is conserved (no creation/loss). Sum of weights unchanged.
+	# Particle count / mass is conserved (no creation/loss).
 	assert torch.allclose(particles_out[:, 3].sum(), particles[:, 3].sum(), atol=1e-12)
 
-	# Average altitude of DISPLACED particles should be markedly higher than
-	# their initial altitude — convective lofting is the whole point.
-	z_disp_initial = z_initial[displaced]
-	z_disp_final = particles_out[displaced, 2]
-	# Use median to be robust to a small fraction that may detrain at the cloud
-	# base. We require the median displaced particle to have risen by > 500 m.
-	median_rise = float((z_disp_final - z_disp_initial).median())
-	assert median_rise > 500.0, (
-		f"median displacement among lofted particles is {median_rise:.0f} m; "
-		"expected > 500 m for deep convection"
+	# Net transport is DOWNWARD: the coherent reverse-updraft (big cloud->BL jumps)
+	# dominates the small one-level reverse-subsidence moves, so the ensemble-mean
+	# displacement is strongly negative. (Median is noisy here — roughly half the
+	# displaced particles take small upward subsidence-reversal steps.)
+	mean_disp = float(displacement.mean())
+	assert mean_disp < -200.0, (
+		f"mean displacement is {mean_disp:.0f} m; expected net downward transport "
+		"(< -200 m) for backward deep convection"
+	)
+	# A meaningful fraction of displaced particles is traced all the way back to
+	# the boundary-layer source (below cloud base) — the footprint-relevant path.
+	frac_to_bl = float((particles_out[displaced, 2] < z_cloud_base).float().mean())
+	assert frac_to_bl > 0.25, (
+		f"only {frac_to_bl:.0%} of displaced particles reached the boundary layer; "
+		"backward convection should trace aloft air to the surface source"
 	)
 
 
