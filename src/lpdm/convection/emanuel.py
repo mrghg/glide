@@ -14,28 +14,37 @@ in pure torch at a higher level of abstraction:
    becomes neutrally buoyant — Level of Neutral Buoyancy (LNB). The cloud
    layer is [LCL, LNB].
 
-3. **Mass-flux matrix `MA[i, j]`.** Buoyancy-sorting per Emanuel (1991) and
-   Forster 2007 Eq 35. For each in-cloud source level ``i``, the mass lifted
-   to level ``i`` mixes with environmental air and is detrained at each
-   ``j ∈ [LCL, LNB]`` according to the mixing fraction
-   ``ε_{i,j} = (θ_j − θ_lp_{i,j}) / (θ_l_{i,j} − θ_lp_{i,j})`` (Eq 36).
-   The cloud-base mass flux ``M_b`` closes the scheme via the dilution closure
-   (Emanuel 1991): ``M_b ∝ (T_v_parcel(LCL+1) − T_v_env(LCL+1)) · ρ_LCL``.
+3. **Mass-flux matrix `fmass[i, j]`.** A NON-DIVERGENT circulation: a coherent
+   boundary-layer → cloud updraft plus compensating environmental subsidence,
+   so mass leaving every layer equals mass entering it. The updraft entrains
+   from the BL (mass-weighted, total ``M_b``) and detrains across the cloud
+   [LCL, LNB] with a linear profile; subsidence returns the same interface flux
+   downward. The cloud-base mass flux ``M_b`` closes the scheme via the dilution
+   closure (Emanuel 1991): ``M_b ∝ (T_v_parcel(LCL+1) − T_v_env(LCL+1)) · ρ_LCL``.
+   See ``compute_mass_flux_matrix``.
 
-4. **Particle redistribution.** For each particle in a convectively active
-   column at level ``i``, ``MA[i, j] / m_i`` is the probability of being moved
-   to level ``j``. Drawn via cumulative sum + uniform random. Subsidence in
-   undisturbed cells is handled implicitly by mass conservation.
+4. **Particle redistribution.** FLEXPART ``calcmatrix``/``redist``: apply the
+   diagonal closure (each row of ``fmassfrac`` sums to the layer air mass), then
+   sample a destination level per particle from the transition matrix — the row
+   for forward runs, the transposed COLUMN for backward runs. Drawn via
+   cumulative sum + uniform random. Because ``fmass`` is non-divergent, both are
+   valid probability distributions and leave a mass-proportional ensemble
+   invariant (the well-mixed criterion). See ``_redistribute_particles``.
 
-5. **Backward.** The matrix is constructed to preserve the well-mixed
-   criterion under EITHER time direction (Forster 2007 §3). No sign change
-   in backward mode.
+5. **Backward.** GLIDE runs backward, so the destination is sampled from the
+   matrix COLUMN (FLEXPART ``redist`` ``ldirect=-1``) — the adjoint of the
+   forward updraft: a particle that is aloft *now* is traced back to the BL air
+   it came from. Non-divergence guarantees the well-mixed criterion holds in
+   this direction too (Forster 2007 §3).
 
 Documented departures from full Emanuel:
-- We compute the buoyancy-sorting matrix only for the "saturated updraft"
-  branch; the saturated-downdraft branch (Emanuel 1991 §4.b) is folded into
-  the mass conservation residual rather than modelled explicitly. For deep
-  cumulus this is a few-percent effect on the redistribution profile.
+- **Detrainment profile is linear** (``_detrainment_weights``), not the Emanuel
+  buoyancy-sorting spectrum (Forster 2007 Eq 35-36). This sets only WHERE the
+  updraft deposits mass, not the mass-conservation structure; non-divergence is
+  guaranteed by the compensating subsidence regardless of the profile shape.
+- **No explicit saturated-downdraft branch** (Emanuel 1991 §4.b); the
+  environmental subsidence carries the compensating return flux. Few-percent
+  effect on the redistribution profile for deep cumulus.
 - The mass-flux closure is a simplified buoyancy-times-density relation
   rather than Emanuel's full quasi-equilibrium closure. Calibrated against
   Forster (2007)'s order-of-magnitude values for typical deep-convection
@@ -97,6 +106,14 @@ UPDRAFT_W_MAX_M_S = 5.0
 P_MIN_PA = 1.0
 T_MIN_K = 150.0
 Q_MIN_KG_KG = 0.0
+
+# CFL-style cap on the convective mass-flux matrix: no layer may shed more than
+# this fraction of its air mass in a single convection event. Keeps the
+# diagonal (stay) probability of the redistribution non-negative. Because the
+# whole flux matrix is scaled by a single factor, non-divergence (hence the
+# well-mixed property) is preserved. FLEXPART enforces the equivalent limit on
+# the cloud-base mass flux inside convect43c.f.
+CFL_MAX_OUTFLUX_FRAC = 0.9
 
 
 # ---------------------------------------------------------------------------
@@ -366,6 +383,33 @@ def compute_lcl_lnb_cape(
 	return i_lcl, i_lnb, cape, dtv_lcl_plus_1
 
 
+def _detrainment_weights(
+	i_lcl: int,
+	i_lnb: int,
+	n_lev: int,
+	device: torch.device,
+	dtype: torch.dtype,
+) -> torch.Tensor:
+	"""Relative detrainment weight per cloud level [LCL, LNB], linear decay from
+	the cloud base to the cloud top (1 at LCL → 0 at LNB).
+
+	The full Emanuel scheme detrains according to a buoyancy-sorting spectrum
+	(Forster 2007 Eq 35-36); we use the documented linear ``M``-profile
+	simplification (departure #4). It sets only WHERE the coherent updraft
+	deposits mass, not the mass-conservation structure — non-divergence (hence
+	the well-mixed property) is guaranteed by the compensating subsidence added
+	in ``compute_mass_flux_matrix`` regardless of this profile's shape.
+	"""
+
+	w = torch.zeros(n_lev, device=device, dtype=dtype)
+	depth = i_lnb - i_lcl
+	if depth <= 0:
+		return w
+	for k in range(i_lcl, i_lnb + 1):
+		w[k] = 1.0 - (k - i_lcl) / depth
+	return w
+
+
 def compute_mass_flux_matrix(
 	t_env: torch.Tensor,
 	q_env: torch.Tensor,
@@ -374,116 +418,76 @@ def compute_mass_flux_matrix(
 	i_lnb: int,
 	m_b: float,
 ) -> torch.Tensor:
-	"""Mass-flux matrix `MA[i, j]` per Forster (2007) Eq 35-36.
+	"""Non-divergent convective mass-flux matrix ``fmass[i, j]`` (off-diagonal
+	mass transported from layer ``i`` to layer ``j`` per convection event).
 
-	Three groups of source rows are populated:
+	Built as a coherent boundary-layer → cloud updraft plus **compensating
+	environmental subsidence**, so that the total mass leaving every layer equals
+	the total entering it (``Σ_j fmass[i,j] == Σ_j fmass[j,i]``). That
+	non-divergence is what makes the particle redistribution preserve a
+	mass-proportional (well-mixed) distribution in BOTH time directions — the
+	pre-2026-07-02 matrix had updraft only (no subsidence) and violated it
+	(Finding 2 of the physics review).
 
-	- **Sub-LCL (i < LCL)** — the surface updraft path. The BL particle pool
-	  acts as a single source feeding the cloud base; mass `M_b` is shared
-	  across all in-cloud destinations weighted by the M-profile. This is what
-	  gets BL particles into the cloud system. ``MA[i, j] = M_b · profile(j)``
-	  for ``i ∈ [0, LCL)`` and ``j ∈ [LCL, LNB]``.
+	Construction (levels ascending, surface at index 0; cloud = [LCL, LNB]):
 
-	- **In-cloud (i ∈ [LCL, LNB])** — Emanuel buoyancy-sorting mixing per
-	  Forster 2007 Eq 35-36. For each in-cloud source level `i`, mixing
-	  fraction ``ε_{i,j} = (θ_j − θ_lp_{i,j}) / (θ_l_{i,j} − θ_lp_{i,j})`` per
-	  Eq 36; ``MA[i, j]`` from Eq 35 normalised so the row sums to
-	  ``M_b · profile(i)``.
+	- **Entrainment** ``e[i]``: the boundary layer ``[0, LCL)`` feeds the updraft,
+	  shared across BL layers by air mass so the TOTAL entrained = ``m_b`` (the
+	  cloud-base flux). Fixes Finding 3 — previously each BL layer sourced the
+	  full ``m_b``, over-venting the BL by a factor of the layer count.
+	- **Detrainment** ``d[j]``: the updraft deposits mass across the cloud with a
+	  linear-decay profile (``_detrainment_weights``), TOTAL = ``m_b``.
+	- **Direct updraft** ``U[i,j] = e[i]·d[j]/m_b`` (BL source → cloud, non-local:
+	  this is the coherent deep-lofting transport).
+	- **Compensating subsidence**: the net upward flux across the interface below
+	  layer ``k+1`` is ``Φ[k] = Σ_{i≤k} e[i] − Σ_{j≤k} d[j]`` (≥ 0); the
+	  environment sinks at the same rate, moving mass from layer ``k+1`` down to
+	  ``k`` (``fmass[k+1, k] += Φ[k]``).
 
-	- **Above LNB (i > LNB)** — zero (not in the cloud).
+	``m_b`` is the cloud-base mass flux already multiplied by the event interval
+	(units kg/m²). The whole matrix is finally scaled down if any layer would
+	shed more than ``CFL_MAX_OUTFLUX_FRAC`` of its mass (a single scalar → keeps
+	non-divergence). Returns zeros (no transport) when there is no cloud.
 
-	The redistribution probability for a particle at level `i` is then
-	``MA[i, :] / m_i``, where ``m_i`` is the layer mass per area.
+	The caller (``_redistribute_particles``) applies the FLEXPART diagonal
+	closure and samples destinations from the matrix row (forward) or column
+	(backward) — GLIDE runs backward.
 	"""
 
 	device, dtype = t_env.device, t_env.dtype
 	n_lev = t_env.numel()
-	ma = torch.zeros((n_lev, n_lev), device=device, dtype=dtype)
+	fmass = torch.zeros((n_lev, n_lev), device=device, dtype=dtype)
 
-	if i_lcl < 0 or i_lnb <= i_lcl:
-		return ma
+	if i_lcl < 0 or i_lnb <= i_lcl or m_b <= 0.0:
+		return fmass
 
-	# Liquid potential temperature: for an undilute parcel lifted along the
-	# moist adiabat, θ_l ≈ θ (the latent-heat reservoir is implicit in q_sat
-	# rather than tracked separately). We use this approximation throughout.
-	theta_env = potential_temperature(t_env, pressure_pa)
+	m = _layer_masses_per_area(pressure_pa)  # [Z] layer air mass per unit area
 
-	# Profile of cloud-base mass flux carried up through level i.
-	# Linear decay between LCL and LNB is a simple closure; the full Emanuel
-	# scheme has a more elaborate buoyancy-driven profile but the integral is
-	# similar order of magnitude.
-	depth = i_lnb - i_lcl
-	if depth <= 0:
-		return ma
-	m_profile = torch.zeros(n_lev, device=device, dtype=dtype)
-	for k in range(i_lcl, i_lnb + 1):
-		# Linear decrease from M_b at LCL to 0 at LNB.
-		m_profile[k] = m_b * (1.0 - (k - i_lcl) / depth)
+	# Entrainment: BL [0, LCL) mass-weighted so Σ e = m_b (Finding 3).
+	e = torch.zeros(n_lev, device=device, dtype=dtype)
+	bl_total = m[:i_lcl].sum().clamp(min=1e-12)
+	e[:i_lcl] = m_b * m[:i_lcl] / bl_total
 
-	# Surface-updraft rows: for any sub-LCL particle in this column, the
-	# probability of being captured into the cloud is `M_b · t_interval / m_BL`
-	# (handled by the caller via `MA[i,j] / layer_mass[i]`). We split the
-	# total mass flux M_b across the in-cloud detrainment levels according to
-	# the M-profile (i.e. detrainment is biased toward the cloud base, matching
-	# the linear M_i decay). This is the BL → cloud bridge that the Forster
-	# 2007 description treats as M_i for i ∈ [LCL, LNB] from the "surface".
-	for i in range(0, i_lcl):
-		# Distribute M_b across [LCL, LNB] using m_profile as weights, then
-		# normalise so the row sum equals M_b (the total surface-to-cloud flux).
-		row = torch.zeros(n_lev, device=device, dtype=dtype)
-		row[i_lcl : i_lnb + 1] = m_profile[i_lcl : i_lnb + 1]
-		row_sum = row.sum()
-		if float(row_sum) > 1e-12:
-			ma[i, :] = row * m_b / row_sum
-		# else: leave zero (shouldn't happen with non-degenerate depth).
+	# Detrainment: cloud [LCL, LNB] linear profile so Σ d = m_b.
+	w = _detrainment_weights(i_lcl, i_lnb, n_lev, device, dtype)
+	w_total = w.sum().clamp(min=1e-12)
+	d = m_b * w / w_total
 
-	# For each source level i, build the row MA[i, :] using mixing fractions.
-	# The mixing fraction at the in-cloud envelope captures the "buoyancy
-	# sorting": a parcel that mixes with environmental air becomes neutrally
-	# buoyant at some level; the detrainment profile peaks where the mixed
-	# parcel matches the environment.
-	for i in range(i_lcl, i_lnb + 1):
-		theta_i = theta_env[i]
-		eps_row = torch.zeros(n_lev, device=device, dtype=dtype)
-		for j in range(i_lcl, i_lnb + 1):
-			# Liquid θ of air "displaced adiabatically from i to j" — for our
-			# undilute proxy, this is just the parcel θ_l at level i (constant).
-			theta_l_ij = theta_i
-			# Liquid θ of a parcel lifted from surface to j (= θ at j on the
-			# moist adiabat, equivalently θ_env_j adjusted for the parcel's
-			# heat content). Approximation: use θ_env_j as a baseline + the
-			# excess buoyancy at j.
-			theta_lp_ij = theta_env[j]
-			# Forster 2007 Eq 36: ε = (θ_j − θ_lp) / (θ_l − θ_lp). If
-			# numerator and denominator have the same sign and |numerator| <
-			# |denominator|, ε ∈ [0, 1] — that's the well-defined mixing case.
-			# Otherwise ε is clamped to [0, 1].
-			denom = theta_l_ij - theta_lp_ij
-			if abs(float(denom)) < 1e-3:
-				eps_row[j] = 0.5
-			else:
-				eps_row[j] = ((theta_env[j] - theta_lp_ij) / denom).clamp(0.0, 0.999)
+	# Coherent updraft transfers (BL source -> cloud detrainment). row_i sum = e[i],
+	# col_j sum = d[j].
+	fmass = fmass + torch.outer(e, d) / m_b
 
-		# MA row: |ε[j+1] − ε[j]| + |ε[j] − ε[j-1]| normalised so the row sums
-		# to M_i (mass conservation). Forster Eq 35.
-		row_unnorm = torch.zeros(n_lev, device=device, dtype=dtype)
-		for j in range(i_lcl, i_lnb + 1):
-			j_plus = min(j + 1, i_lnb)
-			j_minus = max(j - 1, i_lcl)
-			one_minus_eps = (1.0 - eps_row[j]).clamp(min=1e-3)
-			row_unnorm[j] = (
-				(eps_row[j_plus] - eps_row[j]).abs() + (eps_row[j] - eps_row[j_minus]).abs()
-			) / one_minus_eps
+	# Compensating subsidence on the sub-diagonal: Φ[k] from layer k+1 down to k.
+	phi = (torch.cumsum(e, dim=0) - torch.cumsum(d, dim=0))[:-1].clamp(min=0.0)
+	fmass = fmass + torch.diag(phi, -1)
 
-		row_sum = row_unnorm.sum()
-		if float(row_sum) > 1e-12:
-			ma[i, :] = row_unnorm * m_profile[i] / row_sum
-		else:
-			# Degenerate (all ε equal): detrain uniformly across cloud layer.
-			n_cloud = i_lnb - i_lcl + 1
-			ma[i, i_lcl : i_lnb + 1] = m_profile[i] / n_cloud
+	# CFL: cap the per-layer outflux fraction (single scalar scale -> preserves
+	# non-divergence and keeps the redistribution's stay-probability >= 0).
+	max_out_frac = (fmass.sum(dim=1) / m.clamp(min=1e-12)).max()
+	if float(max_out_frac) > CFL_MAX_OUTFLUX_FRAC:
+		fmass = fmass * (CFL_MAX_OUTFLUX_FRAC / max_out_frac)
 
-	return ma
+	return fmass
 
 
 # ---------------------------------------------------------------------------
@@ -638,30 +642,30 @@ class EmanuelReducedConvection(ConvectionScheme):
 		# approximate the met interval as 3600 s (hourly ERA5); the runtime
 		# could pass it explicitly in a future refinement.
 		convection_call_interval_s = 3600.0
-		ma = compute_mass_flux_matrix(
+		fmass = compute_mass_flux_matrix(
 			t_col, q_col, pressure_pa,
 			i_lcl=i_lcl, i_lnb=i_lnb,
 			m_b=m_b * convection_call_interval_s,
 		)
 
-		# Per-level mass per area: m_i = (Δp / g) — used to convert MA[i,j]
-		# (mass flux from i to j) into a redistribution probability.
+		# Per-level mass per area: m_i = (Δp / g) — used for the diagonal closure
+		# and to convert the flux matrix into redistribution probabilities.
 		layer_mass = _layer_masses_per_area(pressure_pa).clamp(min=1e-6)
 
-		# 5) Redistribute particles. For each particle in the convective
-		# column (here = all active particles since we use a single bbox
-		# column), find its current level, then sample destination level from
-		# the MA row probabilities.
+		# 5) Redistribute particles through the (non-divergent) transition matrix.
+		# GLIDE runs backward, so the destination is sampled from the matrix COLUMN
+		# (FLEXPART redist ldirect=-1); the well-mixed criterion holds either way.
 		particles_out, n_displaced = self._redistribute_particles(
 			particles=particles,
 			active_mask=active_mask,
 			height_col=height_col,
-			ma=ma,
+			fmass=fmass,
 			layer_mass=layer_mass,
 			i_lcl=i_lcl, i_lnb=i_lnb,
 			generator=generator,
 			device=device, dtype=dtype,
 			ascending=ascending,
+			backward=True,
 		)
 
 		# Log once per met update (the t_alpha changes when met advances).
@@ -687,7 +691,7 @@ class EmanuelReducedConvection(ConvectionScheme):
 		particles: torch.Tensor,
 		active_mask: torch.Tensor,
 		height_col: torch.Tensor,
-		ma: torch.Tensor,
+		fmass: torch.Tensor,
 		layer_mass: torch.Tensor,
 		i_lcl: int,
 		i_lnb: int,
@@ -695,69 +699,69 @@ class EmanuelReducedConvection(ConvectionScheme):
 		device: torch.device,
 		dtype: torch.dtype,
 		ascending: bool,
+		backward: bool = True,
 	) -> tuple[torch.Tensor, int]:
-		"""For each active particle in the cloud layer, sample a redistribution
-		destination from ``MA[i, :] / layer_mass[i]``; place the particle at a
-		uniform random height within the destination layer.
+		"""Redistribute active particles through the convective transition matrix.
 
-		Returns the updated particle tensor and the count of displaced particles.
-		The horizontal coordinates (lon, lat) and weight are unchanged — only
-		altitude moves.
+		Follows FLEXPART ``calcmatrix`` / ``redist``: apply the diagonal closure so
+		each row of ``fmassfrac`` sums to the layer air mass (the diagonal is the
+		"stay" mass), then sample a destination level per particle from the
+		transition matrix — the matrix ROW for forward runs, the matrix COLUMN for
+		backward runs (``ldirect=-1``). GLIDE runs backward, so ``backward=True``
+		uses the column (transpose). Because ``fmass`` is non-divergent, both the
+		row- and column-normalised transitions are valid probability distributions
+		and leave a mass-proportional ensemble invariant (the well-mixed criterion).
+
+		Sampled movers are placed at a uniform random height within the destination
+		layer; particles that sample their own layer (the stay-diagonal) keep their
+		position. Only altitude changes; lon/lat/weight are untouched.
 		"""
 
 		n = particles.shape[0]
+		n_lev = height_col.numel()
 		out = particles.clone()
-		# Per-particle level index from height — searchsorted in ascending z.
-		# height_col is already ascending after the flip at the top of step().
+
+		# Diagonal closure: fmassfrac[i,i] = m_i - Σ_j fmass[i,j]; rows sum to m_i.
+		# (CFL cap in compute_mass_flux_matrix keeps the diagonal non-negative.)
+		fmassfrac = fmass + torch.diag((layer_mass - fmass.sum(dim=1)).clamp(min=0.0))
+		# Transition matrix: destination distribution for a particle in layer i is
+		# row i (forward) or column i (backward) divided by m_i. Non-divergence ⇒
+		# both are normalised to 1.
+		trans = fmassfrac.t() if backward else fmassfrac
+		prob = (trans / layer_mass.clamp(min=1e-12).unsqueeze(1)).clamp(min=0.0)  # [Z, Z]
+
+		# Per-particle host level (nearest level by height); height_col ascending.
 		z_particles = out[:, 2].contiguous()
-		idx_upper = torch.searchsorted(height_col, z_particles).clamp(min=1, max=height_col.numel() - 1)
+		idx_upper = torch.searchsorted(height_col, z_particles).clamp(min=1, max=n_lev - 1)
 		idx_lower = idx_upper - 1
-		# Pick the closer of (idx_upper, idx_lower) as the particle's host level.
 		z_lo = height_col[idx_lower]
 		z_hi = height_col[idx_upper]
 		host = torch.where((z_particles - z_lo) < (z_hi - z_particles), idx_lower, idx_upper)
 
-		# Particles eligible for convective redistribution: anything from the
-		# surface up to and including the cloud top (LNB). Above LNB there are
-		# no MA entries — those particles are above the convective updraft and
-		# stay put. Sub-LCL particles take the BL → cloud "surface updraft"
-		# rows; in-cloud particles follow the Emanuel buoyancy-sorting matrix.
-		eligible = (host <= i_lnb) & active_mask
+		eligible = active_mask
 		if int(eligible.sum().item()) == 0:
 			return out, 0
 
-		# For each particle, prob(stay) = 1 − Σ_j MA[host, j] / m_host;
-		# prob(move to j) = MA[host, j] / m_host.
-		# Cap total move probability at 1 (numerical safety).
-		move_probs = ma[host] / layer_mass[host].unsqueeze(1)  # [N, Z]
-		total_move = move_probs.sum(dim=1).clamp(max=0.99)
-		# Re-normalise if any rows summed > 1.
-		scale = torch.where(
-			move_probs.sum(dim=1) > 1.0,
-			total_move / move_probs.sum(dim=1).clamp(min=1e-9),
-			torch.ones_like(total_move),
-		)
-		move_probs = move_probs * scale.unsqueeze(1)
+		# Per-particle destination distribution (includes the stay-diagonal).
+		probs = prob[host]  # [N, Z]
+		probs = probs / probs.sum(dim=1, keepdim=True).clamp(min=1e-12)
+		cum = probs.cumsum(dim=1)
 
-		# Cumulative probability per particle (prepend 0 → cumsum → [N, Z+1]).
-		# A draw u ∈ [0, 1]: if u < total_move → moved to level k where the cdf
-		# first exceeds u; else stays.
 		u = (
 			torch.rand(n, generator=generator, device=device, dtype=dtype)
 			if generator is not None
 			else torch.rand(n, device=device, dtype=dtype)
 		)
-		cum = move_probs.cumsum(dim=1)  # [N, Z]
-		moved = (u < total_move) & eligible
+		dest = torch.searchsorted(cum, u.unsqueeze(1)).squeeze(1).clamp(max=n_lev - 1)
+
+		# A particle is "displaced" only if its sampled destination differs from
+		# its host level; stayers (dest == host, the diagonal) keep their z.
+		moved = eligible & (dest != host)
 		n_moved = int(moved.sum().item())
 
 		if n_moved > 0:
-			# Find destination index per moved particle.
-			dest_idx = torch.searchsorted(cum, u.unsqueeze(1)).squeeze(1)
-			dest_idx = dest_idx.clamp(max=cum.shape[1] - 1)
-			# Sub-bin placement: uniform within the destination layer.
-			z_lo_d = height_col[(dest_idx - 1).clamp(min=0)]
-			z_hi_d = height_col[dest_idx]
+			z_lo_d = height_col[(dest - 1).clamp(min=0)]
+			z_hi_d = height_col[dest]
 			u_within = (
 				torch.rand(n, generator=generator, device=device, dtype=dtype)
 				if generator is not None

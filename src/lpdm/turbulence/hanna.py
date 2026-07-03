@@ -1,13 +1,22 @@
 """Hanna 1982 / FLEXPART turbulence scheme.
 
 Implementation per `docs/turbulence.md` §3.2. Three stability regimes (stable,
-neutral, unstable) within the boundary layer with FLEXPART piecewise-homogeneous
-treatment (no explicit Thomson 1987 drift). Surface-layer override for `z < 0.1 h`.
-Constant-diffusivity placeholder above the BL.
+neutral, unstable) within the boundary layer, carrying the full Thomson (1987)
+well-mixed drift + Stohl-Thomson (1999) density correction (§3.2.5), a
+Monin-Obukhov surface-layer override for `z < 0.1 h` (§3.2.4), and a
+gradient-Richardson closure above the BL (§3.2.3).
 
-Constants below come from Hanna 1982 / FLEXPART manual sections 4.3.x. They MUST
-be cross-checked against the FLEXPART source tree before any external comparison
-run; secondary references occasionally diverge by ~10% on minor coefficients.
+The in-BL σ/T_L parameterisation implements the equations of Hanna (1982),
+Caughey (1982) and Ryall & Maryon (1998) — see the per-regime functions for
+the specific equation attributions. This is the same set of parameterisations
+FLEXPART uses in `src/turbulence_mod.f90` `subroutine hanna`; GLIDE adopts them
+(coefficients checked against that reference on 2026-07-02, Finding 5 of the
+physics review) so its boundary-layer turbulence is directly comparable to
+FLEXPART's. By default GLIDE also applies FLEXPART's Lagrangian-timescale floors
+(10/10/30 s; ``flexpart_tl_floors``) and, like FLEXPART, runs the regime formulas
+to the ground with no surface-layer override (``surface_layer_override=False``);
+the legacy behaviour is retained behind those two flags for A/B comparisons.
+See `docs/turbulence.md` §3.2.2/§3.2.4.
 """
 
 from __future__ import annotations
@@ -50,6 +59,18 @@ SIGMA_MIN_M_S = 1e-3
 T_L_MIN_S = 1.0
 USTAR_MIN_M_S = 1e-3
 BLH_MIN_M = 50.0
+Z_MIN_M = 1.0  # height floor (metres) for near-surface z in gradient/timescale lookups
+
+# FLEXPART v11 Lagrangian-timescale floors (turbulence_mod.f90 subroutine hanna:
+# tlu=max(10.,tlu); tlv=max(10.,tlv); tlw=max(30.,tlw)). These keep the
+# near-surface vertical diffusivity K = σ_w²·T_Lw from collapsing as z → 0
+# (T_Lw formulas vanish with z), which otherwise traps particles in the lowest
+# metres and inflates near-field surface footprints — the GLIDE-vs-NAME/FLEXPART
+# over-estimation seen at polluted low-inlet sites (2026-07-02 v2 validation).
+# Applied when HannaScheme(flexpart_tl_floors=True), the default.
+T_LU_FLOOR_FLEXPART_S = 10.0
+T_LV_FLOOR_FLEXPART_S = 10.0
+T_LW_FLOOR_FLEXPART_S = 30.0
 
 # Free-troposphere (above-BL) gradient-Richardson closure constants (docs/turbulence.md §3.2.3).
 P0_PA = 100000.0                  # reference pressure for potential temperature
@@ -164,36 +185,59 @@ def _in_bl_stable(
 	z: torch.Tensor,
 	blh: torch.Tensor,
 	ustar: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-	"""(σ_uv, σ_w, T_Luv, T_Lw) under stable BL (z ≤ h)."""
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+	"""(σ_u, σ_v, σ_w, T_Lu, T_Lv, T_Lw) under stable BL.
+
+	Equations from Hanna (1982) Eqs 7.19-7.24. This is the same stable-regime
+	parameterisation FLEXPART uses (`turbulence_mod.f90` `subroutine hanna`),
+	adopted so GLIDE is directly comparable; the coefficients trace to Hanna."""
 
 	z_over_h = (z / blh).clamp(min=0.0, max=1.0)
 	one_minus = (1.0 - z_over_h).clamp(min=0.0)
 
-	sigma_w = 1.3 * ustar * one_minus.pow(0.75)
-	sigma_uv = 2.0 * ustar * one_minus.pow(0.75)
-	# Use small-z floor to avoid (z/h)^0.8 → 0 producing T_L = 0 at the surface.
+	# Eq 7.20 / 7.19: σ_u = 2.0 u*(1−ζ); σ_v = σ_w = 1.3 u*(1−ζ). LINEAR in (1−ζ),
+	# not the (1−ζ)^¾ of the previous secondary-reference form. σ_v tracks σ_w (1.3),
+	# not σ_u (2.0).
+	sigma_u = 2.0 * ustar * one_minus
+	sigma_w = 1.3 * ustar * one_minus
+	sigma_v = sigma_w
+	# Small-z floor so ζ^0.8 / √ζ → 0 doesn't force T_L = 0 exactly at the surface.
 	z_over_h_floor = z_over_h.clamp(min=1e-6)
+	# Eq 7.22 T_Lu = 0.15 h/σ_u·√ζ; Eq 7.23 T_Lv = 0.467 T_Lu; Eq 7.24 T_Lw = 0.1 h/σ_w·ζ^0.8.
+	T_Lu = 0.15 * blh / sigma_u.clamp(min=SIGMA_MIN_M_S) * z_over_h_floor.pow(0.5)
+	T_Lv = 0.467 * T_Lu
 	T_Lw = 0.10 * blh / sigma_w.clamp(min=SIGMA_MIN_M_S) * z_over_h_floor.pow(0.8)
-	T_Luv = 0.15 * blh / sigma_uv.clamp(min=SIGMA_MIN_M_S) * z_over_h_floor.pow(0.5)
-	return sigma_uv, sigma_w, T_Luv, T_Lw
+	return sigma_u, sigma_v, sigma_w, T_Lu, T_Lv, T_Lw
 
 
 def _in_bl_neutral(
 	z: torch.Tensor,
 	ustar: torch.Tensor,
 	f_cor: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-	"""(σ_uv, σ_w, T_Luv, T_Lw) under neutral BL."""
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+	"""(σ_u, σ_v, σ_w, T_Lu, T_Lv, T_Lw) under neutral BL.
+
+	Equations from Hanna (1982) Eqs 7.25-7.27 (the same neutral-regime forms
+	FLEXPART uses in `subroutine hanna`; coefficients trace to Hanna).
+
+	Uses the per-particle |f| (Finding 4): FLEXPART hardcodes f = 1e-4 s⁻¹, but a
+	real per-latitude Coriolis is strictly better provided we take the ABSOLUTE
+	value — otherwise the Ekman-decay exponents flip sign in the Southern
+	Hemisphere and σ grows (rather than decays) with height.
+	"""
 
 	ustar_safe = ustar.clamp(min=USTAR_MIN_M_S)
-	expfact = torch.exp(-2.0 * f_cor * z / ustar_safe)
-	sigma_w = 1.3 * ustar * expfact
-	sigma_uv = 2.0 * ustar * expfact
-	denom = 1.0 + 15.0 * f_cor * z / ustar_safe
+	f_abs = f_cor.abs().clamp(min=1e-5)  # |f|, floored so the equator doesn't degenerate
+	# Eq 7.25 σ_u = 2.0 u* exp(−3 f z/u*); Eq 7.26 σ_v = σ_w = 1.3 u* exp(−2 f z/u*).
+	sigma_u = 2.0 * ustar * torch.exp(-3.0 * f_abs * z / ustar_safe)
+	sigma_w = 1.3 * ustar * torch.exp(-2.0 * f_abs * z / ustar_safe)
+	sigma_v = sigma_w
+	# Eq 7.27 T_L = 0.5 z/σ_w/(1 + 15 f z/u*), same for all three components.
+	denom = 1.0 + 15.0 * f_abs * z / ustar_safe
 	T_Lw = 0.5 * z / sigma_w.clamp(min=SIGMA_MIN_M_S) / denom.clamp(min=1.0)
-	T_Luv = T_Lw / 1.5
-	return sigma_uv, sigma_w, T_Luv, T_Lw
+	T_Lu = T_Lw
+	T_Lv = T_Lw
+	return sigma_u, sigma_v, sigma_w, T_Lu, T_Lv, T_Lw
 
 
 def _in_bl_unstable(
@@ -202,26 +246,45 @@ def _in_bl_unstable(
 	ustar: torch.Tensor,
 	w_star: torch.Tensor,
 	h_over_L: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-	"""(σ_uv, σ_w, T_Luv, T_Lw) under unstable / convective BL."""
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+	"""(σ_u, σ_v, σ_w, T_Lu, T_Lv, T_Lw) under unstable / convective BL.
+
+	Equations: σ_u from Caughey (1982) Eq 4.15; σ_w from Ryall & Maryon (1998);
+	T_Lu from Hanna (1982) Eq 7.17; the piecewise T_Lw follows the convective
+	surface-layer / mixed-layer scalings in Hanna (1982). This matches the
+	unstable-regime parameterisation FLEXPART uses (`subroutine hanna`), adopted
+	for comparability."""
 
 	z_over_h = (z / blh).clamp(min=0.0, max=1.0)
-	one_minus_095 = (1.0 - 0.95 * z_over_h).clamp(min=0.0)
 
+	# σ_u = σ_v = u*(12 − 0.5 h/L)^(1/3)  [Caughey 1982 Eq 4.15].
+	h_over_L_capped = h_over_L.clamp(min=-1000.0, max=0.0)
+	sigma_u = (12.0 - 0.5 * h_over_L_capped).clamp(min=1e-3).pow(1.0 / 3.0) * ustar
+	sigma_v = sigma_u
+
+	# σ_w = √(1.2 w*²(1−0.9ζ)ζ^(2/3) + (1.8−1.4ζ)u*²)  [Ryall & Maryon 1998].
 	sigma_w_sq = (
-		1.5 * ustar.pow(2) * one_minus_095.pow(2.0 / 3.0)
-		+ 1.6 * w_star.pow(2) * z_over_h.pow(2.0 / 3.0) * (1.0 - z_over_h).pow(2)
+		1.2 * w_star.pow(2) * (1.0 - 0.9 * z_over_h).clamp(min=0.0) * z_over_h.pow(2.0 / 3.0)
+		+ (1.8 - 1.4 * z_over_h) * ustar.pow(2)
 	)
 	sigma_w = sigma_w_sq.clamp(min=SIGMA_MIN_M_S ** 2).sqrt()
 
-	# Cap h/L within a sensible range to avoid pathological values blowing up the bracket.
-	h_over_L_capped = h_over_L.clamp(min=-1000.0, max=0.0)
-	sigma_uv_sq = (12.0 - 0.5 * h_over_L_capped).clamp(min=1e-3).pow(2.0 / 3.0) * ustar.pow(2)
-	sigma_uv = sigma_uv_sq.clamp(min=SIGMA_MIN_M_S ** 2).sqrt()
-
-	T_Lw = 0.15 * blh / sigma_w.clamp(min=SIGMA_MIN_M_S)
-	T_Luv = 0.15 * blh / sigma_uv.clamp(min=SIGMA_MIN_M_S)
-	return sigma_uv, sigma_w, T_Luv, T_Lw
+	# T_Lu = T_Lv = 0.15 h/σ_u  [Eq 7.17].
+	T_Lu = 0.15 * blh / sigma_u.clamp(min=SIGMA_MIN_M_S)
+	T_Lv = T_Lu
+	# T_Lw is piecewise in z/L (FLEXPART): near-surface, shallow, and bulk branches.
+	# |z/L| = ζ·|h/L| (h_over_L < 0 here).
+	abs_z_over_L = (z_over_h * (-h_over_L_capped)).clamp(min=0.0)
+	sw = sigma_w.clamp(min=SIGMA_MIN_M_S)
+	t_near = 0.1 * z / (sw * (0.55 - 0.38 * abs_z_over_L).clamp(min=1e-2))
+	t_shallow = 0.59 * z / sw
+	t_bulk = 0.15 * blh / sw * (1.0 - torch.exp(-5.0 * z_over_h))
+	T_Lw = torch.where(
+		abs_z_over_L < 1.0,
+		t_near,
+		torch.where(z_over_h < 0.1, t_shallow, t_bulk),
+	)
+	return sigma_u, sigma_v, sigma_w, T_Lu, T_Lv, T_Lw
 
 
 def in_bl_sigma_TL(
@@ -234,15 +297,17 @@ def in_bl_sigma_TL(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
 	"""Per-particle (σ_u, σ_v, σ_w, T_Lu, T_Lv, T_Lw) inside the BL.
 
-	Combines the three stability regimes via `torch.where`. All inputs must be
-	per-particle tensors broadcasting to a common shape.
+	Combines the three stability regimes (FLEXPART v11 `subroutine hanna`) via
+	`torch.where`. σ_u ≠ σ_v in general (σ_v tracks σ_w), and the three T_L
+	components differ per regime. All inputs must be per-particle tensors
+	broadcasting to a common shape.
 	"""
 
 	f_cor = coriolis_parameter(latitude_deg)
 
-	uv_st, w_st, t_uv_st, t_w_st = _in_bl_stable(z, blh, ustar)
-	uv_nu, w_nu, t_uv_nu, t_w_nu = _in_bl_neutral(z, ustar, f_cor)
-	uv_un, w_un, t_uv_un, t_w_un = _in_bl_unstable(z, blh, ustar, w_star, h_over_L)
+	u_st, v_st, w_st, tu_st, tv_st, tw_st = _in_bl_stable(z, blh, ustar)
+	u_nu, v_nu, w_nu, tu_nu, tv_nu, tw_nu = _in_bl_neutral(z, ustar, f_cor)
+	u_un, v_un, w_un, tu_un, tv_un, tw_un = _in_bl_unstable(z, blh, ustar, w_star, h_over_L)
 
 	in_stable = h_over_L > H_OVER_L_STABLE_THRESHOLD
 	in_unstable = h_over_L < H_OVER_L_UNSTABLE_THRESHOLD
@@ -250,12 +315,13 @@ def in_bl_sigma_TL(
 	def _select(stable_v: torch.Tensor, neutral_v: torch.Tensor, unstable_v: torch.Tensor) -> torch.Tensor:
 		return torch.where(in_stable, stable_v, torch.where(in_unstable, unstable_v, neutral_v))
 
-	sigma_uv = _select(uv_st, uv_nu, uv_un)
+	sigma_u = _select(u_st, u_nu, u_un)
+	sigma_v = _select(v_st, v_nu, v_un)
 	sigma_w = _select(w_st, w_nu, w_un)
-	T_Luv = _select(t_uv_st, t_uv_nu, t_uv_un)
-	T_Lw = _select(t_w_st, t_w_nu, t_w_un)
-	# Hanna takes σ_u = σ_v (Eq. 11–24); same for T_Lu = T_Lv.
-	return sigma_uv, sigma_uv, sigma_w, T_Luv, T_Luv, T_Lw
+	T_Lu = _select(tu_st, tu_nu, tu_un)
+	T_Lv = _select(tv_st, tv_nu, tv_un)
+	T_Lw = _select(tw_st, tw_nu, tw_un)
+	return sigma_u, sigma_v, sigma_w, T_Lu, T_Lv, T_Lw
 
 
 def potential_temperature(t_kelvin: torch.Tensor, pressure_pa: torch.Tensor) -> torch.Tensor:
@@ -324,10 +390,15 @@ def free_trop_sigma_TL(
 
 
 def surface_layer_sigma_w(z: torch.Tensor, ustar: torch.Tensor, L: torch.Tensor) -> torch.Tensor:
-	"""σ_w in the surface layer, regime-dependent (docs/turbulence.md §3.2.4).
+	"""σ_w in the surface layer, Monin-Obukhov scaling (docs/turbulence.md §3.2.4).
 
-	Stable:    `1.3 u* (1 + 5 z/L)`, capped at `1.3 u* · 6` in very-stable.
-	Unstable:  `1.3 u* (1 - 2 z/L)^(1/3)`.
+	Stable:    `1.3 u*` (constant). σ_w/u* ≈ 1.3 is roughly height-independent in
+	           the stable surface layer (Flesch, Wilson & Yee 1995 App. B). The
+	           previous `1.3 u*(1 + 5 z/L)` form GREW with stability (up to a 6×
+	           cap = 7.8 u*, larger than convective values) — that is the φ_m
+	           momentum-gradient function, NOT a σ_w scaling, and inflated
+	           nocturnal near-surface mixing (Finding 6 of the 2026-07-02 review).
+	Unstable:  `1.3 u* (1 - 3 z/L)^(1/3)`  (Flesch et al. 1995 App. B; z/L < 0).
 	Neutral:   `1.3 u*` (z/L → 0).
 	"""
 
@@ -336,16 +407,10 @@ def surface_layer_sigma_w(z: torch.Tensor, ustar: torch.Tensor, L: torch.Tensor)
 	L_safe = torch.where(finite_L, L, torch.ones_like(L))
 	z_over_L = torch.where(finite_L, (z / L_safe).clamp(-50.0, 50.0), torch.zeros_like(L))
 
-	sigma_unstable = 1.3 * ustar * (1.0 - 2.0 * z_over_L).clamp(min=eps).pow(1.0 / 3.0)
-	cap = 1.3 * ustar * 6.0
-	sigma_stable = (1.3 * ustar * (1.0 + 5.0 * z_over_L)).clamp(max=cap)
-	sigma_neutral = 1.3 * ustar
+	sigma_unstable = 1.3 * ustar * (1.0 - 3.0 * z_over_L).clamp(min=eps).pow(1.0 / 3.0)
+	sigma_stable_or_neutral = 1.3 * ustar
 
-	return torch.where(
-		z_over_L < 0.0,
-		sigma_unstable,
-		torch.where(z_over_L > 0.0, sigma_stable, sigma_neutral),
-	)
+	return torch.where(z_over_L < 0.0, sigma_unstable, sigma_stable_or_neutral)
 
 
 # ---------------------------------------------------------------------------
@@ -370,6 +435,8 @@ class HannaScheme(TurbulenceScheme):
 		max_substeps: int = MAX_SUBSTEPS_DEFAULT,
 		z_ubl_m: float = Z_UBL_DEFAULT_M,
 		static_substeps: bool | None = None,
+		flexpart_tl_floors: bool = True,
+		surface_layer_override: bool = False,
 	) -> None:
 		"""Construct the scheme.
 
@@ -382,6 +449,22 @@ class HannaScheme(TurbulenceScheme):
 		substepped so its effective sub-dt satisfies ``sub_dt < substep_c · T_Lw``,
 		capped at ``max_substeps`` per outer step to bound the cost for very-near-
 		surface particles. Meander has τ ≈ 1800 s so always runs at the outer dt.
+
+		``flexpart_tl_floors`` (default True) applies FLEXPART v11's Lagrangian-
+		timescale floors (T_Lu, T_Lv ≥ 10 s; T_Lw ≥ 30 s) after the profile
+		assembly. Without them the near-surface T_Lw → 0 with z, collapsing the
+		vertical diffusivity K = σ_w²·T_Lw in the lowest metres and inflating
+		near-field surface footprints (the GLIDE ≫ NAME/FLEXPART bias at polluted
+		low-inlet sites, 2026-07-02 v2 validation). Set False for the legacy 1 s
+		floor (A/B comparisons).
+
+		``surface_layer_override`` (default False) enables the GLIDE-only
+		Monin-Obukhov surface-layer treatment below 0.1 h (σ_w from MO scaling,
+		T_L = κz/σ). FLEXPART v11 has no such override — its regime formulas plus
+		the T_L floors run to the ground — and the override both undercuts the
+		floors (κz/σ → seconds near the surface) and introduces a K discontinuity
+		at the 0.1 h seam. Kept as an opt-in for A/B comparisons. Floors are
+		applied AFTER the override, so enabling both still bounds T_L.
 
 		``static_substeps`` selects the substep-loop implementation (docs/architecture.md
 		§5). ``None`` (default) auto-selects by device: the **static-shape** variant
@@ -414,6 +497,8 @@ class HannaScheme(TurbulenceScheme):
 		self.meander_timescale_seconds = float(meander_timescale_seconds)
 		self.substep_c = float(substep_c)
 		self.max_substeps = int(max_substeps)
+		self.flexpart_tl_floors = bool(flexpart_tl_floors)
+		self.surface_layer_override = bool(surface_layer_override)
 		self._static_substeps = static_substeps
 		# F4 Tier 1 (audit 2026-05-30): once-per-instance warning when dt is large
 		# vs the smallest active T_L. After F4 Tier 2 substepping, this warning
@@ -1163,30 +1248,46 @@ class HannaScheme(TurbulenceScheme):
 	) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
 		"""Per-particle (σ_u, σ_v, σ_w, T_Lu, T_Lv, T_Lw) at height ``z_query``.
 
-		Assembles the three regimes — in-BL (Hanna), surface-layer override
-		(z < 0.1 h), and free-troposphere override (z > h, Richardson closure
-		interpolated from ``ft_fields``) — selected per particle by where
-		``z_query`` falls. Floors applied. Callable at arbitrary z so the
-		well-mixed drift can finite-difference σ_w through the regime transitions.
+		Assembles the regimes — in-BL (Hanna, run to the ground by default per
+		FLEXPART v11), the optional Monin-Obukhov surface-layer override
+		(``surface_layer_override``, z < 0.1 h), and the free-troposphere override
+		(z > h, Richardson closure interpolated from ``ft_fields``) — selected per
+		particle by where ``z_query`` falls. T_L floors: FLEXPART's 10/10/30 s when
+		``flexpart_tl_floors`` (default), else the legacy 1 s. Callable at
+		arbitrary z so the well-mixed drift can finite-difference σ_w through the
+		regime transitions.
 		"""
 
 		sigma_u, sigma_v, sigma_w, T_Lu, T_Lv, T_Lw = in_bl_sigma_TL(
 			z_query, blh, ustar, w_star, h_over_L, lat,
 		)
 
-		# Surface-layer override for z < 0.1 h.
-		z_sl = SURFACE_LAYER_FRACTION * blh
-		in_sl = z_query < z_sl
-		sigma_w_sl = surface_layer_sigma_w(z_query, ustar, L)
-		z_clamped = torch.maximum(z_query, z_sl)
-		su_cl, sv_cl, _, _, _, _ = in_bl_sigma_TL(z_clamped, blh, ustar, w_star, h_over_L, lat)
-		sigma_u = torch.where(in_sl, su_cl, sigma_u)
-		sigma_v = torch.where(in_sl, sv_cl, sigma_v)
-		sigma_w = torch.where(in_sl, sigma_w_sl, sigma_w)
-		z_for_TL = z_query.clamp(min=T_L_MIN_S)
-		T_Lu = torch.where(in_sl, KARMAN * z_for_TL / sigma_u.clamp(min=SIGMA_MIN_M_S), T_Lu)
-		T_Lv = torch.where(in_sl, KARMAN * z_for_TL / sigma_v.clamp(min=SIGMA_MIN_M_S), T_Lv)
-		T_Lw = torch.where(in_sl, KARMAN * z_for_TL / sigma_w.clamp(min=SIGMA_MIN_M_S), T_Lw)
+		# OPTIONAL Monin-Obukhov surface-layer override for z < 0.1 h (GLIDE
+		# addition; off by default — FLEXPART v11 runs the regime formulas to the
+		# ground). The T_L = κz/σ scaling undercuts the FLEXPART floors near the
+		# surface and puts a K discontinuity at the 0.1 h seam; keep only for A/B.
+		if self.surface_layer_override:
+			z_sl = SURFACE_LAYER_FRACTION * blh
+			in_sl = z_query < z_sl
+			sigma_w_sl = surface_layer_sigma_w(z_query, ustar, L)
+			z_clamped = torch.maximum(z_query, z_sl)
+			su_cl, sv_cl, _, _, _, _ = in_bl_sigma_TL(z_clamped, blh, ustar, w_star, h_over_L, lat)
+			sigma_u = torch.where(in_sl, su_cl, sigma_u)
+			sigma_v = torch.where(in_sl, sv_cl, sigma_v)
+			sigma_w = torch.where(in_sl, sigma_w_sl, sigma_w)
+			z_for_TL = z_query.clamp(min=Z_MIN_M)
+			T_Lu = torch.where(in_sl, KARMAN * z_for_TL / sigma_u.clamp(min=SIGMA_MIN_M_S), T_Lu)
+			T_Lv = torch.where(in_sl, KARMAN * z_for_TL / sigma_v.clamp(min=SIGMA_MIN_M_S), T_Lv)
+			T_Lw = torch.where(in_sl, KARMAN * z_for_TL / sigma_w.clamp(min=SIGMA_MIN_M_S), T_Lw)
+
+		# FLEXPART v11 T_L floors (tlu/tlv >= 10 s, tlw >= 30 s) on the BL profile.
+		# Applied BEFORE the free-troposphere override: the FT closure derives
+		# (σ_w, T_Lw) as a pair satisfying K = σ_w²·T_Lw, so flooring its T_L after
+		# the fact would silently change K. FLEXPART likewise floors only in hanna.
+		if self.flexpart_tl_floors:
+			T_Lu = T_Lu.clamp(min=T_LU_FLOOR_FLEXPART_S)
+			T_Lv = T_Lv.clamp(min=T_LV_FLOOR_FLEXPART_S)
+			T_Lw = T_Lw.clamp(min=T_LW_FLOOR_FLEXPART_S)
 
 		# Free-troposphere override for z > h. Applied unconditionally (the
 		# `torch.where` is a no-op where `above_bl` is false) rather than guarded
@@ -1296,7 +1397,7 @@ class HannaScheme(TurbulenceScheme):
 			shear_mag = shear_sq.clamp(min=FT_SHEAR_SQ_FLOOR_S2).sqrt()
 
 			ri = gradient_richardson(n2, shear_sq)
-			k_z = free_trop_diffusivity(height.clamp(min=T_L_MIN_S), shear_mag, ri)
+			k_z = free_trop_diffusivity(height.clamp(min=Z_MIN_M), shear_mag, ri)
 			sigma_w_ft, t_lw_ft = free_trop_sigma_TL(k_z, n2)
 			# FT shear turbulence treated as isotropic (documented simplification);
 			# the unresolved-mesoscale "meander" horizontal term is separate.

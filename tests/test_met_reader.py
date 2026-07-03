@@ -300,7 +300,13 @@ def test_hourly_met_tensors_channel_accessors_match_positional() -> None:
 
 
 def test_fetch_hourly_window_includes_ustar_and_deaccumulates_shf() -> None:
-    """Extending channel_names should bring ustar/shf into the tensor; J/m^2 -> W/m^2."""
+    """Extending channel_names should bring ustar/shf into the tensor; J/m^2 -> W/m^2.
+
+    The mock stores +360_000 J/m^2 (ECMWF downward-positive), so after
+    de-accumulation (÷3600 -> +100 W/m^2 downward) and the sign flip to GLIDE's
+    upward-positive convention the tensor holds -100 W/m^2. See
+    `ArcoEra5ZarrReader._convert_shf_to_w_per_m2`.
+    """
 
     ds = _build_mock_era5_dataset()
 
@@ -328,13 +334,15 @@ def test_fetch_hourly_window_includes_ustar_and_deaccumulates_shf() -> None:
     ustar_start, _ = result.channel("ustar")
     assert torch.allclose(ustar_start, torch.full_like(ustar_start, 0.4))
 
-    # Mock SHF is 360_000 J/m^2 accumulated over 3600 s; expect 100 W/m^2.
+    # Mock SHF is +360_000 J/m^2 accumulated over 3600 s = +100 W/m^2 downward;
+    # flipped to GLIDE's upward-positive convention -> -100 W/m^2.
     shf_start, _ = result.channel("shf")
-    assert torch.allclose(shf_start, torch.full_like(shf_start, 100.0))
+    assert torch.allclose(shf_start, torch.full_like(shf_start, -100.0))
 
 
 def test_fetch_hourly_window_passes_through_instantaneous_shf() -> None:
-    """If SHF is supplied as W/m^2 the de-accumulation step should be a no-op."""
+    """If SHF is supplied as W/m^2 the de-accumulation step is a no-op, but the
+    ECMWF->GLIDE sign flip still applies (+100 W/m^2 downward -> -100 upward)."""
 
     ds = _build_mock_era5_dataset()
     ds["surface_sensible_heat_flux"] = ds["surface_sensible_heat_flux"] / 3600.0
@@ -359,7 +367,36 @@ def test_fetch_hourly_window_passes_through_instantaneous_shf() -> None:
     result = reader.fetch_hourly_window(request)
 
     shf_start, _ = result.channel("shf")
-    assert torch.allclose(shf_start, torch.full_like(shf_start, 100.0))
+    assert torch.allclose(shf_start, torch.full_like(shf_start, -100.0))
+
+
+def test_shf_sign_flip_maps_ecmwf_downward_to_upward_positive() -> None:
+    """Regression for Finding 1 (2026-07-02 physics review): ERA5/ECMWF stores
+    surface sensible heat flux positive-DOWNWARD; GLIDE's stability physics wants
+    positive-UPWARD. The reader must negate on read, for BOTH unit conventions.
+
+    A daytime upward heat flux (ECMWF stores it negative) must come out POSITIVE
+    so `obukhov_length` classifies the column as unstable/convective. Getting this
+    wrong flips the stability regime on every real-met run.
+    """
+
+    reader = ArcoEra5ZarrReader.__new__(ArcoEra5ZarrReader)
+    reader.accumulation_seconds = 3600
+
+    # Accumulated J/m^2: ECMWF-negative (upward flux) -> GLIDE-positive.
+    acc = np.array([[-360_000.0]], dtype=np.float64)  # -100 W/m^2 downward
+    out_acc = reader._convert_shf_to_w_per_m2(acc, "J m**-2")
+    assert np.allclose(out_acc, 100.0), "upward flux must be positive after conversion"
+
+    # Instantaneous W/m^2: same sign flip, no de-accumulation.
+    inst = np.array([[-100.0]], dtype=np.float64)
+    out_inst = reader._convert_shf_to_w_per_m2(inst, "W m**-2")
+    assert np.allclose(out_inst, 100.0)
+
+    # A stably-stratified night (ECMWF-positive, downward) -> GLIDE-negative.
+    night = np.array([[43_200.0]], dtype=np.float64)  # +12 W/m^2 downward
+    out_night = reader._convert_shf_to_w_per_m2(night, "J m**-2")
+    assert np.allclose(out_night, -12.0)
 
 
 def test_reader_rejects_channel_names_with_no_variable_map_entry() -> None:

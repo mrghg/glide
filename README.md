@@ -325,6 +325,16 @@ Bug reports, questions, physics feedback, and pull requests are welcome — see
 [CONTRIBUTING.md](CONTRIBUTING.md). For larger changes, please open an issue to
 discuss the approach first.
 
+## Acknowledgements
+
+Parts of GLIDE's turbulence and convection parameterisations follow those used in
+[FLEXPART](https://www.flexpart.eu/) (GPL-3.0) as a reference implementation, so
+that GLIDE's dispersion is directly comparable to FLEXPART's. The underlying
+equations were reimplemented independently from the primary literature (Hanna
+1982; Caughey 1982; Ryall & Maryon 1998; Thomson 1987; Stohl & Thomson 1999;
+Emanuel & Živković-Rothman 1999; Forster et al. 2007); no FLEXPART source code is
+included in this repository. See [NOTICE](NOTICE).
+
 ## License
 
 Apache License 2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE).

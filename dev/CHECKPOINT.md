@@ -1078,3 +1078,54 @@ artifacts, no personal absolute paths in `src/`). Outstanding items, by priority
 
 Lowest-risk first pass (no judgment calls needed): README accuracy fixes + de-personalizing
 (#2–3). License (#1) and data rights (blockers) need Matt's decision before touching.
+
+**Status 2026-06-30/07-02:** steps 1–5 all executed (Apache-2.0 + NOTICE; data
+untracked with data/README.md; README rewritten, Docker removed; docs consolidated
+under docs/ + CLAUDE.md at root + this journal moved to dev/; configs trimmed to a
+5-example ladder; CONTRIBUTING.md added).
+
+## Physics review (2026-07-02) — findings handed off
+
+Full physics audit (docs vs code vs literature) completed 2026-07-02. Six numbered
+findings + minor items, with evidence, locations, fix guidance, commit order, and a
+"verified correct — do not touch" list, all in
+**`dev/PHYSICS_REVIEW_2026-07-02.md`** (the work order for the fixes).
+
+Headlines: (1) ERA5 SHF sign convention inverted → stability classification flips
+on real met (CONFIRMED against the local EUROPE store — fix first, one line);
+(2) convection backward kernel not time-reversed + no compensating subsidence, no
+convection well-mixed test; (3) sub-LCL mass-flux rows each carry full M_b
+(BL venting ~n_BL× overcounted); (4) neutral-regime signed Coriolis breaks SH;
+(5) Hanna coefficients diverge from FLEXPART reference (cross-check never done);
+(6) stable surface-layer σ_w grows with height (φ_m misapplied). The core
+Langevin/WMC machinery (drift + density term + backward signs, reflection,
+implicit position update, ω→w) audited CORRECT.
+
+**All findings implemented on branch `physics-fixes-jul02` (2026-07-02), full
+suite 224 passed.** Four commits: (a) SHF sign flip + regression; (b) convection
+non-divergent mass-flux matrix (updraft + compensating subsidence) with the
+FLEXPART backward-transpose sampling and mass-weighted BL entrainment, gated by
+deterministic well-mixed (mᵀP=mᵀ) tests; (c) Hanna σ/T_L overhaul to FLEXPART
+v11 coefficients + |f| Coriolis + constant stable-SL σ_w + the t_idx/Z_MIN_M
+minor items. DEFERRED (documented in docs/turbulence.md §3.2.2/§3.2.4): FLEXPART's
+10/10/30 s T_L floors and removing the MO surface-layer override — both interact
+with the adaptive-substep machinery and need their own validation. Convection's
+hardcoded 3600 s interval also left as a documented follow-up. **Next: the GH200
+validation re-run (Finding 1 acceptance) — re-run the 56-site config and compare
+against the 2026-06-30 baseline (FLEXPART 0.67, NAME-UMG 0.74, NAME-UKV 0.85;
+GLIDE means 13–19% high).**
+
+**v2 validation (2026-07-02, `outputs/icos-validation-v2`, 48 h):** GLIDE now
+over-estimates mean enhancements, worst at polluted low-inlet sites (up to
+~120 ppb vs <60 for NAME/FLEXPART) — the SHF fix restored correct nocturnal
+stability and unmasked weak near-surface vertical mixing: with the 1 s T_L floor
+and the MO surface-layer override, K = σ_w²·T_Lw is 3–8× below FLEXPART's in the
+lowest ~15 m on stable nights, inflating near-field surface residence exactly at
+near-source sites. In response, the two deferred items are now IMPLEMENTED and
+DEFAULT: `turbulence.flexpart_tl_floors: true` (10/10/30 s) and
+`surface_layer_override: false` (regime formulas to the ground, per FLEXPART
+v11). Legacy behaviour kept behind the flags for A/B. Side-effect: with
+T_Lw ≥ 30 s the substep cap rarely binds (max_substeps pressure eases). **Next:
+v3 GH200 run with the new defaults; expect polluted-site means to drop toward
+the reference range. Also check the v2 log for any "Emanuel convection: fires"
+lines (bbox-mean January column should not trigger).**

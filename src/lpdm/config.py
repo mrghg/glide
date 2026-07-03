@@ -300,6 +300,17 @@ class TurbulenceConfig(_Frozen):
         50, ge=1,
         description="Cap on per-particle substeps per step. Lower → fewer GPU kernels but coarser near-surface integration.",
     )
+    # Near-surface mixing controls (2026-07-02 physics-review follow-up). Defaults
+    # are the FLEXPART-v11-matching "improved" behaviour; the legacy combination
+    # (floors off + override on) is retained for A/B comparisons. Hanna-only.
+    flexpart_tl_floors: bool = Field(
+        True,
+        description="Apply FLEXPART v11 Lagrangian-timescale floors (T_Lu,T_Lv ≥ 10 s; T_Lw ≥ 30 s) to the BL profile — prevents near-surface K collapse.",
+    )
+    surface_layer_override: bool = Field(
+        False,
+        description="Enable the legacy GLIDE-only Monin-Obukhov surface-layer override below 0.1·BLH (FLEXPART has no such override).",
+    )
 
 
 class EmanuelConvectionConfig(_Frozen):

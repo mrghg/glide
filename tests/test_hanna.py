@@ -103,7 +103,9 @@ def test_convective_velocity_zero_when_stable_or_neutral() -> None:
 
 
 def test_in_bl_sigma_at_z_zero_matches_ustar_scaling() -> None:
-    """Both stable and neutral regimes give sigma_w = 1.3 u*, sigma_uv = 2.0 u* at z=0."""
+    """At z=0, FLEXPART v11 hanna gives σ_u = 2.0 u* and σ_v = σ_w = 1.3 u* in
+    the stable and neutral regimes (Hanna 1982 Eqs 7.19-7.20, 7.25-7.26). σ_v
+    tracks σ_w (1.3), NOT σ_u — a change from the old σ_u = σ_v assumption."""
 
     z = torch.tensor([0.0, 0.0, 0.0], dtype=torch.float64)
     blh = torch.tensor([1000.0, 1000.0, 1000.0], dtype=torch.float64)
@@ -115,21 +117,23 @@ def test_in_bl_sigma_at_z_zero_matches_ustar_scaling() -> None:
 
     sigma_u, sigma_v, sigma_w, T_Lu, T_Lv, T_Lw = in_bl_sigma_TL(z, blh, ustar, w_star, h_over_L, lat)
 
-    # Stable z=0: sigma_w = 1.3 u*
-    assert abs(sigma_w[0].item() - 1.3 * 0.5) < 1e-9
+    # Stable z=0: σ_u = 2.0 u*, σ_v = σ_w = 1.3 u*.
     assert abs(sigma_u[0].item() - 2.0 * 0.5) < 1e-9
-    # Neutral z=0: sigma_w = 1.3 u* (exp factor = 1)
+    assert abs(sigma_w[0].item() - 1.3 * 0.5) < 1e-9
+    assert abs(sigma_v[0].item() - 1.3 * 0.5) < 1e-9
+    # Neutral z=0: exp factor = 1 → σ_u = 2.0 u*, σ_v = σ_w = 1.3 u*.
+    assert abs(sigma_u[1].item() - 2.0 * 0.5) < 1e-9
     assert abs(sigma_w[1].item() - 1.3 * 0.5) < 1e-9
-    # Unstable z=0: sigma_w^2 has only the u* term (z/h=0 kills the w* term)
-    expected_sigma_w_unstable = math.sqrt(1.5 * 0.5 ** 2)
+    assert abs(sigma_v[1].item() - 1.3 * 0.5) < 1e-9
+    # Unstable z=0: σ_w² = (1.8 − 1.4·0)·u*² (ζ=0 kills the w* term).
+    expected_sigma_w_unstable = math.sqrt(1.8 * 0.5 ** 2)
     assert abs(sigma_w[2].item() - expected_sigma_w_unstable) < 1e-6
-    # σ_u = σ_v in Hanna
-    assert torch.allclose(sigma_u, sigma_v)
-    assert torch.allclose(T_Lu, T_Lv)
+    # σ_v tracks σ_w, so it must differ from σ_u wherever u* > 0.
+    assert not torch.allclose(sigma_u, sigma_v)
 
 
 def test_in_bl_stable_sigma_vanishes_at_top_of_bl() -> None:
-    """Stable: sigma_w = 1.3 u* (1 - z/h)^(3/4) -> 0 at z=h."""
+    """Stable: sigma_w = 1.3 u* (1 - z/h) -> 0 at z=h (FLEXPART v11, linear)."""
 
     z = torch.tensor([1000.0], dtype=torch.float64)
     blh = torch.tensor([1000.0], dtype=torch.float64)
@@ -160,14 +164,16 @@ def test_in_bl_regime_selection_at_boundaries() -> None:
     sigma_u_unst, _, _, _, _, _ = in_bl_sigma_TL(z[2:3], blh[2:3], ustar[2:3], w_star[2:3], h_over_L[2:3], lat[2:3])
     sigma_u_deep, _, _, _, _, _ = in_bl_sigma_TL(z[3:], blh[3:], ustar[3:], w_star[3:], h_over_L[3:], lat[3:])
 
-    # sigma_u in unstable regime grows with |h/L|: (12 - 0.5*h/L)^(2/3) * u*^2
+    # sigma_u in unstable regime grows with |h/L|: u* (12 - 0.5*h/L)^(1/3)
     assert sigma_u_deep.item() > sigma_u_unst.item() > 0
     # Neutral and stable should give different values (different formula structure)
     assert sigma_u_neu.item() != sigma_u_stab.item()
 
 
 def test_surface_layer_sigma_w_regimes() -> None:
-    """SL formulae: 1.3u* in neutral, 1.3u*(1-2z/L)^(1/3) unstable, 1.3u*(1+5z/L) stable."""
+    """SL formulae (Flesch et al. 1995 App. B): 1.3u* neutral, 1.3u*(1-3z/L)^(1/3)
+    unstable, and 1.3u* CONSTANT in stable (σ_w/u* is height-independent in the
+    stable surface layer — Finding 6, the old 1+5z/L growth was wrong)."""
 
     z = torch.tensor([10.0, 10.0, 10.0], dtype=torch.float64)
     ustar = torch.tensor([0.5, 0.5, 0.5], dtype=torch.float64)
@@ -176,24 +182,25 @@ def test_surface_layer_sigma_w_regimes() -> None:
     sigma_w = surface_layer_sigma_w(z, ustar, L)
     # Neutral: 1.3 * 0.5 = 0.65
     assert abs(sigma_w[0].item() - 0.65) < 1e-6
-    # Unstable: 1.3 * 0.5 * (1 - 2*10/-100)^(1/3) = 0.65 * (1.2)^(1/3)
-    expected_unstable = 0.65 * (1.2 ** (1.0 / 3.0))
+    # Unstable: 1.3 * 0.5 * (1 - 3*10/-100)^(1/3) = 0.65 * (1.3)^(1/3)
+    expected_unstable = 0.65 * (1.3 ** (1.0 / 3.0))
     assert abs(sigma_w[1].item() - expected_unstable) < 1e-6
-    # Stable: 1.3 * 0.5 * (1 + 5*10/200) = 0.65 * 1.25
-    expected_stable = 0.65 * 1.25
-    assert abs(sigma_w[2].item() - expected_stable) < 1e-6
+    # Stable: constant 1.3 * 0.5 = 0.65 (no z/L dependence).
+    assert abs(sigma_w[2].item() - 0.65) < 1e-6
 
 
-def test_surface_layer_sigma_w_caps_in_very_stable() -> None:
-    """Stable SL is capped at 1.3 u* * 6 to avoid runaway in very-stable regimes."""
+def test_surface_layer_sigma_w_stable_is_constant_in_height() -> None:
+    """Stable SL σ_w stays at 1.3 u* regardless of stability / height — it must NOT
+    grow with z/L (Finding 6: the previous 1+5z/L form inflated nocturnal mixing)."""
 
-    z = torch.tensor([100.0], dtype=torch.float64)
-    ustar = torch.tensor([0.5], dtype=torch.float64)
-    L = torch.tensor([5.0], dtype=torch.float64)  # very stable -> z/L = 20 -> uncapped = 1.3*0.5*101
+    ustar = torch.tensor([0.5, 0.5], dtype=torch.float64)
+    # Weakly and very stable, at different heights: σ_w must be identical.
+    z = torch.tensor([10.0, 100.0], dtype=torch.float64)
+    L = torch.tensor([200.0, 5.0], dtype=torch.float64)
 
     sigma_w = surface_layer_sigma_w(z, ustar, L)
-    cap = 1.3 * 0.5 * 6.0
-    assert abs(sigma_w[0].item() - cap) < 1e-9
+    assert abs(sigma_w[0].item() - 0.65) < 1e-9
+    assert abs(sigma_w[1].item() - 0.65) < 1e-9
 
 
 def test_hanna_above_bl_constants_used() -> None:
@@ -355,7 +362,12 @@ def test_substep_cap_warning_fires_once(caplog) -> None:
     )
 
     engine = GPUEngine(device="cpu")
-    scheme = HannaScheme()
+    # Legacy near-surface configuration (1 s T_L floor + MO surface-layer
+    # override): that is the combination whose κz/σ_w timescale collapses to
+    # ~1 s at z=1 m and trips the substep cap. With the default FLEXPART floors
+    # (T_Lw ≥ 30 s) the cap never binds at dt=300 — covered by
+    # test_flexpart_tl_floors_prevent_substep_cap below.
+    scheme = HannaScheme(flexpart_tl_floors=False, surface_layer_override=True)
     n = 8
     particles = torch.zeros(n, 4, dtype=torch.float32)
     particles[:, 2] = 1.0  # release at z=1 m → T_Lw ~ κ·z/σ_w ~ 1 s, far below 5·dt
@@ -374,6 +386,66 @@ def test_substep_cap_warning_fires_once(caplog) -> None:
     assert len(warnings) == 1, f"expected exactly one substep-cap warning, got {len(warnings)}"
     assert "Hanna turbulence" in warnings[0].getMessage()
     assert scheme._warned_substep_cap is True
+
+
+def test_flexpart_tl_floors_prevent_substep_cap(caplog) -> None:
+    """With the DEFAULT near-surface treatment (FLEXPART T_L floors on, legacy
+    surface-layer override off), a z=1 m release at dt=300 s must NOT trip the
+    substep cap: T_Lw is floored at 30 s, so k = ceil(300/(0.5·30)) = 20 ≤ 50.
+    This pins the floors actually reaching the substep schedule — the same
+    scenario trips the cap under the legacy combination
+    (test_substep_cap_warning_fires_once)."""
+
+    import logging
+    from datetime import datetime, timedelta, timezone
+
+    from lpdm.gpu_engine import GPUEngine
+    from lpdm.met_reader import HourlyMetTensors, MetFieldMetadata
+
+    n_lev, n_lat, n_lon = 4, 4, 4
+    shape = (n_lev, n_lat, n_lon)
+    chans = {
+        "u": torch.zeros(shape), "v": torch.zeros(shape), "w": torch.zeros(shape),
+        "blh": torch.full(shape, 1500.0), "sp": torch.full(shape, 101325.0),
+        "t": torch.full(shape, 280.0), "ustar": torch.full(shape, 0.4),
+        "shf": torch.zeros(shape),
+    }
+    names = ("u", "v", "w", "blh", "sp", "t", "ustar", "shf")
+    fields = torch.stack([chans[n] for n in names], dim=0)
+    level = np.linspace(0.0, 4000.0, n_lev)
+    t0 = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    metadata = MetFieldMetadata(
+        lon=np.linspace(-2.0, 2.0, n_lon), lat=np.linspace(-2.0, 2.0, n_lat),
+        level=level, pressure_level_hpa=np.linspace(1000.0, 600.0, n_lev),
+        time_start=t0, time_end=t0 + timedelta(hours=1),
+        variable_units={n: "m/s" for n in names},
+    )
+    height = torch.as_tensor(level, dtype=torch.float32).view(n_lev, 1, 1).expand(shape).contiguous()
+    met = HourlyMetTensors(
+        hour_start=fields, hour_end=fields, metadata=metadata,
+        channel_names=names, height_agl_m=height,
+    )
+
+    engine = GPUEngine(device="cpu")
+    scheme = HannaScheme()  # defaults: flexpart_tl_floors=True, surface_layer_override=False
+    assert scheme.flexpart_tl_floors is True
+    assert scheme.surface_layer_override is False
+    n = 8
+    particles = torch.zeros(n, 4, dtype=torch.float32)
+    particles[:, 2] = 1.0
+    particles[:, 3] = 1.0
+    state = scheme.initialize_state(n, device=torch.device("cpu"), dtype=torch.float32)
+    active = torch.ones(n, dtype=torch.bool)
+
+    with caplog.at_level(logging.WARNING, logger="lpdm.turbulence.hanna"):
+        for _ in range(3):
+            particles, state = scheme.step(
+                particles, state, met, t_alpha=0.5, dt_seconds=300.0,
+                active_mask=active, engine=engine,
+            )
+
+    warnings = [r for r in caplog.records if "max_substeps" in r.getMessage()]
+    assert len(warnings) == 0, "FLEXPART T_L floors should keep the substep cap from binding"
 
 
 def test_substep_cap_warning_silent_when_dt_is_small(caplog) -> None:
