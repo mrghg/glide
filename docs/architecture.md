@@ -136,6 +136,35 @@ device→host sync that stalls the pipeline. The Hanna substep loop was firing
   bubbles, not insufficient parallelism. `dynamic=True` compile fuses *within* each
   method call but cannot fuse *across* the Python substep loop — hence §5.
 
+### 4.7 Batch sizing & footprint memory (multi-site runs)
+A batch holds **all** its releases' particles in one buffer (`torch.cat`, generated
+up front) and one dense footprint tensor `(n_releases, T, Z, Y, X)`; both live on
+the device for the whole batch sweep, and the static per-step path (§4.5/§5)
+processes the **entire** buffer every step (inactive particles are `sub_dt=0`
+no-ops). So the batch is the unit of both memory and wasted-work control.
+
+- **Peak device memory** ≈ `n_releases_in_batch × (n_particles × ~112 B + footprint
+  bytes/release)`. The footprint store on disk is created once (sized for all
+  releases) and written region-by-region as each batch finishes (`create_footprint_store`
+  + `write_footprint_region`, then `del gridder`) — so only one batch's tensor is ever
+  resident. A single batch of *all* releases defeats this (e.g. 40320 releases ×
+  1 z-integrated store = 51.6 GiB footprint + ~29 GiB particles).
+- **Compute-optimal batch = the "active window"** = releases whose backward windows
+  overlap the cursor at peak = `ceil(length/period) × n_sites`. Bigger batches step
+  ever-more inactive particles; smaller batches trade device memory for a larger
+  (host) met cache, since consecutive batches re-read the overlapping backward met
+  (cache ≳ `span + advance`). `scripts/make_multisite_config.py` auto-sizes to the
+  active window, capped by `--gpu-memory-gib`, and sets the met cache from the
+  geometry.
+- **Rejected — single-sweep footprint streaming.** Keeping one sweep over all
+  releases and flushing each release's footprint as its window closes would bound
+  *footprint* memory but not *particle* memory (all particles stay resident) and,
+  on the static GPU path, would step ~6× the particles (only ~1/6 active at once).
+  Bounding particle memory too would need a **dynamic, shrinking particle buffer**,
+  which breaks the static-shape CUDA-graph capture (§5) the GPU throughput depends
+  on. Batching is the memory lever precisely because the graph strategy fixes the
+  shape. Revisit only if abandoning graph capture ever becomes acceptable.
+
 ---
 
 ## 5. Planned: CUDA-graph capture of the per-step body (Milestone 3, in progress)
