@@ -35,7 +35,13 @@
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:1                        # one GH200 (a node has 4; we use 1)
 #SBATCH --cpus-per-task=16                  # CPU-side work (met I/O, numpy) + dataloader threads
-#SBATCH --mem=64G                           # >>> EDIT: Grace has unified memory; headroom for met cache
+# HOST RAM. The met cache lives in host memory (memory.met_cache_on_host), so this
+# must exceed the cache footprint that make_multisite_config.py prints (~0.27 GiB per
+# met-cache hour on EUROPE) PLUS ~20 GiB run overhead. 64 GiB is fine for a single-batch
+# run (tiny 8 h cache) but far too small for multi-batch runs (tens of GiB of cache) —
+# a multi-batch 720-release run needs ~90 GiB. Grace has ~480 GB; raise this to match
+# your config (or use --mem=0 to request all node memory).
+#SBATCH --mem=256G                          # >>> EDIT to your node + the printed met-cache size
 # #SBATCH --account=CHEM007981                # >>> EDIT: set to your Isambard AI project code
 # #SBATCH --partition=workq                   # >>> EDIT: set to the Isambard AI GPU partition
 

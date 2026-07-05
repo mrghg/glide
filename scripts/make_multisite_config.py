@@ -52,6 +52,14 @@ _PERSISTENT_BYTES_PER_PARTICLE_BASE = 56.0     # meander on; subtract 8 if off
 _WORKING_SET_MULTIPLIER = 2.0
 _BYTES_PER_GIB = float(1024 ** 3)
 
+# Host met-cache footprint: the on-host met cache holds ~this many GiB per cached
+# hour on the EUROPE domain (empirical: 192 h ≈ 50 GiB). Multi-batch runs need a
+# cache spanning the overlapping backward windows, so this drives HOST RAM (SLURM
+# --mem), NOT device memory. ~20 GiB more is fixed run overhead (python/torch,
+# particle staging, prefetch buffers).
+_MET_GIB_PER_HOUR = 0.27
+_HOST_RESERVE_GIB = 20.0
+
 # EUROPE domain + output grid, identical to configs/example_mhd_january_periodic.yaml
 # (these come from the FLEXPART validation file; do not diverge or the comparison breaks).
 OUTPUT_GRID = {
@@ -202,6 +210,15 @@ def main() -> None:
         default=0,
         help="0 = auto (from batch geometry). Override to control host-RAM met-cache size.",
     )
+    ap.add_argument(
+        "--host-memory-gib",
+        type=float,
+        default=None,
+        help="Host RAM budget in GiB (your SLURM --mem). The on-host met cache must fit "
+        "it; if the geometry-ideal cache is larger it's CAPPED to fit (accepting some "
+        "cross-batch met re-fetch) and a warning is printed. Omit to size for the geometry "
+        "and just print the host RAM required.",
+    )
     ap.add_argument("--zarr-store", default="~/data/arco-era5/EUROPE_*.zarr")
     ap.add_argument("--output-uri", default="outputs/icos-validation")  # matches notebooks/multisite_validation.ipynb
     ap.add_argument("-o", "--output-config", default="configs/multisite_validation_48h.yaml")
@@ -234,12 +251,21 @@ def main() -> None:
     # the reuse threshold (span + advance) to avoid cross-batch re-fetch thrash.
     span_hours = args.length_seconds / 3600.0
     advance_hours = (max_per_batch / n_sites) * (args.period_seconds / 3600.0)
+    cache_capped = False
     if args.met_cache_max_hours:
         met_cache_hours = args.met_cache_max_hours
     elif n_batches <= 1:
         met_cache_hours = 8
     else:
         met_cache_hours = int(math.ceil(span_hours + advance_hours)) + 6
+
+    # Cap the on-host cache to the declared host-RAM budget (SLURM --mem). A smaller
+    # cache is still CORRECT — it just re-fetches the cross-batch overlap from zarr.
+    if args.host_memory_gib is not None and not args.met_cache_max_hours:
+        affordable_hours = int(max(8.0, (args.host_memory_gib - _HOST_RESERVE_GIB) / _MET_GIB_PER_HOUR))
+        if met_cache_hours > affordable_hours:
+            met_cache_hours = affordable_hours
+            cache_capped = n_batches > 1
 
     cfg = {
         "io": {"zarr_store": args.zarr_store, "output_uri": args.output_uri},
@@ -306,8 +332,8 @@ def main() -> None:
     # Sizing report.
     per_release_mb = _device_bytes_per_release(args.n_particles, meander_enabled) / 1e6
     batch_device_gib = max_per_batch * per_release_mb / 1024.0
-    met_gib_per_hour = 0.27  # EUROPE domain, ~0.27 GiB/h of host met cache (empirical)
-    host_cache_gib = met_cache_hours * met_gib_per_hour
+    host_cache_gib = met_cache_hours * _MET_GIB_PER_HOUR
+    host_total_gib = host_cache_gib + _HOST_RESERVE_GIB  # cache + run overhead; drives SLURM --mem
 
     print(f"wrote {out_path}")
     print(
@@ -315,22 +341,29 @@ def main() -> None:
         f"in {len(batches)} batch(es) of <= {max_per_batch}  [{batch_why}]"
     )
     print(
-        f"  per batch: ~{max_per_batch * args.n_particles / 1e6:.0f}M particles, "
-        f"~{batch_device_gib:.1f} GiB DEVICE (particles + footprint {total}-release store "
-        f"{OUTPUT_GRID['n_time_bins']}x{len(OUTPUT_GRID['z_edges_m']) - 1}x"
+        f"  DEVICE (GPU): ~{batch_device_gib:.1f} GiB/batch "
+        f"(~{max_per_batch * args.n_particles / 1e6:.0f}M particles + footprint {total}-release "
+        f"store {OUTPUT_GRID['n_time_bins']}x{len(OUTPUT_GRID['z_edges_m']) - 1}x"
         f"{OUTPUT_GRID['n_y']}x{OUTPUT_GRID['n_x']})"
     )
     print(
-        f"  met cache: {met_cache_hours} h on HOST (~{host_cache_gib:.0f} GiB host RAM; "
-        f"span {span_hours:.0f}h + advance {advance_hours:.0f}h)"
-        + ("" if n_batches > 1 else "  [single monotonic sweep]")
+        f"  HOST (RAM / SLURM --mem): ~{host_total_gib:.0f} GiB "
+        f"(met cache {met_cache_hours} h ~{host_cache_gib:.0f} GiB + ~{_HOST_RESERVE_GIB:.0f} GiB overhead"
+        + ("" if n_batches > 1 else "; single monotonic sweep") + ")"
     )
+    if cache_capped:
+        print(
+            f"  WARNING: met cache capped to {met_cache_hours} h to fit --host-memory-gib="
+            f"{args.host_memory_gib:.0f}; ideal is {int(math.ceil(span_hours + advance_hours)) + 6} h. "
+            "The run is still correct but re-fetches the cross-batch met overlap (slower I/O). "
+            "Raise --mem / --host-memory-gib, or use smaller --max-releases-per-batch."
+        )
     if args.gpu_memory_gib is None:
         print(
-            f"  NOTE: sized for the active window assuming it fits in GPU memory "
-            f"(~{batch_device_gib:.1f} GiB needed). If your GPU is smaller, re-run with "
-            f"--gpu-memory-gib <your VRAM in GiB> to split into more batches."
+            f"  NOTE: batch sized for the active window assuming it fits GPU memory "
+            f"(~{batch_device_gib:.1f} GiB). Set --gpu-memory-gib if your GPU is smaller."
         )
+    print(f"  -> set SLURM --mem >= {math.ceil(host_total_gib / 16) * 16} GiB")
     print(f"  launch: sbatch scripts/run_periodic_cuda.slurm {args.output_config}")
 
 
