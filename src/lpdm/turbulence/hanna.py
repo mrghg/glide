@@ -521,6 +521,15 @@ class HannaScheme(TurbulenceScheme):
 		# `_cached_window_field`. One entry per field key (the current window).
 		self._window_field_cache: dict[str, tuple[datetime, torch.Tensor]] = {}
 
+		# Per-window cache of the RAW met already moved to the device: the surface
+		# hour-start/end slices, the 3D u/v/w wind, and the level array. These are
+		# constant within a met window, so caching them removes a redundant
+		# host->device copy (~100 MB of 3D wind + the surface slices) AND a device
+		# allocation EVERY step (~60/window) — the latter was a driver of the
+		# caching-allocator fragmentation (dev_reserved >> dev_alloc). `_gather_static_inputs`
+		# then only does the cheap per-step time interpolation of the surface fields.
+		self._raw_met_cache: tuple[datetime, dict] | None = None
+
 	def required_met_keys(self) -> tuple[str, ...]:
 		# Baseline (u, v, w, blh, sp) is added by the runtime; declare scheme-specific extras.
 		return ("t", "ustar", "shf")
@@ -676,52 +685,80 @@ class HannaScheme(TurbulenceScheme):
 			state["v_meander"][active_mask] = v_meander_active
 		return particles, state
 
-	def _gather_static_inputs(self, met_window, t_alpha, device, dtype):
-		"""Hoist the Python (met-window-accessing) field gathering out of `_step_core`
-		so the core is a pure-tensor torch.compile target. Returns the per-step met-field
-		tensors + the (run-constant) interpolation bounds. The 3D stacks are the per-window
-		cache; the surface fields are the cheap time-interpolated lowest-level slices."""
-		def _surf(name, lev):
+	def _cached_raw_device_met(self, met_window, device, dtype) -> dict:
+		"""Raw met moved to the device ONCE per window (keyed by window start time).
+
+		Returns the surface hour-start/end slices (as (start, end) pairs, for the
+		per-step time interpolation), the raw 3D u/v/w wind (hour-start/end), the
+		per-level AGL ``level_arr`` and the ``ascending`` flag. All constant within a
+		met window, so this replaces the per-step host->device copy + allocation that
+		``_gather_static_inputs`` used to do every step. See ``_raw_met_cache``.
+		"""
+
+		ts = met_window.metadata.time_start
+		entry = self._raw_met_cache
+		if entry is not None and entry[0] == ts:
+			return entry[1]
+
+		def _surf_pair(name, lev):
 			cs, ce = met_window.channel(name)
-			return cs[lev].to(device=device, dtype=dtype) * (1.0 - t_alpha) + ce[lev].to(device=device, dtype=dtype) * t_alpha
+			return (cs[lev].to(device=device, dtype=dtype), ce[lev].to(device=device, dtype=dtype))
+
 		lowest_t = int(np.argmin(met_window.metadata.level))
+		m_start_uvw, m_end_uvw = met_window.channels("u", "v", "w")
+		level = met_window.metadata.level
+		bundle = dict(
+			blh=_surf_pair("blh", 0),
+			sp=_surf_pair("sp", 0),
+			ustar=_surf_pair("ustar", 0),
+			shf=_surf_pair("shf", 0),
+			t=_surf_pair("t", lowest_t),
+			m_start_uvw=m_start_uvw.to(device=device, dtype=dtype),
+			m_end_uvw=m_end_uvw.to(device=device, dtype=dtype),
+			# per-level AGL heights (bbox-mean) — the F9 vertical-lookup axis; a dynamic
+			# TENSOR so dynamo doesn't specialise the graph on the per-window values.
+			level_arr=torch.as_tensor(np.asarray(level), device=device, dtype=dtype),
+			# pressure-level ORDER is genuinely constant, so it stays a plain bool.
+			ascending=bool(level[-1] > level[0]),
+		)
+		self._raw_met_cache = (ts, bundle)
+		return bundle
+
+	def _gather_static_inputs(self, met_window, t_alpha, device, dtype):
+		"""Assemble the per-step pure-tensor inputs for `_step_core` (the torch.compile
+		target). The raw met + derived stacks are cached per window; only the cheap
+		per-step time interpolation of the surface fields and the ``alpha`` scalar are
+		rebuilt each step. Behaviour-preserving vs the pre-cache path (identical math)."""
+		raw = self._cached_raw_device_met(met_window, device, dtype)
+
+		def _interp(pair):
+			s, e = pair
+			return s * (1.0 - t_alpha) + e * t_alpha
+
 		ft_fields, grid_bounds = self._free_trop_fields(met_window, device, dtype)
 		meander_fields = None
 		if self.meander_enabled:
 			meander_fields, _ = self._meander_sigma_fields(met_window, device, dtype)
-		# Raw u/v/w wind fields (hour-start/end, [3, Z, Y, X]) for the RK2 advection,
-		# which is now folded into `_step_core` so the whole step (advect + turbulence)
-		# captures as one graph. The time interpolation is done per-sample inside the
-		# core (matches the pre-fold advection), so these stay raw.
-		m_start_uvw, m_end_uvw = met_window.channels("u", "v", "w")
-		# The per-level AGL heights (bbox-mean) are the F9 vertical-lookup axis. Their
-		# VALUES change every met window (geopotential is weather-dependent), so pass them
-		# as a dynamic TENSOR — a tuple-of-floats would make dynamo specialise the graph
-		# per window and recompile every window (GH200 2026-06-26). `ascending` (the
-		# pressure-level ORDER) is genuinely constant, so it stays a plain bool.
-		level = met_window.metadata.level
-		level_arr = torch.as_tensor(np.asarray(level), device=device, dtype=dtype)
-		ascending = bool(level[-1] > level[0])
 		return dict(
-			blh_field=_surf("blh", 0),
-			sp_field=_surf("sp", 0),
-			ustar_field=_surf("ustar", 0),
-			shf_field=_surf("shf", 0),
-			t_field=_surf("t", lowest_t),
+			blh_field=_interp(raw["blh"]),
+			sp_field=_interp(raw["sp"]),
+			ustar_field=_interp(raw["ustar"]),
+			shf_field=_interp(raw["shf"]),
+			t_field=_interp(raw["t"]),
 			ft_fields=ft_fields,
 			density_fields=self._density_fields(met_window, device, dtype),
 			meander_fields=meander_fields,
 			grid_bounds=grid_bounds,
-			m_start_uvw=m_start_uvw.to(device=device, dtype=dtype),
-			m_end_uvw=m_end_uvw.to(device=device, dtype=dtype),
+			m_start_uvw=raw["m_start_uvw"],
+			m_end_uvw=raw["m_end_uvw"],
 			# alpha (the RK2-midpoint time-interp weight) changes EVERY step. Pass it as
 			# a 0-d TENSOR, not a Python float: dynamo specializes the compiled graph on
 			# float values, so a per-step float would recompile every step, blow the
 			# recompile limit, and fall back to eager (GH200 profile 2026-06-26 — the run
 			# went 4× slower than before, GPU-busy 0.7%). A tensor is a dynamic input.
 			alpha=torch.tensor(float(t_alpha), device=device, dtype=dtype),
-			level_arr=level_arr,
-			ascending=ascending,
+			level_arr=raw["level_arr"],
+			ascending=raw["ascending"],
 		)
 
 	def _advect_rk2(self, particles, m_start_uvw, m_end_uvw, alpha, grid_bounds, dt_seconds, engine, level_arr=None, ascending=None):

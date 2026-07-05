@@ -73,6 +73,12 @@ export OMP_NUM_THREADS="${GLIDE_NUM_THREADS}"
 export MKL_NUM_THREADS="${GLIDE_NUM_THREADS}"
 export OPENBLAS_NUM_THREADS="${GLIDE_NUM_THREADS}"
 
+# CUDA caching-allocator: expandable segments cut reserved-but-unused HBM from the
+# per-batch alloc/free churn of the big particle + footprint tensors (observed
+# dev_reserved ~83 GiB vs dev_alloc ~20 GiB). This lowers fragmentation and the risk
+# of a spurious CUDA OOM as batches recycle. Harmless on older drivers (ignored).
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+
 # torch.compile / CUDA-graph capture of the per-step physics. On CUDA the runtime
 # uses the static-shape per-step path (full particle buffer, mask-gated, no per-step
 # host sync — docs/architecture.md §5), and GLIDE_COMPILE wraps the whole fixed-count

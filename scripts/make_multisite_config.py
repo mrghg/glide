@@ -287,7 +287,7 @@ def main() -> None:
         },
         "turbulence": {
             "scheme": "hanna_1982",
-            "max_substeps": 20,
+            "max_substeps": 6,  # dt=60 & T_Lw>=30s floor -> k=4 needed; 6 = margin
             "meander": {"enabled": True, "coefficient": 0.16},
         },
         "convection": {"scheme": "emanuel_reduced", "emanuel": {"closure_c": 0.03}},
