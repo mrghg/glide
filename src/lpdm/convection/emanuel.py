@@ -231,9 +231,18 @@ def lift_parcel_moist_pseudo_adiabatic(
 	temperatures because dθ_e/dT amplifies rapidly with T).
 
 	The default bracket [180, 350] K covers everything from polar-tropopause
-	to tropical-surface; reaches 0.01 K tolerance in ~15 iterations.
+	to tropical-surface; 30 bisection halvings shrink it to 170/2^30 ≈ 1.6e-7 K,
+	far below `tol_k`. `theta_e_const` broadcasts against `p_target_pa`, so this
+	lifts a WHOLE column (or any batch) in one call.
+
+	The loop runs a FIXED `max_iter` iterations with NO per-iteration convergence
+	check: that check was a device->host sync every iteration, and called per level
+	inside `compute_lcl_lnb_cape` it dominated the convection cost on GPU (~n_lev x
+	max_iter syncs per call). A fixed count is sync-free and, at 30 halvings, more
+	than converged. `tol_k` is retained only for API compatibility.
 	"""
 
+	del tol_k  # no early-exit convergence check (it was a per-iteration host sync)
 	t_lo = torch.full_like(p_target_pa, t_min_k)
 	t_hi = torch.full_like(p_target_pa, t_max_k)
 	for _ in range(max_iter):
@@ -243,8 +252,6 @@ def lift_parcel_moist_pseudo_adiabatic(
 		too_high = theta_e_mid > theta_e_const
 		t_hi = torch.where(too_high, t_mid, t_hi)
 		t_lo = torch.where(too_high, t_lo, t_mid)
-		if bool((t_hi - t_lo).max() < tol_k):
-			break
 	return 0.5 * (t_lo + t_hi)
 
 
@@ -311,19 +318,16 @@ def compute_lcl_lnb_cape(
 		t_sfc.unsqueeze(0), q_sfc.unsqueeze(0), p_sfc.unsqueeze(0),
 	).squeeze(0)
 
-	# Lift the parcel through each level. Below LCL we use the dry adiabat
-	# (θ_parcel = θ_sfc); above LCL we use the moist adiabat (θ_e conserved).
+	# Lift the parcel through every level, VECTORISED (no per-level Python loop /
+	# per-iteration host sync — that was the dominant convection cost on GPU).
+	# Dry adiabat at/below LCL (θ_parcel = θ_sfc); moist adiabat above (θ_e
+	# conserved). The moist lift is evaluated for the whole column at once
+	# (`theta_e_parcel` broadcasts against `pressure_pa`) and discarded below the
+	# LCL by the mask — cheap vs the ~n_lev × bisection-iter syncs it replaces.
 	theta_sfc = potential_temperature(t_sfc.unsqueeze(0), p_sfc.unsqueeze(0)).squeeze(0)
-	t_parcel = torch.zeros(n_lev, device=device, dtype=dtype)
-	for k in range(n_lev):
-		p_k = pressure_pa[k]
-		if p_k >= p_lcl:
-			# Below or at LCL: dry-adiabatic. T = θ_sfc · (p/p0)^κ.
-			t_parcel[k] = theta_sfc * (p_k / P0_PA).pow(KAPPA_POISSON)
-		else:
-			t_parcel[k] = lift_parcel_moist_pseudo_adiabatic(
-				theta_e_parcel.unsqueeze(0), p_k.unsqueeze(0),
-			).squeeze(0)
+	dry_t = theta_sfc * (pressure_pa / P0_PA).pow(KAPPA_POISSON)
+	moist_t = lift_parcel_moist_pseudo_adiabatic(theta_e_parcel, pressure_pa)
+	t_parcel = torch.where(pressure_pa >= p_lcl, dry_t, moist_t)
 
 	# Virtual temperatures (parcel uses its own q_sat above LCL; environment
 	# uses its actual q).
