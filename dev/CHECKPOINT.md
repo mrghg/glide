@@ -59,6 +59,146 @@ Build a modern, highly optimized, backward-in-time LPDM for greenhouse-gas footp
 
 ## Milestone timeline
 
+### 2026-07-16 Finding 7: the vertical coordinate is terrain-blind (surface footprint is ZERO over high ground)
+
+**Symptom.** Spotted by eye in the January-2024 ICOS animation
+(`scripts/animate_footprints.py`): the surface (0–40 m) footprint is zero over
+elevated terrain. The hole mask traces orography exactly — Scandes, Scottish
+Highlands, Alps, Pyrenees, Iberian meseta, Apennines, Dinarides, Carpathians,
+Anatolia. Not physical: a month of releases cannot leave the whole Iberian meseta
+at exactly zero while the sea around it is strongly sensitive.
+
+**Confirmed against real met** (`data/glide_met_2024-01-15T12.zarr`, one ERA5 hour
+extracted from Isambard with the new `scripts/extract_met_window.py`):
+
+- *The vertical axis is not AGL — it is ~ASL.* `level_agl_m` (the bbox-mean of the
+  per-column AGL, which `normalize_particle_coordinates` maps particles through)
+  matches the true **mean height above sea level** to within 1–140 m, because the
+  mean surface elevation over this ocean-dominated domain is only 140 m. Averaging
+  AGL over the bbox erases terrain. A particle at "20 m AGL" is at 20 m ASL — over
+  the Atlantic and over a 2263 m Alpine summit alike.
+- *The clamp destroyed every sub-surface column.* Over the Alps 10/37 levels are
+  below ground; `np.maximum(agl_m, 0.0)` collapsed them all onto z=0, giving 9
+  zero-thickness layers. `_vertical_gradient` divides by those (guarded only by its
+  1e-6 floor): **17,324 cells with |dθ/dz| > 1 K/m, max 4.6e6 K/m**, vs **0 cells /
+  max 0.11 K/m** without the clamp. 45% of columns in the window have ≥1 clamped level.
+- *Measured consequence on the real footprint.* Cells **with** surface footprint have
+  median terrain **0.4 m**; cells with a **hole** have median terrain **669 m**. By
+  terrain band, fraction of cells with NO surface footprint: sea level **0.2%**,
+  >300 m **69.8%**, >600 m **86.6%**. Endpoint particles floor in proportion to
+  terrain (p1: Atlantic 42 m, Iberia 488 m, Norway 823 m, Alps 969 m).
+- *Releases are affected too, badly.* Releases are specified AGL but the axis is ASL,
+  so **22/55 sites sit above 200 m and 13 above 500 m** are initialised at the wrong
+  altitude by their full station elevation: PRS-10magl off by **2375 m**,
+  JFJ-1000magl by **2247 m**, ZSF/ZUG-600magl by 1157 m, CMN-500magl by 812 m. Those
+  sites are released ~2 km underground, inside the degenerate band. **Any validation
+  statistic involving the Alpine/Apennine sites is measuring this bug, not the
+  physics** — the v2/v3 comparisons need re-running (or those sites excluded) once fixed.
+
+`docs/LPDM_physics_spec.md` is silent on terrain, so this is a design gap, not a
+documented simplification.
+
+**Two separable defects:**
+
+- **A — the sub-surface clamp** (`met_reader._compute_level_agl_m`). **FIXED
+  2026-07-16**: the clamp is removed; sub-surface levels now carry their true
+  negative AGL, so layer thicknesses are real and the gradient blow-up is gone.
+  Consumers needing a positive height already clamp locally
+  (`free_trop_diffusivity(height.clamp(min=Z_MIN_M), ...)`). `tests/test_met_reader.py`
+  green.
+- **B — the bbox-mean profile used as the particle vertical mapping** (`main.py` /
+  `hanna._grid_bounds` → `GridInterpolationBounds.level_agl_m` →
+  `GPUEngine.normalize_particle_coordinates`). **FIXED 2026-07-16** via the
+  terrain-following resample below — the reader now ships fields on a fixed AGL grid,
+  so the single 1-D level array is *exact* per column, not a bbox approximation.
+
+**A alone is not enough.** It removes the absurd gradients but leaves the coordinate
+flat and ASL-like: particles would fly *through* mountains and Iberia's footprint
+would be sampled 700 m below the meseta. Wrong, just no longer zero. **Do not treat
+the terrain holes as fixed until B lands.**
+
+**Design for B — hybrid (terrain-following) vertical coordinate, FLEXPART-style.
+IMPLEMENTED 2026-07-16 (`src/lpdm/vertical_grid.py` + `met_reader` resample; 235
+tests green).** Chosen over the two per-particle alternatives after checking what FLEXPART/HYSPLIT/
+STILT actually do: they read *native* terrain-following model levels, so below-ground
+levels never exist. GLIDE streams ARCO ERA5 *pressure* levels (quasi-horizontal —
+they slice through mountains), which is the root of this. FLEXPART's `verttransform`
+resamples the met onto a fixed terrain-following height grid **once per window** and
+slope-corrects `w`. We mirror that. `particles[:, 2]` stays AGL throughout.
+
+*Why this beats the per-particle options.* An LPDM's physics is intrinsically in
+height-above-ground (`σ_w`, `T_L`, the whole BL scaling is in `z/h`) and the footprint
+is defined in AGL, so a terrain-following grid is the natural frame. Regridding in the
+reader (per window, ~60 steps amortised) means: the vertical level array becomes a
+**run constant** (permanently kills the `level_agl_m` per-window recompile class), the
+hot path gets *simpler* (no per-particle terrain lookup), and sub-surface pressure
+levels are excluded **once**, cleanly.
+
+Implementation (mostly `met_reader`-contained — the per-particle sampling already
+routes through one 1-D `level_arr` + `grid_sample`, so the schemes barely move):
+
+1. **`src/lpdm/vertical_grid.py`** (new, pure-numpy, CPU-tested): `default_agl_levels`
+   (fixed ascending AGL grid, fine near surface → geometric aloft, to `alt_max`);
+   `regrid_columns_to_agl` (per-column linear interp of pressure-level fields onto the
+   AGL grid, excluding sub-surface levels — bracket lower index clamped to each
+   column's first above-ground level, constant-extrapolate below it); `terrain_gradient`
+   / `slope_correct_w`.
+2. **`met_reader.fetch_hourly_window`**: after the existing pressure-level channel
+   build + omega→w (both on the pressure grid, unchanged), regrid `hour_start`/`hour_end`
+   onto the AGL grid using the (now un-clamped, Fix A) per-column heights; apply the
+   `w` slope correction `w_agl = w − taper(z)·(u·∂h/∂x + v·∂h/∂y)`,
+   `taper = clamp(1 − z/z_top, 0, 1)`; set `metadata.level = agl_levels`,
+   `height_agl_m = agl_levels` broadcast `[Z,Y,X]`, and
+   `metadata.pressure_level_hpa = bbox-mean pressure on the AGL grid` (length Z).
+3. **Schemes unchanged.** Hanna-FT and Emanuel already use `pressure_level_hpa` as a
+   per-level (horizontally-uniform) pressure and `height_agl_m` for gradients; feeding
+   them the AGL-grid mean pressure + uniform heights is the *same* class of
+   approximation they already make. Everything is stored ascending-z (surface at
+   index 0) so Emanuel's flip-to-ascending becomes a no-op.
+4. **Hot path:** `level_arr` is now the fixed AGL grid (a run constant); the
+   `normalize_particle_coordinates` fractional-level lookup is unchanged and now
+   *correct* per-column (the AGL grid is terrain-following, so one 1-D array is exact,
+   not a bbox approximation). The CPU guards
+   (`test_step_core_traces_as_one_graph_no_breaks/_does_not_recompile_per_step`) still
+   apply.
+5. Rejected alternatives, both per-particle: **(i) AGL + terrain-offset lookup + slope
+   term** — works but adds ~5 terrain lookups/step to the hot path and a non-orthogonal
+   Jacobian in the Langevin term; **(ii) track ASL internally** — exact advection but
+   changes the meaning of `particles[:, 2]` across the release generator, reflection,
+   the (deliberately met-agnostic) gridder, and the `endpoint_particles.parquet`
+   contract, while every physics term still needs AGL. The per-window regrid gets the
+   terrain-following benefit without either cost.
+
+**Follow-ups / caveats.** The AGL grid is a modelling choice (FLEXPART makes it
+configurable); starts as a `met_reader` default, promote to config later. Near-surface
+extrapolation below the lowest above-ground level is constant (a log-profile would be
+more faithful; defensible v1). The slope-correction taper shape follows FLEXPART in
+spirit — verify against the primary reference before treating it as final (no FLEXPART
+source in-repo). CANNOT be physics-validated on the CPU box: the numerical kernels are
+unit-tested against the real Alps column (`data/glide_met_2024-01-15T12.zarr`) and the
+existing well-mixed/conservation suite guards regression, but the footprint-over-terrain
+outcome needs a GH200 run + NAME/FLEXPART comparison.
+
+**Acceptance:** surface footprint non-zero over Iberia/Alps with the sea-level field
+unchanged; the hole-vs-terrain correlation above collapses (>600 m band 86.6% → ~0);
+elevated-site releases land at the right AGL; then re-run the 56-site validation and
+revisit the v2/v3 mountain-site comparisons.
+
+**Landed 2026-07-16.** `src/lpdm/vertical_grid.py` (`default_agl_levels`,
+`regrid_columns_to_agl` with sub-surface exclusion, `terrain_gradient`,
+`slope_correct_w`) + `ArcoEra5ZarrReader._resample_terrain_following` (on by default;
+`terrain_following=False` restores the legacy pressure-grid path for A/B and synthetic
+stores). Emanuel/Hanna-FT unchanged (they read the AGL-grid mean pressure). Tests:
+`tests/test_vertical_grid.py` (8, incl. linear-recovery, sub-surface exclusion,
+orientation invariance, slope taper) + two `test_met_reader` resample/slope tests; full
+suite 235 green. **End-to-end reader check on the real Alps hour:** regridded near-surface
+T @ 0 m AGL = **−7.2 °C** (the real 266 K lowest-above-ground level) vs the **+9 °C**
+(282 K) sub-surface fiction the old coordinate sampled — the defining symptom is gone in
+the fields. **STILL PENDING (needs GH200 + reference):** the footprint-over-terrain
+acceptance run and the v2/v3 mountain-site re-check; the taper-shape cross-check vs the
+primary FLEXPART reference; promoting the AGL grid to run config. **Fix A + B do not
+change results over the sea**, only over terrain — the animation's ocean footprints stand.
+
 ### 2026-06-18 Performance: CPU thread tuning, per-window field caching, GPU readiness
 
 Profiled the real engine (cProfile + thread sweeps on a 48-core node) to cut runtime for the longer FLEXPART-comparison runs. Combined CPU speedup ~1.4–1.5×, plus a 3×-jobs-per-node throughput win for sweeps; the engine is now positioned for GPU (Isambard AI GH200).

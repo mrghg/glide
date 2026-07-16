@@ -7,18 +7,25 @@ import torch
 import xarray as xr
 
 from lpdm.met_reader import ArcoEra5ZarrReader, BoundingBoxRequest, SpatialBounds, TimeBounds
+from lpdm.vertical_grid import default_agl_levels
 
 
 class _InMemoryArcoReader(ArcoEra5ZarrReader):
-    def __init__(self, dataset: xr.Dataset) -> None:
-        super().__init__(zarr_store="in-memory", device="cpu", dtype=torch.float64)
+    def __init__(self, dataset: xr.Dataset, *, terrain_following: bool = False, **kwargs) -> None:
+        # Default off so the low-level mechanic tests (omega->w, SHF de-accumulation,
+        # lon-wrap, multi-store) keep asserting pressure-grid shapes/values. The
+        # terrain-following resample has its own tests below.
+        super().__init__(
+            zarr_store="in-memory", device="cpu", dtype=torch.float64,
+            terrain_following=terrain_following, **kwargs,
+        )
         self._dataset = dataset
 
     def _open_dataset(self) -> xr.Dataset:
         return self._ensure_monotonic_longitude(self._dataset)
 
 
-def _build_mock_era5_dataset() -> xr.Dataset:
+def _build_mock_era5_dataset(terrain_slope_m_per_deg: float = 0.0) -> xr.Dataset:
     times = np.array([
         np.datetime64("2024-01-01T00:00:00"),
         np.datetime64("2024-01-01T01:00:00"),
@@ -41,7 +48,10 @@ def _build_mock_era5_dataset() -> xr.Dataset:
     shf_accumulated = np.full(shape_3d, 360_000.0, dtype=np.float64)
 
     # Build geopotential fields so the implied AGL is exactly [900, 1000] m.
-    z_sfc = np.full(shape_3d, 150.0 * 9.80665, dtype=np.float64)  # 150 m AMSL in m^2 s^-2
+    # Terrain elevation may slope in longitude (default flat); the level geopotential
+    # tracks it so AGL stays [900, 1000] m everywhere (isolates the w slope-correction).
+    terrain_m = 150.0 + terrain_slope_m_per_deg * (lon - lon[0])[None, :]  # [1, X] -> broadcast
+    z_sfc = np.broadcast_to(terrain_m, shape_3d).astype(np.float64) * 9.80665
     z = np.empty(shape_4d, dtype=np.float64)
     z[:, 0, :, :] = z_sfc + (900.0 * 9.80665)
     z[:, 1, :, :] = z_sfc + (1000.0 * 9.80665)
@@ -508,6 +518,7 @@ def test_multi_store_fetch_window_spans_both_stores(tmp_path) -> None:
         zarr_store=[str(path_a), str(path_b)],
         device="cpu",
         dtype=torch.float64,
+        terrain_following=False,  # this test asserts pressure-grid time-stitching
     )
 
     request = BoundingBoxRequest(
@@ -669,3 +680,62 @@ def test_hourly_met_tensors_channel_unknown_name_raises() -> None:
     except KeyError as exc:
         assert "'ustar'" in str(exc)
         assert "Available" in str(exc)
+
+
+def _tf_request(z_max: float = 1050.0) -> BoundingBoxRequest:
+    return BoundingBoxRequest(
+        spatial=SpatialBounds(
+            lon_min=19.5, lon_max=21.5, lat_min=9.5, lat_max=11.5, z_min=0.0, z_max=z_max,
+        ),
+        time=TimeBounds(
+            start=datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc),
+            end=datetime(2024, 1, 1, 1, 0, tzinfo=timezone.utc),
+        ),
+    )
+
+
+def test_terrain_following_resamples_to_agl_grid() -> None:
+    # Finding 7 fix: with terrain_following on, the window ships on a fixed
+    # ascending AGL grid, height is uniform per column, and surface fields survive.
+    reader = _InMemoryArcoReader(_build_mock_era5_dataset(), terrain_following=True)
+    result = reader.fetch_hourly_window(_tf_request(1050.0))
+
+    agl = default_agl_levels(1050.0)
+    assert np.allclose(result.metadata.level, agl)
+    assert result.hour_start.shape[1] == agl.size
+    assert result.metadata.level[0] == 0.0 and result.metadata.level[-1] >= 1050.0
+
+    # height_agl_m is now the AGL grid broadcast over columns.
+    h = result.height_agl_m.cpu().numpy()
+    assert h.shape[0] == agl.size
+    assert np.allclose(h[:, 0, 0], agl)
+
+    # Bbox-mean pressure per AGL level: one value per AGL level, in hPa.
+    # (The mock maps 900 hPa -> 900 m and 1000 hPa -> 1000 m, i.e. it is not
+    # physically monotonic, so we only check length + magnitude here.)
+    assert result.metadata.pressure_level_hpa.size == agl.size
+    assert np.all(result.metadata.pressure_level_hpa >= 800.0)
+    assert np.all(result.metadata.pressure_level_hpa <= 1100.0)
+
+    # A spatially-constant field is preserved exactly through the resample.
+    ui = reader.channel_names.index("u")
+    assert np.allclose(result.hour_start[ui].cpu().numpy(), 5.0)
+
+
+def test_terrain_following_slope_corrects_w() -> None:
+    # w is transformed into the AGL frame; u, v are not. Comparing flat vs
+    # east-sloping terrain (same AGL heights) isolates the slope correction.
+    flat = _InMemoryArcoReader(_build_mock_era5_dataset(0.0), terrain_following=True)
+    sloped = _InMemoryArcoReader(_build_mock_era5_dataset(500.0), terrain_following=True)
+    rf = flat.fetch_hourly_window(_tf_request())
+    rs = sloped.fetch_hourly_window(_tf_request())
+
+    ui, vi, wi = (flat.channel_names.index(k) for k in ("u", "v", "w"))
+    assert np.allclose(rf.hour_start[ui].cpu().numpy(), rs.hour_start[ui].cpu().numpy())
+    assert np.allclose(rf.hour_start[vi].cpu().numpy(), rs.hour_start[vi].cpu().numpy())
+
+    wf = rf.hour_start[wi].cpu().numpy()
+    ws = rs.hour_start[wi].cpu().numpy()
+    assert not np.allclose(wf, ws)
+    # u=5>0 over east-rising terrain -> AGL-frame w reduced near the surface.
+    assert np.all(ws[0] < wf[0] - 1e-9)
