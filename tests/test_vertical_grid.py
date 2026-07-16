@@ -114,3 +114,21 @@ def test_regrid_rejects_bad_shapes():
         regrid_columns_to_agl(np.zeros((2, 3)), np.zeros((3, 1, 1)), np.array([0.0, 1.0]))
     with pytest.raises(ValueError):
         regrid_columns_to_agl(np.zeros((1, 3, 2, 2)), np.zeros((3, 2, 2)), np.array([1.0, 0.0]))
+
+
+def test_weights_split_matches_wrapper_and_is_shareable():
+    # compute-once/apply-many must equal the one-shot wrapper, for multiple fields
+    # sharing the same level heights (the met-window usage pattern).
+    from lpdm.vertical_grid import apply_agl_regrid, compute_agl_regrid_weights
+
+    rng = np.random.default_rng(7)
+    h = _descending_pressure_column(300.0)[:, None, None] + rng.normal(
+        0.0, 5.0, size=(8, 3, 4)
+    )  # [Zp, Y, X], descending with jitter
+    targets = np.array([0.0, 40.0, 500.0, 2000.0, 8000.0])
+    w = compute_agl_regrid_weights(h, targets)
+    for seed in (0, 1):
+        f = np.random.default_rng(seed).normal(size=(3, 8, 3, 4))
+        assert np.allclose(
+            apply_agl_regrid(f, w), regrid_columns_to_agl(f, h, targets)
+        )

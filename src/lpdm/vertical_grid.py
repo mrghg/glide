@@ -9,13 +9,18 @@ because their levels already follow the terrain. Here we do what FLEXPART's
 `verttransform` does: regrid onto a fixed terrain-following AGL grid and
 slope-correct the vertical velocity, once per window (amortised over ~60 steps).
 
-Pure NumPy, no torch — the regrid runs in the met reader (CPU, per window), not in
-the per-step hot path. Fields are returned surface-first (ascending AGL).
+NumPy in / NumPy out; internals use torch (batched `searchsorted` + multithreaded
+`gather` — ~10x faster than the equivalent NumPy, measured on a real ERA5 hour).
+The regrid runs in the met reader (per window, on the prefetch thread), not in the
+per-step hot path. Fields are returned surface-first (ascending AGL).
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
+import torch
 
 # Default fixed AGL grid: fine near the surface (to resolve the 0-40 m and
 # 40-1000 m footprint bins), geometric aloft. A modelling choice — FLEXPART makes
@@ -41,22 +46,36 @@ def default_agl_levels(alt_max_m: float) -> np.ndarray:
     return levels
 
 
-def regrid_columns_to_agl(
-    field_p: np.ndarray,
+@dataclass(frozen=True)
+class AglRegridWeights:
+    """Precomputed per-column bracketing for a pressure->AGL regrid.
+
+    The bracketing depends only on the level heights and the target grid, not on
+    the field being regridded — so it is computed ONCE per met window and shared
+    by every tensor regridded onto the same AGL grid (hour_start, hour_end, the
+    pressure profile). Splitting this out cut the per-window regrid CPU cost ~
+    an order of magnitude vs recomputing per tensor per level (perf review
+    2026-07-16 #3): the regrid runs on the met prefetch thread, and at full-domain
+    scale the unsplit version could no longer be hidden behind GPU compute.
+    """
+
+    lower: np.ndarray  # [Za, Y, X] intp — bracket index into the ASCENDING level axis
+    frac: np.ndarray   # [Za, Y, X] float64 — interpolation fraction in [0, 1]
+    flipped: bool      # source arrived TOA-first and was flipped to ascending
+    n_source_levels: int
+
+
+def compute_agl_regrid_weights(
     height_agl_p: np.ndarray,
     agl_levels: np.ndarray,
-) -> np.ndarray:
-    """Per-column linear interpolation of pressure-level fields onto an AGL grid.
+) -> AglRegridWeights:
+    """Bracket indices + fractions for interpolating onto ``agl_levels``.
 
     Args:
-        field_p: ``[C, Zp, Y, X]`` fields on the pressure-level grid.
         height_agl_p: ``[Zp, Y, X]`` geometric height above ground of each pressure
             level, per column. NOT clamped at 0 — sub-surface levels legitimately
             carry negative AGL and are excluded here (see below).
         agl_levels: ``[Za]`` strictly-ascending target AGL heights (>= 0).
-
-    Returns:
-        ``[C, Za, Y, X]`` fields interpolated onto ``agl_levels`` (surface first).
 
     Sub-surface pressure levels (negative AGL, ERA5's fictitious below-ground
     extrapolation) are excluded: the lower bracket index is clamped to each
@@ -64,46 +83,102 @@ def regrid_columns_to_agl(
     extrapolates from that lowest real level rather than blending in below-ground
     values. Targets above the top level constant-extrapolate from the top.
     """
+    if height_agl_p.ndim != 3:
+        raise ValueError(f"height_agl_p must be [Zp, Y, X]; got {height_agl_p.shape}")
+    agl_levels = np.asarray(agl_levels, dtype="float64")
+    if agl_levels.ndim != 1 or not np.all(np.diff(agl_levels) > 0):
+        raise ValueError("agl_levels must be 1-D strictly ascending")
+
+    Zp, Y, X = height_agl_p.shape
+    Za = agl_levels.size
+
+    # Work surface-up. Pressure levels are stored top-of-atmosphere first (AGL
+    # descending); flip to ascending AGL so bracketing is monotonic.
+    mean_profile = np.nanmean(height_agl_p, axis=(1, 2))
+    flipped = bool(mean_profile[0] > mean_profile[-1])
+
+    h_t = torch.as_tensor(np.ascontiguousarray(height_agl_p), dtype=torch.float64)
+    if flipped:
+        h_t = h_t.flip(0)
+    # Rows of ascending column heights for ONE batched searchsorted over all columns
+    # (replaces a Python loop of Za full-grid passes).
+    h_rows = h_t.permute(1, 2, 0).reshape(-1, Zp).contiguous()  # [Y*X, Zp]
+    targets = torch.as_tensor(agl_levels, dtype=torch.float64)
+    target_rows = targets.unsqueeze(0).expand(h_rows.shape[0], -1).contiguous()
+
+    # Insertion index = count of levels strictly below each target (== the old
+    # per-level `np.sum(h < z_t, axis=0)`).
+    idx = torch.searchsorted(h_rows, target_rows)  # [Y*X, Za]
+    # First above-ground level per column: ascending order puts all sub-surface
+    # (negative-AGL) levels first, so their count is the first real index.
+    k0 = (h_rows < 0.0).sum(dim=1, keepdim=True)  # [Y*X, 1]
+    lower = (idx - 1).clamp(min=0).maximum(k0).clamp(max=Zp - 2)  # [Y*X, Za]
+
+    h_lo = torch.gather(h_rows, 1, lower)
+    h_hi = torch.gather(h_rows, 1, lower + 1)
+    frac = ((target_rows - h_lo) / (h_hi - h_lo).clamp(min=1e-6)).clamp(0.0, 1.0)
+
+    lower_zyx = lower.reshape(Y, X, Za).permute(2, 0, 1).contiguous().numpy().astype(np.intp)
+    frac_zyx = frac.reshape(Y, X, Za).permute(2, 0, 1).contiguous().numpy()
+    return AglRegridWeights(
+        lower=lower_zyx, frac=frac_zyx, flipped=flipped, n_source_levels=Zp
+    )
+
+
+def apply_agl_regrid(field_p: np.ndarray, weights: AglRegridWeights) -> np.ndarray:
+    """Regrid ``[C, Zp, Y, X]`` pressure-level fields onto the weights' AGL grid.
+
+    Returns ``[C, Za, Y, X]`` (surface first). One gather pair over all target
+    levels at once, sharing the precomputed bracketing across channels.
+    """
+    if field_p.ndim != 4:
+        raise ValueError(f"field_p must be [C, Zp, Y, X]; got {field_p.shape}")
+    if field_p.shape[1] != weights.n_source_levels or field_p.shape[2:] != weights.lower.shape[1:]:
+        raise ValueError(
+            f"field_p {field_p.shape} does not match weights "
+            f"(Zp={weights.n_source_levels}, YX={weights.lower.shape[1:]})"
+        )
+    C = field_p.shape[0]
+    Zp = weights.n_source_levels
+    # ascontiguousarray: torch cannot wrap negative-/zero-stride numpy views
+    # (copies only when the input actually is such a view).
+    f_t = torch.as_tensor(np.ascontiguousarray(field_p))
+
+    # Gather in the ORIGINAL level orientation (index arithmetic instead of
+    # flipping the big field tensor): ascending index i maps to original Zp-1-i.
+    lower_t = torch.as_tensor(weights.lower)
+    if weights.flipped:
+        idx_lo = (Zp - 1) - lower_t
+        idx_hi = idx_lo - 1
+    else:
+        idx_lo = lower_t
+        idx_hi = idx_lo + 1
+    expand = (C, -1, -1, -1)
+    f_lo = torch.gather(f_t, 1, idx_lo.unsqueeze(0).expand(*expand))  # [C, Za, Y, X]
+    f_hi = torch.gather(f_t, 1, idx_hi.unsqueeze(0).expand(*expand))
+    frac_t = torch.as_tensor(weights.frac).to(dtype=f_t.dtype)
+    out = torch.lerp(f_lo, f_hi, frac_t)
+    return out.numpy() if isinstance(field_p, np.ndarray) else out
+
+
+def regrid_columns_to_agl(
+    field_p: np.ndarray,
+    height_agl_p: np.ndarray,
+    agl_levels: np.ndarray,
+) -> np.ndarray:
+    """Per-column linear interpolation of pressure-level fields onto an AGL grid.
+
+    Convenience wrapper: ``apply_agl_regrid(field_p, compute_agl_regrid_weights(...))``.
+    When regridding several tensors that share level heights (hour_start, hour_end,
+    pressure), compute the weights once and call ``apply_agl_regrid`` per tensor.
+    """
     if field_p.ndim != 4:
         raise ValueError(f"field_p must be [C, Zp, Y, X]; got {field_p.shape}")
     if height_agl_p.shape != field_p.shape[1:]:
         raise ValueError(
             f"height_agl_p {height_agl_p.shape} must match field_p[1:] {field_p.shape[1:]}"
         )
-    agl_levels = np.asarray(agl_levels, dtype="float64")
-    if agl_levels.ndim != 1 or not np.all(np.diff(agl_levels) > 0):
-        raise ValueError("agl_levels must be 1-D strictly ascending")
-
-    C, Zp, Y, X = field_p.shape
-    Za = agl_levels.size
-
-    # Work surface-up. Pressure levels are stored top-of-atmosphere first (AGL
-    # descending); flip both to ascending AGL so bracketing is monotonic.
-    mean_profile = np.nanmean(height_agl_p, axis=(1, 2))
-    if mean_profile[0] > mean_profile[-1]:
-        h = np.ascontiguousarray(height_agl_p[::-1])
-        f = np.ascontiguousarray(field_p[:, ::-1])
-    else:
-        h = np.ascontiguousarray(height_agl_p)
-        f = np.ascontiguousarray(field_p)
-
-    # First above-ground level per column (excludes sub-surface levels below it).
-    k0 = np.argmax(h >= 0.0, axis=0)  # [Y, X]
-
-    out = np.empty((C, Za, Y, X), dtype=field_p.dtype)
-    for k in range(Za):
-        z_t = float(agl_levels[k])
-        lower = np.clip(np.sum(h < z_t, axis=0) - 1, k0, Zp - 2)  # [Y, X]
-        upper = lower + 1
-        h_lo = np.take_along_axis(h, lower[None], axis=0)[0]  # [Y, X]
-        h_hi = np.take_along_axis(h, upper[None], axis=0)[0]
-        w = np.clip((z_t - h_lo) / np.clip(h_hi - h_lo, 1e-6, None), 0.0, 1.0)  # [Y, X]
-        li = np.broadcast_to(lower[None, None], (C, 1, Y, X))
-        ui = np.broadcast_to(upper[None, None], (C, 1, Y, X))
-        f_lo = np.take_along_axis(f, li, axis=1)[:, 0]  # [C, Y, X]
-        f_hi = np.take_along_axis(f, ui, axis=1)[:, 0]
-        out[:, k] = f_lo * (1.0 - w) + f_hi * w
-    return out
+    return apply_agl_regrid(field_p, compute_agl_regrid_weights(height_agl_p, agl_levels))
 
 
 def terrain_gradient(

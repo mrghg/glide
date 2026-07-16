@@ -59,6 +59,72 @@ Build a modern, highly optimized, backward-in-time LPDM for greenhouse-gas footp
 
 ## Milestone timeline
 
+### 2026-07-16 Performance review: remaining efficiency headroom (work order)
+
+Architecture-wide efficiency review (post CUDA-graph 6×). Grounded in the 2026-06-26
+GH200 steady-state profile (5.0 ms/step, GPU-busy 36.5%, **~49% of GPU time =
+`Memcpy DtoD` cudagraph plumbing**, ~26% physics core), the month-run "GPU bursts
+then idle" symptom, and fresh measurements below. The pie is **copies > stalls >
+compute** — the physics math is NOT the bottleneck. Ranked:
+
+1. **[OPEN — biggest lever] Cudagraph inputs re-copied every replay (~49% of GPU
+   time).** `hanna._cached_raw_device_met` allocates FRESH device tensors each
+   window (`.to(device)`), so the compiled core's input *addresses* change per
+   window and cudagraph trees copy every input into its static buffer **every
+   replay**. Fix: allocate the buffers once per batch, `copy_()` each new window's
+   data INTO the same storage (addresses never change), and mark them
+   `torch._dynamo.mark_static_address`. Bundle: the per-step
+   `torch.tensor(alpha, device=...)` H2D → `alpha_buf.fill_()` into a static 0-d
+   buffer. Expected ~1.4–1.7× per-step; needs a GH200 re-profile to confirm.
+2. **[DONE 2026-07-16] Per-step full-met H2D for the wind_mean diagnostic.**
+   `main._advection_alpha_wind_mean` did `.to(device)` on BOTH [3, Z, Y, X] wind
+   tensors from the host met cache **every step** (~84 MB/step H2D at EUROPE scale)
+   + full-grid interp + reduction — to produce a (3,) trajectory diagnostic. It also
+   bypassed hanna's per-window device cache. Fixed: grid means computed once per
+   window (mean/lerp commute — linear), single-slot cache threaded through both
+   paths; per-step cost is now a 3-element lerp. Verified identical to the old
+   formula to fp noise (3.5e-17). Also removes a ~10M-element interp+mean per step
+   from the dynamic CPU path.
+3. **[DONE 2026-07-16] Terrain regrid was too slow to hide behind prefetch.**
+   Finding-7's per-window regrid cost **~1.2 s/window** (scaled to full EUROPE,
+   measured on the real extracted hour) on the single-threaded prefetch thread —
+   vs ~0.3 s of GPU work per window (60 steps × 5 ms) ⇒ guaranteed stall every
+   window boundary. Fixed in two moves: (a) split
+   `compute_agl_regrid_weights` (bracketing depends only on level heights) from
+   `apply_agl_regrid`, computed once per window and shared across hour_start /
+   hour_end / pressure; (b) torch internals — ONE batched `torch.searchsorted`
+   over all columns replaces the per-level Python loop, multithreaded
+   `torch.gather` + `lerp` replace numpy `take_along_axis` (which was also
+   upcasting the lerp to float64). **Measured: ~1.2 s → ~77 ms/window (~15×)** —
+   now comfortably inside the prefetch budget. NumPy API unchanged
+   (`regrid_columns_to_agl` kept as a wrapper); equivalence-tested.
+4. **[OPEN] Met cache keyed per WINDOW duplicates every physical hour.**
+   `main._get_hourly_met_window` caches whole `HourlyMetTensors`; consecutive
+   windows share an hour (window k's `hour_end` == window k+1's `hour_start`), so
+   every hour is stored twice (192 h cache ≈ 50 GiB would be ~25 GiB), read from
+   zarr twice, and terrain-regridded twice. Restructure to a per-HOUR cache with
+   windows assembled as `(hour[H], hour[H+1])` views. Halves met RAM + reads +
+   regrid; contained in main/reader.
+5. **[OPEN] Fold the gridder + eager tail into the graph.** ~45 of the remaining
+   ~106 launches/step are `FootprintGridder.accumulate` (+ t_idx math, escape
+   count). `scatter_add_` into the persistent accumulator is capture-safe. Do
+   AFTER #1–2 shrink the pie; modest on its own.
+6. **[OPEN — measure first] Inactive-particle waste, now quantified.** From the
+   icos-202401 run's own trajectory_diagnostics: **54.4% of stepped particles were
+   inactive** on average (the trapezoidal release-window ramp inherent to
+   batch = active-window sizing), of which **11.0% escaped** (the §5.1(B)
+   recoverable slice). Bucketed/periodic graph recapture could claw some back but
+   fights the static-shape design. Only touch if a re-profile after #1–4 shows the
+   run has become compute-bound.
+
+Smaller/speculative (not scheduled): fp16/bf16 met stacks for `grid_sample`
+(halves copy+sample bandwidth; needs an accuracy gate vs the eager fp32
+reference); packing co-sampled field stacks into one volume so normalized coords
+are computed once; multi-GPU batch fan-out (4×GH200/node, embarrassingly parallel
+batch axis); making `endpoint_particles.parquet` optional (10.8 GB on the month
+run). **Process note: re-profile (`GLIDE_PROFILE=1`) after #1 lands before
+touching #5/#6 — measure, don't stack complexity.**
+
 ### 2026-07-16 Finding 7: the vertical coordinate is terrain-blind (surface footprint is ZERO over high ground)
 
 **Symptom.** Spotted by eye in the January-2024 ICOS animation

@@ -864,6 +864,7 @@ def _advection_alpha_wind_mean(
 	delta_s: float,
 	device: torch.device,
 	dtype: torch.dtype,
+	wind_mean_cache: dict | None = None,
 ) -> tuple[float, torch.Tensor]:
 	"""RK2-midpoint time-interpolation weight ``alpha`` + the grid-mean (u, v, w) wind.
 
@@ -871,6 +872,14 @@ def _advection_alpha_wind_mean(
 	advection is folded into `HannaScheme._step_core` so `main._run` only needs these two
 	scalars/diagnostics. ``wind_mean`` is a (3,) device tensor (no host sync — materialised
 	once per batch for the trajectory diagnostics).
+
+	The grid means are computed ONCE per met window and cached in ``wind_mean_cache``
+	(single-slot, keyed by window start): the mean and the time interpolation are both
+	linear, so ``mean(lerp(start, end)) == lerp(mean(start), mean(end))`` exactly. The
+	per-step cost is a 3-element lerp on device. Without the cache this did a full
+	[3, Z, Y, X] host->device copy + grid interpolation + reduction EVERY step, just
+	for a 3-number diagnostic (perf review 2026-07-16 #2) — on the static path the
+	scheme never needs main's device copy of the winds at all.
 	"""
 
 	t_start_s = met_window.metadata.time_start.timestamp()
@@ -878,12 +887,21 @@ def _advection_alpha_wind_mean(
 	t_eval_s = t_cursor.timestamp() - 0.5 * delta_s
 	alpha = max(0.0, min(1.0, (t_eval_s - t_start_s) / max(1.0, float(t_end_s - t_start_s))))
 
-	m_start_uvw, m_end_uvw = met_window.channels("u", "v", "w")
-	interp_wind = (
-		m_start_uvw.to(device=device, dtype=dtype) * (1.0 - alpha)
-		+ m_end_uvw.to(device=device, dtype=dtype) * alpha
-	)  # [3, Z, Y, X]
-	wind_mean = interp_wind.reshape(3, -1).mean(dim=1)
+	ts = met_window.metadata.time_start
+	cached = wind_mean_cache if wind_mean_cache is not None and wind_mean_cache.get("ts") == ts else None
+	if cached is None:
+		m_start_uvw, m_end_uvw = met_window.channels("u", "v", "w")
+		# Reduce where the met lives (host when met_cache_on_host); ship only (3,).
+		mean_start = m_start_uvw.reshape(3, -1).mean(dim=1).to(device=device, dtype=dtype)
+		mean_end = m_end_uvw.reshape(3, -1).mean(dim=1).to(device=device, dtype=dtype)
+		if wind_mean_cache is not None:
+			wind_mean_cache.clear()
+			wind_mean_cache["ts"] = ts
+			wind_mean_cache["means"] = (mean_start, mean_end)
+	else:
+		mean_start, mean_end = cached["means"]
+
+	wind_mean = mean_start * (1.0 - alpha) + mean_end * alpha
 	return alpha, wind_mean
 
 
@@ -895,6 +913,7 @@ def _advect_active_particles(
 	t_cursor: datetime,
 	delta_s: float,
 	dtype: torch.dtype,
+	wind_mean_cache: dict | None = None,
 ) -> tuple[torch.Tensor, float, torch.Tensor]:
 	"""RK2 backward advection on the active particle subset (dynamic / CPU path).
 
@@ -903,7 +922,9 @@ def _advect_active_particles(
 	to the host once per batch rather than syncing every step (matters on CUDA).
 	"""
 
-	alpha, diag_wind_mean = _advection_alpha_wind_mean(met_window, t_cursor, delta_s, device, dtype)
+	alpha, diag_wind_mean = _advection_alpha_wind_mean(
+		met_window, t_cursor, delta_s, device, dtype, wind_mean_cache
+	)
 
 	grid_bounds = GridInterpolationBounds(
 		lon_first=float(met_window.metadata.lon[0]),
@@ -1191,6 +1212,11 @@ def _run(
 	# lazily on the first batch (we need a gridder's geometry to build coords).
 	footprint_store_created = False
 
+	# Single-slot per-window cache for the grid-mean wind diagnostic (perf review
+	# 2026-07-16 #2): without it every step paid a full [3, Z, Y, X] host->device
+	# copy + reduction just to log a (3,) mean.
+	wind_mean_cache: dict = {}
+
 	for batch in batches:
 		if device.type == "cuda":
 			torch.cuda.reset_peak_memory_stats(device)
@@ -1315,12 +1341,13 @@ def _run(
 				# (the RK2-midpoint weight, also used for the surface fields) and the
 				# grid-mean wind diagnostic.
 				t_alpha, wind_mean = _advection_alpha_wind_mean(
-					met_window, t_cursor, delta_s, device, particles.dtype
+					met_window, t_cursor, delta_s, device, particles.dtype, wind_mean_cache
 				)
 				if not scheme.step_includes_advection(engine):
 					with phase_timer.phase("advect"):
 						advected_full = _advect_active_particles(
 							engine, device, particles, met_window, t_cursor, delta_s, particles.dtype,
+							wind_mean_cache=wind_mean_cache,
 						)[0]
 						particles = torch.where(active_mask.unsqueeze(1), advected_full, particles)
 				with phase_timer.phase("step"):
@@ -1384,6 +1411,7 @@ def _run(
 						t_cursor,
 						delta_s,
 						particles.dtype,
+						wind_mean_cache=wind_mean_cache,
 					)
 					particles[active_mask] = advected_active
 

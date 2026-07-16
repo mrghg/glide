@@ -26,8 +26,9 @@ import xarray as xr
 
 from lpdm.runtime import DEVICE
 from lpdm.vertical_grid import (
+    apply_agl_regrid,
+    compute_agl_regrid_weights,
     default_agl_levels,
-    regrid_columns_to_agl,
     slope_correct_w,
     terrain_gradient,
 )
@@ -431,10 +432,16 @@ class ArcoEra5ZarrReader(MetReader):
             self.agl_levels_m if self.agl_levels_m is not None else default_agl_levels(z_max_m)
         )
 
+        # Bracketing depends only on the (window-averaged) level heights, so compute
+        # it once and share it across hour_start / hour_end / the pressure profile —
+        # this runs on the met prefetch thread and must stay cheaper than one window
+        # of GPU compute (perf review 2026-07-16 #3).
+        weights = compute_agl_regrid_weights(height_agl_p, agl_levels)
+
         hs_np = hour_start.detach().cpu().numpy()
         he_np = hour_end.detach().cpu().numpy()
-        hs_agl = regrid_columns_to_agl(hs_np, height_agl_p, agl_levels)
-        he_agl = regrid_columns_to_agl(he_np, height_agl_p, agl_levels)
+        hs_agl = apply_agl_regrid(hs_np, weights)
+        he_agl = apply_agl_regrid(he_np, weights)
 
         # Slope-correct w into the terrain-following frame (needs u, v, w present).
         if all(k in self.channel_names for k in ("u", "v", "w")):
@@ -456,8 +463,12 @@ class ArcoEra5ZarrReader(MetReader):
         # per-level (horizontally-uniform) pressure, so the AGL-grid mean is the same
         # class of approximation they already make on the pressure grid.
         level_hpa = np.asarray(ds_start[self.level_name].values, dtype="float64")
-        pressure_p = np.broadcast_to(level_hpa[:, None, None], height_agl_p.shape)
-        pressure_agl = regrid_columns_to_agl(pressure_p[None], height_agl_p, agl_levels)[0]
+        # Materialised (not broadcast_to): the torch-backed regrid can't wrap
+        # zero-stride numpy views.
+        pressure_p = np.ascontiguousarray(
+            np.broadcast_to(level_hpa[:, None, None], height_agl_p.shape)
+        )
+        pressure_agl = apply_agl_regrid(pressure_p[None], weights)[0]
         pressure_level_hpa = pressure_agl.mean(axis=(1, 2))  # already hPa
 
         hs_t = torch.as_tensor(hs_agl, dtype=self.dtype, device=self.device)
