@@ -1,6 +1,8 @@
 # GLIDE Validation Notes
 
-Scope of the validation suite, expected tolerances and seeds, and which metrics carry placeholder status pending Milestone 1.
+Scope of the validation suite, expected tolerances and seeds, and which checks are
+still to be added (see [Planned synthetic verification tests](#planned-synthetic-verification-tests)
+and `dev/TEST_REVIEW_2026-07-16.md` for the full plan).
 
 ## Running the suite
 
@@ -8,11 +10,31 @@ Scope of the validation suite, expected tolerances and seeds, and which metrics 
 .venv/bin/python -m pytest -q tests/
 ```
 
-The suite runs in well under 30 seconds with no network access. All tests use synthetic met data via `AnalyticMetReader` (see `tests/test_main_runtime.py`). Run order is irrelevant; tests do not share state.
+The suite (236 tests at the 2026-07-16 review) runs in ~90 seconds with no network
+access. End-to-end tests use synthetic met via `AnalyticMetReader` (see
+`tests/test_main_runtime.py`). Run order is irrelevant; tests do not share state.
 
 ## Test layers
 
-The validation suite is split into three layers, each owned by a separate file.
+Twelve files, layered roughly unit → scheme → end-to-end:
+
+| File | Scope |
+| --- | --- |
+| `test_physics.py` | Engine primitives: RK2 advection (incl. convergence order), OU/Langevin, reflection, well-mixed drift, coordinate normalisation |
+| `test_hanna.py` | Hanna scheme: regime formulae, stability classification, meander, substep machinery, per-window caches, compile gating |
+| `test_convection.py` | Emanuel reduced scheme: thermodynamics, LCL/LNB/CAPE, mass-flux matrix well-mixedness/non-divergence |
+| `test_vertical_grid.py` | Terrain-following resample kernels (Finding 7): AGL regrid, sub-surface exclusion, slope correction |
+| `test_met_reader.py` | ARCO reader mechanics: units, ω→w, SHF, lon conventions, multi-store stitching, terrain-following wiring |
+| `test_footprint.py` | Gridder: binning, conservation, drop contracts, per-release scatter |
+| `test_release_generator.py` | Point/column/batch particle generation, seeding |
+| `test_comparison.py` | STILT conversion + conservative regridding |
+| `test_main_config.py` | Config schema, release expansion, batching |
+| `test_main_runtime.py` | End-to-end runs on synthetic met: advection/trajectory checks, WMC through the production scheme, static/dynamic parity, graph guards, outputs |
+| `test_output_writer.py` | Output contracts (Zarr/Parquet) |
+| `test_download_sample_cube.py` | Met-download helper |
+
+The most detailed per-test tables below are maintained for the physics-bearing
+subset; see the files themselves for the rest.
 
 ### Engine unit tests (`tests/test_physics.py`)
 
@@ -39,7 +61,7 @@ The validation suite is split into three layers, each owned by a separate file.
 | `test_in_bl_stable_sigma_vanishes_at_top_of_bl` | σ_w → 0 at z = h (stable) | `< 1e-2` | none |
 | `test_in_bl_regime_selection_at_boundaries` | Regime branching at h/L = ±1 boundaries | qualitative | none |
 | `test_surface_layer_sigma_w_regimes` | SL formulae per regime match analytic forms | abs err `< 1e-6` | none |
-| `test_surface_layer_sigma_w_caps_in_very_stable` | Stable SL capped at 1.3 u\* · 6 | exact | none |
+| `test_surface_layer_sigma_w_stable_is_constant_in_height` | Stable SL σ_w constant with height (FLEXPART v11 convention; 2026-07-02 physics fixes) | exact | none |
 | `test_hanna_above_bl_constants_used` | Above-BL σ = 0.1 m/s, T_L = 100 s | exact | none |
 
 ### Footprint gridder tests (`tests/test_footprint.py`)
@@ -91,12 +113,54 @@ Cover the post-processing helpers in `src/lpdm/comparison.py` used to put GLIDE 
 
 ## Validation status
 
-The Hanna 1982 / FLEXPART scheme (`hanna_1982`) landed in M1 with the unit and end-to-end tests above. The default `--turbulence-scheme` remains `placeholder_constant_ou` until external comparison signs off — see `docs/turbulence.md` §5.3.
+`hanna_1982` is the production turbulence scheme (all example configs use it;
+`turbulence.scheme` is a required YAML field — there is no CLI scheme flag).
+`placeholder_constant_ou` is kept only as a regression pin and to isolate runtime
+plumbing from Hanna in a few end-to-end tests.
 
 **Pending external validation** (don't use as cross-model baselines yet):
 
-- Quantitative endpoint spread, time-height structure, and column-integrated footprint magnitude under Hanna. The unit tests pin local σ/T_L values and the smoke test pins ensemble-mean preservation, but the dispersion magnitude has not been compared to a FLEXPART/STILT reference run on identical met.
-- Above-BL transport accuracy: the constant-K placeholder (σ = 0.1 m/s, T_L = 100 s) is intentionally crude and will need a refined N²-based scheme to be defensible (logged as M1.x in `docs/turbulence.md`).
+- Quantitative endpoint spread, time-height structure, and column-integrated footprint magnitude under Hanna. The unit tests pin local σ/T_L values and the smoke test pins ensemble-mean preservation; systematic comparison against NAME/FLEXPART is in progress (and the terrain-affected v2/v3 comparisons need re-running after the Finding-7 fix — see `dev/CHECKPOINT.md`).
+- Free-troposphere transport accuracy: the Richardson-closure FT scheme is implemented, but its dispersion magnitude is untested against theory until T1/T5a below land.
+
+## Planned synthetic verification tests
+
+From the 2026-07-16 test-suite review. Detailed instructions — analytic targets,
+setups, tolerances, pitfalls, order of attack — live in
+**`dev/TEST_REVIEW_2026-07-16.md`**; each test gains a tolerance/seed row in the
+tables above when it lands.
+
+| ID | Test | Analytic target | Chain covered | Status |
+| --- | --- | --- | --- | --- |
+| T5a | `test_ou_autocorrelation_and_stationarity` | R(τ)=e^(−τ/T_L); Var(w′)=σ_w² | engine OU update | **LANDED** |
+| T5b | `test_solid_body_rotation_advection_returns_to_start` | circular trajectory, period 2π/ω, O(dt²) | RK2 in spatially varying wind, backward sign | **LANDED** |
+| T1 | `test_taylor_dispersion_curve_ballistic_to_diffusive` (+ `..._position_integration_bias_with_dt`) | σ_z²(t)=2σ_w²T_L[t−T_L(1−e^(−t/T_L))], ballistic→diffusive | engine OU + vertical displacement | **LANDED** |
+| T4 | `test_terrain_hill_footprint_continuous_and_agl_preserved` | constant-AGL transit over a hill; no Finding-7 hole | reader terrain resample → advection → gridder (e2e) | **PLANNED — gate for the GH200 terrain acceptance run** |
+| T2 | `test_footprint_matches_analytic_gaussian_plume` | f(x,y)=exp(−y²/2σ_y²)exp(−z_r²/2σ_z²)/(πσ_yσ_zU) | advection+OU+reflection+gridder+STILT units (flagship) | **PLANNED** |
+| T3 | `test_langevin_diffusion_limit_matches_pde` | ∂c/∂t=∂_z(K∂_zc), Crank–Nicolson reference | inhomogeneous K + drift + reflection; near-surface K bias class | **PLANNED** |
+| T6 | forward/backward reciprocity | forward concentration ≡ backward footprint × source | backward formulation itself | **DEFERRED** |
+
+**Note (revised from the plan):** T1/T5a were specced to drive through
+`HannaScheme.step`, but Hanna has *no homogeneous regime* — T_L is intrinsically
+height-dependent (the inhomogeneity the Thomson drift corrects), so OU/Taylor
+statistics have no closed form through the assembled scheme. They are therefore
+verified at the engine-OU level with prescribed constant (σ_w, T_L); the scheme's
+substep integration is covered by the well-mixed tests (inhomogeneous, full step)
+and the static/dynamic substep-equivalence tests.
+
+### Analytic dispersion tests (`tests/test_dispersion_analytic.py`)
+
+| Test | Asserts | Tolerance | Seed |
+| --- | --- | --- | --- |
+| `test_ou_autocorrelation_and_stationarity` | OU R(τ)=e^(−τ/T_L) at τ/T_L∈{0.5,1,2}; stationary Var=σ_w² | `|R−e^(−τ/T_L)|<0.02` (obs ~0.003); Var within ±3% | 4111 |
+| `test_solid_body_rotation_advection_returns_to_start` | Circle closure after one period; RK2 second order | err ratio `>3.5×` per dt-halving (obs 4.00); finest return `<1e-3·r` | none (deterministic) |
+| `test_taylor_dispersion_curve_ballistic_to_diffusive` | σ_z(t) vs Taylor at 6 checkpoints; ballistic σ_w·t; diffusive 2Kt | curve `<5%` (obs ~0.1%); ballistic `<5%`; diffusive `<8%` | 2201 |
+| `test_taylor_dispersion_position_integration_bias_with_dt` | forward-Euler position bias: tight at dt/T_L=0.01, bounded at 0.2 | fine `<2%`, coarse `<15%` | 71 |
+
+Housekeeping planned alongside (same doc): legacy-flag smokes
+(`surface_layer_override`, `flexpart_tl_floors`), `wind_mean`-cache unit test,
+Emanuel stable-winter-column guard, memory-guard trip test, one `pytest --cov`
+coverage map.
 
 **Stable across runs (with seed):**
 
@@ -186,7 +250,7 @@ If the output grid was authored to match the reference, no regridding step is ne
 - **Output grid bounds are outer cell edges**: GLIDE's `output_grid.lon_bounds` / `lat_bounds` are the outermost edges, with `n_x`, `n_y` equal cells filling the interval. Reference outputs often label coordinates by cell centres — add half a cell on each side when authoring the YAML so your cells align.
 - **Mismatched surface-layer depth**: if the reference uses a layer other than 0–40 m, set `surface_layer_depth_m` (and the matching `z_edges_m` bottom bin) accordingly. If you can't make them match exactly, the converter depth-weights overlapping bins (approximate, assumes uniform residence-time density within each bin).
 - **Spatial air-density variation**: for runs spanning large lat or elevation ranges, replace the scalar `air_density_kg_m3` with a 2D `xarray.DataArray` of `sp / (R_d * T_surface)` from the met.
-- **Different met**: GLIDE uses ARCO ERA5 model-level fields; FLEXPART runs typically use ECMWF operational analyses; NAME uses UM analyses. Inter-model met differences contribute to footprint differences that aren't due to the turbulence scheme — note this in any documented tolerance.
+- **Different met**: GLIDE streams ARCO ERA5 *pressure-level* fields, resampled onto a fixed terrain-following AGL grid per met window (Finding 7, 2026-07-16); FLEXPART runs typically use ECMWF operational analyses on native model levels; NAME uses UM analyses. Inter-model met differences contribute to footprint differences that aren't due to the turbulence scheme — note this in any documented tolerance.
 - **Different release setup**: keep the release within the surface layer (`release.alt_agl_m < surface_layer_depth_m`) to avoid "particle-not-yet-mixed" startup transients dominating the comparison.
 - **Time resolution**: pass `integrate_time=False` if you want time-resolved sensitivity; useful for diagnosing when the GLIDE plume diverges from the reference.
 

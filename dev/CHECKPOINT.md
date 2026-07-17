@@ -59,6 +59,30 @@ Build a modern, highly optimized, backward-in-time LPDM for greenhouse-gas footp
 
 ## Milestone timeline
 
+### 2026-07-16 Test-suite review → synthetic-physics test plan (work order)
+
+Full audit of the 236-test suite + a plan for the missing layer: **quantitative
+statistical verification against known analytic results** — the "physics test
+suite robust enough to convince me" item. Detailed instructions, formulas,
+tolerances, pitfalls, and order of attack in **`dev/TEST_REVIEW_2026-07-16.md`**
+(the work order); `docs/VALIDATION.md` refreshed same day (stale claims fixed,
+placeholder rows added for the planned tests).
+
+Suite verdict: strong on mechanics/regression (WMC drift pair, RK2 convergence
+order, static/dynamic parity, graph-break + recompile guards, conservation), but
+NOTHING tests dispersion magnitude or footprint shape against theory, and the
+terrain-following resample has NO end-to-end particle test (`AnalyticMetReader`
+bypasses it). Planned, in order: **T5a** OU autocorrelation/stationarity through
+the substep loop; **T5b** solid-body-rotation advection; **T1** Taylor (1921)
+σ²(t) curve through `HannaScheme.step`; **T4** terrain-hill e2e (the CPU-side
+physics gate for the Finding-7 GH200 acceptance run — do first among the big
+ones); **T2** analytic Gaussian-plume footprint (flagship: whole chain, shape AND
+absolute magnitude); **T3** diffusion-limit vs Crank–Nicolson PDE with
+inhomogeneous K (the class that would have caught the v2 near-surface K bias);
+**T6** forward/backward reciprocity (deferred). Housekeeping: legacy-flag
+smokes, wind_mean-cache unit test, Emanuel winter-column guard, memory-guard
+trip test, one `pytest --cov` run.
+
 ### 2026-07-16 Performance review: remaining efficiency headroom (work order)
 
 Architecture-wide efficiency review (post CUDA-graph 6×). Grounded in the 2026-06-26
