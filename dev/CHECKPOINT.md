@@ -84,7 +84,18 @@ cell-integrated** reflected-Gaussian plume (erf in y and over the 0–40 m bin,
 sharp x(t)=−Ut, σ(t) from Taylor), then STILT as an exact scale factor. Observed:
 **absolute magnitude ratio 0.992** (the whole-chain units check nothing else
 provides), near-field columns 0.4%, 2-D correlation 0.9985, σ_y ≤1.1% of Taylor.
-**Remaining:** T3 (PDE diffusion limit), housekeeping, T6 (deferred).
+**Same day, batch 3 — T3 + housekeeping: the work order is complete (T6 deferred
+by design).** T3 (`tests/test_diffusion_pde.py`): Langevin (production OU +
+Thomson drift + reflection) vs conservative Crank–Nicolson at three checkpoints —
+L1 ≤0.044 vs 0.08 bound, near-surface occupancy ≤7.9% vs 12%. **Design revision,
+measured:** the planned mid-column release was INSENSITIVE to near-surface K
+(¼×K below 50 m ⇒ L1 shift only ~0.02), so the release moved inside the low-K
+layer where a merely halved near-surface K separates by 7–12× — asserted as an
+in-test teeth check against corrupted-K PDE references (the v2-bias class is now
+genuinely detectable). Housekeeping: legacy-flag smokes, wind-mean-cache test
+(pinned to float32-reduction noise, atol 1e-5), memory-guard abort +
+run_metadata diagnostics, Emanuel winter-inversion no-fire guard. Coverage map
+recorded in the work order.
 
 ### 2026-07-16 Test-suite review → synthetic-physics test plan (work order)
 

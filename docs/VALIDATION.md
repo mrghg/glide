@@ -137,8 +137,16 @@ tables above when it lands.
 | T1 | `test_taylor_dispersion_curve_ballistic_to_diffusive` (+ `..._position_integration_bias_with_dt`) | σ_z²(t)=2σ_w²T_L[t−T_L(1−e^(−t/T_L))], ballistic→diffusive | engine OU + vertical displacement | **LANDED** |
 | T4 | `test_terrain_following_preserves_agl_crossing_hill` (+ `test_no_slope_correction_lets_particle_ride_the_terrain`) | constant-AGL transit over a hill via the real reader resample | reader terrain resample → production advection (e2e) | **LANDED** |
 | T2 | `test_footprint_matches_analytic_gaussian_plume` (+ magnitude, σ_y-width, STILT-scaling companions) | cell-integrated reflected-Gaussian plume, σ(t) from Taylor | advection+OU+reflection+gridder+STILT units (flagship) | **LANDED** |
-| T3 | `test_langevin_diffusion_limit_matches_pde` | ∂c/∂t=∂_z(K∂_zc), Crank–Nicolson reference | inhomogeneous K + drift + reflection; near-surface K bias class | **PLANNED** |
+| T3 | `test_langevin_diffusion_limit_matches_pde` (+ K-error discrimination teeth) | ∂c/∂t=∂_z(K∂_zc), Crank–Nicolson reference | inhomogeneous K + drift + reflection; near-surface K bias class | **LANDED** |
 | T6 | forward/backward reciprocity | forward concentration ≡ backward footprint × source | backward formulation itself | **DEFERRED** |
+
+Housekeeping tests from the same review, all landed 2026-07-17: legacy-flag
+smokes (`test_legacy_flag_paths_still_run`, `tests/test_hanna.py`), wind-mean
+cache (`test_wind_mean_cache_matches_direct_and_invalidates_across_windows`),
+memory-guard abort diagnostics (`test_memory_guard_trip_aborts_and_writes_diagnostics`,
+both `tests/test_main_runtime.py`), and the Emanuel winter-inversion no-fire
+guard (`test_emanuel_does_not_fire_on_winter_inversion_column`,
+`tests/test_convection.py`).
 
 **Note (revised from the plan):** T1/T5a were specced to drive through
 `HannaScheme.step`, but Hanna has *no homogeneous regime* — T_L is intrinsically
@@ -172,6 +180,18 @@ conversion is then checked as an exact scale factor.
 | `test_footprint_absolute_magnitude_matches_plume` | total surface residence vs analytic | ratio within ±3% (obs 0.992) | 9021 |
 | `test_footprint_crosswind_width_matches_taylor` | moment-based σ_y (Sheppard-corrected) at ~6 distances | `<5%` (obs ≤1.1%) | 9021 |
 | `test_stilt_conversion_scales_raw_footprint_exactly` | STILT field = raw × m_air/(hρ) | exact (rtol 1e-12) | 9021 |
+
+### Diffusion-limit vs PDE (`tests/test_diffusion_pde.py`)
+
+One Langevin evolution (production OU + Thomson drift + reflection;
+K(z)=0.02+0.12·min(z,200 m), T_L=10 s, dt/T_L=0.1, n=100k, release slab 5–15 m
+**inside the low-K layer** — a mid-column release was measured to be insensitive
+to near-surface K) against conservative flux-form Crank–Nicolson references.
+
+| Test | Asserts | Tolerance | Seed |
+| --- | --- | --- | --- |
+| `test_langevin_diffusion_limit_matches_pde` | binned density vs true-K PDE at 300/900/1800 s; near-surface (0–60 m) occupancy | L1 `<0.08` (obs ≤0.044); near-surface rel `<12%` (obs ≤7.9%) | 3301 |
+| `test_diffusion_pde_discriminates_near_surface_k_errors` | teeth: distance to PDEs with near-surface K ×½ and ×¼ (the v2-bias class) | half `L1>0.12–0.25` (obs 0.18–0.33); quarter `>0.30–0.45` (obs 0.46–0.66) | 3301 |
 
 ### Terrain-following transport (`tests/test_terrain_transport.py`)
 

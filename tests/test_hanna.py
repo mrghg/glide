@@ -11,6 +11,7 @@ from __future__ import annotations
 import math
 
 import numpy as np
+import pytest
 import torch
 
 from lpdm.turbulence import HannaScheme, get_scheme, list_schemes
@@ -806,3 +807,44 @@ def test_graph_compile_gating(monkeypatch) -> None:
     eng_dyn = GPUEngine(device="cpu")
     assert eng_dyn._compile_hot_paths is True
     assert scheme2._maybe_graph_compile(eng_dyn) is None
+
+
+@pytest.mark.parametrize(
+    "legacy_kwargs",
+    [{"surface_layer_override": True}, {"flexpart_tl_floors": False}],
+    ids=["surface_layer_override_on", "tl_floors_off"],
+)
+def test_legacy_flag_paths_still_run(legacy_kwargs) -> None:
+    """Smoke for the legacy A/B branches (kept for comparison against the
+    2026-07-02 physics-fix defaults): both must still step cleanly — finite
+    state, particles above ground, mass conserved. Guards the otherwise-untested
+    `surface_layer_override=True` and `flexpart_tl_floors=False` code paths."""
+
+    from datetime import datetime, timezone
+
+    from lpdm.gpu_engine import GPUEngine
+
+    torch.manual_seed(77)
+    t0 = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    met = _make_meander_test_window(t0, 4.0, 6.0)
+    engine = GPUEngine(device="cpu")
+    scheme = HannaScheme(meander_enabled=False, **legacy_kwargs)
+
+    n = 400
+    particles = torch.zeros(n, 4, dtype=torch.float32)
+    particles[:, 2] = torch.empty(n).uniform_(5.0, 1200.0)
+    particles[:, 3] = 1.0 / n
+    state = scheme.initialize_state(n, device=torch.device("cpu"), dtype=torch.float32)
+    active = torch.ones(n, dtype=torch.bool)
+
+    for _ in range(5):
+        particles, state = scheme.step(
+            particles=particles, state=state, met_window=met,
+            t_alpha=0.5, dt_seconds=60.0, active_mask=active, engine=engine,
+        )
+
+    assert torch.isfinite(particles).all()
+    assert (particles[:, 2] >= 0.0).all()
+    assert torch.allclose(particles[:, 3].sum(), torch.tensor(1.0), atol=1e-6)
+    for key, tensor in state.items():
+        assert torch.isfinite(tensor).all(), f"non-finite {key} on legacy path"

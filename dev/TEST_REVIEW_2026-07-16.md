@@ -176,6 +176,14 @@ T1–T5 are green.
    `MemoryError` + diagnostics in `run_metadata.json`.
 6. **Run `pytest --cov`** once and record the module-level coverage map here —
    this review was by reading, not instrumentation.
+   **DONE 2026-07-17** (253 tests, pytest-cov installed ad hoc in the venv, NOT
+   added to pyproject). Module map: **90% total** (3064 stmts). Highlights:
+   hanna 98%, footprint_gridder 100%, config 96%, emanuel 94%, vertical_grid 94%,
+   output_writer 94%, comparison 91%, met_reader 89%, gpu_engine 85%. Thinnest:
+   **main.py 80%** (690 stmts, 139 missed — mostly CLI entry, remote-store
+   branches, guard/log cadence variants), release_generator 83% (column/satellite
+   generators awaiting their features), turbulence/base 82%. No physics-bearing
+   module below 85%; the untested main.py lines are orchestration, not physics.
 
 ## Order of attack
 
@@ -189,10 +197,16 @@ T1–T5 are green.
    total magnitude ratio **0.992**, near-field columns 0.4%, correlation 0.9985,
    σ_y ≤1.1% of Taylor. The near-field image-solution worry (OU reflection vs
    Brownian) proved negligible at these parameters.
-5. T3 (targets the known near-surface risk class) — **NEXT**
-6. Housekeeping items 2–5 as filler between the above; T6 last, if at all.
+5. ✅ T3 — **DONE 2026-07-17**, `tests/test_diffusion_pde.py` (2 fns off one
+   fixture sim). **Design revision, measured:** the plan's mid-column release is
+   INSENSITIVE to near-surface K (quartering K below 50 m moved the profile by
+   only L1 ~0.02 — below any usable tolerance); the release was moved INSIDE the
+   low-K layer (5–15 m), where halving near-surface K moves the profile by
+   L1 0.18–0.33 vs true-K agreement ≤0.044 (7–12× separation, asserted as teeth).
+6. ✅ Housekeeping 2–5 — **DONE 2026-07-17**: legacy-flag smokes (test_hanna),
+   wind-mean cache + memory-guard abort diagnostics (test_main_runtime), Emanuel
+   winter-inversion no-fire guard (test_convection). T6 remains deferred.
 
-**Status 2026-07-17 (2nd update):** T5a/T5b/T1 (4 fns) + T4 (2 fns) + T2 (4 fns)
-landed on branch `tests/synthetic-physics` (PR #8), all with verified teeth.
-Remaining: **T3** (PDE diffusion limit, the near-surface-K-bias class), the
-housekeeping items, T6 (deferred).
+**Status 2026-07-17 (final for this work order):** T1/T2/T3/T4/T5a/T5b + all four
+housekeeping tests landed on branch `tests/synthetic-physics` (PR #8) — every
+planned item except T6 (deferred by design). Coverage map below (housekeeping #6).
