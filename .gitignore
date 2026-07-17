@@ -46,6 +46,18 @@ data/**
 !data/README.md
 !data/*/
 !data/**/.gitkeep
+# ...but never track data payloads themselves. `!data/*/` above re-includes every
+# immediate subdirectory of data/ to preserve structure, which would otherwise
+# un-ignore a met store (e.g. a .zarr) dropped straight into data/. Re-assert here
+# (last match wins) so payloads stay ignored regardless of where they land.
+data/**/*.zarr/
+data/**/*.nc
+data/**/*.parquet
+data/**/*.tar.gz
+
+# Data/met archives anywhere in the tree (e.g. an extracted met window at the root).
+*.tar.gz
+*.tgz
 
 # OS/editor noise
 .DS_Store

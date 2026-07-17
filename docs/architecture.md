@@ -52,7 +52,13 @@ Device-agnosticism is a core principle: the same code runs on `cuda → mps → 
 ## 3. Module map (compute-relevant)
 
 - **`met_reader.py`** — streams ARCO ERA5 Zarr subsets; geopotential→AGL; omega→w.
-  Returns `hour_start`/`hour_end` 3D tensors for per-step temporal interpolation.
+  Resamples the pressure-level fields onto a fixed **terrain-following AGL grid** once
+  per window (`terrain_following=True`, via `vertical_grid.py`), excluding sub-surface
+  levels and slope-correcting `w` — so the per-particle vertical mapping is a run
+  constant and correct over orography (dev/CHECKPOINT.md Finding 7). Returns
+  `hour_start`/`hour_end` 3D tensors for per-step temporal interpolation.
+- **`vertical_grid.py`** — the terrain-following resample kernels (pure NumPy, per
+  window): AGL grid, per-column pressure→AGL interpolation, terrain slope, `w` transform.
 - **`gpu_engine.py`** — device-safe primitives: RK2 backward advection, OU/Langevin
   velocity update (`_ou_step_kernel`), horizontal/vertical turbulent displacement,
   surface reflection. The elementwise hot paths live here.

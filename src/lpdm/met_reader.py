@@ -25,6 +25,13 @@ import torch
 import xarray as xr
 
 from lpdm.runtime import DEVICE
+from lpdm.vertical_grid import (
+    apply_agl_regrid,
+    compute_agl_regrid_weights,
+    default_agl_levels,
+    slope_correct_w,
+    terrain_gradient,
+)
 
 
 GRAVITY_M_S2 = 9.80665
@@ -220,6 +227,8 @@ class ArcoEra5ZarrReader(MetReader):
         time_name: str = "time",
         chunk_overrides: Mapping[str, int] | None = None,
         accumulation_seconds: int = 3600,
+        terrain_following: bool = True,
+        agl_levels_m: Sequence[float] | None = None,
         device: torch.device | str = DEVICE,
         dtype: torch.dtype = torch.float32,
     ) -> None:
@@ -247,6 +256,12 @@ class ArcoEra5ZarrReader(MetReader):
                 surface_sensible_heat_flux as J/m^2) are aggregated. Used to convert
                 accumulated flux fields back to instantaneous W/m^2. Default 3600 s
                 matches ERA5 hourly accumulation.
+            terrain_following: If True (default), resample the pressure-level met onto
+                a fixed terrain-following AGL grid once per window and slope-correct
+                the vertical velocity (Finding 7 fix). If False, ship fields on the
+                pressure grid with the legacy bbox-mean level array.
+            agl_levels_m: Optional explicit ascending AGL height grid (m) for the
+                terrain-following resample. Defaults to `default_agl_levels(z_max)`.
             device: Torch target device for returned tensors.
             dtype: Torch dtype for returned tensors.
         """
@@ -264,6 +279,14 @@ class ArcoEra5ZarrReader(MetReader):
         self.time_name = time_name
         self.chunk_overrides = dict(chunk_overrides or {})
         self.accumulation_seconds = int(accumulation_seconds)
+        # Terrain-following (hybrid) vertical coordinate: resample pressure levels
+        # onto a fixed AGL grid once per window (Finding 7). Off => legacy path that
+        # ships fields on the pressure grid with a bbox-mean level array (biased over
+        # terrain; kept for A/B and for synthetic stores without geopotential).
+        self.terrain_following = bool(terrain_following)
+        self.agl_levels_m = (
+            np.asarray(agl_levels_m, dtype="float64") if agl_levels_m is not None else None
+        )
         self.device = torch.device(device)
         self.dtype = dtype
 
@@ -343,17 +366,40 @@ class ArcoEra5ZarrReader(MetReader):
         hour_start = self._dataset_to_channel_tensor(ds_start)
         hour_end = self._dataset_to_channel_tensor(ds_end)
 
+        lon_arr = np.asarray(ds_start[self.lon_name].values)
+        lat_arr = np.asarray(ds_start[self.lat_name].values)
+        level_out = level_agl_m
+        pressure_level_hpa = np.asarray(ds_start[self.level_name].values)
+        height_agl_3d_out = height_agl_3d
+
+        if self.terrain_following:
+            (
+                hour_start,
+                hour_end,
+                level_out,
+                pressure_level_hpa,
+                height_agl_3d_out,
+            ) = self._resample_terrain_following(
+                hour_start=hour_start,
+                hour_end=hour_end,
+                height_agl_p=height_agl_3d,
+                ds_start=ds_start,
+                lat_arr=lat_arr,
+                lon_arr=lon_arr,
+                z_max_m=request.spatial.z_max,
+            )
+
         metadata = MetFieldMetadata(
-            lon=np.asarray(ds_start[self.lon_name].values),
-            lat=np.asarray(ds_start[self.lat_name].values),
-            level=level_agl_m,
-            pressure_level_hpa=np.asarray(ds_start[self.level_name].values),
+            lon=lon_arr,
+            lat=lat_arr,
+            level=level_out,
+            pressure_level_hpa=pressure_level_hpa,
             time_start=t0,
             time_end=t1,
             variable_units=self._read_variable_units(ds_start),
         )
 
-        height_agl_m = torch.as_tensor(height_agl_3d, dtype=self.dtype, device=self.device)
+        height_agl_m = torch.as_tensor(height_agl_3d_out, dtype=self.dtype, device=self.device)
 
         return HourlyMetTensors(
             hour_start=hour_start,
@@ -362,6 +408,77 @@ class ArcoEra5ZarrReader(MetReader):
             channel_names=self.channel_names,
             height_agl_m=height_agl_m,
         )
+
+    def _resample_terrain_following(
+        self,
+        *,
+        hour_start: torch.Tensor,
+        hour_end: torch.Tensor,
+        height_agl_p: np.ndarray,
+        ds_start: xr.Dataset,
+        lat_arr: np.ndarray,
+        lon_arr: np.ndarray,
+        z_max_m: float,
+    ) -> tuple[torch.Tensor, torch.Tensor, np.ndarray, np.ndarray, np.ndarray]:
+        """Resample the pressure-level window onto a fixed terrain-following AGL grid.
+
+        FLEXPART-style hybrid coordinate (Finding 7): regrid every channel per column
+        onto `agl_levels` (excluding sub-surface levels), slope-correct `w` into the
+        AGL frame, and return the AGL-grid tensors plus the level array, bbox-mean
+        pressure per AGL level, and the (now uniform-per-column) 3D height field.
+        Runs once per window; not in the per-step hot path.
+        """
+        agl_levels = (
+            self.agl_levels_m if self.agl_levels_m is not None else default_agl_levels(z_max_m)
+        )
+
+        # Bracketing depends only on the (window-averaged) level heights, so compute
+        # it once and share it across hour_start / hour_end / the pressure profile —
+        # this runs on the met prefetch thread and must stay cheaper than one window
+        # of GPU compute (perf review 2026-07-16 #3).
+        weights = compute_agl_regrid_weights(height_agl_p, agl_levels)
+
+        hs_np = hour_start.detach().cpu().numpy()
+        he_np = hour_end.detach().cpu().numpy()
+        hs_agl = apply_agl_regrid(hs_np, weights)
+        he_agl = apply_agl_regrid(he_np, weights)
+
+        # Slope-correct w into the terrain-following frame (needs u, v, w present).
+        if all(k in self.channel_names for k in ("u", "v", "w")):
+            z_sfc = np.asarray(ds_start[self.variable_map["z_sfc"]].values)
+            if z_sfc.ndim == 3:
+                z_sfc = z_sfc[0]
+            terrain_m = z_sfc / GRAVITY_M_S2
+            dhdx, dhdy = terrain_gradient(terrain_m, lat_arr, lon_arr)
+            ui = self.channel_names.index("u")
+            vi = self.channel_names.index("v")
+            wi = self.channel_names.index("w")
+            z_top = float(agl_levels[-1])
+            for fld in (hs_agl, he_agl):
+                fld[wi] = slope_correct_w(
+                    fld[wi], fld[ui], fld[vi], dhdx, dhdy, agl_levels, z_top
+                )
+
+        # Bbox-mean pressure per AGL level (hPa) — Hanna-FT / Emanuel read this as a
+        # per-level (horizontally-uniform) pressure, so the AGL-grid mean is the same
+        # class of approximation they already make on the pressure grid.
+        level_hpa = np.asarray(ds_start[self.level_name].values, dtype="float64")
+        # Materialised (not broadcast_to): the torch-backed regrid can't wrap
+        # zero-stride numpy views.
+        pressure_p = np.ascontiguousarray(
+            np.broadcast_to(level_hpa[:, None, None], height_agl_p.shape)
+        )
+        pressure_agl = apply_agl_regrid(pressure_p[None], weights)[0]
+        pressure_level_hpa = pressure_agl.mean(axis=(1, 2))  # already hPa
+
+        hs_t = torch.as_tensor(hs_agl, dtype=self.dtype, device=self.device)
+        he_t = torch.as_tensor(he_agl, dtype=self.dtype, device=self.device)
+        level_out = np.asarray(agl_levels, dtype="float64")
+        # Height field is now uniform per column (terrain-following): broadcast.
+        height_agl_3d_out = np.broadcast_to(
+            level_out[:, None, None], (level_out.size, *height_agl_p.shape[1:])
+        ).copy()
+        return hs_t, he_t, level_out, pressure_level_hpa, height_agl_3d_out
 
     def get_time_coverage(self) -> tuple[datetime, datetime]:
         """Return the first and last timestamps available in the dataset."""
@@ -703,8 +820,13 @@ class ArcoEra5ZarrReader(MetReader):
         else:
             raise ValueError("geopotential_at_surface must be a 2D or 3D field")
 
-        agl_m = (z_level - z_sfc_3d) / GRAVITY_M_S2
-        return np.maximum(agl_m, 0.0)
+        # NOT clamped at 0: pressure levels below ground legitimately have negative
+        # AGL, and clamping them collapsed every sub-surface level onto z=0. That
+        # gave zero-thickness layers, which `_vertical_gradient` then divided by
+        # (guarded only by its 1e-6 floor) -> |dtheta/dz| up to 5e6 K/m over the
+        # Alps vs a true max of 0.1. Consumers that need a positive height clamp
+        # locally (e.g. `free_trop_diffusivity(height.clamp(min=Z_MIN_M), ...)`).
+        return (z_level - z_sfc_3d) / GRAVITY_M_S2
 
     def _pressure_levels_to_pa(self, ds_time_slice: xr.Dataset) -> np.ndarray:
         """Convert vertical coordinate values to pressure in Pascals."""
