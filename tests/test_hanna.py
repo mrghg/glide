@@ -613,12 +613,15 @@ def test_per_window_field_cache_reuses_within_window_and_rebuilds_across() -> No
     )
     assert torch.allclose(f1[0], expected_su)
 
-    # A new window (different time_start) rebuilds: different object AND, because
-    # its winds differ, different values.
+    # A new window (different time_start) rebuilds the VALUES. Since perf review
+    # 2026-07-16 #1 the stack lives in a persistent static buffer (stable address
+    # for cudagraph replay), so the OBJECT is deliberately the same across
+    # windows — compare against a snapshot of the old values instead.
+    f1_values = f1.clone()
     met_b = _make_meander_test_window(t0 + timedelta(hours=1), u_start_val=20.0, u_end_val=40.0)
     f3, _ = scheme._meander_sigma_fields(met_b, dev, dt)
-    assert f3 is not f1
-    assert not torch.allclose(f3, f1)
+    assert f3 is f1, "new window must refill the SAME static buffer, not allocate"
+    assert not torch.allclose(f3, f1_values)
 
 
 # ---------------------------------------------------------------------------

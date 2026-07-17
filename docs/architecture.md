@@ -374,3 +374,13 @@ specialises on those and recompiles per value (the per-step `alpha` and the per-
 for the level array) and only genuine run-constants (e.g. the `ascending` level order) as
 Python scalars. Also: clone any output that outlives the call and `cudagraph_mark_step_begin()`
 per invocation (cudagraph aliasing).
+
+**Input ADDRESSES must be stable too (perf review 2026-07-16 #1):** cudagraph replay
+copies any input whose storage address changed since capture into the graph's staging
+buffers — so a fresh `.to(device)` per met window silently re-staged the big
+window-constant tensors every step (~49% of GPU time in the 2026-06-26 profile). Rule:
+every tensor input to the compiled core lives in a persistent buffer
+(`HannaScheme._to_static_buffer`, marked `torch._dynamo.mark_static_address` on CUDA)
+and is REFILLED in place (`copy_` / `lerp(out=)` / `fill_`), never reallocated — with all
+mutation outside the captured region. Particle/state tensors are exempt (inherently
+per-step; their staging copy is the price of the clone-on-output pattern).

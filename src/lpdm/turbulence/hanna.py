@@ -529,6 +529,16 @@ class HannaScheme(TurbulenceScheme):
 		# caching-allocator fragmentation (dev_reserved >> dev_alloc). `_gather_static_inputs`
 		# then only does the cheap per-step time interpolation of the surface fields.
 		self._raw_met_cache: tuple[datetime, dict] | None = None
+		# Persistent, address-stable buffers for the compiled-core inputs (perf
+		# review 2026-07-16 #1). Cudagraph replay copies every input whose ADDRESS
+		# changed since capture into the graph's staging buffers — and the fresh
+		# `.to(device)` allocations each met window made the big window-constant
+		# tensors (winds, ft/density/meander stacks) recopy EVERY STEP (~49% of
+		# GPU time in the 2026-06-26 profile). These buffers are allocated once,
+		# marked `torch._dynamo.mark_static_address` on CUDA, and refilled in
+		# place (per window for window-constant inputs; per step for the small
+		# surface lerps and alpha) — all outside the captured region.
+		self._static_input_buffers: dict[str, torch.Tensor] = {}
 
 	def required_met_keys(self) -> tuple[str, ...]:
 		# Baseline (u, v, w, blh, sp) is added by the runtime; declare scheme-specific extras.
@@ -708,16 +718,28 @@ class HannaScheme(TurbulenceScheme):
 		m_start_uvw, m_end_uvw = met_window.channels("u", "v", "w")
 		level = met_window.metadata.level
 		bundle = dict(
+			# The surface (start, end) pairs feed the per-step lerp OUTSIDE the
+			# graph, so their addresses don't matter — no buffers needed.
 			blh=_surf_pair("blh", 0),
 			sp=_surf_pair("sp", 0),
 			ustar=_surf_pair("ustar", 0),
 			shf=_surf_pair("shf", 0),
 			t=_surf_pair("t", lowest_t),
-			m_start_uvw=m_start_uvw.to(device=device, dtype=dtype),
-			m_end_uvw=m_end_uvw.to(device=device, dtype=dtype),
-			# per-level AGL heights (bbox-mean) — the F9 vertical-lookup axis; a dynamic
+			# The wind stacks and level array enter the compiled core directly:
+			# static buffers, refilled once per window (perf #1).
+			m_start_uvw=self._to_static_buffer(
+				"met.m_start_uvw", m_start_uvw.to(device=device, dtype=dtype)
+			),
+			m_end_uvw=self._to_static_buffer(
+				"met.m_end_uvw", m_end_uvw.to(device=device, dtype=dtype)
+			),
+			# per-level AGL heights — the F9 vertical-lookup axis; a dynamic
 			# TENSOR so dynamo doesn't specialise the graph on the per-window values.
-			level_arr=torch.as_tensor(np.asarray(level), device=device, dtype=dtype),
+			# (Under the terrain-following coordinate the values are a run constant,
+			# but the legacy pressure-grid path still varies per window.)
+			level_arr=self._to_static_buffer(
+				"met.level_arr", torch.as_tensor(np.asarray(level), device=device, dtype=dtype)
+			),
 			# pressure-level ORDER is genuinely constant, so it stays a plain bool.
 			ascending=bool(level[-1] > level[0]),
 		)
@@ -731,32 +753,48 @@ class HannaScheme(TurbulenceScheme):
 		rebuilt each step. Behaviour-preserving vs the pre-cache path (identical math)."""
 		raw = self._cached_raw_device_met(met_window, device, dtype)
 
-		def _interp(pair):
+		def _interp(name, pair):
+			# Per-step surface lerp, written INTO a stable buffer (perf #1): the
+			# result is a compiled-core input, and a fresh tensor each step would
+			# be restaged by cudagraph on every replay. `torch.lerp(..., out=)`
+			# runs in eager, outside the captured region.
 			s, e = pair
-			return s * (1.0 - t_alpha) + e * t_alpha
+			buf = self._to_static_buffer(f"surf.{name}", s, copy_src=False)
+			torch.lerp(s, e, float(t_alpha), out=buf)
+			return buf
 
 		ft_fields, grid_bounds = self._free_trop_fields(met_window, device, dtype)
 		meander_fields = None
 		if self.meander_enabled:
 			meander_fields, _ = self._meander_sigma_fields(met_window, device, dtype)
+
+		# alpha (the RK2-midpoint time-interp weight) changes EVERY step. Pass it as
+		# a 0-d TENSOR, not a Python float: dynamo specializes the compiled graph on
+		# float values, so a per-step float would recompile every step, blow the
+		# recompile limit, and fall back to eager (GH200 profile 2026-06-26 — the run
+		# went 4× slower than before, GPU-busy 0.7%). A tensor is a dynamic input —
+		# held in a stable 0-d buffer and refilled per step (perf #1).
+		alpha_buf = self._static_input_buffers.get("alpha")
+		if alpha_buf is None or alpha_buf.device != device or alpha_buf.dtype != dtype:
+			alpha_buf = torch.zeros((), device=device, dtype=dtype)
+			if device.type == "cuda":
+				torch._dynamo.mark_static_address(alpha_buf)
+			self._static_input_buffers["alpha"] = alpha_buf
+		alpha_buf.fill_(float(t_alpha))
+
 		return dict(
-			blh_field=_interp(raw["blh"]),
-			sp_field=_interp(raw["sp"]),
-			ustar_field=_interp(raw["ustar"]),
-			shf_field=_interp(raw["shf"]),
-			t_field=_interp(raw["t"]),
+			blh_field=_interp("blh", raw["blh"]),
+			sp_field=_interp("sp", raw["sp"]),
+			ustar_field=_interp("ustar", raw["ustar"]),
+			shf_field=_interp("shf", raw["shf"]),
+			t_field=_interp("t", raw["t"]),
 			ft_fields=ft_fields,
 			density_fields=self._density_fields(met_window, device, dtype),
 			meander_fields=meander_fields,
 			grid_bounds=grid_bounds,
 			m_start_uvw=raw["m_start_uvw"],
 			m_end_uvw=raw["m_end_uvw"],
-			# alpha (the RK2-midpoint time-interp weight) changes EVERY step. Pass it as
-			# a 0-d TENSOR, not a Python float: dynamo specializes the compiled graph on
-			# float values, so a per-step float would recompile every step, blow the
-			# recompile limit, and fall back to eager (GH200 profile 2026-06-26 — the run
-			# went 4× slower than before, GPU-busy 0.7%). A tensor is a dynamic input.
-			alpha=torch.tensor(float(t_alpha), device=device, dtype=dtype),
+			alpha=alpha_buf,
 			level_arr=raw["level_arr"],
 			ascending=raw["ascending"],
 		)
@@ -1379,10 +1417,41 @@ class HannaScheme(TurbulenceScheme):
 		ts = met_window.metadata.time_start
 		entry = self._window_field_cache.get(key)
 		if entry is None or entry[0] != ts:
-			stack = build()
+			# Route the freshly-built stack through its static buffer so the
+			# compiled core sees a stable address across windows (perf #1); the
+			# copy happens once per window, not per step.
+			stack = self._to_static_buffer(f"winfield.{key}", build())
 			self._window_field_cache[key] = (ts, stack)
 			return stack
 		return entry[1]
+
+	def _to_static_buffer(self, name: str, src: torch.Tensor, *, copy_src: bool = True) -> torch.Tensor:
+		"""Copy ``src`` into a persistent buffer with a stable storage address.
+
+		Allocated once per (shape, dtype, device) and marked as a cudagraph
+		static address on CUDA, so graph replays read it in place instead of
+		staging a copy of the input every step. Callers refill it in place
+		(``copy_``) when the underlying value changes — always OUTSIDE the
+		captured region. A shape/device change (new run geometry) reallocates,
+		which simply triggers a fresh capture. ``copy_src=False`` returns the
+		(possibly stale) buffer without copying, for callers that overwrite it
+		entirely themselves (e.g. an ``out=`` lerp)."""
+
+		buf = self._static_input_buffers.get(name)
+		fresh = (
+			buf is None
+			or buf.shape != src.shape
+			or buf.dtype != src.dtype
+			or buf.device != src.device
+		)
+		if fresh:
+			buf = torch.empty_like(src)
+			if src.device.type == "cuda":
+				torch._dynamo.mark_static_address(buf)
+			self._static_input_buffers[name] = buf
+		if copy_src or fresh:  # a fresh buffer must be initialised regardless
+			buf.copy_(src)
+		return buf
 
 	@staticmethod
 	def _window_mid(

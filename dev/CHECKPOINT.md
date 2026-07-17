@@ -129,15 +129,22 @@ GH200 steady-state profile (5.0 ms/step, GPU-busy 36.5%, **~49% of GPU time =
 then idle" symptom, and fresh measurements below. The pie is **copies > stalls >
 compute** — the physics math is NOT the bottleneck. Ranked:
 
-1. **[OPEN — biggest lever] Cudagraph inputs re-copied every replay (~49% of GPU
-   time).** `hanna._cached_raw_device_met` allocates FRESH device tensors each
-   window (`.to(device)`), so the compiled core's input *addresses* change per
-   window and cudagraph trees copy every input into its static buffer **every
-   replay**. Fix: allocate the buffers once per batch, `copy_()` each new window's
-   data INTO the same storage (addresses never change), and mark them
-   `torch._dynamo.mark_static_address`. Bundle: the per-step
-   `torch.tensor(alpha, device=...)` H2D → `alpha_buf.fill_()` into a static 0-d
-   buffer. Expected ~1.4–1.7× per-step; needs a GH200 re-profile to confirm.
+1. **[IMPLEMENTED 2026-07-17 — GH200 re-profile PENDING] Cudagraph inputs
+   re-copied every replay (~49% of GPU time).** `hanna._cached_raw_device_met`
+   allocated FRESH device tensors each window (`.to(device)`), so the compiled
+   core's input *addresses* changed per window and cudagraph trees copied every
+   input into its static buffer **every replay**. Fix (branch
+   `perf/gpu-efficiency`): `HannaScheme._to_static_buffer` — persistent
+   buffers, allocated once and marked `torch._dynamo.mark_static_address` on
+   CUDA; window-constant inputs (wind stacks, level_arr via
+   `_cached_raw_device_met`; ft/density/meander stacks via
+   `_cached_window_field`) are `copy_`'d once per window; the per-step surface
+   lerps write into stable buffers via `torch.lerp(out=)`; alpha is a reused 0-d
+   buffer refilled with `fill_()`. All mutation happens OUTSIDE the captured
+   region on the default stream. Contract change: the per-window field cache now
+   returns the SAME tensor object across windows (refilled), pinned by the
+   updated cache test. CPU guards (graph-break + recompile) green; expected
+   ~1.4–1.7× per-step — **confirm on the GH200 before claiming it**.
 2. **[DONE 2026-07-16] Per-step full-met H2D for the wind_mean diagnostic.**
    `main._advection_alpha_wind_mean` did `.to(device)` on BOTH [3, Z, Y, X] wind
    tensors from the host met cache **every step** (~84 MB/step H2D at EUROPE scale)
