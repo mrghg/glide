@@ -22,11 +22,19 @@ See `docs/turbulence.md` §3.2.2/§3.2.4.
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime
 from typing import Callable, ClassVar
 
 import numpy as np
 import torch
+
+# Escape hatch for the perf-#1 static-address marking (GH200 diagnosis
+# 2026-07-17: marking collapsed the DtoD staging copies as intended, but the
+# smoke profile showed per-step cudagraph RE-RECORDING — set
+# GLIDE_MARK_STATIC_INPUTS=0 to keep the reusable buffers but skip
+# `mark_static_address`, isolating which half causes the re-record).
+_MARK_STATIC_INPUTS = os.environ.get("GLIDE_MARK_STATIC_INPUTS", "1") != "0"
 
 from lpdm.gpu_engine import GPUEngine, use_static_step_path
 from lpdm.met_reader import HourlyMetTensors
@@ -777,7 +785,7 @@ class HannaScheme(TurbulenceScheme):
 		alpha_buf = self._static_input_buffers.get("alpha")
 		if alpha_buf is None or alpha_buf.device != device or alpha_buf.dtype != dtype:
 			alpha_buf = torch.zeros((), device=device, dtype=dtype)
-			if device.type == "cuda":
+			if device.type == "cuda" and _MARK_STATIC_INPUTS:
 				torch._dynamo.mark_static_address(alpha_buf)
 			self._static_input_buffers["alpha"] = alpha_buf
 		alpha_buf.fill_(float(t_alpha))
@@ -1446,7 +1454,7 @@ class HannaScheme(TurbulenceScheme):
 		)
 		if fresh:
 			buf = torch.empty_like(src)
-			if src.device.type == "cuda":
+			if src.device.type == "cuda" and _MARK_STATIC_INPUTS:
 				torch._dynamo.mark_static_address(buf)
 			self._static_input_buffers[name] = buf
 		if copy_src or fresh:  # a fresh buffer must be initialised regardless
