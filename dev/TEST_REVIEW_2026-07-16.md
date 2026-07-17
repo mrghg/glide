@@ -182,11 +182,17 @@ T1–T5 are green.
 1. ✅ T5a + T5b (same day, quick wins, immediately strengthen the suite) — **DONE 2026-07-17**, `tests/test_dispersion_analytic.py`
 2. ✅ T1 (the curve) — **DONE 2026-07-17** (engine-level, not scheme — see the homogeneity note above), `tests/test_dispersion_analytic.py`
 3. ✅ T4 (before the GH200 terrain acceptance run — the CPU-side gate for PR #7's physics) — **DONE 2026-07-17**, `tests/test_terrain_transport.py` (True holds AGL to ~2.7 m over an 800 m hill; False rides it up ~784 m)
-4. T2 (flagship; budget uninterrupted time) — **NEXT**
-5. T3 (targets the known near-surface risk class)
+4. ✅ T2 (flagship) — **DONE 2026-07-17**, `tests/test_plume_footprint.py` (4 test
+   fns off one module-fixture sim). Asserted on the RAW residence against the
+   exact cell-integrated reflected-Gaussian form (erf in y and over the 0–40 m
+   bin; sharp x(t)=−Ut with u′=0), then STILT as an exact scale factor. Observed:
+   total magnitude ratio **0.992**, near-field columns 0.4%, correlation 0.9985,
+   σ_y ≤1.1% of Taylor. The near-field image-solution worry (OU reflection vs
+   Brownian) proved negligible at these parameters.
+5. T3 (targets the known near-surface risk class) — **NEXT**
 6. Housekeeping items 2–5 as filler between the above; T6 last, if at all.
 
-**Status 2026-07-17:** T5a/T5b/T1 (4 test fns) + T4 (2 test fns) landed on branch
-`tests/synthetic-physics`, all with verified teeth. Remaining: **T2** (Gaussian
-plume — the flagship, whole-chain shape + magnitude), **T3** (PDE diffusion limit,
-the near-surface-K-bias class), and the housekeeping items.
+**Status 2026-07-17 (2nd update):** T5a/T5b/T1 (4 fns) + T4 (2 fns) + T2 (4 fns)
+landed on branch `tests/synthetic-physics` (PR #8), all with verified teeth.
+Remaining: **T3** (PDE diffusion limit, the near-surface-K-bias class), the
+housekeeping items, T6 (deferred).

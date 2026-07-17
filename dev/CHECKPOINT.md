@@ -77,7 +77,14 @@ OU/Taylor statistics have no closed form through the assembled scheme. Verified 
 the engine-OU level with prescribed constant (σ_w, T_L) instead; the scheme's
 substep integration stays covered by the well-mixed + substep-equivalence tests.
 Documented in `docs/VALIDATION.md` and the T5a/T1 notes in the work order.
-**Remaining:** T2 (Gaussian-plume flagship), T3 (PDE diffusion limit), housekeeping.
+
+**Same day, batch 2 — T2 landed** (`tests/test_plume_footprint.py`, 4 test fns off
+one module-fixture backward-plume sim): raw surface residence vs the **exact
+cell-integrated** reflected-Gaussian plume (erf in y and over the 0–40 m bin,
+sharp x(t)=−Ut, σ(t) from Taylor), then STILT as an exact scale factor. Observed:
+**absolute magnitude ratio 0.992** (the whole-chain units check nothing else
+provides), near-field columns 0.4%, 2-D correlation 0.9985, σ_y ≤1.1% of Taylor.
+**Remaining:** T3 (PDE diffusion limit), housekeeping, T6 (deferred).
 
 ### 2026-07-16 Test-suite review → synthetic-physics test plan (work order)
 

@@ -136,7 +136,7 @@ tables above when it lands.
 | T5b | `test_solid_body_rotation_advection_returns_to_start` | circular trajectory, period 2π/ω, O(dt²) | RK2 in spatially varying wind, backward sign | **LANDED** |
 | T1 | `test_taylor_dispersion_curve_ballistic_to_diffusive` (+ `..._position_integration_bias_with_dt`) | σ_z²(t)=2σ_w²T_L[t−T_L(1−e^(−t/T_L))], ballistic→diffusive | engine OU + vertical displacement | **LANDED** |
 | T4 | `test_terrain_following_preserves_agl_crossing_hill` (+ `test_no_slope_correction_lets_particle_ride_the_terrain`) | constant-AGL transit over a hill via the real reader resample | reader terrain resample → production advection (e2e) | **LANDED** |
-| T2 | `test_footprint_matches_analytic_gaussian_plume` | f(x,y)=exp(−y²/2σ_y²)exp(−z_r²/2σ_z²)/(πσ_yσ_zU) | advection+OU+reflection+gridder+STILT units (flagship) | **PLANNED** |
+| T2 | `test_footprint_matches_analytic_gaussian_plume` (+ magnitude, σ_y-width, STILT-scaling companions) | cell-integrated reflected-Gaussian plume, σ(t) from Taylor | advection+OU+reflection+gridder+STILT units (flagship) | **LANDED** |
 | T3 | `test_langevin_diffusion_limit_matches_pde` | ∂c/∂t=∂_z(K∂_zc), Crank–Nicolson reference | inhomogeneous K + drift + reflection; near-surface K bias class | **PLANNED** |
 | T6 | forward/backward reciprocity | forward concentration ≡ backward footprint × source | backward formulation itself | **DEFERRED** |
 
@@ -156,6 +156,22 @@ and the static/dynamic substep-equivalence tests.
 | `test_solid_body_rotation_advection_returns_to_start` | Circle closure after one period; RK2 second order | err ratio `>3.5×` per dt-halving (obs 4.00); finest return `<1e-3·r` | none (deterministic) |
 | `test_taylor_dispersion_curve_ballistic_to_diffusive` | σ_z(t) vs Taylor at 6 checkpoints; ballistic σ_w·t; diffusive 2Kt | curve `<5%` (obs ~0.1%); ballistic `<5%`; diffusive `<8%` | 2201 |
 | `test_taylor_dispersion_position_integration_bias_with_dt` | forward-Euler position bias: tight at dt/T_L=0.01, bounded at 0.2 | fine `<2%`, coarse `<15%` | 71 |
+
+### Analytic plume footprint (`tests/test_plume_footprint.py`)
+
+One backward-plume simulation (module fixture, ~15 s: z_r=50 m, U=5 m/s,
+σ_v=σ_w=0.5 m/s, T_L=100 s, n=200k, dt=5 s, ground reflection) compared against
+the **exact cell-integrated** reflected-Gaussian surface residence
+`(Δx/U)·[Φ-cell in y]·[Φ-integral of the reflected z-density over 0–40 m]` with
+σ(t) from Taylor. Raw residence is asserted (no unit ambiguity); the STILT
+conversion is then checked as an exact scale factor.
+
+| Test | Asserts | Tolerance | Seed |
+| --- | --- | --- | --- |
+| `test_footprint_matches_analytic_gaussian_plume` | crosswind-integrated columns per travel-time band + 2-D correlation | 2–5 T_L: max `<5%` (obs 0.4%); ≥5 T_L: max `<15%` (obs ≤10%, statistical); corr `>0.995` (obs 0.9985) | 9021 |
+| `test_footprint_absolute_magnitude_matches_plume` | total surface residence vs analytic | ratio within ±3% (obs 0.992) | 9021 |
+| `test_footprint_crosswind_width_matches_taylor` | moment-based σ_y (Sheppard-corrected) at ~6 distances | `<5%` (obs ≤1.1%) | 9021 |
+| `test_stilt_conversion_scales_raw_footprint_exactly` | STILT field = raw × m_air/(hρ) | exact (rtol 1e-12) | 9021 |
 
 ### Terrain-following transport (`tests/test_terrain_transport.py`)
 
