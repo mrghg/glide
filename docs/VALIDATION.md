@@ -135,7 +135,7 @@ tables above when it lands.
 | T5a | `test_ou_autocorrelation_and_stationarity` | R(τ)=e^(−τ/T_L); Var(w′)=σ_w² | engine OU update | **LANDED** |
 | T5b | `test_solid_body_rotation_advection_returns_to_start` | circular trajectory, period 2π/ω, O(dt²) | RK2 in spatially varying wind, backward sign | **LANDED** |
 | T1 | `test_taylor_dispersion_curve_ballistic_to_diffusive` (+ `..._position_integration_bias_with_dt`) | σ_z²(t)=2σ_w²T_L[t−T_L(1−e^(−t/T_L))], ballistic→diffusive | engine OU + vertical displacement | **LANDED** |
-| T4 | `test_terrain_hill_footprint_continuous_and_agl_preserved` | constant-AGL transit over a hill; no Finding-7 hole | reader terrain resample → advection → gridder (e2e) | **PLANNED — gate for the GH200 terrain acceptance run** |
+| T4 | `test_terrain_following_preserves_agl_crossing_hill` (+ `test_no_slope_correction_lets_particle_ride_the_terrain`) | constant-AGL transit over a hill via the real reader resample | reader terrain resample → production advection (e2e) | **LANDED** |
 | T2 | `test_footprint_matches_analytic_gaussian_plume` | f(x,y)=exp(−y²/2σ_y²)exp(−z_r²/2σ_z²)/(πσ_yσ_zU) | advection+OU+reflection+gridder+STILT units (flagship) | **PLANNED** |
 | T3 | `test_langevin_diffusion_limit_matches_pde` | ∂c/∂t=∂_z(K∂_zc), Crank–Nicolson reference | inhomogeneous K + drift + reflection; near-surface K bias class | **PLANNED** |
 | T6 | forward/backward reciprocity | forward concentration ≡ backward footprint × source | backward formulation itself | **DEFERRED** |
@@ -156,6 +156,18 @@ and the static/dynamic substep-equivalence tests.
 | `test_solid_body_rotation_advection_returns_to_start` | Circle closure after one period; RK2 second order | err ratio `>3.5×` per dt-halving (obs 4.00); finest return `<1e-3·r` | none (deterministic) |
 | `test_taylor_dispersion_curve_ballistic_to_diffusive` | σ_z(t) vs Taylor at 6 checkpoints; ballistic σ_w·t; diffusive 2Kt | curve `<5%` (obs ~0.1%); ballistic `<5%`; diffusive `<8%` | 2201 |
 | `test_taylor_dispersion_position_integration_bias_with_dt` | forward-Euler position bias: tight at dt/T_L=0.01, bounded at 0.2 | fine `<2%`, coarse `<15%` | 71 |
+
+### Terrain-following transport (`tests/test_terrain_transport.py`)
+
+End-to-end through the real `ArcoEra5ZarrReader` resample (Finding 7 / T4). A
+synthetic pressure-level store with a Gaussian hill and the terrain-following
+vertical velocity; a near-surface particle is backward-advected across the hill by
+the production advection path.
+
+| Test | Asserts | Tolerance | Seed |
+| --- | --- | --- | --- |
+| `test_terrain_following_preserves_agl_crossing_hill` | particle holds AGL crossing an 800 m hill (slope correction cancels the imposed w) | max AGL excursion `< 25 m` (obs ~2.7 m) | none (deterministic) |
+| `test_no_slope_correction_lets_particle_ride_the_terrain` | teeth: without the resample the particle rides the terrain up | excursion `> 200 m` (obs ~784 m ≈ hill height) | none (deterministic) |
 
 Housekeeping planned alongside (same doc): legacy-flag smokes
 (`surface_layer_override`, `flexpart_tl_floors`), `wind_mean`-cache unit test,
