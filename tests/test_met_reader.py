@@ -739,3 +739,60 @@ def test_terrain_following_slope_corrects_w() -> None:
     assert not np.allclose(wf, ws)
     # u=5>0 over east-rising terrain -> AGL-frame w reduced near the surface.
     assert np.all(ws[0] < wf[0] - 1e-9)
+
+
+def _three_hour_mock_dataset() -> xr.Dataset:
+    """The standard mock extended to three hourly steps (02:00 duplicates 01:00's
+    fields; values are irrelevant — these tests assert caching/sharing)."""
+    ds = _build_mock_era5_dataset()
+    extra = ds.isel(time=[1]).assign_coords(time=[np.datetime64("2024-01-01T02:00:00")])
+    return xr.concat([ds, extra], dim="time")
+
+
+def test_terrain_hour_cache_shares_hour_between_adjacent_windows() -> None:
+    # Perf review 2026-07-16 #4: window k's hour_end and window k+1's hour_start
+    # are the same physical hour — the reader must process it ONCE and share the
+    # tensor between the two windows.
+    reader = _InMemoryArcoReader(_three_hour_mock_dataset(), terrain_following=True)
+
+    def req(h0: int, h1: int) -> BoundingBoxRequest:
+        return BoundingBoxRequest(
+            spatial=SpatialBounds(
+                lon_min=19.5, lon_max=21.5, lat_min=9.5, lat_max=11.5, z_min=0.0, z_max=1050.0,
+            ),
+            time=TimeBounds(
+                start=datetime(2024, 1, 1, h0, 0, tzinfo=timezone.utc),
+                end=datetime(2024, 1, 1, h1, 0, tzinfo=timezone.utc),
+            ),
+        )
+
+    win_a = reader.fetch_hourly_window(req(0, 1))
+    assert reader.hour_cache_hits == 0
+    win_b = reader.fetch_hourly_window(req(1, 2))
+    # Hour 01 was processed for win_a and REUSED for win_b: one hit, shared tensor.
+    assert reader.hour_cache_hits == 1
+    assert win_b.hour_start is win_a.hour_end
+    assert win_b.hour_end is not win_a.hour_start
+
+    # Refetching a window in cache range is two hits and identical tensors.
+    win_a2 = reader.fetch_hourly_window(req(0, 1))
+    assert reader.hour_cache_hits == 3
+    assert win_a2.hour_start is win_a.hour_start
+    assert win_a2.hour_end is win_a.hour_end
+
+
+def test_legacy_path_does_not_use_hour_cache() -> None:
+    reader = _InMemoryArcoReader(_build_mock_era5_dataset(), terrain_following=False)
+    request = BoundingBoxRequest(
+        spatial=SpatialBounds(
+            lon_min=19.5, lon_max=21.5, lat_min=9.5, lat_max=11.5, z_min=850.0, z_max=1050.0,
+        ),
+        time=TimeBounds(
+            start=datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc),
+            end=datetime(2024, 1, 1, 1, 0, tzinfo=timezone.utc),
+        ),
+    )
+    reader.fetch_hourly_window(request)
+    reader.fetch_hourly_window(request)
+    assert reader.hour_cache_hits == 0
+    assert len(reader._hour_cache) == 0

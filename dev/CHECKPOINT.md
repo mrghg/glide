@@ -167,13 +167,23 @@ compute** — the physics math is NOT the bottleneck. Ranked:
    upcasting the lerp to float64). **Measured: ~1.2 s → ~77 ms/window (~15×)** —
    now comfortably inside the prefetch budget. NumPy API unchanged
    (`regrid_columns_to_agl` kept as a wrapper); equivalence-tested.
-4. **[OPEN] Met cache keyed per WINDOW duplicates every physical hour.**
-   `main._get_hourly_met_window` caches whole `HourlyMetTensors`; consecutive
-   windows share an hour (window k's `hour_end` == window k+1's `hour_start`), so
-   every hour is stored twice (192 h cache ≈ 50 GiB would be ~25 GiB), read from
-   zarr twice, and terrain-regridded twice. Restructure to a per-HOUR cache with
-   windows assembled as `(hour[H], hour[H+1])` views. Halves met RAM + reads +
-   regrid; contained in main/reader.
+4. **[IMPLEMENTED 2026-07-17] Met cache keyed per WINDOW duplicated every
+   physical hour.** Consecutive windows share an hour (window k's `hour_end` ==
+   window k+1's `hour_start`), so every hour was read from zarr twice,
+   ω→w-converted twice, terrain-regridded twice, and stored twice in the
+   runtime's window cache (192 h ≈ 50 GiB → ~25 GiB effective). Fix (branch
+   `perf/gpu-efficiency`, reader-contained — main.py untouched):
+   `ArcoEra5ZarrReader._processed_hour` — a small thread-safe LRU (6 entries) of
+   fully PROCESSED per-hour bundles on the AGL grid; `fetch_hourly_window`
+   (terrain path) assembles windows from two bundles, so adjacent windows SHARE
+   the common hour's tensor (halving effective window-cache RAM via shared
+   storage) and the duplicate read/convert/regrid is skipped
+   (`reader.hour_cache_hits` counts). Numerics note: each hour is now regridded
+   with its OWN heights instead of the window average — within the documented
+   met-cadence approximation, and it makes hour H bit-identical in both adjacent
+   windows (removing a small inconsistency the window-average scheme had). The
+   legacy pressure-grid path is NOT hour-cacheable (window-dependent level
+   subset ⇒ shape mismatch) and keeps the old two-hour flow unchanged.
 5. **[OPEN] Fold the gridder + eager tail into the graph.** ~45 of the remaining
    ~106 launches/step are `FootprintGridder.accumulate` (+ t_idx math, escape
    count). `scatter_add_` into the persistent accumulator is capture-safe. Do
