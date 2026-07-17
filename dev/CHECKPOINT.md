@@ -59,6 +59,68 @@ Build a modern, highly optimized, backward-in-time LPDM for greenhouse-gas footp
 
 ## Milestone timeline
 
+### 2026-07-17 Synthetic physics tests, batch 1 (T1/T5a/T5b + T4)
+
+First four of the six planned analytic tests landed on branch
+`tests/synthetic-physics` (PR pending), all with verified teeth. `tests/
+test_dispersion_analytic.py` (T5a OU autocorrelation R(τ)=e^(−τ/T_L), obs ~0.003
+vs 0.02 bound; T5b solid-body rotation, RK2 4.00× per dt-halving; T1 Taylor σ_z(t)
+ballistic→diffusive, obs ~0.1% vs 5%). `tests/test_terrain_transport.py` (T4:
+particle holds AGL to ~2.7 m crossing an 800 m hill through the REAL reader
+resample, vs ~784 m with `terrain_following=False` — a 292× teeth contrast; the
+CPU-side gate for the Finding-7 GH200 acceptance). Full suite 242 passed.
+
+**Deviation from the 2026-07-16 plan (below):** T1/T5a were specced to run through
+`HannaScheme.step`, but Hanna has **no homogeneous regime** — T_L is intrinsically
+height-dependent (the very inhomogeneity the Thomson well-mixed drift corrects), so
+OU/Taylor statistics have no closed form through the assembled scheme. Verified at
+the engine-OU level with prescribed constant (σ_w, T_L) instead; the scheme's
+substep integration stays covered by the well-mixed + substep-equivalence tests.
+Documented in `docs/VALIDATION.md` and the T5a/T1 notes in the work order.
+
+**Same day, batch 2 — T2 landed** (`tests/test_plume_footprint.py`, 4 test fns off
+one module-fixture backward-plume sim): raw surface residence vs the **exact
+cell-integrated** reflected-Gaussian plume (erf in y and over the 0–40 m bin,
+sharp x(t)=−Ut, σ(t) from Taylor), then STILT as an exact scale factor. Observed:
+**absolute magnitude ratio 0.992** (the whole-chain units check nothing else
+provides), near-field columns 0.4%, 2-D correlation 0.9985, σ_y ≤1.1% of Taylor.
+**Same day, batch 3 — T3 + housekeeping: the work order is complete (T6 deferred
+by design).** T3 (`tests/test_diffusion_pde.py`): Langevin (production OU +
+Thomson drift + reflection) vs conservative Crank–Nicolson at three checkpoints —
+L1 ≤0.044 vs 0.08 bound, near-surface occupancy ≤7.9% vs 12%. **Design revision,
+measured:** the planned mid-column release was INSENSITIVE to near-surface K
+(¼×K below 50 m ⇒ L1 shift only ~0.02), so the release moved inside the low-K
+layer where a merely halved near-surface K separates by 7–12× — asserted as an
+in-test teeth check against corrupted-K PDE references (the v2-bias class is now
+genuinely detectable). Housekeeping: legacy-flag smokes, wind-mean-cache test
+(pinned to float32-reduction noise, atol 1e-5), memory-guard abort +
+run_metadata diagnostics, Emanuel winter-inversion no-fire guard. Coverage map
+recorded in the work order.
+
+### 2026-07-16 Test-suite review → synthetic-physics test plan (work order)
+
+Full audit of the 236-test suite + a plan for the missing layer: **quantitative
+statistical verification against known analytic results** — the "physics test
+suite robust enough to convince me" item. Detailed instructions, formulas,
+tolerances, pitfalls, and order of attack in **`dev/TEST_REVIEW_2026-07-16.md`**
+(the work order); `docs/VALIDATION.md` refreshed same day (stale claims fixed,
+placeholder rows added for the planned tests).
+
+Suite verdict: strong on mechanics/regression (WMC drift pair, RK2 convergence
+order, static/dynamic parity, graph-break + recompile guards, conservation), but
+NOTHING tests dispersion magnitude or footprint shape against theory, and the
+terrain-following resample has NO end-to-end particle test (`AnalyticMetReader`
+bypasses it). Planned, in order: **T5a** OU autocorrelation/stationarity through
+the substep loop; **T5b** solid-body-rotation advection; **T1** Taylor (1921)
+σ²(t) curve through `HannaScheme.step`; **T4** terrain-hill e2e (the CPU-side
+physics gate for the Finding-7 GH200 acceptance run — do first among the big
+ones); **T2** analytic Gaussian-plume footprint (flagship: whole chain, shape AND
+absolute magnitude); **T3** diffusion-limit vs Crank–Nicolson PDE with
+inhomogeneous K (the class that would have caught the v2 near-surface K bias);
+**T6** forward/backward reciprocity (deferred). Housekeeping: legacy-flag
+smokes, wind_mean-cache unit test, Emanuel winter-column guard, memory-guard
+trip test, one `pytest --cov` run.
+
 ### 2026-07-16 Performance review: remaining efficiency headroom (work order)
 
 Architecture-wide efficiency review (post CUDA-graph 6×). Grounded in the 2026-06-26

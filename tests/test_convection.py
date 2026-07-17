@@ -542,3 +542,78 @@ def test_emanuel_constructor_validates_params() -> None:
 		EmanuelReducedConvection(min_cape_j_kg=-10.0)
 	with pytest.raises(ValueError, match="min_cloud_depth_m"):
 		EmanuelReducedConvection(min_cloud_depth_m=-5.0)
+
+
+def _winter_inversion_column(n_lev: int = 10) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+	"""January-like maritime column: cold surface (272 K) under a low-level
+	inversion, moist near the surface but conditionally stable throughout — the
+	bbox-mean regime the winter validation runs feed the scheme."""
+
+	p_hpa = np.linspace(1000.0, 200.0, n_lev)
+	z_km = -8.0 * np.log(p_hpa / 1000.0)
+	t_k = np.where(z_km < 1.0, 272.0 + 3.0 * z_km, 275.0 - 6.5 * (z_km - 1.0))
+	t_k = np.maximum(t_k, 210.0)
+	q = 3e-3 * np.exp(-z_km / 2.0)
+	return (
+		torch.as_tensor(t_k, dtype=torch.float64),
+		torch.as_tensor(q, dtype=torch.float64),
+		torch.as_tensor(p_hpa * 100.0, dtype=torch.float64),
+	)
+
+
+def test_emanuel_does_not_fire_on_winter_inversion_column() -> None:
+	"""Runtime guard for the January validation runs (dev/CHECKPOINT.md: 'check
+	the v2 log for Emanuel fires' — as a test instead of a log grep): a cold
+	moist column capped by a surface inversion must NOT trigger; every particle
+	passes through untouched."""
+
+	from datetime import datetime, timedelta, timezone
+
+	from lpdm.gpu_engine import GPUEngine
+	from lpdm.met_reader import HourlyMetTensors, MetFieldMetadata
+
+	torch.manual_seed(20260717)
+	t_col, q_col, p_col = _winter_inversion_column()
+	n_lev, n_lat, n_lon = t_col.numel(), 3, 3
+	shape = (n_lev, n_lat, n_lon)
+	t_3d = t_col.to(torch.float32).view(n_lev, 1, 1).expand(shape).contiguous()
+	q_3d = q_col.to(torch.float32).view(n_lev, 1, 1).expand(shape).contiguous()
+	chans = {
+		"u": torch.zeros(shape), "v": torch.zeros(shape), "w": torch.zeros(shape),
+		"blh": torch.full(shape, 300.0), "sp": torch.full(shape, float(p_col[0])),
+		"t": t_3d, "q": q_3d,
+	}
+	names = ("u", "v", "w", "blh", "sp", "t", "q")
+	fields = torch.stack([chans[n] for n in names], dim=0)
+	height = np.asarray(-8000.0 * np.log(np.linspace(1000.0, 200.0, n_lev) / 1000.0))
+	t0 = datetime(2024, 1, 15, 12, 0, 0, tzinfo=timezone.utc)
+	metadata = MetFieldMetadata(
+		lon=np.linspace(-1.0, 1.0, n_lon), lat=np.linspace(-1.0, 1.0, n_lat),
+		level=height,
+		pressure_level_hpa=(np.asarray(p_col, dtype=float) / 100.0),
+		time_start=t0, time_end=t0 + timedelta(hours=1),
+		variable_units={n: "" for n in names},
+	)
+	height_3d = torch.as_tensor(height, dtype=torch.float32).view(n_lev, 1, 1).expand(shape).contiguous()
+	met = HourlyMetTensors(
+		hour_start=fields, hour_end=fields, metadata=metadata,
+		channel_names=names, height_agl_m=height_3d,
+	)
+
+	engine = GPUEngine(device="cpu")
+	scheme = EmanuelReducedConvection()
+	n = 200
+	particles = torch.zeros(n, 4, dtype=torch.float32)
+	particles[:, 2] = torch.empty(n).uniform_(20.0, 3000.0)
+	particles[:, 3] = 1.0 / n
+	z_initial = particles[:, 2].clone()
+	state = scheme.initialize_state(n, device=torch.device("cpu"), dtype=torch.float32)
+	active = torch.ones(n, dtype=torch.bool)
+
+	particles_out, _ = scheme.maybe_convect(
+		particles, state, met, t_alpha=0.5, dt_seconds=300.0,
+		active_mask=active, engine=engine,
+	)
+	assert torch.equal(particles_out[:, 2], z_initial), (
+		"Emanuel convection fired on a stable winter-inversion column"
+	)

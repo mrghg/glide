@@ -1647,3 +1647,76 @@ def test_step_core_does_not_recompile_per_step() -> None:
         torch._dynamo.config.suppress_errors = prev_sup
         torch._dynamo.config.error_on_recompile = prev_rec
         torch._dynamo.reset()
+
+
+def test_wind_mean_cache_matches_direct_and_invalidates_across_windows() -> None:
+    """The per-window wind-mean cache (perf review 2026-07-16 #2) must be
+    invisible: cached, cache-free, and direct-formula values agree exactly
+    (mean and time-lerp commute — both linear), and a new met window invalidates
+    the single-slot cache."""
+
+    import dataclasses
+    from datetime import timedelta
+
+    from lpdm.main import _advection_alpha_wind_mean
+
+    win1 = _varying_wind_met_window()
+    device, dtp = torch.device("cpu"), torch.float64
+    t_cur = win1.metadata.time_start + timedelta(minutes=20)
+
+    cache: dict = {}
+    a1, wm1 = _advection_alpha_wind_mean(win1, t_cur, 60.0, device, dtp, cache)
+    _, wm2 = _advection_alpha_wind_mean(win1, t_cur, 60.0, device, dtp, cache)  # cache hit
+    _, wm3 = _advection_alpha_wind_mean(win1, t_cur, 60.0, device, dtp, None)   # cache-free
+    assert torch.equal(wm1, wm2)
+    assert torch.allclose(wm1, wm3)
+
+    # Reference: the pre-cache formula (interp full grid, then mean). The cache
+    # path reduces in the met's source dtype (float32) before casting, so agree
+    # only to float32 reduction noise -- physically irrelevant for a diagnostic.
+    m_start, m_end = win1.channels("u", "v", "w")
+    ref = (m_start.to(dtp) * (1.0 - a1) + m_end.to(dtp) * a1).reshape(3, -1).mean(dim=1)
+    assert torch.allclose(wm1, ref, atol=1e-5)
+
+    # A different window (new time_start, doubled fields) must invalidate the slot.
+    meta2 = dataclasses.replace(
+        win1.metadata,
+        time_start=win1.metadata.time_start + timedelta(hours=1),
+        time_end=win1.metadata.time_end + timedelta(hours=1),
+    )
+    win2 = dataclasses.replace(
+        win1, metadata=meta2, hour_start=win1.hour_start * 2.0, hour_end=win1.hour_end * 2.0
+    )
+    _, wm4 = _advection_alpha_wind_mean(
+        win2, meta2.time_start + timedelta(minutes=20), 60.0, device, dtp, cache
+    )
+    assert cache["ts"] == meta2.time_start
+    assert torch.allclose(wm4, 2.0 * ref, atol=2e-5)
+
+
+def test_memory_guard_trip_aborts_and_writes_diagnostics(tmp_path: Path) -> None:
+    """A tripped memory guard must abort with MemoryError AND leave the guard
+    diagnostics in run_metadata.json (CLAUDE.md: preserve diagnostic metadata on
+    guard-triggered aborts). Uses an absurdly small RSS limit so the first check
+    trips."""
+
+    import json
+
+    cfg = _make_run_config(
+        output_uri=str(tmp_path / "out"),
+        memory_guard_max_rss_gib=0.001,  # ~1 MiB: any live process exceeds this
+        memory_guard_check_every_steps=1,
+    )
+    reader = _make_reader(cfg, wind_fn=lambda _: (5.0, 0.0, 0.0))
+
+    with pytest.raises(MemoryError, match="Memory safety guard"):
+        _run(cfg, reader=reader)
+
+    meta_path = tmp_path / "out" / "run_metadata.json"
+    assert meta_path.exists(), "guard abort must still write run_metadata.json"
+    text = meta_path.read_text()
+    meta = json.loads(text)
+    assert meta["status"] == "aborted_memory_guard"
+    assert "RSS" in meta["reason"]
+    assert "guard_limit_rss_bytes" in text
+    assert "guard_observed_rss_bytes" in text
