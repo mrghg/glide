@@ -59,6 +59,26 @@ Build a modern, highly optimized, backward-in-time LPDM for greenhouse-gas footp
 
 ## Milestone timeline
 
+### 2026-07-17 Synthetic physics tests, batch 1 (T1/T5a/T5b + T4)
+
+First four of the six planned analytic tests landed on branch
+`tests/synthetic-physics` (PR pending), all with verified teeth. `tests/
+test_dispersion_analytic.py` (T5a OU autocorrelation R(τ)=e^(−τ/T_L), obs ~0.003
+vs 0.02 bound; T5b solid-body rotation, RK2 4.00× per dt-halving; T1 Taylor σ_z(t)
+ballistic→diffusive, obs ~0.1% vs 5%). `tests/test_terrain_transport.py` (T4:
+particle holds AGL to ~2.7 m crossing an 800 m hill through the REAL reader
+resample, vs ~784 m with `terrain_following=False` — a 292× teeth contrast; the
+CPU-side gate for the Finding-7 GH200 acceptance). Full suite 242 passed.
+
+**Deviation from the 2026-07-16 plan (below):** T1/T5a were specced to run through
+`HannaScheme.step`, but Hanna has **no homogeneous regime** — T_L is intrinsically
+height-dependent (the very inhomogeneity the Thomson well-mixed drift corrects), so
+OU/Taylor statistics have no closed form through the assembled scheme. Verified at
+the engine-OU level with prescribed constant (σ_w, T_L) instead; the scheme's
+substep integration stays covered by the well-mixed + substep-equivalence tests.
+Documented in `docs/VALIDATION.md` and the T5a/T1 notes in the work order.
+**Remaining:** T2 (Gaussian-plume flagship), T3 (PDE diffusion limit), housekeeping.
+
 ### 2026-07-16 Test-suite review → synthetic-physics test plan (work order)
 
 Full audit of the 236-test suite + a plan for the missing layer: **quantitative
