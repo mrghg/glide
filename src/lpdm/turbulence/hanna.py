@@ -783,7 +783,7 @@ class HannaScheme(TurbulenceScheme):
 		# went 4× slower than before, GPU-busy 0.7%). A tensor is a dynamic input —
 		# held in a stable 0-d buffer and refilled per step (perf #1).
 		alpha_buf = self._static_input_buffers.get("alpha")
-		if alpha_buf is None or alpha_buf.device != device or alpha_buf.dtype != dtype:
+		if alpha_buf is None or not self._device_matches(alpha_buf.device, device) or alpha_buf.dtype != dtype:
 			alpha_buf = torch.zeros((), device=device, dtype=dtype)
 			if device.type == "cuda" and _MARK_STATIC_INPUTS:
 				torch._dynamo.mark_static_address(alpha_buf)
@@ -1432,6 +1432,23 @@ class HannaScheme(TurbulenceScheme):
 			self._window_field_cache[key] = (ts, stack)
 			return stack
 		return entry[1]
+
+	@staticmethod
+	def _device_matches(buf_device: torch.device, requested: torch.device) -> bool:
+		"""True if a buffer on ``buf_device`` satisfies ``requested``.
+
+		``torch.device("cuda") != torch.device("cuda:0")`` in PyTorch, and a
+		tensor's ``.device`` is always index-qualified — so a naive ``!=``
+		against the runtime's unindexed device reallocated (and re-marked) the
+		alpha buffer EVERY STEP on CUDA. Each step then presented a brand-new
+		marked-static input, forcing cudagraph trees to re-record the whole
+		graph per step (~6 ms/step + capture syncs): the 2026-07-17 GH200
+		profile regression (17 ms/step vs the 5.0 ms baseline). Invisible on
+		CPU, where the comparison is benign — hence a dedicated unit test.
+		"""
+		if buf_device.type != requested.type:
+			return False
+		return requested.index is None or buf_device.index == requested.index
 
 	def _to_static_buffer(self, name: str, src: torch.Tensor, *, copy_src: bool = True) -> torch.Tensor:
 		"""Copy ``src`` into a persistent buffer with a stable storage address.

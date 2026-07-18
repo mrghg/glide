@@ -145,6 +145,20 @@ compute** — the physics math is NOT the bottleneck. Ranked:
    returns the SAME tensor object across windows (refilled), pinned by the
    updated cache test. CPU guards (graph-break + recompile) green; expected
    ~1.4–1.7× per-step — **confirm on the GH200 before claiming it**.
+   **First GH200 profile (2026-07-17, smoke): half right, half regression.**
+   DtoD staging collapsed **49% → 4.3%** of GPU time (the target), BUT the
+   cudagraph was **re-recorded every step** (20 records + 20 instantiates per
+   20-step window, ~6 ms/step + capture device-syncs) → 17 ms/step vs the
+   5.0 ms baseline, GPU-busy 4.6%. **Root cause found by code audit
+   (2026-07-18): `torch.device("cuda") != torch.device("cuda:0")`** — the
+   runtime passes the unindexed device, a tensor's `.device` is always
+   indexed, so the alpha-buffer reuse check failed EVERY step → a brand-new
+   marked-static input per call → cudagraph re-record per call. Invisible on
+   CPU (the comparison is benign there), which is why every CPU guard passed.
+   Fixed via `_device_matches` (index-normalised), regression-tested without a
+   GPU (device objects are pure metadata) + a buffer-identity-across-steps
+   test. `GLIDE_MARK_STATIC_INPUTS=0` escape hatch added during diagnosis
+   (kept). **Re-profile still required before merge/claim.**
 2. **[DONE 2026-07-16] Per-step full-met H2D for the wind_mean diagnostic.**
    `main._advection_alpha_wind_mean` did `.to(device)` on BOTH [3, Z, Y, X] wind
    tensors from the host met cache **every step** (~84 MB/step H2D at EUROPE scale)
