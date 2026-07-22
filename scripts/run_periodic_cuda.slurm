@@ -24,13 +24,20 @@
 #     sbatch scripts/run_periodic_cuda.slurm
 #     sbatch scripts/run_periodic_cuda.slurm configs/smoke_mhd_single_release.yaml  # smoke test first!
 #
+# WALLTIME AS AN ARGUMENT (no need to edit the #SBATCH --time below): any sbatch CLI
+# flag OVERRIDES the in-script #SBATCH default, so pass --time= before the script:
+#     sbatch --time=00:30:00 scripts/run_periodic_cuda.slurm configs/ab_multisite_perf.yaml
+#     sbatch --time=45       scripts/run_periodic_cuda.slurm <config>   # 45 = 45 minutes
+# (SLURM --time accepts MM, MM:SS, HH:MM:SS, or DD-HH:MM:SS.) Same trick works for
+# --mem, --partition, etc. The config is the script's own positional arg and stays LAST.
+#
 # BEFORE FIRST USE, fill in the lines marked  # >>> EDIT (account / partition).
 # =============================================================================
 
 #SBATCH --job-name=glide-periodic-gpu
 #SBATCH --output=slurm_logs/%x-%j.out      # %x=job name, %j=job id (dir must exist at submit)
 #SBATCH --error=slurm_logs/%x-%j.err
-#SBATCH --time=04:00:00                     # GPU run is much faster; trim after a first run
+#SBATCH --time=04:00:00                     # DEFAULT only — override per-job with `sbatch --time=… ` (see header); trim to fit the cluster
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:1                        # one GH200 (a node has 4; we use 1)
