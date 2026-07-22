@@ -159,6 +159,52 @@ compute** — the physics math is NOT the bottleneck. Ranked:
    GPU (device objects are pure metadata) + a buffer-identity-across-steps
    test. `GLIDE_MARK_STATIC_INPUTS=0` escape hatch added during diagnosis
    (kept). **Re-profile still required before merge/claim.**
+   **Re-profile done (2026-07-18 smoke): the re-record bug is gone** —
+   `CUDAGraphNode.record`/`Instantiate` 20→~1, `cudaDeviceSynchronize` 101→1,
+   compiled-region 8.3→0.39 ms/step, DtoD stays 4.3%. #1's mechanism now works
+   as designed. **BUT the production A/B (2026-07-18/22, month
+   `example_mhd_january_periodic`, phase timers) says it does not matter:**
+
+   | phase | main | perf branch | note |
+   |---|---|---|---|
+   | **met_fetch** | 5536.7 s (54.5%) | 5448.7 s (53.2%) | #4: −88 s (−1.6%) |
+   | **convection** | 1736.1 s (17.1%) | 1741.4 s (17.0%) | unchanged |
+   | step | 795.4 s (7.8%) | 852.0 s (8.3%) | CPU-enqueue only; +56 s |
+   | gridder | 583.9 s (5.7%) | 645.2 s (6.3%) | +61 s — but UNCHANGED code, so ~10%/phase is run-to-run NOISE |
+   | **total wall** | 10160 s | 10233 s | +0.7%, within noise |
+
+   **What survives regardless of config: #1 and #4 are within run-to-run
+   noise.** The UNTOUCHED `gridder` phase differs 10.5% between the two runs, so
+   per-phase noise (~10%) exceeds every effect either change produces; total
+   wall is +0.7% (noise). #1's mechanism is confirmed correct (above) but its
+   GPU-side DtoD saving is off the critical path here; #4 shows a small
+   met_fetch dip. Neither moves wall in THIS run.
+
+   **CONFOUNDED MEASUREMENT — do NOT trust the phase *shares* (corrected
+   2026-07-22, Matt).** The A/B config is WRONG for strategic conclusions on two
+   axes, both inflating met_fetch:
+   - *Single-site* (`example_mhd_january_periodic`, `periodic_point`, one MHD
+     point) — pays full met cost per release. The production run is
+     `multi_point_periodic` (`make_multisite_config.py`), where sites in a batch
+     SHARE met windows, so met_fetch per footprint is amortized across all sites.
+   - *`met_cache_max_hours: 2`* — the run's own startup WARNING fired: batch met
+     span ~143 h ⇒ consecutive batches re-fetch the ~119 h overlap ⇒ **~6×
+     redundant met I/O (LRU thrash)**. The production config auto-sizes the cache
+     to `span+advance+6 ≈ 167 h`, which does not thrash. (`main.py` warns; the
+     example config just hasn't been raised. Ignored the warning — my miss.)
+
+   So the 53% met_fetch is a ~6×-inflated, un-amortized artifact, NOT the
+   production character. Back-of-envelope with the cache fixed (met_fetch /6 ≈
+   900 s) flips the ordering: convection would become the largest phase (~31% of
+   a ~5700 s wall), step ~15%. **But that is arithmetic on a broken run — do not
+   act on it. Re-run the A/B properly before any reprioritisation.** Correct
+   command: `python scripts/make_multisite_config.py -o configs/ab.yaml`
+   (auto-sizes cache + batches for the real workload), or at minimum raise
+   `met_cache_max_hours >= 167` in the single-site config. Only THEN read the
+   phase shares. Still-live suspicion (unchanged since 2026-06-26, now with a
+   number to chase): convection at 403 ms/window looks high for a bbox-mean
+   reduced-column scheme — worth a `GLIDE_PROFILE`/host-sync look once the run is
+   representative.
 2. **[DONE 2026-07-16] Per-step full-met H2D for the wind_mean diagnostic.**
    `main._advection_alpha_wind_mean` did `.to(device)` on BOTH [3, Z, Y, X] wind
    tensors from the host met cache **every step** (~84 MB/step H2D at EUROPE scale)
