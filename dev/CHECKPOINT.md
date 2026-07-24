@@ -59,6 +59,49 @@ Build a modern, highly optimized, backward-in-time LPDM for greenhouse-gas footp
 
 ## Milestone timeline
 
+### 2026-07-24 Perf #1/#4 VALIDATED — and a methodology trap that voided the earlier A/Bs
+
+**The venv trap (all earlier phase-timer A/Bs this month were VOID).** SLURM +
+editable install (`.venv` `.pth` → a checkout's `src/`, read at import time) means
+a job runs whatever the working tree is at EXECUTION time, not submission. A/B'ing
+two branches from ONE shared checkout → both jobs loaded the same code. Proof: two
+"different-branch" runs both logged `git rev 3d93651` (= main). Fix: git worktrees,
+**one venv each**, submit each job from its own dir; verify via the log's `git rev`.
+(Same-code pair was not wasted — it gave a clean noise floor for the same-instant/
+adjacent-node case: <1% wall, 2–4% per phase.)
+
+**Valid A/B (2026-07-24), representative config `ab_multisite_perf.yaml` (3 sites,
+2 batches, 192 h cache — no thrash):** main `3d93651` 439.3 s vs perf `aeb5ee1`
+297.7 s = **−32% wall (1.48×).**
+
+| phase | main | perf | Δ |
+|---|---|---|---|
+| met_fetch | 173.7 s | **21.9 s** | **−87% (7.9×)** = #4 |
+| step | 80.3 s | 69.1 s | −14% = #1 (suggestive) |
+| convection | 64.7 s | 74.6 s | +15% (UNCHANGED code → env) |
+| gridder | 25.8 s | 34.3 s | +33% (UNCHANGED code → env) |
+| residual | 94.8 s | 97.8 s | +3% (flat) |
+
+- **#4 (per-hour cache) is the win, not #1.** met_fetch collapsed ~8× — the whole
+  wall saving (~152 s). The ~2× fetch-work reduction tips the marginal prefetch from
+  I/O-bound to hidden, so it reads as ~8× *blocking*-time. Site-independent absolute
+  saving, so at 56 sites the % wall win is smaller (met is a smaller share) but the
+  met-RAM halving is unchanged. I under-rated #4 as "a RAM win."
+- **#1 (static buffers): −14% on step is above noise but NOT isolated** — untouched
+  `gridder`/`convection` moved +33%/+15% on this single cross-node pair, so run
+  variance here ≫ the same-instant 4%. #1's mechanism is proven (2026-07-18 profile:
+  re-record gone, DtoD 49%→4.3%, compiled region 8.3→0.39 ms); its wall contribution
+  is plausibly small-positive with no downside. Don't quote a number without a
+  multi-run isolation.
+
+**PR #9 verdict: validated, ready out of draft** — #4 alone earns it; #1 is
+harmless-to-helpful and fixes the re-record bug. **New optimisation frontier
+(post-#4): `residual` (32.8%, untimed — wind_mean diagnostic, mask/alive/escape
+bookkeeping, per-batch particle-gen + output writes, Python loop) and `convection`
+(25.1%, 259 ms/window) are now the top targets; `met_fetch` is down to 7.4%.** #5
+(gridder into graph)/#6 remain low priority — step is 23% but the CPU-enqueue part
+is the only critical-path piece.
+
 ### 2026-07-17 Synthetic physics tests, batch 1 (T1/T5a/T5b + T4)
 
 First four of the six planned analytic tests landed on branch
@@ -129,15 +172,82 @@ GH200 steady-state profile (5.0 ms/step, GPU-busy 36.5%, **~49% of GPU time =
 then idle" symptom, and fresh measurements below. The pie is **copies > stalls >
 compute** — the physics math is NOT the bottleneck. Ranked:
 
-1. **[OPEN — biggest lever] Cudagraph inputs re-copied every replay (~49% of GPU
-   time).** `hanna._cached_raw_device_met` allocates FRESH device tensors each
-   window (`.to(device)`), so the compiled core's input *addresses* change per
-   window and cudagraph trees copy every input into its static buffer **every
-   replay**. Fix: allocate the buffers once per batch, `copy_()` each new window's
-   data INTO the same storage (addresses never change), and mark them
-   `torch._dynamo.mark_static_address`. Bundle: the per-step
-   `torch.tensor(alpha, device=...)` H2D → `alpha_buf.fill_()` into a static 0-d
-   buffer. Expected ~1.4–1.7× per-step; needs a GH200 re-profile to confirm.
+1. **[IMPLEMENTED 2026-07-17 — GH200 re-profile PENDING] Cudagraph inputs
+   re-copied every replay (~49% of GPU time).** `hanna._cached_raw_device_met`
+   allocated FRESH device tensors each window (`.to(device)`), so the compiled
+   core's input *addresses* changed per window and cudagraph trees copied every
+   input into its static buffer **every replay**. Fix (branch
+   `perf/gpu-efficiency`): `HannaScheme._to_static_buffer` — persistent
+   buffers, allocated once and marked `torch._dynamo.mark_static_address` on
+   CUDA; window-constant inputs (wind stacks, level_arr via
+   `_cached_raw_device_met`; ft/density/meander stacks via
+   `_cached_window_field`) are `copy_`'d once per window; the per-step surface
+   lerps write into stable buffers via `torch.lerp(out=)`; alpha is a reused 0-d
+   buffer refilled with `fill_()`. All mutation happens OUTSIDE the captured
+   region on the default stream. Contract change: the per-window field cache now
+   returns the SAME tensor object across windows (refilled), pinned by the
+   updated cache test. CPU guards (graph-break + recompile) green; expected
+   ~1.4–1.7× per-step — **confirm on the GH200 before claiming it**.
+   **First GH200 profile (2026-07-17, smoke): half right, half regression.**
+   DtoD staging collapsed **49% → 4.3%** of GPU time (the target), BUT the
+   cudagraph was **re-recorded every step** (20 records + 20 instantiates per
+   20-step window, ~6 ms/step + capture device-syncs) → 17 ms/step vs the
+   5.0 ms baseline, GPU-busy 4.6%. **Root cause found by code audit
+   (2026-07-18): `torch.device("cuda") != torch.device("cuda:0")`** — the
+   runtime passes the unindexed device, a tensor's `.device` is always
+   indexed, so the alpha-buffer reuse check failed EVERY step → a brand-new
+   marked-static input per call → cudagraph re-record per call. Invisible on
+   CPU (the comparison is benign there), which is why every CPU guard passed.
+   Fixed via `_device_matches` (index-normalised), regression-tested without a
+   GPU (device objects are pure metadata) + a buffer-identity-across-steps
+   test. `GLIDE_MARK_STATIC_INPUTS=0` escape hatch added during diagnosis
+   (kept). **Re-profile still required before merge/claim.**
+   **Re-profile done (2026-07-18 smoke): the re-record bug is gone** —
+   `CUDAGraphNode.record`/`Instantiate` 20→~1, `cudaDeviceSynchronize` 101→1,
+   compiled-region 8.3→0.39 ms/step, DtoD stays 4.3%. #1's mechanism now works
+   as designed. **BUT the production A/B (2026-07-18/22, month
+   `example_mhd_january_periodic`, phase timers) says it does not matter:**
+
+   | phase | main | perf branch | note |
+   |---|---|---|---|
+   | **met_fetch** | 5536.7 s (54.5%) | 5448.7 s (53.2%) | #4: −88 s (−1.6%) |
+   | **convection** | 1736.1 s (17.1%) | 1741.4 s (17.0%) | unchanged |
+   | step | 795.4 s (7.8%) | 852.0 s (8.3%) | CPU-enqueue only; +56 s |
+   | gridder | 583.9 s (5.7%) | 645.2 s (6.3%) | +61 s — but UNCHANGED code, so ~10%/phase is run-to-run NOISE |
+   | **total wall** | 10160 s | 10233 s | +0.7%, within noise |
+
+   **What survives regardless of config: #1 and #4 are within run-to-run
+   noise.** The UNTOUCHED `gridder` phase differs 10.5% between the two runs, so
+   per-phase noise (~10%) exceeds every effect either change produces; total
+   wall is +0.7% (noise). #1's mechanism is confirmed correct (above) but its
+   GPU-side DtoD saving is off the critical path here; #4 shows a small
+   met_fetch dip. Neither moves wall in THIS run.
+
+   **CONFOUNDED MEASUREMENT — do NOT trust the phase *shares* (corrected
+   2026-07-22, Matt).** The A/B config is WRONG for strategic conclusions on two
+   axes, both inflating met_fetch:
+   - *Single-site* (`example_mhd_january_periodic`, `periodic_point`, one MHD
+     point) — pays full met cost per release. The production run is
+     `multi_point_periodic` (`make_multisite_config.py`), where sites in a batch
+     SHARE met windows, so met_fetch per footprint is amortized across all sites.
+   - *`met_cache_max_hours: 2`* — the run's own startup WARNING fired: batch met
+     span ~143 h ⇒ consecutive batches re-fetch the ~119 h overlap ⇒ **~6×
+     redundant met I/O (LRU thrash)**. The production config auto-sizes the cache
+     to `span+advance+6 ≈ 167 h`, which does not thrash. (`main.py` warns; the
+     example config just hasn't been raised. Ignored the warning — my miss.)
+
+   So the 53% met_fetch is a ~6×-inflated, un-amortized artifact, NOT the
+   production character. Back-of-envelope with the cache fixed (met_fetch /6 ≈
+   900 s) flips the ordering: convection would become the largest phase (~31% of
+   a ~5700 s wall), step ~15%. **But that is arithmetic on a broken run — do not
+   act on it. Re-run the A/B properly before any reprioritisation.** Correct
+   command: `python scripts/make_multisite_config.py -o configs/ab.yaml`
+   (auto-sizes cache + batches for the real workload), or at minimum raise
+   `met_cache_max_hours >= 167` in the single-site config. Only THEN read the
+   phase shares. Still-live suspicion (unchanged since 2026-06-26, now with a
+   number to chase): convection at 403 ms/window looks high for a bbox-mean
+   reduced-column scheme — worth a `GLIDE_PROFILE`/host-sync look once the run is
+   representative.
 2. **[DONE 2026-07-16] Per-step full-met H2D for the wind_mean diagnostic.**
    `main._advection_alpha_wind_mean` did `.to(device)` on BOTH [3, Z, Y, X] wind
    tensors from the host met cache **every step** (~84 MB/step H2D at EUROPE scale)
@@ -160,13 +270,23 @@ compute** — the physics math is NOT the bottleneck. Ranked:
    upcasting the lerp to float64). **Measured: ~1.2 s → ~77 ms/window (~15×)** —
    now comfortably inside the prefetch budget. NumPy API unchanged
    (`regrid_columns_to_agl` kept as a wrapper); equivalence-tested.
-4. **[OPEN] Met cache keyed per WINDOW duplicates every physical hour.**
-   `main._get_hourly_met_window` caches whole `HourlyMetTensors`; consecutive
-   windows share an hour (window k's `hour_end` == window k+1's `hour_start`), so
-   every hour is stored twice (192 h cache ≈ 50 GiB would be ~25 GiB), read from
-   zarr twice, and terrain-regridded twice. Restructure to a per-HOUR cache with
-   windows assembled as `(hour[H], hour[H+1])` views. Halves met RAM + reads +
-   regrid; contained in main/reader.
+4. **[IMPLEMENTED 2026-07-17] Met cache keyed per WINDOW duplicated every
+   physical hour.** Consecutive windows share an hour (window k's `hour_end` ==
+   window k+1's `hour_start`), so every hour was read from zarr twice,
+   ω→w-converted twice, terrain-regridded twice, and stored twice in the
+   runtime's window cache (192 h ≈ 50 GiB → ~25 GiB effective). Fix (branch
+   `perf/gpu-efficiency`, reader-contained — main.py untouched):
+   `ArcoEra5ZarrReader._processed_hour` — a small thread-safe LRU (6 entries) of
+   fully PROCESSED per-hour bundles on the AGL grid; `fetch_hourly_window`
+   (terrain path) assembles windows from two bundles, so adjacent windows SHARE
+   the common hour's tensor (halving effective window-cache RAM via shared
+   storage) and the duplicate read/convert/regrid is skipped
+   (`reader.hour_cache_hits` counts). Numerics note: each hour is now regridded
+   with its OWN heights instead of the window average — within the documented
+   met-cadence approximation, and it makes hour H bit-identical in both adjacent
+   windows (removing a small inconsistency the window-average scheme had). The
+   legacy pressure-grid path is NOT hour-cacheable (window-dependent level
+   subset ⇒ shape mismatch) and keeps the old two-hour flow unchanged.
 5. **[OPEN] Fold the gridder + eager tail into the graph.** ~45 of the remaining
    ~106 launches/step are `FootprintGridder.accumulate` (+ t_idx math, escape
    count). `scatter_add_` into the persistent accumulator is capture-safe. Do

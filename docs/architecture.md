@@ -52,11 +52,14 @@ Device-agnosticism is a core principle: the same code runs on `cuda → mps → 
 ## 3. Module map (compute-relevant)
 
 - **`met_reader.py`** — streams ARCO ERA5 Zarr subsets; geopotential→AGL; omega→w.
-  Resamples the pressure-level fields onto a fixed **terrain-following AGL grid** once
-  per window (`terrain_following=True`, via `vertical_grid.py`), excluding sub-surface
+  Resamples the pressure-level fields onto a fixed **terrain-following AGL grid**
+  (`terrain_following=True`, via `vertical_grid.py`), excluding sub-surface
   levels and slope-correcting `w` — so the per-particle vertical mapping is a run
-  constant and correct over orography (dev/CHECKPOINT.md Finding 7). Returns
-  `hour_start`/`hour_end` 3D tensors for per-step temporal interpolation.
+  constant and correct over orography (dev/CHECKPOINT.md Finding 7). Processing is
+  **per hour through a small LRU** (perf #4): adjacent windows share the common
+  hour's processed tensor, so each physical hour is read/converted/regridded once
+  and window caches hold shared storage. Returns `hour_start`/`hour_end` 3D
+  tensors for per-step temporal interpolation.
 - **`vertical_grid.py`** — the terrain-following resample kernels (pure NumPy, per
   window): AGL grid, per-column pressure→AGL interpolation, terrain slope, `w` transform.
 - **`gpu_engine.py`** — device-safe primitives: RK2 backward advection, OU/Langevin
@@ -374,3 +377,13 @@ specialises on those and recompiles per value (the per-step `alpha` and the per-
 for the level array) and only genuine run-constants (e.g. the `ascending` level order) as
 Python scalars. Also: clone any output that outlives the call and `cudagraph_mark_step_begin()`
 per invocation (cudagraph aliasing).
+
+**Input ADDRESSES must be stable too (perf review 2026-07-16 #1):** cudagraph replay
+copies any input whose storage address changed since capture into the graph's staging
+buffers — so a fresh `.to(device)` per met window silently re-staged the big
+window-constant tensors every step (~49% of GPU time in the 2026-06-26 profile). Rule:
+every tensor input to the compiled core lives in a persistent buffer
+(`HannaScheme._to_static_buffer`, marked `torch._dynamo.mark_static_address` on CUDA)
+and is REFILLED in place (`copy_` / `lerp(out=)` / `fill_`), never reallocated — with all
+mutation outside the captured region. Particle/state tensors are exempt (inherently
+per-step; their staging copy is the price of the clone-on-output pattern).

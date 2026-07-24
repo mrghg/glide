@@ -613,12 +613,15 @@ def test_per_window_field_cache_reuses_within_window_and_rebuilds_across() -> No
     )
     assert torch.allclose(f1[0], expected_su)
 
-    # A new window (different time_start) rebuilds: different object AND, because
-    # its winds differ, different values.
+    # A new window (different time_start) rebuilds the VALUES. Since perf review
+    # 2026-07-16 #1 the stack lives in a persistent static buffer (stable address
+    # for cudagraph replay), so the OBJECT is deliberately the same across
+    # windows — compare against a snapshot of the old values instead.
+    f1_values = f1.clone()
     met_b = _make_meander_test_window(t0 + timedelta(hours=1), u_start_val=20.0, u_end_val=40.0)
     f3, _ = scheme._meander_sigma_fields(met_b, dev, dt)
-    assert f3 is not f1
-    assert not torch.allclose(f3, f1)
+    assert f3 is f1, "new window must refill the SAME static buffer, not allocate"
+    assert not torch.allclose(f3, f1_values)
 
 
 # ---------------------------------------------------------------------------
@@ -848,3 +851,41 @@ def test_legacy_flag_paths_still_run(legacy_kwargs) -> None:
     assert torch.allclose(particles[:, 3].sum(), torch.tensor(1.0), atol=1e-6)
     for key, tensor in state.items():
         assert torch.isfinite(tensor).all(), f"non-finite {key} on legacy path"
+
+
+def test_static_buffer_device_matching_handles_unindexed_cuda() -> None:
+    """Regression for the 2026-07-17 GH200 re-record: torch.device("cuda") !=
+    torch.device("cuda:0"), but a tensor's .device is always index-qualified.
+    The buffer-reuse check must treat them as the same device, or the alpha
+    buffer is reallocated (and re-marked static) every step — forcing a cudagraph
+    re-record per step. Device objects are pure metadata, so this is testable
+    without a GPU."""
+
+    match = HannaScheme._device_matches
+    assert match(torch.device("cuda:0"), torch.device("cuda"))
+    assert match(torch.device("cuda:0"), torch.device("cuda:0"))
+    assert match(torch.device("cpu"), torch.device("cpu"))
+    assert not match(torch.device("cpu"), torch.device("cuda"))
+    assert not match(torch.device("cuda:1"), torch.device("cuda:0"))
+
+
+def test_gather_static_inputs_reuses_buffers_across_steps() -> None:
+    """The compiled-core inputs must keep STABLE tensor objects across steps
+    (perf #1): alpha and the surface-lerp buffers are refilled in place, never
+    reallocated — a reallocation re-stages (or re-records) the cudagraph."""
+
+    from datetime import datetime, timezone
+
+    t0 = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    met = _make_meander_test_window(t0, 4.0, 6.0)
+    scheme = HannaScheme(meander_enabled=False)
+    dev, dtp = torch.device("cpu"), torch.float32
+
+    first = scheme._gather_static_inputs(met, 0.25, dev, dtp)
+    second = scheme._gather_static_inputs(met, 0.75, dev, dtp)
+
+    for key in ("alpha", "blh_field", "sp_field", "ustar_field", "shf_field",
+                "t_field", "ft_fields", "m_start_uvw", "m_end_uvw", "level_arr"):
+        assert second[key] is first[key], f"{key} was reallocated between steps"
+    # ...and the per-step values really did update in place.
+    assert float(second["alpha"]) == 0.75

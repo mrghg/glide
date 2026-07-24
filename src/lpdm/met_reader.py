@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import glob
 import os
+import threading
 from abc import ABC, abstractmethod
+from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Mapping, Sequence
@@ -215,6 +217,11 @@ class ArcoEra5ZarrReader(MetReader):
     #   z, z_sfc -> geopotential -> AGL conversion
     _DERIVATION_KEYS: tuple[str, ...] = ("t", "z", "z_sfc")
 
+    # Per-hour processed cache size. Windows walk the hours monotonically, so a
+    # handful of entries bridges adjacent windows; the runtime's window-level
+    # LRU (memory.met_cache_max_hours) remains the big cache.
+    _HOUR_CACHE_MAX: int = 6
+
     def __init__(
         self,
         zarr_store: str | Sequence[str],
@@ -287,6 +294,17 @@ class ArcoEra5ZarrReader(MetReader):
         self.agl_levels_m = (
             np.asarray(agl_levels_m, dtype="float64") if agl_levels_m is not None else None
         )
+        # Per-hour processed-tensor cache (perf review 2026-07-16 #4), terrain
+        # path only. Consecutive met windows share a physical hour (window k's
+        # hour_end == window k+1's hour_start); caching the PROCESSED hour lets
+        # adjacent windows share one tensor — the duplicate zarr read, omega->w,
+        # and AGL regrid disappear, and downstream window caches hold shared
+        # storage instead of two copies. Legacy pressure-grid windows are not
+        # hour-cacheable (their level subset is window-dependent, so the same
+        # hour can have different shapes in adjacent windows).
+        self._hour_cache: OrderedDict[tuple, dict] = OrderedDict()
+        self._hour_cache_lock = threading.Lock()
+        self.hour_cache_hits = 0
         self.device = torch.device(device)
         self.dtype = dtype
 
@@ -330,76 +348,84 @@ class ArcoEra5ZarrReader(MetReader):
         ds = self._select_variables(ds)
 
         try:
-            start_request = BoundingBoxRequest(
-                spatial=request_hour.spatial,
-                time=TimeBounds(start=t0, end=t0),
-            )
-            end_request = BoundingBoxRequest(
-                spatial=request_hour.spatial,
-                time=TimeBounds(start=t1, end=t1),
-            )
+            if self.terrain_following:
+                # Per-hour processing via the hour cache (perf #4): the shared
+                # hour of adjacent windows is fetched/regridded once and its
+                # tensor SHARED between the two windows.
+                bundle_start = self._processed_hour(ds, t0, request.spatial)
+                bundle_end = self._processed_hour(ds, t1, request.spatial)
+            else:
+                start_request = BoundingBoxRequest(
+                    spatial=request_hour.spatial,
+                    time=TimeBounds(start=t0, end=t0),
+                )
+                end_request = BoundingBoxRequest(
+                    spatial=request_hour.spatial,
+                    time=TimeBounds(start=t1, end=t1),
+                )
 
-            ds_start_lazy = self._slice_spatial_temporal(ds, start_request)
-            ds_end_lazy = self._slice_spatial_temporal(ds, end_request)
-            
-            # Ensure time subsets only have 1 step before accessing values
-            t0_sel, _ = self._coerce_time_bounds_for_dataset(ds_start_lazy, t0, t0)
-            _, t1_sel = self._coerce_time_bounds_for_dataset(ds_end_lazy, t1, t1)
-            ds_start_lazy = ds_start_lazy.sel({self.time_name: t0_sel})
-            ds_end_lazy = ds_end_lazy.sel({self.time_name: t1_sel})
+                ds_start_lazy = self._slice_spatial_temporal(ds, start_request)
+                ds_end_lazy = self._slice_spatial_temporal(ds, end_request)
 
-            # Subset vertical levels using lazy Dask arrays (only reads Z/Z_SFC into memory to evaluate the bound)
-            ds_start_sub, ds_end_sub, level_agl_m, height_agl_3d = self._subset_vertical_levels_by_agl(
-                ds_start=ds_start_lazy,
-                ds_end=ds_end_lazy,
-                spatial=request.spatial,
-            )
+                # Ensure time subsets only have 1 step before accessing values
+                t0_sel, _ = self._coerce_time_bounds_for_dataset(ds_start_lazy, t0, t0)
+                _, t1_sel = self._coerce_time_bounds_for_dataset(ds_end_lazy, t1, t1)
+                ds_start_lazy = ds_start_lazy.sel({self.time_name: t0_sel})
+                ds_end_lazy = ds_end_lazy.sel({self.time_name: t1_sel})
 
-            # Materialize only the fully sliced bounding boxes
-            ds_start = ds_start_sub.compute()
-            ds_end = ds_end_sub.compute()
+                # Subset vertical levels using lazy Dask arrays (only reads Z/Z_SFC
+                # into memory to evaluate the bound)
+                ds_start_sub, ds_end_sub, level_agl_m, height_agl_3d = self._subset_vertical_levels_by_agl(
+                    ds_start=ds_start_lazy,
+                    ds_end=ds_end_lazy,
+                    spatial=request.spatial,
+                )
+
+                # Materialize only the fully sliced bounding boxes
+                ds_start = ds_start_sub.compute()
+                ds_end = ds_end_sub.compute()
         finally:
             close_fn = getattr(ds, "close", None)
             if callable(close_fn):
                 close_fn()
 
+        if self.terrain_following:
+            agl = bundle_start["level"]
+            metadata = MetFieldMetadata(
+                lon=bundle_start["lon"],
+                lat=bundle_start["lat"],
+                level=agl,
+                pressure_level_hpa=bundle_start["pressure_level_hpa"],
+                time_start=t0,
+                time_end=t1,
+                variable_units=bundle_start["units"],
+            )
+            height_broadcast = np.broadcast_to(
+                agl[:, None, None],
+                (agl.size, bundle_start["lat"].size, bundle_start["lon"].size),
+            ).copy()
+            return HourlyMetTensors(
+                hour_start=bundle_start["tensor"],
+                hour_end=bundle_end["tensor"],
+                metadata=metadata,
+                channel_names=self.channel_names,
+                height_agl_m=torch.as_tensor(height_broadcast, dtype=self.dtype, device=self.device),
+            )
+
         hour_start = self._dataset_to_channel_tensor(ds_start)
         hour_end = self._dataset_to_channel_tensor(ds_end)
 
-        lon_arr = np.asarray(ds_start[self.lon_name].values)
-        lat_arr = np.asarray(ds_start[self.lat_name].values)
-        level_out = level_agl_m
-        pressure_level_hpa = np.asarray(ds_start[self.level_name].values)
-        height_agl_3d_out = height_agl_3d
-
-        if self.terrain_following:
-            (
-                hour_start,
-                hour_end,
-                level_out,
-                pressure_level_hpa,
-                height_agl_3d_out,
-            ) = self._resample_terrain_following(
-                hour_start=hour_start,
-                hour_end=hour_end,
-                height_agl_p=height_agl_3d,
-                ds_start=ds_start,
-                lat_arr=lat_arr,
-                lon_arr=lon_arr,
-                z_max_m=request.spatial.z_max,
-            )
-
         metadata = MetFieldMetadata(
-            lon=lon_arr,
-            lat=lat_arr,
-            level=level_out,
-            pressure_level_hpa=pressure_level_hpa,
+            lon=np.asarray(ds_start[self.lon_name].values),
+            lat=np.asarray(ds_start[self.lat_name].values),
+            level=level_agl_m,
+            pressure_level_hpa=np.asarray(ds_start[self.level_name].values),
             time_start=t0,
             time_end=t1,
             variable_units=self._read_variable_units(ds_start),
         )
 
-        height_agl_m = torch.as_tensor(height_agl_3d_out, dtype=self.dtype, device=self.device)
+        height_agl_m = torch.as_tensor(height_agl_3d, dtype=self.dtype, device=self.device)
 
         return HourlyMetTensors(
             hour_start=hour_start,
@@ -409,43 +435,125 @@ class ArcoEra5ZarrReader(MetReader):
             height_agl_m=height_agl_m,
         )
 
-    def _resample_terrain_following(
+    def _processed_hour(self, ds: xr.Dataset, when: datetime, spatial: SpatialBounds) -> dict:
+        """Fetch + fully process ONE met hour onto the terrain-following AGL grid,
+        through the per-hour cache (perf review 2026-07-16 #4).
+
+        Returns a bundle dict: ``tensor`` ([C, Za, Y, X], on the reader's
+        device/dtype), ``lon``/``lat``/``level``/``pressure_level_hpa``/``units``.
+        Cache hits return the SAME bundle object, so adjacent windows share the
+        common hour's tensor — treat bundle tensors as read-only downstream.
+        """
+        key = (
+            when,
+            round(spatial.lon_min, 6), round(spatial.lon_max, 6),
+            round(spatial.lat_min, 6), round(spatial.lat_max, 6),
+            round(spatial.z_min, 3), round(spatial.z_max, 3),
+        )
+        with self._hour_cache_lock:
+            bundle = self._hour_cache.get(key)
+            if bundle is not None:
+                self._hour_cache.move_to_end(key)
+                self.hour_cache_hits += 1
+                return bundle
+
+        hour_request = BoundingBoxRequest(
+            spatial=spatial, time=TimeBounds(start=when, end=when)
+        )
+        ds_hour_lazy = self._slice_spatial_temporal(ds, hour_request)
+        t_sel, _ = self._coerce_time_bounds_for_dataset(ds_hour_lazy, when, when)
+        ds_hour_lazy = ds_hour_lazy.sel({self.time_name: t_sel})
+
+        ds_hour_sub, height_agl_p = self._subset_vertical_levels_single_hour(
+            ds_hour_lazy, spatial
+        )
+        ds_hour = ds_hour_sub.compute()
+
+        tensor_p = self._dataset_to_channel_tensor(ds_hour)
+        lon_arr = np.asarray(ds_hour[self.lon_name].values)
+        lat_arr = np.asarray(ds_hour[self.lat_name].values)
+        tensor_agl, level_out, pressure_level_hpa = self._resample_hour_to_agl(
+            tensor_p, height_agl_p, ds_hour, lat_arr, lon_arr, spatial.z_max
+        )
+        bundle = dict(
+            tensor=tensor_agl,
+            lon=lon_arr,
+            lat=lat_arr,
+            level=level_out,
+            pressure_level_hpa=pressure_level_hpa,
+            units=self._read_variable_units(ds_hour),
+        )
+        with self._hour_cache_lock:
+            self._hour_cache[key] = bundle
+            while len(self._hour_cache) > self._HOUR_CACHE_MAX:
+                self._hour_cache.popitem(last=False)
+        return bundle
+
+    def _subset_vertical_levels_single_hour(
+        self, ds_hour: xr.Dataset, spatial: SpatialBounds
+    ) -> tuple[xr.Dataset, np.ndarray]:
+        """Single-hour analogue of `_subset_vertical_levels_by_agl` (terrain path).
+
+        Subsets pressure levels by THIS hour's own AGL bounds and returns the
+        per-column AGL heights — not window-averaged. Geopotential drift within a
+        window is negligible (the same approximation the window-average made), and
+        per-hour heights make an hour's processed tensor identical in both
+        adjacent windows, which is what makes it cacheable.
+        """
+        if (
+            int(ds_hour.sizes.get(self.lon_name, 0)) == 0
+            or int(ds_hour.sizes.get(self.lat_name, 0)) == 0
+        ):
+            raise ValueError(
+                "Cannot subset vertical levels: empty spatial selection for met hour."
+            )
+        level_agl = self._compute_level_agl_m(ds_hour)
+        if level_agl.size == 0:
+            raise ValueError("Computed empty AGL arrays for met hour.")
+        if not np.isfinite(level_agl).all():
+            raise ValueError(
+                "Geopotential-derived AGL heights contain non-finite values in the "
+                "requested region/time window. The meteorology store is incomplete or "
+                "corrupted, or the source dataset is missing required geopotential "
+                "coverage for this slice."
+            )
+        level_values = np.asarray(ds_hour[self.level_name].values)
+        level_mask = (np.nanmax(level_agl, axis=(1, 2)) >= spatial.z_min) & (
+            np.nanmin(level_agl, axis=(1, 2)) <= spatial.z_max
+        )
+        if not np.any(level_mask):
+            raise ValueError(
+                "No vertical levels intersect requested AGL bounds "
+                f"[{spatial.z_min}, {spatial.z_max}] m"
+            )
+        ds_sub = ds_hour.sel({self.level_name: level_values[level_mask]})
+        return ds_sub, self._compute_level_agl_m(ds_sub)
+
+    def _resample_hour_to_agl(
         self,
-        *,
-        hour_start: torch.Tensor,
-        hour_end: torch.Tensor,
+        tensor_p: torch.Tensor,
         height_agl_p: np.ndarray,
-        ds_start: xr.Dataset,
+        ds_hour: xr.Dataset,
         lat_arr: np.ndarray,
         lon_arr: np.ndarray,
         z_max_m: float,
-    ) -> tuple[torch.Tensor, torch.Tensor, np.ndarray, np.ndarray, np.ndarray]:
-        """Resample the pressure-level window onto a fixed terrain-following AGL grid.
+    ) -> tuple[torch.Tensor, np.ndarray, np.ndarray]:
+        """Resample ONE hour's pressure-level channels onto the fixed AGL grid.
 
-        FLEXPART-style hybrid coordinate (Finding 7): regrid every channel per column
-        onto `agl_levels` (excluding sub-surface levels), slope-correct `w` into the
-        AGL frame, and return the AGL-grid tensors plus the level array, bbox-mean
-        pressure per AGL level, and the (now uniform-per-column) 3D height field.
-        Runs once per window; not in the per-step hot path.
+        FLEXPART-style hybrid coordinate (Finding 7): per-column regrid excluding
+        sub-surface levels, then slope-correct `w` into the AGL frame. Runs on the
+        met prefetch thread, once per hour (perf #3/#4) — never in the per-step
+        hot path.
         """
         agl_levels = (
             self.agl_levels_m if self.agl_levels_m is not None else default_agl_levels(z_max_m)
         )
-
-        # Bracketing depends only on the (window-averaged) level heights, so compute
-        # it once and share it across hour_start / hour_end / the pressure profile —
-        # this runs on the met prefetch thread and must stay cheaper than one window
-        # of GPU compute (perf review 2026-07-16 #3).
         weights = compute_agl_regrid_weights(height_agl_p, agl_levels)
-
-        hs_np = hour_start.detach().cpu().numpy()
-        he_np = hour_end.detach().cpu().numpy()
-        hs_agl = apply_agl_regrid(hs_np, weights)
-        he_agl = apply_agl_regrid(he_np, weights)
+        arr_agl = apply_agl_regrid(tensor_p.detach().cpu().numpy(), weights)
 
         # Slope-correct w into the terrain-following frame (needs u, v, w present).
         if all(k in self.channel_names for k in ("u", "v", "w")):
-            z_sfc = np.asarray(ds_start[self.variable_map["z_sfc"]].values)
+            z_sfc = np.asarray(ds_hour[self.variable_map["z_sfc"]].values)
             if z_sfc.ndim == 3:
                 z_sfc = z_sfc[0]
             terrain_m = z_sfc / GRAVITY_M_S2
@@ -453,16 +561,15 @@ class ArcoEra5ZarrReader(MetReader):
             ui = self.channel_names.index("u")
             vi = self.channel_names.index("v")
             wi = self.channel_names.index("w")
-            z_top = float(agl_levels[-1])
-            for fld in (hs_agl, he_agl):
-                fld[wi] = slope_correct_w(
-                    fld[wi], fld[ui], fld[vi], dhdx, dhdy, agl_levels, z_top
-                )
+            arr_agl[wi] = slope_correct_w(
+                arr_agl[wi], arr_agl[ui], arr_agl[vi], dhdx, dhdy,
+                agl_levels, float(agl_levels[-1]),
+            )
 
         # Bbox-mean pressure per AGL level (hPa) — Hanna-FT / Emanuel read this as a
         # per-level (horizontally-uniform) pressure, so the AGL-grid mean is the same
         # class of approximation they already make on the pressure grid.
-        level_hpa = np.asarray(ds_start[self.level_name].values, dtype="float64")
+        level_hpa = np.asarray(ds_hour[self.level_name].values, dtype="float64")
         # Materialised (not broadcast_to): the torch-backed regrid can't wrap
         # zero-stride numpy views.
         pressure_p = np.ascontiguousarray(
@@ -471,14 +578,8 @@ class ArcoEra5ZarrReader(MetReader):
         pressure_agl = apply_agl_regrid(pressure_p[None], weights)[0]
         pressure_level_hpa = pressure_agl.mean(axis=(1, 2))  # already hPa
 
-        hs_t = torch.as_tensor(hs_agl, dtype=self.dtype, device=self.device)
-        he_t = torch.as_tensor(he_agl, dtype=self.dtype, device=self.device)
-        level_out = np.asarray(agl_levels, dtype="float64")
-        # Height field is now uniform per column (terrain-following): broadcast.
-        height_agl_3d_out = np.broadcast_to(
-            level_out[:, None, None], (level_out.size, *height_agl_p.shape[1:])
-        ).copy()
-        return hs_t, he_t, level_out, pressure_level_hpa, height_agl_3d_out
+        tensor_agl = torch.as_tensor(arr_agl, dtype=self.dtype, device=self.device)
+        return tensor_agl, np.asarray(agl_levels, dtype="float64"), pressure_level_hpa
 
     def get_time_coverage(self) -> tuple[datetime, datetime]:
         """Return the first and last timestamps available in the dataset."""

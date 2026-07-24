@@ -1,0 +1,81 @@
+# GLIDE performance A/B config — a SHORT but REPRESENTATIVE multi-site run.
+#
+# Purpose: profile phase shares (met_fetch / convection / step / gridder) on a run
+# that reproduces production's two decisive characteristics, which a single-site run
+# does NOT (dev/CHECKPOINT.md, 2026-07-22 correction):
+#   1. multi_point_periodic → sites SHARE met windows, so the fixed per-window costs
+#      (met fetch, convection matrix, 3D-field build) amortise across all sites.
+#   2. met_cache_max_hours ABOVE the cross-batch reuse threshold → no ~6x LRU-thrash
+#      re-fetch of the overlapping backward met between batches.
+#
+# It is `example_multisite_january.yaml` trimmed to 2 days of releases (→ 2 batches,
+# so cross-batch met reuse IS exercised). Everything else — 5-day backward window,
+# 20k particles, full physics, EUROPE grid — is production-identical so the phase
+# SHARES are meaningful. ~1/15 the month wall.
+#
+# Caveat: 3 sites amortise met less than the 56-site validation network, so met_fetch
+# share here is an UPPER bound on production — if met is not dominant at 3 sites it is
+# certainly not dominant at 56. For the fully faithful number use
+# `make_multisite_config.py --n-releases 48 --gpu-memory-gib <cap>` (needs the
+# validation CSVs). Bump n_releases to 72/96 for more per-window samples.
+#
+#   GLIDE_PHASE_TIMERS=1 sbatch --time=00:40:00 scripts/run_periodic_cuda.slurm configs/ab_multisite_perf.yaml
+
+io:
+  zarr_store: ~/data/arco-era5/EUROPE_*.zarr
+  output_uri: outputs/ab-multisite-perf
+
+simulation:
+  start_time: 2024-01-01T00:00:00Z
+  length_seconds: 432000              # 5 days backward — production-identical
+  dt_seconds: 60
+  device: auto
+
+release:
+  kind: multi_point_periodic
+  sites:
+    - {name: MHD, lon: -9.9046, lat: 53.3267, alt_agl_m: 10.0}    # Mace Head
+    - {name: RGL, lon: -2.5400, lat: 51.9970, alt_agl_m: 90.0}    # Ridge Hill
+    - {name: TAC, lon:  1.1387, lat: 52.5176, alt_agl_m: 185.0}   # Tacolneston
+  start_time: 2024-01-01T00:00:00Z
+  period_seconds: 3600
+  n_releases: 48                       # 2 days × 24 h (× 3 sites = 144 releases → 2 batches)
+  duration_seconds: 3600
+  n_particles_per_release: 20000       # production value — keep step/gridder shares faithful
+  seed: 42
+
+turbulence:
+  scheme: hanna_1982
+  max_substeps: 6
+  meander:
+    enabled: true
+    coefficient: 0.16
+
+convection:
+  scheme: emanuel_reduced
+  emanuel:
+    closure_c: 0.03
+
+output_grid:
+  lon_bounds: [-98.076, 39.556]
+  lat_bounds: [10.612, 79.174]
+  n_x: 391
+  n_y: 293
+  z_edges_m: [0.0, 40.0, 1000.0, 5000.0]
+  n_time_bins: 1
+
+met_domain:
+  lon_bounds: [-100.0, 40.0]
+  lat_bounds: [10.0, 80.0]
+  alt_max_m: 15000.0
+
+batch:
+  max_releases_per_batch: 72           # 24 h × 3 sites = one calendar day, all sites
+
+memory:
+  met_cache_max_hours: 192             # > ~168 h reuse threshold → no cross-batch thrash
+  met_cache_on_host: true
+  met_prefetch: true
+  log_every_steps: 100
+  gc_every_steps: 50
+  guard_check_every_steps: 10
