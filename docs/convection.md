@@ -4,7 +4,7 @@ Specification for the reduced port of FLEXPART's Emanuel & Živković-Rothman
 (1999) deep-convection scheme (Forster, Stohl & Seibert 2007). Source-of-truth
 for what `lpdm.convection.EmanuelReducedConvection` implements and why; the
 audit deliverable for the "biggest non-audit dispersion gap" called out in the
-2026-05-30 / 2026-05-31 CHECKPOINT entries.
+the physics audit (see `../dev/decisions/0007-reduced-emanuel-convection.md`).
 
 ## 1. Why convection
 
@@ -200,7 +200,7 @@ This is verified deterministically by
    the bbox (one decision for the whole met domain). For small domains this
    is a fine approximation; for very large domains (e.g. continental Europe)
    it can over- or under-trigger compared to FLEXPART. Mirrors the F9
-   approximation used in advection (see CHECKPOINT 2026-05-31 entry).
+   approximation used in advection (see `../dev/decisions/0003-terrain-following-agl-coordinate.md`).
 
 2. **Linear detrainment profile**, not the Emanuel buoyancy-sorting spectrum
    (Forster 2007 Eq 35-36). The updraft detrains with `d(z) ∝ (1 − (z−LCL)/

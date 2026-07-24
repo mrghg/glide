@@ -2,7 +2,9 @@
 
 Technical documentation for GLIDE. Start with the [project README](../README.md)
 for installation and run instructions; these pages cover the physics and the
-engineering in depth.
+engineering in depth. For current project status see [../STATUS.md](../STATUS.md);
+for the *why* behind the major design/physics choices see
+[../dev/decisions/](../dev/decisions/).
 
 ## Contents
 

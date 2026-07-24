@@ -120,7 +120,7 @@ plumbing from Hanna in a few end-to-end tests.
 
 **Pending external validation** (don't use as cross-model baselines yet):
 
-- Quantitative endpoint spread, time-height structure, and column-integrated footprint magnitude under Hanna. The unit tests pin local σ/T_L values and the smoke test pins ensemble-mean preservation; systematic comparison against NAME/FLEXPART is in progress (and the terrain-affected v2/v3 comparisons need re-running after the Finding-7 fix — see `dev/CHECKPOINT.md`).
+- Quantitative endpoint spread, time-height structure, and column-integrated footprint magnitude under Hanna. The unit tests pin local σ/T_L values and the smoke test pins ensemble-mean preservation; systematic comparison against NAME/FLEXPART is in progress (and the terrain-affected v2/v3 comparisons need re-running after the Finding-7 fix — see `../STATUS.md`).
 - Free-troposphere transport accuracy: the Richardson-closure FT scheme is implemented, but its dispersion magnitude is untested against theory until T1/T5a below land.
 
 ## Planned synthetic verification tests
