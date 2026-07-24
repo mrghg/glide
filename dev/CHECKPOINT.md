@@ -59,6 +59,49 @@ Build a modern, highly optimized, backward-in-time LPDM for greenhouse-gas footp
 
 ## Milestone timeline
 
+### 2026-07-24 Perf #1/#4 VALIDATED — and a methodology trap that voided the earlier A/Bs
+
+**The venv trap (all earlier phase-timer A/Bs this month were VOID).** SLURM +
+editable install (`.venv` `.pth` → a checkout's `src/`, read at import time) means
+a job runs whatever the working tree is at EXECUTION time, not submission. A/B'ing
+two branches from ONE shared checkout → both jobs loaded the same code. Proof: two
+"different-branch" runs both logged `git rev 3d93651` (= main). Fix: git worktrees,
+**one venv each**, submit each job from its own dir; verify via the log's `git rev`.
+(Same-code pair was not wasted — it gave a clean noise floor for the same-instant/
+adjacent-node case: <1% wall, 2–4% per phase.)
+
+**Valid A/B (2026-07-24), representative config `ab_multisite_perf.yaml` (3 sites,
+2 batches, 192 h cache — no thrash):** main `3d93651` 439.3 s vs perf `aeb5ee1`
+297.7 s = **−32% wall (1.48×).**
+
+| phase | main | perf | Δ |
+|---|---|---|---|
+| met_fetch | 173.7 s | **21.9 s** | **−87% (7.9×)** = #4 |
+| step | 80.3 s | 69.1 s | −14% = #1 (suggestive) |
+| convection | 64.7 s | 74.6 s | +15% (UNCHANGED code → env) |
+| gridder | 25.8 s | 34.3 s | +33% (UNCHANGED code → env) |
+| residual | 94.8 s | 97.8 s | +3% (flat) |
+
+- **#4 (per-hour cache) is the win, not #1.** met_fetch collapsed ~8× — the whole
+  wall saving (~152 s). The ~2× fetch-work reduction tips the marginal prefetch from
+  I/O-bound to hidden, so it reads as ~8× *blocking*-time. Site-independent absolute
+  saving, so at 56 sites the % wall win is smaller (met is a smaller share) but the
+  met-RAM halving is unchanged. I under-rated #4 as "a RAM win."
+- **#1 (static buffers): −14% on step is above noise but NOT isolated** — untouched
+  `gridder`/`convection` moved +33%/+15% on this single cross-node pair, so run
+  variance here ≫ the same-instant 4%. #1's mechanism is proven (2026-07-18 profile:
+  re-record gone, DtoD 49%→4.3%, compiled region 8.3→0.39 ms); its wall contribution
+  is plausibly small-positive with no downside. Don't quote a number without a
+  multi-run isolation.
+
+**PR #9 verdict: validated, ready out of draft** — #4 alone earns it; #1 is
+harmless-to-helpful and fixes the re-record bug. **New optimisation frontier
+(post-#4): `residual` (32.8%, untimed — wind_mean diagnostic, mask/alive/escape
+bookkeeping, per-batch particle-gen + output writes, Python loop) and `convection`
+(25.1%, 259 ms/window) are now the top targets; `met_fetch` is down to 7.4%.** #5
+(gridder into graph)/#6 remain low priority — step is 23% but the CPU-enqueue part
+is the only critical-path piece.
+
 ### 2026-07-17 Synthetic physics tests, batch 1 (T1/T5a/T5b + T4)
 
 First four of the six planned analytic tests landed on branch
