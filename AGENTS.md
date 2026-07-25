@@ -51,7 +51,11 @@ loops):
   [data/README.md](data/README.md). Tests must not depend on it.
 
 ## Code style
-- Match existing formatting and naming; comment only non-obvious logic.
+- Formatting and linting are automated by **ruff** (config in `pyproject.toml`);
+  pre-commit runs it on every commit. Don't hand-format — run `ruff format .` /
+  `ruff check --fix .` and let the tool decide layout (4-space PEP 8, 100 cols).
+- Secrets are scanned by **gitleaks** in the same hook; never bypass it.
+- Match existing naming; comment only non-obvious logic.
 - Prefer explicit validation for new config fields / CLI flags.
 - Keep memory defaults conservative.
 

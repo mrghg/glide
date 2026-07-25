@@ -66,9 +66,13 @@ viz = [
     "h5netcdf>=1.3",
     "h5py>=3.10",
 ]
-# Test harness. Separate from `viz` so CI can install only what it needs.
+# Test harness + local quality tooling. Separate from `viz` so CI can install
+# only what it needs. `pre-commit` manages ruff/gitleaks via pinned hook envs
+# (.pre-commit-config.yaml); `ruff` is also listed so it can be run directly.
 dev = [
     "pytest>=8.2",
+    "pre-commit>=3.7",
+    "ruff>=0.16",
 ]
 
 [tool.setuptools]
@@ -79,6 +83,36 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+# ---------------------------------------------------------------------------
+# Ruff: linter + formatter. Enforced pre-commit (.pre-commit-config.yaml) and
+# runnable directly: `ruff check .` / `ruff format .`.
+# ---------------------------------------------------------------------------
+[tool.ruff]
+line-length = 100          # matches the codebase's existing convention (p95 ~ 87)
+target-version = "py311"   # keep in sync with requires-python
+extend-exclude = ["notebooks", "slides", ".venv"]
+
+[tool.ruff.lint]
+# Curated high-signal set: pycodestyle (E/W), pyflakes (F), import sorting (I),
+# pyupgrade (UP), bugbear (B), comprehensions (C4), simplify (SIM).
+select = ["E", "W", "F", "I", "UP", "B", "C4", "SIM"]
+ignore = [
+    "E501",    # line length is a formatter concern; long strings/URLs/comments are fine
+    "C408",    # dict(...)/list(...) calls read fine; not worth churning the physics core
+    "C401",    # generator-vs-comprehension is a micro-style call
+    "SIM108",  # ternary vs if/else is a readability judgement, left to the author
+    "B905",    # zip(): explicit strict= everywhere is noise; behaviour is unchanged
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Analytic/physics tests deliberately bind intermediate quantities for clarity
+# and readability even when a given assertion doesn't consume all of them.
+"tests/*" = ["F841"]
+
+[tool.ruff.format]
+indent-style = "space"     # PEP 8 spaces (dev/decisions/0009-ruff-gitleaks-pre-commit.md)
+quote-style = "double"
 
 # ---------------------------------------------------------------------------
 # uv: pin torch to the CUDA 12.6 wheel index on aarch64 (Isambard AI GH200).

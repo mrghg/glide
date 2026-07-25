@@ -18,3 +18,4 @@ alternatives → Status**, with a pointer to the relevant `docs/` page.
 | [0006](0006-hanna-turbulence-flexpart-aligned.md) | Hanna (1982) turbulence, aligned to FLEXPART v11 |
 | [0007](0007-reduced-emanuel-convection.md) | Reduced Emanuel deep convection, once per met window |
 | [0008](0008-multi-site-shared-met-batching.md) | Multi-site shared-met batching + per-hour/per-window met caches |
+| [0009](0009-ruff-gitleaks-pre-commit.md) | Ruff + gitleaks pre-commit hooks; standardise on PEP 8 spaces |
