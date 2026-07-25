@@ -960,8 +960,7 @@ def _make_periodic_config(
     # window-end lands exactly on the cursor grid. With a duration not a
     # multiple of dt, the cursor skips the upper-boundary visit for the
     # earliest release in each batch and that release loses one step's
-    # worth of mass — a real but small discrete-time effect documented
-    # in the M5 stage 5 entry in dev/CHECKPOINT.md.
+    # worth of mass — a real but small discrete-time effect.
     start_time = start_time or datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
     return RunConfig.model_validate(
         {

@@ -1,8 +1,7 @@
 # GLIDE Validation Notes
 
 Scope of the validation suite, expected tolerances and seeds, and which checks are
-still to be added (see [Planned synthetic verification tests](#planned-synthetic-verification-tests)
-and `dev/TEST_REVIEW_2026-07-16.md` for the full plan).
+still to be added (see [Planned synthetic verification tests](#planned-synthetic-verification-tests)).
 
 ## Running the suite
 
@@ -121,14 +120,13 @@ plumbing from Hanna in a few end-to-end tests.
 **Pending external validation** (don't use as cross-model baselines yet):
 
 - Quantitative endpoint spread, time-height structure, and column-integrated footprint magnitude under Hanna. The unit tests pin local σ/T_L values and the smoke test pins ensemble-mean preservation; systematic comparison against NAME/FLEXPART is in progress (and the terrain-affected v2/v3 comparisons need re-running after the Finding-7 fix — see `../STATUS.md`).
-- Free-troposphere transport accuracy: the Richardson-closure FT scheme is implemented, but its dispersion magnitude is untested against theory until T1/T5a below land.
+- Free-troposphere transport accuracy: T1/T5a (below) verify the engine-level OU dispersion the Richardson-closure FT scheme feeds, but the closure's own σ/T_L magnitudes are still pending external validation.
 
 ## Planned synthetic verification tests
 
-From the 2026-07-16 test-suite review. Detailed instructions — analytic targets,
-setups, tolerances, pitfalls, order of attack — live in
-**`dev/TEST_REVIEW_2026-07-16.md`**; each test gains a tolerance/seed row in the
-tables above when it lands.
+From the 2026-07-16 test-suite review (the full work-order document is in git
+history). Each test gains a tolerance/seed row in the tables above when it lands;
+the test-file docstrings carry the analytic targets and design notes.
 
 | ID | Test | Analytic target | Chain covered | Status |
 | --- | --- | --- | --- | --- |

@@ -1,14 +1,14 @@
-"""T4 — terrain-following transport over a hill, end-to-end (Finding 7).
+"""T4 — terrain-following transport over a hill, end-to-end.
 
 The CPU-side acceptance test for the terrain-following vertical coordinate: build a
 synthetic *pressure-level* met store with a Gaussian hill and the vertical velocity
 air genuinely has riding over it, run it through the REAL `ArcoEra5ZarrReader`
 resample, and verify that after the slope correction a near-surface particle holds
 its height above ground while crossing the hill — the mechanism that fills the
-Finding-7 surface-footprint holes. The `terrain_following=False` path (no slope
+surface-footprint holes over high terrain. The `terrain_following=False` path (no slope
 correction) must fail the same check, so the test has teeth.
 
-See dev/TEST_REVIEW_2026-07-16.md (T4) and dev/CHECKPOINT.md (Finding 7).
+See docs/VALIDATION.md (T4) and dev/decisions/0003-terrain-following-agl-coordinate.md.
 """
 
 from __future__ import annotations

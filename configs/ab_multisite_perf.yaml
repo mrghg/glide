@@ -2,7 +2,7 @@
 #
 # Purpose: profile phase shares (met_fetch / convection / step / gridder) on a run
 # that reproduces production's two decisive characteristics, which a single-site run
-# does NOT (dev/CHECKPOINT.md, 2026-07-22 correction):
+# does NOT (see STATUS.md, performance status):
 #   1. multi_point_periodic → sites SHARE met windows, so the fixed per-window costs
 #      (met fetch, convection matrix, 3D-field build) amortise across all sites.
 #   2. met_cache_max_hours ABOVE the cross-batch reuse threshold → no ~6x LRU-thrash

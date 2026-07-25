@@ -1315,8 +1315,7 @@ def _run(
 			# Per-particle active mask uses both bounds (upper: cursor reached the
 			# release time; lower: cursor still inside the backward window) and the
 			# liveness mask. For a single-release batch with no escapes this is
-			# identical to the pre-kill release-time check (stage 3 entry in
-			# dev/CHECKPOINT.md).
+			# identical to the pre-kill release-time check.
 			cursor_offset_s = t_cursor.timestamp() - batch_start_ts
 			active_mask = (
 				(release_time_offsets_s >= cursor_offset_s)

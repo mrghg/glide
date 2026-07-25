@@ -134,8 +134,8 @@ class GPUEngine:
 		self.dtype = dtype
 		# `torch.compile` the elementwise hot-path methods (OU velocity update +
 		# displacement + reflection). Each fuses its internal ops into far fewer
-		# CUDA kernels, which helps when the run is launch-bound (the regime after
-		# the host-sync removal — see CHECKPOINT 2026-06-18b). Off by default;
+		# CUDA kernels, which helps when the run is launch-bound (the regime
+		# after the host-sync removal). Off by default;
 		# opt in with GLIDE_COMPILE=1 (or compile_hot_paths=True). Primarily a CUDA
 		# win (Inductor/Triton); on CPU Inductor may help or be neutral. NOTE:
 		# compiled RNG is statistically equivalent but not bit-identical to eager,

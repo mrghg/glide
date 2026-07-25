@@ -92,9 +92,12 @@ removed and returns only once the architecture settles (see README "Next Steps")
 
 ## Open follow-ups from reviews
 
-- Physics ([dev/PHYSICS_REVIEW_2026-07-02.md](dev/PHYSICS_REVIEW_2026-07-02.md)):
-  per-column vertical interpolation / convection profiles (currently bbox-mean);
-  per-substep σ re-evaluation; convection's hardcoded 3600 s interval.
-- Tests ([dev/TEST_REVIEW_2026-07-16.md](dev/TEST_REVIEW_2026-07-16.md)):
-  forward/backward reciprocity test (T6) deferred; otherwise the analytic-test
-  work order is complete.
+- Physics (2026-07-02 review): per-column vertical interpolation / convection
+  profiles (currently bbox-mean); per-substep σ re-evaluation; convection's
+  hardcoded 3600 s interval.
+- Tests (2026-07-16 review): forward/backward reciprocity test (T6) deferred;
+  otherwise the analytic-test work order is complete
+  ([docs/VALIDATION.md](docs/VALIDATION.md)).
+
+The full review documents were one-shot work orders; they live in git history
+(`dev/`, removed 2026-07-25), not the working tree.

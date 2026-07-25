@@ -562,10 +562,9 @@ def _winter_inversion_column(n_lev: int = 10) -> tuple[torch.Tensor, torch.Tenso
 
 
 def test_emanuel_does_not_fire_on_winter_inversion_column() -> None:
-	"""Runtime guard for the January validation runs (dev/CHECKPOINT.md: 'check
-	the v2 log for Emanuel fires' — as a test instead of a log grep): a cold
-	moist column capped by a surface inversion must NOT trigger; every particle
-	passes through untouched."""
+	"""Runtime guard for the January validation runs (a test instead of a log
+	grep for spurious Emanuel fires): a cold moist column capped by a surface
+	inversion must NOT trigger; every particle passes through untouched."""
 
 	from datetime import datetime, timedelta, timezone
 
