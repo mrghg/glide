@@ -96,11 +96,16 @@ removed and returns only once the architecture settles (see README "Next Steps")
    (1000/975/950 hPa). This is the main lever left on near-surface / BL accuracy,
    the regime footprints care about most, and it lets us **retire** most of the
    pressure→AGL resample rather than extend it (it's what FLEXPART does natively).
-   Cost: a new vertical path in `met_reader` — geopotential/height is no longer a
-   supplied field but reconstructed hydrostatically from the 137-level a/b hybrid
-   coefficients + surface pressure + surface geopotential; ~3.7× the vertical data
-   (stream only the lowest ~60–90 levels); check the model-level vertical-velocity
-   encoding (omega vs eta-dot) against the existing omega→m/s conversion.
+   Cost: a new vertical path in `met_reader` (point it at the `hybrid` coord and
+   stop treating the level values as pressures) + ~3.7× the vertical data (stream
+   only the lowest ~60–90 levels). The download side already supports it
+   (`scripts/download_sample_cube.py --levels model`). Confirmed against the store
+   metadata (2026-07-25): the model-level product ships `geopotential`, `u`, `v`,
+   `temperature`, `specific_humidity` and `vertical_velocity` (omega, Pa/s — same
+   as now) **directly on the hybrid levels**, so the AGL conversion is unchanged
+   (`(z − z_sfc)/g`) — **no hybrid a/b coefficients or hydrostatic reconstruction
+   needed**. Surface fields must be merged in from the pressure/surface store (the
+   model-level store has none); the downloader does this.
    **Sequencing:** like the terrain fix, this shifts footprint magnitudes
    *everywhere*, so it should land **before** the big validation re-run (#1) —
    otherwise we validate a configuration we're about to change.
