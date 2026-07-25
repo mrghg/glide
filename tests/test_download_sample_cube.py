@@ -85,6 +85,8 @@ def test_dispatch_rejects_mixing_named_and_adhoc_modes() -> None:
     module = _load_download_sample_cube_module()
     args = Namespace(
         store_uri="gs://x",
+        surface_store_uri="gs://sfc",
+        levels="pressure",
         zarr_version=2,
         domain="EUROPE",
         year_month="202401",
@@ -115,6 +117,8 @@ def test_dispatch_named_mode_writes_to_out_dir_with_auto_filename(
 
     args = Namespace(
         store_uri="gs://x",
+        surface_store_uri="gs://sfc",
+        levels="pressure",
         zarr_version=2,
         domain="EUROPE",
         year_month="202401",
@@ -132,12 +136,62 @@ def test_dispatch_named_mode_writes_to_out_dir_with_auto_filename(
     assert captured["out_path"] == "/Volumes/external/met/EUROPE_202401.zarr"
 
 
+def test_three_d_and_surface_vars_partition_required_vars() -> None:
+    """REQUIRED_VARS is exactly the 3D fields plus the surface fields, disjoint."""
+
+    module = _load_download_sample_cube_module()
+    assert module.REQUIRED_VARS == module.THREE_D_VARS + module.SURFACE_VARS
+    assert set(module.THREE_D_VARS).isdisjoint(module.SURFACE_VARS)
+    # geopotential is a 3D field (needed on model levels too); its surface
+    # counterpart is a distinct field that lives with the surface fields.
+    assert "geopotential" in module.THREE_D_VARS
+    assert "geopotential_at_surface" in module.SURFACE_VARS
+
+
+def test_dispatch_model_levels_tags_filename_and_resolves_model_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--levels model: '_ml' filename suffix, model-level 3D store, and the
+    surface store passed through for the merge."""
+
+    from argparse import Namespace
+
+    module = _load_download_sample_cube_module()
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(module, "download_sample_cube", lambda **kw: captured.update(kw))
+
+    args = Namespace(
+        store_uri=None,  # resolve from --levels
+        surface_store_uri=module.PRESSURE_LEVEL_STORE,
+        levels="model",
+        zarr_version=2,
+        domain="EUROPE",
+        year_month="202401",
+        out_dir="data/era5",
+        out_path=None,
+        time_start=None,
+        time_end=None,
+        lon_min=None,
+        lon_max=None,
+        lat_min=None,
+        lat_max=None,
+    )
+    module._dispatch(args)
+
+    assert captured["out_path"] == "data/era5/EUROPE_202401_ml.zarr"
+    assert captured["store_uri"] == module.MODEL_LEVEL_STORE
+    assert captured["surface_store_uri"] == module.PRESSURE_LEVEL_STORE
+    assert captured["levels"] == "model"
+
+
 def test_dispatch_requires_both_domain_and_year_month_together() -> None:
     from argparse import Namespace
 
     module = _load_download_sample_cube_module()
     args = Namespace(
         store_uri="gs://x",
+        surface_store_uri="gs://sfc",
+        levels="pressure",
         zarr_version=2,
         domain="EUROPE",
         year_month=None,

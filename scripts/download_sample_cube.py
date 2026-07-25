@@ -17,6 +17,18 @@ Two invocation modes:
            --lon-min -127.0 --lon-max -117.0 --lat-min 33.0 --lat-max 43.0
 
    You must provide ``--out-path``, ``--time-*`` and all four lon/lat bounds.
+
+Vertical coordinate (either mode): ``--levels pressure`` (default) downloads the
+37 pressure levels from the unified store; ``--levels model`` downloads ERA5's
+137 native hybrid model levels (finer near-surface, terrain-following) and merges
+in the surface fields from the pressure/surface store, since the model-level store
+carries none. Named-domain model cubes are written with an ``_ml`` suffix
+(``<DOMAIN>_<YYYYMM>_ml.zarr``) and every cube records its type in the
+``glide_vertical_coordinate`` attr, so the two met types are distinguishable on
+disk. Model-level stores use a ``hybrid`` vertical coord (vs ``level``), so the
+reader must be pointed at it with ``level_name="hybrid"``.
+
+       python scripts/download_sample_cube.py --domain EUROPE --year-month 202401 --levels model
 """
 
 from __future__ import annotations
@@ -30,29 +42,49 @@ from pathlib import Path
 import numpy as np
 import xarray as xr
 
-# Logical to ERA5 physical mapping required by the runtime.
-# - friction_velocity and surface_sensible_heat_flux are required by the Hanna
-#   turbulence scheme (see docs/turbulence.md). They are surface fields so
-#   adding them is cheap.
-# - specific_humidity is required by the Emanuel deep-convection scheme (see
-#   docs/convection.md). It is a 3D pressure-level field, so it adds roughly as
-#   much volume as temperature/geopotential — but the example periodic config
-#   enables convection by default, so a cube without it cannot run that config.
-# Downloading all of them keeps the local cube ready for placeholder, Hanna,
-# and convection-enabled runs alike.
-REQUIRED_VARS = [
+# ARCO ERA5 analysis-ready source stores (0.25 deg, hourly, on GCS).
+#
+# - Pressure levels: ONE "unified" store carrying both the 37-pressure-level 3D
+#   fields and the surface fields.
+# - Model levels: the 3D fields live on ERA5's 137 native hybrid levels in a
+#   SEPARATE store that has NO surface fields. The surface fields must therefore
+#   be merged in from the pressure/surface store. Confirmed against the store
+#   metadata 2026-07-25: the model-level store provides `geopotential` directly
+#   on the hybrid levels, so the geometric-height/AGL conversion is unchanged
+#   (no hybrid a/b coefficients or hydrostatic integration needed).
+PRESSURE_LEVEL_STORE = "gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3"
+MODEL_LEVEL_STORE = "gs://gcp-public-data-arco-era5/ar/model-level-1h-0p25deg.zarr-v1"
+
+# 3D fields, carried on whichever vertical coordinate the chosen store uses
+# (`level` for pressure levels, `hybrid` for model levels).
+# - u/v/vertical_velocity: advection (vertical_velocity is omega, Pa/s).
+# - temperature: needed for the omega->w conversion.
+# - geopotential: geometric-height / AGL conversion.
+# - specific_humidity: Emanuel deep convection (docs/convection.md). The example
+#   periodic config enables convection, so a cube without it cannot run it.
+THREE_D_VARS = [
     "u_component_of_wind",
     "v_component_of_wind",
     "vertical_velocity",
+    "temperature",
+    "geopotential",
+    "specific_humidity",
+]
+
+# Surface / single-level fields (2D: time, lat, lon), always from the
+# pressure/surface store. friction_velocity and surface_sensible_heat_flux drive
+# the Hanna turbulence scheme (docs/turbulence.md); geopotential_at_surface is
+# the orography used by the terrain-following AGL conversion.
+SURFACE_VARS = [
     "boundary_layer_height",
     "surface_pressure",
-    "temperature",
-    "specific_humidity",
-    "geopotential",
     "geopotential_at_surface",
     "friction_velocity",
     "surface_sensible_heat_flux",
 ]
+
+# The full unified pressure-level list (3D + surface) lives in one store.
+REQUIRED_VARS = THREE_D_VARS + SURFACE_VARS
 
 
 # Registry of named meteorological-archive domains. Add new domains here rather
@@ -154,7 +186,7 @@ def _replace_store_atomically(tmp_path: str, out_path: str) -> None:
             shutil.rmtree(backup_store)
 
 
-def _validate_written_store(out_path: str) -> None:
+def _validate_written_store(out_path: str, expected_vars: list[str]) -> None:
     """Stream-check the written store for non-finite values without loading whole vars into RAM.
 
     Uses xarray's dask-backed reductions: ``isfinite().all()`` lazily evaluates
@@ -165,7 +197,7 @@ def _validate_written_store(out_path: str) -> None:
 
     ds = xr.open_zarr(out_path, consolidated=True)
     try:
-        for var_name in REQUIRED_VARS:
+        for var_name in expected_vars:
             all_finite = bool(np.isfinite(ds[var_name]).all().compute().item())
             if not all_finite:
                 raise ValueError(
@@ -206,36 +238,31 @@ def _resolve_domain_bbox(domain: str) -> dict[str, float]:
     }
 
 
-def download_sample_cube(
-    out_path: str,
-    store_uri: str,
+def _require_vars(ds: xr.Dataset, required: list[str], store_uri: str) -> None:
+    missing = [v for v in required if v not in ds.variables]
+    if missing:
+        raise ValueError(f"Missing required variables in {store_uri!r}: {missing}")
+
+
+def _slice_domain(
+    ds: xr.Dataset,
     time_start: str,
     time_end: str,
     lon_min: float,
     lon_max: float,
     lat_min: float,
     lat_max: float,
-    zarr_version: int,
-    archive_attrs: dict[str, str] | None = None,
-):
-    print(f"Opening remote Zarr store at {store_uri}...")
-    # Public ARCO bucket access should use anonymous GCS token via gcsfs.
-    ds = xr.open_zarr(store_uri, consolidated=True, storage_options={"token": "anon"})
+) -> xr.Dataset:
+    """Slice a global ARCO dataset to the requested time/lat/lon box.
 
-    missing = [v for v in REQUIRED_VARS if v not in ds.variables]
-    if missing:
-        raise ValueError(f"Missing required variables in dataset: {missing}")
-
-    ds = ds[REQUIRED_VARS]
+    Handles ERA5's 0..360 longitude (incl. Greenwich-crossing boxes) and
+    descending latitude, and returns a store with a strictly ascending
+    -180..180 longitude coordinate. Purely lazy — no chunk data is read.
+    """
 
     # ERA5 uses 0..360 for longitude. Convert negative requested longitudes.
     req_lon_min = lon_min + 360.0 if lon_min < 0 else lon_min
     req_lon_max = lon_max + 360.0 if lon_max < 0 else lon_max
-
-    print(f"Slicing time: {time_start} to {time_end}")
-    print(
-        f"Slicing spatial: Lat [{lat_min}, {lat_max}], Lon [{lon_min}, {lon_max}] (ERA5 lon coords [{req_lon_min}, {req_lon_max}])"
-    )
 
     # ERA5 latitudes are typically stored descending (90 to -90).
     lat_values = ds["latitude"].values
@@ -244,12 +271,7 @@ def download_sample_cube(
     else:
         lat_slice = slice(lat_min, lat_max)
 
-    ds_subset = ds.sel(
-        {
-            "time": slice(time_start, time_end),
-            "latitude": lat_slice,
-        }
-    )
+    ds_subset = ds.sel({"time": slice(time_start, time_end), "latitude": lat_slice})
 
     # Handle longitudes bridging the 0/360 wrap.
     if req_lon_min <= req_lon_max:
@@ -265,12 +287,72 @@ def download_sample_cube(
     # non-monotonic, which breaks .sel(slice(...)) lookups in any downstream
     # consumer. The conversion only relabels the coord, so it's a lazy op
     # that does not touch chunk data.
-    ds_subset = _normalise_longitude_to_ascending(ds_subset)
+    return _normalise_longitude_to_ascending(ds_subset)
 
-    if archive_attrs:
-        # Persist provenance into the local store's attrs so we can answer
-        # "what is this?" by opening the Zarr alone.
-        ds_subset.attrs = {**ds_subset.attrs, **archive_attrs}
+
+def download_sample_cube(
+    out_path: str,
+    store_uri: str,
+    time_start: str,
+    time_end: str,
+    lon_min: float,
+    lon_max: float,
+    lat_min: float,
+    lat_max: float,
+    zarr_version: int,
+    archive_attrs: dict[str, str] | None = None,
+    *,
+    levels: str = "pressure",
+    surface_store_uri: str = PRESSURE_LEVEL_STORE,
+):
+    """Download a localised ERA5 cube on pressure levels or native model levels.
+
+    ``levels="pressure"`` (default): all fields come from the single unified
+    pressure/surface store ``store_uri`` (the 3D fields sit on a ``level`` coord).
+
+    ``levels="model"``: the 3D fields come from the model-level store
+    ``store_uri`` (on a 137-deep ``hybrid`` coord) and the surface fields are
+    merged in from ``surface_store_uri`` — the model-level store has none.
+    """
+
+    print(f"Slicing time: {time_start} to {time_end}")
+    print(f"Slicing spatial: Lat [{lat_min}, {lat_max}], Lon [{lon_min}, {lon_max}]")
+    box = (time_start, time_end, lon_min, lon_max, lat_min, lat_max)
+    # Public ARCO bucket access should use anonymous GCS token via gcsfs.
+    anon = {"token": "anon"}
+
+    if levels == "pressure":
+        print(f"Opening unified pressure/surface store at {store_uri}...")
+        ds = xr.open_zarr(store_uri, consolidated=True, storage_options=anon)
+        _require_vars(ds, REQUIRED_VARS, store_uri)
+        ds_subset = _slice_domain(ds[REQUIRED_VARS], *box)
+        written_vars = REQUIRED_VARS
+    elif levels == "model":
+        print(f"Opening model-level 3D store at {store_uri}...")
+        ds_ml = xr.open_zarr(store_uri, consolidated=True, storage_options=anon)
+        _require_vars(ds_ml, THREE_D_VARS, store_uri)
+        print(f"Opening surface store at {surface_store_uri}...")
+        ds_sfc = xr.open_zarr(surface_store_uri, consolidated=True, storage_options=anon)
+        _require_vars(ds_sfc, SURFACE_VARS, surface_store_uri)
+
+        ds_3d = _slice_domain(ds_ml[THREE_D_VARS], *box)
+        ds_surface = _slice_domain(ds_sfc[SURFACE_VARS], *box)
+        # Both are 0.25 deg ar products on identical time/lat/lon grids, so an
+        # exact-join merge aligns them; any mismatch fails loudly rather than
+        # silently dropping timestamps. The 3D store carries the `hybrid` coord;
+        # the surface fields have no vertical dim, so there is no name collision.
+        print("Merging model-level 3D fields with surface fields...")
+        ds_subset = xr.merge([ds_3d, ds_surface], join="exact", combine_attrs="drop_conflicts")
+        written_vars = THREE_D_VARS + SURFACE_VARS
+    else:
+        raise ValueError(f"Unknown levels={levels!r}; expected 'pressure' or 'model'.")
+
+    # Persist provenance (incl. the vertical coordinate type) into the store's
+    # attrs so we can answer "what is this?" by opening the Zarr alone, and so
+    # consumers can tell pressure- from model-level cubes apart.
+    attrs = dict(archive_attrs or {})
+    attrs["glide_vertical_coordinate"] = "model_level" if levels == "model" else "pressure_level"
+    ds_subset.attrs = {**ds_subset.attrs, **attrs}
 
     print(
         f"Subset computed. Estimated size in memory (uncompressed): {ds_subset.nbytes / (1024**3):.2f} GB"
@@ -295,7 +377,7 @@ def download_sample_cube(
             zarr_format=zarr_version,
         )
 
-    _validate_written_store(tmp_out_path)
+    _validate_written_store(tmp_out_path, written_vars)
     _replace_store_atomically(tmp_out_path, out_path)
 
     print(f"Download and local store setup complete: {out_path}")
@@ -311,9 +393,32 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--levels",
+        choices=["pressure", "model"],
+        default="pressure",
+        help=(
+            "Vertical coordinate to download. 'pressure' (default): 37 pressure "
+            "levels from the unified store. 'model': ERA5's 137 native hybrid "
+            "levels (finer near-surface, terrain-following) merged with surface "
+            "fields from the pressure/surface store. Named-domain model cubes get "
+            "an '_ml' filename suffix."
+        ),
+    )
+    parser.add_argument(
         "--store-uri",
-        default="gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3",
-        help="ARCO ERA5 Zarr store URI on GCS.",
+        default=None,
+        help=(
+            "ARCO ERA5 3D-field Zarr store on GCS. Defaults to the store matching "
+            f"--levels: pressure -> {PRESSURE_LEVEL_STORE}; model -> {MODEL_LEVEL_STORE}."
+        ),
+    )
+    parser.add_argument(
+        "--surface-store-uri",
+        default=PRESSURE_LEVEL_STORE,
+        help=(
+            "Store to source the 2D surface fields from when --levels model (the "
+            "model-level store has none). Ignored for --levels pressure."
+        ),
     )
     parser.add_argument(
         "--zarr-version",
@@ -351,6 +456,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 
 
 def _dispatch(args: argparse.Namespace) -> None:
+    # Resolve the 3D-field store from --levels unless explicitly overridden.
+    store_uri = args.store_uri or (
+        MODEL_LEVEL_STORE if args.levels == "model" else PRESSURE_LEVEL_STORE
+    )
+    level_suffix = "_ml" if args.levels == "model" else ""
+
     using_named = args.domain is not None or args.year_month is not None
     using_adhoc = any(
         v is not None
@@ -377,16 +488,18 @@ def _dispatch(args: argparse.Namespace) -> None:
             raise SystemExit("--domain and --year-month must be given together.")
         bbox = _resolve_domain_bbox(args.domain)
         t_start, t_end = _resolve_year_month_window(args.year_month)
-        out_path = os.path.join(args.out_dir, f"{args.domain}_{args.year_month}.zarr")
+        out_path = os.path.join(args.out_dir, f"{args.domain}_{args.year_month}{level_suffix}.zarr")
         archive_attrs = {
             "glide_domain": args.domain,
             "glide_year_month": args.year_month,
-            "glide_source_store": args.store_uri,
+            "glide_source_store": store_uri,
             "glide_domain_description": str(DOMAINS[args.domain]["description"]),
         }
+        if args.levels == "model":
+            archive_attrs["glide_surface_store"] = args.surface_store_uri
         download_sample_cube(
             out_path=out_path,
-            store_uri=args.store_uri,
+            store_uri=store_uri,
             time_start=t_start,
             time_end=t_end,
             lon_min=bbox["lon_min"],
@@ -395,6 +508,8 @@ def _dispatch(args: argparse.Namespace) -> None:
             lat_max=bbox["lat_max"],
             zarr_version=args.zarr_version,
             archive_attrs=archive_attrs,
+            levels=args.levels,
+            surface_store_uri=args.surface_store_uri,
         )
         return
 
@@ -414,7 +529,7 @@ def _dispatch(args: argparse.Namespace) -> None:
         )
     download_sample_cube(
         out_path=args.out_path,
-        store_uri=args.store_uri,
+        store_uri=store_uri,
         time_start=args.time_start,
         time_end=args.time_end,
         lon_min=args.lon_min,
@@ -422,6 +537,8 @@ def _dispatch(args: argparse.Namespace) -> None:
         lat_min=args.lat_min,
         lat_max=args.lat_max,
         zarr_version=args.zarr_version,
+        levels=args.levels,
+        surface_store_uri=args.surface_store_uri,
     )
 
 
