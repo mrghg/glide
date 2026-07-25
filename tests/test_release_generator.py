@@ -13,7 +13,7 @@ multi-release batches.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 import torch
@@ -21,8 +21,8 @@ import torch
 from lpdm.config import ConcreteRelease, ReleaseBatch
 from lpdm.release_generator import (
     ColumnRelease,
-    PointRelease,
     ParticleBatch,
+    PointRelease,
     generate_batch_particles,
 )
 
@@ -123,7 +123,7 @@ def _single_release_batch(
     duration_seconds: int = 1800,
     release_time: datetime | None = None,
 ) -> ReleaseBatch:
-    release_time = release_time or datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
+    release_time = release_time or datetime(2024, 1, 1, 0, 0, tzinfo=UTC)
     concrete = ConcreteRelease(
         release_idx=0,
         release_time=release_time,
@@ -186,7 +186,7 @@ def test_generate_batch_particles_unseeded_offsets_are_in_range() -> None:
 def test_generate_batch_particles_multi_release_concatenates_and_tags() -> None:
     """Two releases at different times: particles, indices and offsets line up."""
 
-    t0 = datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
+    t0 = datetime(2024, 1, 1, 0, 0, tzinfo=UTC)
     t1 = t0 + timedelta(hours=1)
     rel0 = ConcreteRelease(
         release_idx=0,
@@ -233,7 +233,7 @@ def test_generate_batch_particles_multi_release_concatenates_and_tags() -> None:
 def test_generate_batch_particles_per_release_seeding_is_independent() -> None:
     """Different release seeds must produce different within-release offset draws."""
 
-    t0 = datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
+    t0 = datetime(2024, 1, 1, 0, 0, tzinfo=UTC)
     common_kwargs = dict(
         release_time=t0,
         lon=0.0,
@@ -276,15 +276,27 @@ def test_generate_batch_particles_rejects_empty_batch() -> None:
 def test_generate_batch_particles_emits_release_window_end_offsets() -> None:
     """M5 stage 3: per-particle window-end offsets per release, in batch-start frame."""
 
-    t0 = datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
+    t0 = datetime(2024, 1, 1, 0, 0, tzinfo=UTC)
     t1 = t0 + timedelta(hours=2)
     rel0 = ConcreteRelease(
-        release_idx=0, release_time=t0, lon=0.0, lat=0.0, alt_agl_m=10.0,
-        duration_seconds=1800, n_particles=10, seed=1,
+        release_idx=0,
+        release_time=t0,
+        lon=0.0,
+        lat=0.0,
+        alt_agl_m=10.0,
+        duration_seconds=1800,
+        n_particles=10,
+        seed=1,
     )
     rel1 = ConcreteRelease(
-        release_idx=1, release_time=t1, lon=0.0, lat=0.0, alt_agl_m=10.0,
-        duration_seconds=3600, n_particles=20, seed=2,
+        release_idx=1,
+        release_time=t1,
+        lon=0.0,
+        lat=0.0,
+        alt_agl_m=10.0,
+        duration_seconds=3600,
+        n_particles=20,
+        seed=2,
     )
     pb = generate_batch_particles(
         ReleaseBatch(batch_idx=0, releases=(rel0, rel1)),

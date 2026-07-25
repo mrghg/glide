@@ -20,104 +20,103 @@ import torch
 from lpdm.gpu_engine import GPUEngine
 from lpdm.met_reader import HourlyMetTensors
 
-
 TurbulenceState: TypeAlias = dict[str, torch.Tensor]
 
 
 class TurbulenceScheme(ABC):
-	"""Abstract interface for turbulence parameterizations."""
+    """Abstract interface for turbulence parameterizations."""
 
-	name: ClassVar[str]
+    name: ClassVar[str]
 
-	@abstractmethod
-	def required_met_keys(self) -> tuple[str, ...]:
-		"""Logical met-variable keys this scheme reads from `HourlyMetTensors`.
+    @abstractmethod
+    def required_met_keys(self) -> tuple[str, ...]:
+        """Logical met-variable keys this scheme reads from `HourlyMetTensors`.
 
-		Names must match keys in `ArcoEra5ZarrReader.DEFAULT_VARIABLE_MAP`. The runtime
-		cross-checks these at startup so missing fields fail loud rather than silently
-		defaulting.
-		"""
+        Names must match keys in `ArcoEra5ZarrReader.DEFAULT_VARIABLE_MAP`. The runtime
+        cross-checks these at startup so missing fields fail loud rather than silently
+        defaulting.
+        """
 
-	@abstractmethod
-	def initialize_state(
-		self,
-		n_particles: int,
-		*,
-		device: torch.device,
-		dtype: torch.dtype,
-	) -> TurbulenceState:
-		"""Allocate per-particle state tensors for this scheme."""
+    @abstractmethod
+    def initialize_state(
+        self,
+        n_particles: int,
+        *,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> TurbulenceState:
+        """Allocate per-particle state tensors for this scheme."""
 
-	@abstractmethod
-	def step(
-		self,
-		particles: torch.Tensor,
-		state: TurbulenceState,
-		met_window: HourlyMetTensors,
-		t_alpha: float,
-		dt_seconds: float,
-		active_mask: torch.Tensor,
-		engine: GPUEngine,
-	) -> tuple[torch.Tensor, TurbulenceState]:
-		"""Apply one turbulence step to the particle cloud.
+    @abstractmethod
+    def step(
+        self,
+        particles: torch.Tensor,
+        state: TurbulenceState,
+        met_window: HourlyMetTensors,
+        t_alpha: float,
+        dt_seconds: float,
+        active_mask: torch.Tensor,
+        engine: GPUEngine,
+    ) -> tuple[torch.Tensor, TurbulenceState]:
+        """Apply one turbulence step to the particle cloud.
 
-		Args:
-			particles: (N, 4) tensor [lon, lat, alt, weight] for the entire ensemble.
-			state: per-particle turbulence state (e.g. perturbation velocities).
-			met_window: bracketing hourly met fields for temporal interpolation.
-			t_alpha: temporal interpolation weight in [0, 1] for met blending.
-			dt_seconds: integration timestep length.
-			active_mask: (N,) bool. Inactive particles must be left unmodified.
-			engine: `GPUEngine` instance for primitives (OU update, displacement,
-				surface reflection).
+        Args:
+                particles: (N, 4) tensor [lon, lat, alt, weight] for the entire ensemble.
+                state: per-particle turbulence state (e.g. perturbation velocities).
+                met_window: bracketing hourly met fields for temporal interpolation.
+                t_alpha: temporal interpolation weight in [0, 1] for met blending.
+                dt_seconds: integration timestep length.
+                active_mask: (N,) bool. Inactive particles must be left unmodified.
+                engine: `GPUEngine` instance for primitives (OU update, displacement,
+                        surface reflection).
 
-		Returns:
-			(updated_particles, updated_state). Implementations may mutate inputs in
-			place; callers must treat the return values as authoritative.
-		"""
+        Returns:
+                (updated_particles, updated_state). Implementations may mutate inputs in
+                place; callers must treat the return values as authoritative.
+        """
 
-	def step_includes_advection(self, engine: GPUEngine) -> bool:
-		"""Whether ``step`` also performs the RK2 mean-wind advection (so the runtime
-		must NOT advect separately).
+    def step_includes_advection(self, engine: GPUEngine) -> bool:
+        """Whether ``step`` also performs the RK2 mean-wind advection (so the runtime
+        must NOT advect separately).
 
-		Default ``False``: the runtime advects, then calls ``step`` for turbulence only.
-		A scheme may fold advection into ``step`` for a specific path (e.g. ``HannaScheme``
-		on the static/CUDA path folds it into one captured graph) and return ``True`` there
-		— the runtime then skips its own advection. ``engine`` is provided so the answer
-		can be path/device-dependent.
-		"""
+        Default ``False``: the runtime advects, then calls ``step`` for turbulence only.
+        A scheme may fold advection into ``step`` for a specific path (e.g. ``HannaScheme``
+        on the static/CUDA path folds it into one captured graph) and return ``True`` there
+        — the runtime then skips its own advection. ``engine`` is provided so the answer
+        can be path/device-dependent.
+        """
 
-		del engine
-		return False
+        del engine
+        return False
 
 
 _REGISTRY: dict[str, type[TurbulenceScheme]] = {}
 
 
 def register_scheme(cls: type[TurbulenceScheme]) -> type[TurbulenceScheme]:
-	"""Decorator: register a `TurbulenceScheme` subclass by its `name` class attribute."""
+    """Decorator: register a `TurbulenceScheme` subclass by its `name` class attribute."""
 
-	if not getattr(cls, "name", ""):
-		raise TypeError(f"{cls.__name__} must define a non-empty class-level `name` attribute")
-	existing = _REGISTRY.get(cls.name)
-	if existing is not None and existing is not cls:
-		raise ValueError(
-			f"Turbulence scheme name {cls.name!r} already registered to {existing.__name__}"
-		)
-	_REGISTRY[cls.name] = cls
-	return cls
+    if not getattr(cls, "name", ""):
+        raise TypeError(f"{cls.__name__} must define a non-empty class-level `name` attribute")
+    existing = _REGISTRY.get(cls.name)
+    if existing is not None and existing is not cls:
+        raise ValueError(
+            f"Turbulence scheme name {cls.name!r} already registered to {existing.__name__}"
+        )
+    _REGISTRY[cls.name] = cls
+    return cls
 
 
 def get_scheme(name: str, **kwargs: object) -> TurbulenceScheme:
-	"""Construct a registered scheme by name. `kwargs` are forwarded to the constructor."""
+    """Construct a registered scheme by name. `kwargs` are forwarded to the constructor."""
 
-	if name not in _REGISTRY:
-		available = ", ".join(sorted(_REGISTRY)) or "<none>"
-		raise KeyError(f"Unknown turbulence scheme {name!r}. Registered schemes: {available}")
-	return _REGISTRY[name](**kwargs)
+    if name not in _REGISTRY:
+        available = ", ".join(sorted(_REGISTRY)) or "<none>"
+        raise KeyError(f"Unknown turbulence scheme {name!r}. Registered schemes: {available}")
+    return _REGISTRY[name](**kwargs)
 
 
 def list_schemes() -> tuple[str, ...]:
-	"""Return the names of all registered schemes, sorted."""
+    """Return the names of all registered schemes, sorted."""
 
-	return tuple(sorted(_REGISTRY))
+    return tuple(sorted(_REGISTRY))

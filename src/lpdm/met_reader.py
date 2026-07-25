@@ -18,9 +18,9 @@ import os
 import threading
 from abc import ABC, abstractmethod
 from collections import OrderedDict
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-from typing import Mapping, Sequence
+from datetime import UTC, datetime, timedelta
 
 import numpy as np
 import torch
@@ -34,7 +34,6 @@ from lpdm.vertical_grid import (
     slope_correct_w,
     terrain_gradient,
 )
-
 
 GRAVITY_M_S2 = 9.80665
 R_DRY_AIR_J_KG_K = 287.05
@@ -275,7 +274,9 @@ class ArcoEra5ZarrReader(MetReader):
 
         self.zarr_stores: tuple[str, ...] = self._resolve_stores(zarr_store)
         # Back-compat single-store attribute for callers that inspect this directly.
-        self.zarr_store = self.zarr_stores[0] if len(self.zarr_stores) == 1 else list(self.zarr_stores)
+        self.zarr_store = (
+            self.zarr_stores[0] if len(self.zarr_stores) == 1 else list(self.zarr_stores)
+        )
         self.variable_map = dict(variable_map or self.DEFAULT_VARIABLE_MAP)
         self.channel_names: tuple[str, ...] = (
             tuple(channel_names) if channel_names is not None else self.DEFAULT_CHANNEL_NAMES
@@ -375,10 +376,12 @@ class ArcoEra5ZarrReader(MetReader):
 
                 # Subset vertical levels using lazy Dask arrays (only reads Z/Z_SFC
                 # into memory to evaluate the bound)
-                ds_start_sub, ds_end_sub, level_agl_m, height_agl_3d = self._subset_vertical_levels_by_agl(
-                    ds_start=ds_start_lazy,
-                    ds_end=ds_end_lazy,
-                    spatial=request.spatial,
+                ds_start_sub, ds_end_sub, level_agl_m, height_agl_3d = (
+                    self._subset_vertical_levels_by_agl(
+                        ds_start=ds_start_lazy,
+                        ds_end=ds_end_lazy,
+                        spatial=request.spatial,
+                    )
                 )
 
                 # Materialize only the fully sliced bounding boxes
@@ -409,7 +412,9 @@ class ArcoEra5ZarrReader(MetReader):
                 hour_end=bundle_end["tensor"],
                 metadata=metadata,
                 channel_names=self.channel_names,
-                height_agl_m=torch.as_tensor(height_broadcast, dtype=self.dtype, device=self.device),
+                height_agl_m=torch.as_tensor(
+                    height_broadcast, dtype=self.dtype, device=self.device
+                ),
             )
 
         hour_start = self._dataset_to_channel_tensor(ds_start)
@@ -446,9 +451,12 @@ class ArcoEra5ZarrReader(MetReader):
         """
         key = (
             when,
-            round(spatial.lon_min, 6), round(spatial.lon_max, 6),
-            round(spatial.lat_min, 6), round(spatial.lat_max, 6),
-            round(spatial.z_min, 3), round(spatial.z_max, 3),
+            round(spatial.lon_min, 6),
+            round(spatial.lon_max, 6),
+            round(spatial.lat_min, 6),
+            round(spatial.lat_max, 6),
+            round(spatial.z_min, 3),
+            round(spatial.z_max, 3),
         )
         with self._hour_cache_lock:
             bundle = self._hour_cache.get(key)
@@ -457,16 +465,12 @@ class ArcoEra5ZarrReader(MetReader):
                 self.hour_cache_hits += 1
                 return bundle
 
-        hour_request = BoundingBoxRequest(
-            spatial=spatial, time=TimeBounds(start=when, end=when)
-        )
+        hour_request = BoundingBoxRequest(spatial=spatial, time=TimeBounds(start=when, end=when))
         ds_hour_lazy = self._slice_spatial_temporal(ds, hour_request)
         t_sel, _ = self._coerce_time_bounds_for_dataset(ds_hour_lazy, when, when)
         ds_hour_lazy = ds_hour_lazy.sel({self.time_name: t_sel})
 
-        ds_hour_sub, height_agl_p = self._subset_vertical_levels_single_hour(
-            ds_hour_lazy, spatial
-        )
+        ds_hour_sub, height_agl_p = self._subset_vertical_levels_single_hour(ds_hour_lazy, spatial)
         ds_hour = ds_hour_sub.compute()
 
         tensor_p = self._dataset_to_channel_tensor(ds_hour)
@@ -504,9 +508,7 @@ class ArcoEra5ZarrReader(MetReader):
             int(ds_hour.sizes.get(self.lon_name, 0)) == 0
             or int(ds_hour.sizes.get(self.lat_name, 0)) == 0
         ):
-            raise ValueError(
-                "Cannot subset vertical levels: empty spatial selection for met hour."
-            )
+            raise ValueError("Cannot subset vertical levels: empty spatial selection for met hour.")
         level_agl = self._compute_level_agl_m(ds_hour)
         if level_agl.size == 0:
             raise ValueError("Computed empty AGL arrays for met hour.")
@@ -562,8 +564,13 @@ class ArcoEra5ZarrReader(MetReader):
             vi = self.channel_names.index("v")
             wi = self.channel_names.index("w")
             arr_agl[wi] = slope_correct_w(
-                arr_agl[wi], arr_agl[ui], arr_agl[vi], dhdx, dhdy,
-                agl_levels, float(agl_levels[-1]),
+                arr_agl[wi],
+                arr_agl[ui],
+                arr_agl[vi],
+                dhdx,
+                dhdy,
+                agl_levels,
+                float(agl_levels[-1]),
             )
 
         # Bbox-mean pressure per AGL level (hPa) — Hanna-FT / Emanuel read this as a
@@ -625,9 +632,7 @@ class ArcoEra5ZarrReader(MetReader):
             if has_glob and not is_remote:
                 matches = sorted(glob.glob(expanded))
                 if not matches:
-                    raise FileNotFoundError(
-                        f"Glob pattern {candidate!r} matched no Zarr stores"
-                    )
+                    raise FileNotFoundError(f"Glob pattern {candidate!r} matched no Zarr stores")
                 resolved.extend(matches)
             else:
                 resolved.append(expanded)
@@ -716,9 +721,7 @@ class ArcoEra5ZarrReader(MetReader):
                     raise ValueError(
                         f"Zarr store {ordered_stores[i]!r} is missing coordinate {coord!r}"
                     )
-                if not np.array_equal(
-                    np.asarray(ref[coord].values), np.asarray(ds[coord].values)
-                ):
+                if not np.array_equal(np.asarray(ref[coord].values), np.asarray(ds[coord].values)):
                     raise ValueError(
                         f"Zarr store {ordered_stores[i]!r} has {coord!r} coordinate "
                         f"that does not match {ordered_stores[0]!r}; cannot stitch "
@@ -743,7 +746,9 @@ class ArcoEra5ZarrReader(MetReader):
     def _select_variables(self, ds: xr.Dataset) -> xr.Dataset:
         """Select only required meteorological fields."""
 
-        dataset_vars: Sequence[str] = tuple(self.variable_map[k] for k in self.required_variable_keys)
+        dataset_vars: Sequence[str] = tuple(
+            self.variable_map[k] for k in self.required_variable_keys
+        )
         missing = [name for name in dataset_vars if name not in ds.variables]
         if missing:
             raise KeyError(f"Required variables missing from dataset: {missing}")
@@ -786,14 +791,14 @@ class ArcoEra5ZarrReader(MetReader):
             lon_min = ((spatial.lon_min + 180.0) % 360.0) - 180.0
             lon_max = ((spatial.lon_max + 180.0) % 360.0) - 180.0
 
-        lon_coord = ds[self.lon_name]
-        
-        # Slice temporal and latitude bounds first to dramatically reduce 
+        # Slice temporal and latitude bounds first to dramatically reduce
         # the dask graph size and memory footprint before any longitude operations.
-        ds = ds.sel({
-            self.time_name: slice(time_start, time_end),
-        })
-        
+        ds = ds.sel(
+            {
+                self.time_name: slice(time_start, time_end),
+            }
+        )
+
         lat_values = ds[self.lat_name].values
         lat_descending = lat_values[0] > lat_values[-1]
         lat_slice = (
@@ -841,12 +846,18 @@ class ArcoEra5ZarrReader(MetReader):
         of start/end), for per-column vertical-gradient schemes.
         """
 
-        if int(ds_start.sizes.get(self.lon_name, 0)) == 0 or int(ds_start.sizes.get(self.lat_name, 0)) == 0:
+        if (
+            int(ds_start.sizes.get(self.lon_name, 0)) == 0
+            or int(ds_start.sizes.get(self.lat_name, 0)) == 0
+        ):
             raise ValueError(
                 "Cannot subset vertical levels: empty spatial selection in ds_start "
                 f"(lat={int(ds_start.sizes.get(self.lat_name, 0))}, lon={int(ds_start.sizes.get(self.lon_name, 0))})."
             )
-        if int(ds_end.sizes.get(self.lon_name, 0)) == 0 or int(ds_end.sizes.get(self.lat_name, 0)) == 0:
+        if (
+            int(ds_end.sizes.get(self.lon_name, 0)) == 0
+            or int(ds_end.sizes.get(self.lat_name, 0)) == 0
+        ):
             raise ValueError(
                 "Cannot subset vertical levels: empty spatial selection in ds_end "
                 f"(lat={int(ds_end.sizes.get(self.lat_name, 0))}, lon={int(ds_end.sizes.get(self.lon_name, 0))})."
@@ -933,7 +944,9 @@ class ArcoEra5ZarrReader(MetReader):
         """Convert vertical coordinate values to pressure in Pascals."""
 
         level_vals = np.asarray(ds_time_slice[self.level_name].values, dtype=np.float64)
-        level_units = self._normalize_units(str(ds_time_slice[self.level_name].attrs.get("units", "")))
+        level_units = self._normalize_units(
+            str(ds_time_slice[self.level_name].attrs.get("units", ""))
+        )
 
         if level_units in {"pa", "pascal", "pascals"}:
             return level_vals
@@ -952,8 +965,8 @@ class ArcoEra5ZarrReader(MetReader):
 
         time_coord = ds[self.time_name]
         if np.issubdtype(time_coord.dtype, np.datetime64):
-            start_utc = start.astimezone(timezone.utc).replace(tzinfo=None)
-            end_utc = end.astimezone(timezone.utc).replace(tzinfo=None)
+            start_utc = start.astimezone(UTC).replace(tzinfo=None)
+            end_utc = end.astimezone(UTC).replace(tzinfo=None)
             return np.datetime64(start_utc), np.datetime64(end_utc)
         return start, end
 
@@ -967,15 +980,15 @@ class ArcoEra5ZarrReader(MetReader):
 
         if isinstance(value, datetime):
             if value.tzinfo is None:
-                return value.replace(tzinfo=timezone.utc)
-            return value.astimezone(timezone.utc)
+                return value.replace(tzinfo=UTC)
+            return value.astimezone(UTC)
 
         raise TypeError(f"Unsupported time coordinate value type: {type(value)!r}")
 
     def _canonicalize_hour_bounds(self, bounds: TimeBounds) -> tuple[datetime, datetime]:
         """Return exact hour start/end timestamps used for met interpolation."""
 
-        t0 = bounds.start.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
+        t0 = bounds.start.astimezone(UTC).replace(minute=0, second=0, microsecond=0)
         t1 = t0 + timedelta(hours=1)
         return t0, t1
 

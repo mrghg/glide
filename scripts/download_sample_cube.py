@@ -30,7 +30,6 @@ from pathlib import Path
 import numpy as np
 import xarray as xr
 
-
 # Logical to ERA5 physical mapping required by the runtime.
 # - friction_velocity and surface_sensible_heat_flux are required by the Hanna
 #   turbulence scheme (see docs/turbulence.md). They are surface fields so
@@ -234,7 +233,9 @@ def download_sample_cube(
     req_lon_max = lon_max + 360.0 if lon_max < 0 else lon_max
 
     print(f"Slicing time: {time_start} to {time_end}")
-    print(f"Slicing spatial: Lat [{lat_min}, {lat_max}], Lon [{lon_min}, {lon_max}] (ERA5 lon coords [{req_lon_min}, {req_lon_max}])")
+    print(
+        f"Slicing spatial: Lat [{lat_min}, {lat_max}], Lon [{lon_min}, {lon_max}] (ERA5 lon coords [{req_lon_min}, {req_lon_max}])"
+    )
 
     # ERA5 latitudes are typically stored descending (90 to -90).
     lat_values = ds["latitude"].values
@@ -243,10 +244,12 @@ def download_sample_cube(
     else:
         lat_slice = slice(lat_min, lat_max)
 
-    ds_subset = ds.sel({
-        "time": slice(time_start, time_end),
-        "latitude": lat_slice,
-    })
+    ds_subset = ds.sel(
+        {
+            "time": slice(time_start, time_end),
+            "latitude": lat_slice,
+        }
+    )
 
     # Handle longitudes bridging the 0/360 wrap.
     if req_lon_min <= req_lon_max:
@@ -269,7 +272,9 @@ def download_sample_cube(
         # "what is this?" by opening the Zarr alone.
         ds_subset.attrs = {**ds_subset.attrs, **archive_attrs}
 
-    print(f"Subset computed. Estimated size in memory (uncompressed): {ds_subset.nbytes / (1024 ** 3):.2f} GB")
+    print(
+        f"Subset computed. Estimated size in memory (uncompressed): {ds_subset.nbytes / (1024**3):.2f} GB"
+    )
 
     out_dir = os.path.dirname(out_path)
     if out_dir:
@@ -349,7 +354,15 @@ def _dispatch(args: argparse.Namespace) -> None:
     using_named = args.domain is not None or args.year_month is not None
     using_adhoc = any(
         v is not None
-        for v in (args.out_path, args.time_start, args.time_end, args.lon_min, args.lon_max, args.lat_min, args.lat_max)
+        for v in (
+            args.out_path,
+            args.time_start,
+            args.time_end,
+            args.lon_min,
+            args.lon_max,
+            args.lat_min,
+            args.lat_max,
+        )
     )
 
     if using_named and using_adhoc:

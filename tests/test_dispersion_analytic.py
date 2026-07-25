@@ -80,7 +80,9 @@ def test_ou_autocorrelation_and_stationarity() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def _run_rotation(engine: GPUEngine, r0: torch.Tensor, omega: float, dt: float, period: float) -> torch.Tensor:
+def _run_rotation(
+    engine: GPUEngine, r0: torch.Tensor, omega: float, dt: float, period: float
+) -> torch.Tensor:
     """Backward-advect through a solid-body rotation field v = omega x (x - c),
     centred at the origin, for one full period. Works in a local metres frame."""
 
@@ -126,11 +128,15 @@ def test_solid_body_rotation_advection_returns_to_start() -> None:
     # Second order: halving dt cuts the return error ~4x.
     for i in range(len(errors) - 1):
         ratio = errors[i] / max(errors[i + 1], 1e-12)
-        assert ratio > 3.5, f"RK2 rotation not second-order: ratio {ratio:.2f} at dt {dts[i]}->{dts[i+1]}"
+        assert ratio > 3.5, (
+            f"RK2 rotation not second-order: ratio {ratio:.2f} at dt {dts[i]}->{dts[i + 1]}"
+        )
 
     # Absolute closure at the finest dt: tiny vs the ~10^5 m orbit radius.
     r_max = torch.max(torch.linalg.norm(start[:, :2], dim=1)).item()
-    assert errors[-1] < 1e-3 * r_max, f"return error {errors[-1]:.3g} m too large vs radius {r_max:.3g}"
+    assert errors[-1] < 1e-3 * r_max, (
+        f"return error {errors[-1]:.3g} m too large vs radius {r_max:.3g}"
+    )
 
     # z and weight untouched by horizontal advection.
     final = _run_rotation(engine, start, omega, dts[-1], period)
@@ -170,8 +176,12 @@ def test_taylor_dispersion_curve_ballistic_to_diffusive() -> None:
     step = 0
     for c_tl, target in zip(checkpoints_tl, checkpoint_steps):
         while step < target:
-            w = engine.update_langevin_velocity(w, t_lagrangian=t_l, sigma_w2=sigma_w2, dt_seconds=dt)
-            particles = engine.apply_vertical_turbulence(particles, w, dt_seconds=dt, backward=False)
+            w = engine.update_langevin_velocity(
+                w, t_lagrangian=t_l, sigma_w2=sigma_w2, dt_seconds=dt
+            )
+            particles = engine.apply_vertical_turbulence(
+                particles, w, dt_seconds=dt, backward=False
+            )
             step += 1
         sigma_z[c_tl] = torch.std(particles[:, 2], unbiased=True).item()
 
@@ -183,7 +193,7 @@ def test_taylor_dispersion_curve_ballistic_to_diffusive() -> None:
         got = sigma_z[c_tl]
         assert abs(got - expected) / expected < 0.05, (
             f"sigma_z at t={c_tl} T_L = {got:.3f}, Taylor {expected:.3f} "
-            f"(rel err {abs(got-expected)/expected:.3f})"
+            f"(rel err {abs(got - expected) / expected:.3f})"
         )
 
     # Ballistic limit: sigma_z ~ sigma_w * t for t << T_L.
@@ -217,11 +227,17 @@ def test_taylor_dispersion_position_integration_bias_with_dt() -> None:
         p = torch.zeros((n, 4), dtype=torch.float64)
         w = torch.randn(n, dtype=torch.float64) * math.sqrt(sigma_w2)
         for _ in range(int(round(total_t / dt))):
-            w = engine.update_langevin_velocity(w, t_lagrangian=t_l, sigma_w2=sigma_w2, dt_seconds=dt)
+            w = engine.update_langevin_velocity(
+                w, t_lagrangian=t_l, sigma_w2=sigma_w2, dt_seconds=dt
+            )
             p = engine.apply_vertical_turbulence(p, w, dt_seconds=dt, backward=False)
         return torch.std(p[:, 2], unbiased=True).item()
 
     fine = spread_at_dt(1.0, 71)
     coarse = spread_at_dt(20.0, 71)
-    assert abs(fine - expected) / expected < 0.02, f"fine-dt spread off Taylor by {abs(fine-expected)/expected:.3f}"
-    assert abs(coarse - expected) / expected < 0.15, f"coarse-dt spread off Taylor by {abs(coarse-expected)/expected:.3f}"
+    assert abs(fine - expected) / expected < 0.02, (
+        f"fine-dt spread off Taylor by {abs(fine - expected) / expected:.3f}"
+    )
+    assert abs(coarse - expected) / expected < 0.15, (
+        f"coarse-dt spread off Taylor by {abs(coarse - expected) / expected:.3f}"
+    )

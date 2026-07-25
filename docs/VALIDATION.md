@@ -285,7 +285,7 @@ ref_field = ref["srr"].sel(time="2024-01-01T00:00:00").sum("time")  # match GLID
 diff = glide_stilt - ref_field
 print(f"GLIDE total:     {float(glide_stilt.sum()):.3e}")
 print(f"Reference total: {float(ref_field.sum()):.3e}")
-print(f"RMSE:            {float(np.sqrt((diff ** 2).mean())):.3e}")
+print(f"RMSE:            {float(np.sqrt((diff**2).mean())):.3e}")
 print(f"Correlation:     {float(xr.corr(glide_stilt, ref_field)):.3f}")
 ```
 

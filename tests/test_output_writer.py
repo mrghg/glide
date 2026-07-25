@@ -75,8 +75,14 @@ def test_output_writer_footprint_zarr(tmp_path: Path) -> None:
             "z_top_m": ("z_bin", np.array([1000.0, 2000.0, 3000.0], dtype=np.float64)),
             "latitude": np.array([35.25, 35.75, 36.25, 36.75], dtype=np.float64),
             "longitude": np.array([-122.5, -122.0, -121.5, -121.0, -120.5], dtype=np.float64),
-            "latitude_edge": ("latitude_edge", np.array([35.0, 35.5, 36.0, 36.5, 37.0], dtype=np.float64)),
-            "longitude_edge": ("longitude_edge", np.array([-122.75, -122.25, -121.75, -121.25, -120.75, -120.25], dtype=np.float64)),
+            "latitude_edge": (
+                "latitude_edge",
+                np.array([35.0, 35.5, 36.0, 36.5, 37.0], dtype=np.float64),
+            ),
+            "longitude_edge": (
+                "longitude_edge",
+                np.array([-122.75, -122.25, -121.75, -121.25, -120.75, -120.25], dtype=np.float64),
+            ),
         },
     )
 
@@ -97,7 +103,10 @@ def test_output_writer_footprint_zarr(tmp_path: Path) -> None:
     assert np.allclose(ds["z_bottom_m"].values, np.array([0.0, 1000.0, 2000.0]))
     assert np.allclose(ds["z_top_m"].values, np.array([1000.0, 2000.0, 3000.0]))
     assert np.allclose(ds["latitude_edge"].values, np.array([35.0, 35.5, 36.0, 36.5, 37.0]))
-    assert np.allclose(ds["longitude_edge"].values, np.array([-122.75, -122.25, -121.75, -121.25, -120.75, -120.25]))
+    assert np.allclose(
+        ds["longitude_edge"].values,
+        np.array([-122.75, -122.25, -121.75, -121.25, -120.75, -120.25]),
+    )
 
 
 def test_output_writer_footprint_rejects_4d_tensor(tmp_path: Path) -> None:
@@ -171,7 +180,10 @@ def _footprint_coords(n_releases: int) -> dict:
         "z_bin": np.array([500.0, 1500.0, 2500.0], dtype=np.float64),
         "latitude": np.array([35.25, 35.75, 36.25, 36.75], dtype=np.float64),
         "longitude": np.array([-122.5, -122.0, -121.5, -121.0, -120.5], dtype=np.float64),
-        "latitude_edge": ("latitude_edge", np.array([35.0, 35.5, 36.0, 36.5, 37.0], dtype=np.float64)),
+        "latitude_edge": (
+            "latitude_edge",
+            np.array([35.0, 35.5, 36.0, 36.5, 37.0], dtype=np.float64),
+        ),
     }
 
 

@@ -116,7 +116,9 @@ def diffusion() -> dict:
             w = engine.update_langevin_velocity(
                 w, t_lagrangian=T_L, sigma_w2=s2, dt_seconds=DT, drift=drift
             )
-            particles = engine.apply_vertical_turbulence(particles, w, dt_seconds=DT, backward=False)
+            particles = engine.apply_vertical_turbulence(
+                particles, w, dt_seconds=DT, backward=False
+            )
             particles, w = engine.reflect_surface(particles, w, z_surface=0.0)
             above = particles[:, 2] > H_TOP
             particles[:, 2] = torch.where(above, 2.0 * H_TOP - particles[:, 2], particles[:, 2])

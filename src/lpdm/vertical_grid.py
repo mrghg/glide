@@ -27,9 +27,29 @@ import torch
 # 40-1000 m footprint bins), geometric aloft. A modelling choice — FLEXPART makes
 # the equivalent grid configurable; promote to run config later.
 _DEFAULT_AGL_LEVELS_M: tuple[float, ...] = (
-    0.0, 10.0, 20.0, 40.0, 80.0, 120.0, 200.0, 300.0, 500.0, 750.0, 1000.0,
-    1250.0, 1500.0, 2000.0, 2500.0, 3000.0, 4000.0, 5000.0, 6000.0, 8000.0,
-    10000.0, 12000.0, 15000.0,
+    0.0,
+    10.0,
+    20.0,
+    40.0,
+    80.0,
+    120.0,
+    200.0,
+    300.0,
+    500.0,
+    750.0,
+    1000.0,
+    1250.0,
+    1500.0,
+    2000.0,
+    2500.0,
+    3000.0,
+    4000.0,
+    5000.0,
+    6000.0,
+    8000.0,
+    10000.0,
+    12000.0,
+    15000.0,
 )
 
 # Local metres per degree (spherical-earth approximation, matches gpu_engine).
@@ -61,8 +81,8 @@ class AglRegridWeights:
     """
 
     lower: np.ndarray  # [Za, Y, X] intp — bracket index into the ASCENDING level axis
-    frac: np.ndarray   # [Za, Y, X] float64 — interpolation fraction in [0, 1]
-    flipped: bool      # source arrived TOA-first and was flipped to ascending
+    frac: np.ndarray  # [Za, Y, X] float64 — interpolation fraction in [0, 1]
+    flipped: bool  # source arrived TOA-first and was flipped to ascending
     n_source_levels: int
 
 
@@ -121,9 +141,7 @@ def compute_agl_regrid_weights(
 
     lower_zyx = lower.reshape(Y, X, Za).permute(2, 0, 1).contiguous().numpy().astype(np.intp)
     frac_zyx = frac.reshape(Y, X, Za).permute(2, 0, 1).contiguous().numpy()
-    return AglRegridWeights(
-        lower=lower_zyx, frac=frac_zyx, flipped=flipped, n_source_levels=Zp
-    )
+    return AglRegridWeights(lower=lower_zyx, frac=frac_zyx, flipped=flipped, n_source_levels=Zp)
 
 
 def apply_agl_regrid(field_p: np.ndarray, weights: AglRegridWeights) -> np.ndarray:
@@ -192,9 +210,7 @@ def terrain_gradient(
     Uses the actual coordinate arrays, so descending latitude is handled correctly.
     """
     dh_dlat, dh_dlon = np.gradient(terrain_m, lat_deg, lon_deg)  # per degree
-    m_per_deg_lon = np.clip(
-        _M_PER_DEG_LON_EQ * np.cos(np.deg2rad(lat_deg)), 1.0, None
-    )  # [Y]
+    m_per_deg_lon = np.clip(_M_PER_DEG_LON_EQ * np.cos(np.deg2rad(lat_deg)), 1.0, None)  # [Y]
     dhdx = dh_dlon / m_per_deg_lon[:, None]
     dhdy = dh_dlat / _M_PER_DEG_LAT
     return dhdx, dhdy

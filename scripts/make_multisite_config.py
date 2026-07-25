@@ -48,9 +48,9 @@ VTS_DIR = REPO / "data" / "validation-timeseries"
 # covers that peak. This is an ESTIMATE — the --memory-headroom-frac budget and
 # the runtime memory guards are the real safety net, so it only needs to be in
 # the right ballpark.
-_PERSISTENT_BYTES_PER_PARTICLE_BASE = 56.0     # meander on; subtract 8 if off
+_PERSISTENT_BYTES_PER_PARTICLE_BASE = 56.0  # meander on; subtract 8 if off
 _WORKING_SET_MULTIPLIER = 2.0
-_BYTES_PER_GIB = float(1024 ** 3)
+_BYTES_PER_GIB = float(1024**3)
 
 # Host met-cache footprint: the on-host met cache holds ~this many GiB per cached
 # hour on the EUROPE domain (empirical: 192 h ≈ 50 GiB). Multi-batch runs need a
@@ -89,9 +89,7 @@ def _parse_header(csv_path: Path) -> dict[str, str]:
 
 def collect_sites() -> list[dict[str, object]]:
     """One site per unique inlet label, with location from its CSV header."""
-    labels = sorted(
-        {p.name.split("_FLEXPART")[0].split("_NAME")[0] for p in VTS_DIR.glob("*.csv")}
-    )
+    labels = sorted({p.name.split("_FLEXPART")[0].split("_NAME")[0] for p in VTS_DIR.glob("*.csv")})
     if not labels:
         raise SystemExit(f"No validation CSVs found in {VTS_DIR}")
     sites: list[dict[str, object]] = []
@@ -177,7 +175,9 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--n-releases", type=int, default=48, help="hourly release times per site")
     ap.add_argument("--start-time", default="2024-01-01T00:00:00Z")
-    ap.add_argument("--length-seconds", type=int, default=432000, help="backward window (default 5 days)")
+    ap.add_argument(
+        "--length-seconds", type=int, default=432000, help="backward window (default 5 days)"
+    )
     ap.add_argument("--period-seconds", type=int, default=3600)
     ap.add_argument("--duration-seconds", type=int, default=3600)
     ap.add_argument("--n-particles", type=int, default=20000, help="particles per (site, time)")
@@ -220,7 +220,9 @@ def main() -> None:
         "and just print the host RAM required.",
     )
     ap.add_argument("--zarr-store", default="~/data/arco-era5/EUROPE_*.zarr")
-    ap.add_argument("--output-uri", default="outputs/icos-validation")  # matches notebooks/multisite_validation.ipynb
+    ap.add_argument(
+        "--output-uri", default="outputs/icos-validation"
+    )  # matches notebooks/multisite_validation.ipynb
     ap.add_argument("-o", "--output-config", default="configs/multisite_validation_48h.yaml")
     args = ap.parse_args()
 
@@ -262,7 +264,9 @@ def main() -> None:
     # Cap the on-host cache to the declared host-RAM budget (SLURM --mem). A smaller
     # cache is still CORRECT — it just re-fetches the cross-batch overlap from zarr.
     if args.host_memory_gib is not None and not args.met_cache_max_hours:
-        affordable_hours = int(max(8.0, (args.host_memory_gib - _HOST_RESERVE_GIB) / _MET_GIB_PER_HOUR))
+        affordable_hours = int(
+            max(8.0, (args.host_memory_gib - _HOST_RESERVE_GIB) / _MET_GIB_PER_HOUR)
+        )
         if met_cache_hours > affordable_hours:
             met_cache_hours = affordable_hours
             cache_capped = n_batches > 1
@@ -349,7 +353,8 @@ def main() -> None:
     print(
         f"  HOST (RAM / SLURM --mem): ~{host_total_gib:.0f} GiB "
         f"(met cache {met_cache_hours} h ~{host_cache_gib:.0f} GiB + ~{_HOST_RESERVE_GIB:.0f} GiB overhead"
-        + ("" if n_batches > 1 else "; single monotonic sweep") + ")"
+        + ("" if n_batches > 1 else "; single monotonic sweep")
+        + ")"
     )
     if cache_capped:
         print(

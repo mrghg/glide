@@ -7,10 +7,10 @@ accumulation, output writing) without depending on remote ERA5 data.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Callable
 
 import numpy as np
 import pandas as pd
@@ -100,10 +100,15 @@ class AnalyticMetReader(MetReader):
 
         # 3D AGL height: per-level height broadcast over the (lat, lon) grid.
         level_agl = torch.linspace(
-            self.z_bounds_agl_m[0], self.z_bounds_agl_m[1], self.n_lev,
-            dtype=self.dtype, device=self.device,
+            self.z_bounds_agl_m[0],
+            self.z_bounds_agl_m[1],
+            self.n_lev,
+            dtype=self.dtype,
+            device=self.device,
         )
-        height_agl_m = level_agl.view(self.n_lev, 1, 1).expand(self.n_lev, self.n_lat, self.n_lon).contiguous()
+        height_agl_m = (
+            level_agl.view(self.n_lev, 1, 1).expand(self.n_lev, self.n_lat, self.n_lon).contiguous()
+        )
 
         return HourlyMetTensors(
             hour_start=_build(u0, v0, w0),
@@ -125,7 +130,7 @@ def _make_run_config(**flat_overrides: object) -> RunConfig:
         zarr_store="fake://placeholder",
         output_uri="outputs/test",
         # Simulation
-        start_time=datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc),
+        start_time=datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC),
         simulation_length_seconds=10800,
         dt_seconds=300,
         device="cpu",
@@ -219,8 +224,10 @@ def _make_reader(
     wind_fn: Callable[[datetime], tuple[float, float, float]],
 ) -> AnalyticMetReader:
     return AnalyticMetReader(
-        coverage_start=cfg.simulation.start_time - timedelta(seconds=cfg.simulation.length_seconds + 7200),
-        coverage_end=cfg.simulation.start_time + timedelta(seconds=cfg.release.duration_seconds + 3600),
+        coverage_start=cfg.simulation.start_time
+        - timedelta(seconds=cfg.simulation.length_seconds + 7200),
+        coverage_end=cfg.simulation.start_time
+        + timedelta(seconds=cfg.release.duration_seconds + 3600),
         wind_fn=wind_fn,
     )
 
@@ -295,8 +302,10 @@ def _make_hanna_reader(
     """AnalyticMetReader configured to supply the channels Hanna needs."""
 
     return AnalyticMetReader(
-        coverage_start=cfg.simulation.start_time - timedelta(seconds=cfg.simulation.length_seconds + 7200),
-        coverage_end=cfg.simulation.start_time + timedelta(seconds=cfg.release.duration_seconds + 3600),
+        coverage_start=cfg.simulation.start_time
+        - timedelta(seconds=cfg.simulation.length_seconds + 7200),
+        coverage_end=cfg.simulation.start_time
+        + timedelta(seconds=cfg.release.duration_seconds + 3600),
         wind_fn=wind_fn,
         channel_names=("u", "v", "w", "blh", "sp", "t", "ustar", "shf"),
         ustar_m_s=ustar_m_s,
@@ -325,7 +334,9 @@ def test_hanna_run_completes_with_synthetic_met(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("static", [False, True])
-def test_hanna_constant_wind_preserves_mean_trajectory(tmp_path: Path, monkeypatch, static: bool) -> None:
+def test_hanna_constant_wind_preserves_mean_trajectory(
+    tmp_path: Path, monkeypatch, static: bool
+) -> None:
     """Hanna's zero-mean perturbations shouldn't bias the ensemble mean position.
 
     Parametrized over the dynamic path (the runtime advects) and the static path
@@ -379,7 +390,10 @@ def test_hanna_produces_nontrivial_vertical_spread(tmp_path: Path) -> None:
     )
     # Convective conditions: positive SHF, w* > 0, particles should mix vertically.
     reader = _make_hanna_reader(
-        cfg, wind_fn=lambda _: (0.0, 0.0, 0.0), ustar_m_s=0.5, shf_w_m2=200.0,
+        cfg,
+        wind_fn=lambda _: (0.0, 0.0, 0.0),
+        ustar_m_s=0.5,
+        shf_w_m2=200.0,
     )
 
     _run(cfg, reader=reader)
@@ -417,7 +431,10 @@ def test_hanna_well_mixed_no_runaway_lofting(tmp_path: Path) -> None:
     # Near-neutral BL (no convection), so σ_w is set by u* and decays toward the
     # BL top — the inhomogeneity the well-mixed drift must handle.
     reader = _make_hanna_reader(
-        cfg, wind_fn=lambda _: (0.0, 0.0, 0.0), ustar_m_s=0.4, shf_w_m2=0.0,
+        cfg,
+        wind_fn=lambda _: (0.0, 0.0, 0.0),
+        ustar_m_s=0.4,
+        shf_w_m2=0.0,
     )
     # Override the synthetic BLH to a defined value for a clean expectation.
     reader.blh_m = blh
@@ -471,7 +488,7 @@ def _varying_wind_met_window(
         names = ("u", "v", "w", "blh", "sp", "t", "ustar", "shf")
         return torch.stack([chans[n] for n in names], dim=0)
 
-    t0 = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    t0 = datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC)
     level = np.linspace(0.0, 4000.0, n_lev)
     metadata = MetFieldMetadata(
         lon=np.linspace(-2.0, 2.0, n_lon),
@@ -481,12 +498,21 @@ def _varying_wind_met_window(
         time_start=t0,
         time_end=t0 + timedelta(hours=1),
         variable_units={
-            "u": "m/s", "v": "m/s", "w": "m/s", "blh": "m", "sp": "Pa",
-            "t": "K", "z": "m**2s**-2", "z_sfc": "m**2s**-2",
-            "ustar": "m/s", "shf": "W m**-2",
+            "u": "m/s",
+            "v": "m/s",
+            "w": "m/s",
+            "blh": "m",
+            "sp": "Pa",
+            "t": "K",
+            "z": "m**2s**-2",
+            "z_sfc": "m**2s**-2",
+            "ustar": "m/s",
+            "shf": "W m**-2",
         },
     )
-    height = torch.as_tensor(level, dtype=torch.float32).view(n_lev, 1, 1).expand(shape).contiguous()
+    height = (
+        torch.as_tensor(level, dtype=torch.float32).view(n_lev, 1, 1).expand(shape).contiguous()
+    )
     fields = _build()
     return HourlyMetTensors(
         hour_start=fields,
@@ -522,8 +548,13 @@ def _horizontal_spread_after_steps(*, meander_enabled: bool, n_steps: int = 40) 
 
     for _ in range(n_steps):
         particles, state = scheme.step(
-            particles, state, met, t_alpha=0.5, dt_seconds=300.0,
-            active_mask=active, engine=engine,
+            particles,
+            state,
+            met,
+            t_alpha=0.5,
+            dt_seconds=300.0,
+            active_mask=active,
+            engine=engine,
         )
     return float(particles[:, 0].std())
 
@@ -558,7 +589,9 @@ def _wmc_met_window(
     shape = (n_lev, n_lat, n_lon)
     zeros = torch.zeros(shape, dtype=torch.float32)
     chans = {
-        "u": zeros, "v": zeros, "w": zeros,
+        "u": zeros,
+        "v": zeros,
+        "w": zeros,
         "blh": torch.full(shape, blh_m),
         "sp": torch.full(shape, 101325.0),
         "t": torch.full(shape, 280.0),
@@ -568,7 +601,7 @@ def _wmc_met_window(
     names = ("u", "v", "w", "blh", "sp", "t", "ustar", "shf")
     fields = torch.stack([chans[n] for n in names], dim=0)
 
-    t0 = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    t0 = datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC)
     level = np.linspace(0.0, max(4000.0, 1.5 * blh_m), n_lev)
     metadata = MetFieldMetadata(
         lon=np.linspace(-2.0, 2.0, n_lon),
@@ -578,18 +611,27 @@ def _wmc_met_window(
         time_start=t0,
         time_end=t0 + timedelta(hours=1),
         variable_units={
-            "u": "m/s", "v": "m/s", "w": "m/s", "blh": "m", "sp": "Pa",
-            "t": "K", "z": "m**2s**-2", "z_sfc": "m**2s**-2",
-            "ustar": "m/s", "shf": "W m**-2",
+            "u": "m/s",
+            "v": "m/s",
+            "w": "m/s",
+            "blh": "m",
+            "sp": "Pa",
+            "t": "K",
+            "z": "m**2s**-2",
+            "z_sfc": "m**2s**-2",
+            "ustar": "m/s",
+            "shf": "W m**-2",
         },
     )
     height = (
-        torch.as_tensor(level, dtype=torch.float32)
-        .view(n_lev, 1, 1).expand(shape).contiguous()
+        torch.as_tensor(level, dtype=torch.float32).view(n_lev, 1, 1).expand(shape).contiguous()
     )
     return HourlyMetTensors(
-        hour_start=fields, hour_end=fields, metadata=metadata,
-        channel_names=names, height_agl_m=height,
+        hour_start=fields,
+        hour_end=fields,
+        metadata=metadata,
+        channel_names=names,
+        height_agl_m=height,
     )
 
 
@@ -627,7 +669,7 @@ def test_v1_well_mixed_hanna_backward_path(static_substeps: bool) -> None:
 
     n = 6000
     particles = torch.zeros(n, 4, dtype=torch.float32)
-    particles[:, 1] = 45.0   # mid-latitude → nonzero Coriolis
+    particles[:, 1] = 45.0  # mid-latitude → nonzero Coriolis
     # Uniform initial in [0, blh] — the well-mixed reference distribution.
     particles[:, 2] = torch.rand(n, dtype=torch.float32) * blh
     particles[:, 3] = 1.0 / n
@@ -635,15 +677,20 @@ def test_v1_well_mixed_hanna_backward_path(static_substeps: bool) -> None:
     active = torch.ones(n, dtype=torch.bool)
 
     dt = 15.0
-    n_steps = 1500   # ≈ 100·T_L_typical → fully equilibrated if WMC holds
+    n_steps = 1500  # ≈ 100·T_L_typical → fully equilibrated if WMC holds
     # Manual reflection at z=blh (z=0 is handled inside scheme.step). The scheme
     # doesn't natively reflect at the BL top — for this synthetic test we add it
     # so particles can't escape into the (different) FT closure during the run.
     # Same physics as the W&F §6 smooth-wall reflection: flip both z and w'.
     for _ in range(n_steps):
         particles, state = scheme.step(
-            particles, state, met, t_alpha=0.5, dt_seconds=dt,
-            active_mask=active, engine=engine,
+            particles,
+            state,
+            met,
+            t_alpha=0.5,
+            dt_seconds=dt,
+            active_mask=active,
+            engine=engine,
         )
         above = particles[:, 2] > blh
         if bool(above.any()):
@@ -670,7 +717,7 @@ def test_v1_well_mixed_hanna_backward_path(static_substeps: bool) -> None:
     n_bins = 10
     edges = np.linspace(0.0, blh, n_bins + 1)
     counts, _ = np.histogram(z_final[in_bl], bins=edges)
-    interior = counts[2:8]   # z ∈ [600, 2400] m
+    interior = counts[2:8]  # z ∈ [600, 2400] m
     expected = interior.mean()
     rel_rms = float(np.sqrt(np.mean(((interior - expected) / expected) ** 2)))
 
@@ -702,7 +749,9 @@ def _wmc_density_met_window(
     shape = (n_lev, n_lat, n_lon)
     zeros = torch.zeros(shape, dtype=torch.float32)
     chans = {
-        "u": zeros, "v": zeros, "w": zeros,
+        "u": zeros,
+        "v": zeros,
+        "w": zeros,
         "blh": torch.full(shape, blh_m),
         "sp": torch.full(shape, 101325.0),
         "t": torch.full(shape, 280.0),
@@ -712,7 +761,7 @@ def _wmc_density_met_window(
     names = ("u", "v", "w", "blh", "sp", "t", "ustar", "shf")
     fields = torch.stack([chans[n] for n in names], dim=0)
 
-    t0 = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    t0 = datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC)
     z_top = max(6000.0, 1.2 * blh_m)
     level = np.linspace(0.0, z_top, n_lev)
     metadata = MetFieldMetadata(
@@ -723,22 +772,33 @@ def _wmc_density_met_window(
         time_start=t0,
         time_end=t0 + timedelta(hours=1),
         variable_units={
-            "u": "m/s", "v": "m/s", "w": "m/s", "blh": "m", "sp": "Pa",
-            "t": "K", "z": "m**2s**-2", "z_sfc": "m**2s**-2",
-            "ustar": "m/s", "shf": "W m**-2",
+            "u": "m/s",
+            "v": "m/s",
+            "w": "m/s",
+            "blh": "m",
+            "sp": "Pa",
+            "t": "K",
+            "z": "m**2s**-2",
+            "z_sfc": "m**2s**-2",
+            "ustar": "m/s",
+            "shf": "W m**-2",
         },
     )
     height = (
-        torch.as_tensor(level, dtype=torch.float32)
-        .view(n_lev, 1, 1).expand(shape).contiguous()
+        torch.as_tensor(level, dtype=torch.float32).view(n_lev, 1, 1).expand(shape).contiguous()
     )
     return HourlyMetTensors(
-        hour_start=fields, hour_end=fields, metadata=metadata,
-        channel_names=names, height_agl_m=height,
+        hour_start=fields,
+        hour_end=fields,
+        metadata=metadata,
+        channel_names=names,
+        height_agl_m=height,
     )
 
 
-def _density_at(z_m: np.ndarray, *, p_bot_hpa: float, p_top_hpa: float, z_top_m: float, t_kelvin: float) -> np.ndarray:
+def _density_at(
+    z_m: np.ndarray, *, p_bot_hpa: float, p_top_hpa: float, z_top_m: float, t_kelvin: float
+) -> np.ndarray:
     """Air density at height z [m], matching the linear-in-z pressure profile of
     `_wmc_density_met_window` (constant T → ρ ∝ p)."""
 
@@ -775,10 +835,16 @@ def test_v1_density_weighted_well_mixed_with_F2() -> None:
     # Rejection-sample N particle altitudes from ρ(z) on [0, blh].
     n = 6000
     z_init: list[float] = []
-    rho_max = float(_density_at(np.array([0.0]), p_bot_hpa=p_bot, p_top_hpa=p_top, z_top_m=z_top_grid, t_kelvin=T)[0])
+    rho_max = float(
+        _density_at(
+            np.array([0.0]), p_bot_hpa=p_bot, p_top_hpa=p_top, z_top_m=z_top_grid, t_kelvin=T
+        )[0]
+    )
     while len(z_init) < n:
         z_try = rng.uniform(0.0, blh, size=n - len(z_init))
-        rho_try = _density_at(z_try, p_bot_hpa=p_bot, p_top_hpa=p_top, z_top_m=z_top_grid, t_kelvin=T)
+        rho_try = _density_at(
+            z_try, p_bot_hpa=p_bot, p_top_hpa=p_top, z_top_m=z_top_grid, t_kelvin=T
+        )
         accepted = z_try[rng.uniform(0.0, rho_max, size=z_try.shape) < rho_try]
         z_init.extend(accepted.tolist())
     z_init_arr = np.array(z_init[:n])
@@ -794,8 +860,13 @@ def test_v1_density_weighted_well_mixed_with_F2() -> None:
     n_steps = 1500
     for _ in range(n_steps):
         particles, state = scheme.step(
-            particles, state, met, t_alpha=0.5, dt_seconds=dt,
-            active_mask=active, engine=engine,
+            particles,
+            state,
+            met,
+            t_alpha=0.5,
+            dt_seconds=dt,
+            active_mask=active,
+            engine=engine,
         )
         above = particles[:, 2] > blh
         if bool(above.any()):
@@ -811,7 +882,11 @@ def test_v1_density_weighted_well_mixed_with_F2() -> None:
     counts, _ = np.histogram(z_final[in_bl], bins=edges)
     bin_centres = 0.5 * (edges[:-1] + edges[1:])
     rho_at_centres = _density_at(
-        bin_centres, p_bot_hpa=p_bot, p_top_hpa=p_top, z_top_m=z_top_grid, t_kelvin=T,
+        bin_centres,
+        p_bot_hpa=p_bot,
+        p_top_hpa=p_top,
+        z_top_m=z_top_grid,
+        t_kelvin=T,
     )
     expected = counts.sum() * rho_at_centres / rho_at_centres.sum()
     # Compare interior bins (z = 1500..3500 m, indices 3..6) so surface-layer
@@ -820,7 +895,7 @@ def test_v1_density_weighted_well_mixed_with_F2() -> None:
     interior_counts = counts[3:7]
     interior_expected = expected[3:7]
     rel_dev = (interior_counts - interior_expected) / interior_expected
-    rel_rms = float(np.sqrt(np.mean(rel_dev ** 2)))
+    rel_rms = float(np.sqrt(np.mean(rel_dev**2)))
 
     # Separately confirm a flat-distribution null assertion would have failed:
     # the same data vs a constant expected (i.e. assuming no density correction)
@@ -855,7 +930,7 @@ def test_met_cache_thrash_warning_fires_when_undersized(caplog) -> None:
 
     from lpdm.main import _warn_if_met_cache_thrashes
 
-    base = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    base = datetime(2024, 1, 1, tzinfo=UTC)
 
     def _rel(secs: int) -> SimpleNamespace:
         return SimpleNamespace(release_time=base + timedelta(seconds=secs), duration_seconds=3600)
@@ -931,9 +1006,10 @@ def test_footprint_total_matches_active_particle_time(tmp_path: Path) -> None:
     _run(cfg, reader=reader)
 
     traj = pd.read_parquet(tmp_path / "out" / "trajectory_diagnostics.parquet")
-    expected_total = float(
-        (traj["active_particles"].astype(float) * cfg.simulation.dt_seconds).sum()
-    ) / cfg.release.n_particles
+    expected_total = (
+        float((traj["active_particles"].astype(float) * cfg.simulation.dt_seconds).sum())
+        / cfg.release.n_particles
+    )
 
     fp = xr.open_zarr(tmp_path / "out" / "footprints.zarr")
     actual_total = float(fp["footprint"].sum())
@@ -961,7 +1037,7 @@ def _make_periodic_config(
     # multiple of dt, the cursor skips the upper-boundary visit for the
     # earliest release in each batch and that release loses one step's
     # worth of mass — a real but small discrete-time effect.
-    start_time = start_time or datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    start_time = start_time or datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC)
     return RunConfig.model_validate(
         {
             "io": {"zarr_store": "fake://x", "output_uri": output_uri},
@@ -1013,9 +1089,7 @@ def _make_multi_release_reader(
 
     all_releases = [r for b in cfg.expand_to_batches() for r in b.releases]
     earliest = min(r.release_time for r in all_releases)
-    latest_end = max(
-        r.release_time + timedelta(seconds=r.duration_seconds) for r in all_releases
-    )
+    latest_end = max(r.release_time + timedelta(seconds=r.duration_seconds) for r in all_releases)
     return AnalyticMetReader(
         coverage_start=earliest - timedelta(seconds=cfg.simulation.length_seconds + 7200),
         coverage_end=latest_end + timedelta(hours=1),
@@ -1035,7 +1109,7 @@ def _make_multi_site_config(
     start_time: datetime | None = None,
     seed: int | None = 42,
 ) -> RunConfig:
-    start_time = start_time or datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    start_time = start_time or datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC)
     return RunConfig.model_validate(
         {
             "io": {"zarr_store": "fake://x", "output_uri": output_uri},
@@ -1153,9 +1227,7 @@ def test_periodic_release_run_completes_and_emits_5d_footprint(tmp_path: Path) -
     # release_time is now a coord along `release` (so a timestamp can repeat across sites)
     assert fp["release_time"].dims == ("release",)
 
-    expected_times = [
-        cfg.simulation.start_time + timedelta(seconds=i * 3600) for i in range(3)
-    ]
+    expected_times = [cfg.simulation.start_time + timedelta(seconds=i * 3600) for i in range(3)]
     actual_times = pd.to_datetime(fp["release_time"].values).tz_localize("UTC")
     for actual, expected in zip(actual_times, expected_times):
         assert actual == expected
@@ -1216,9 +1288,10 @@ def test_periodic_release_footprint_mass_matches_active_particle_time(tmp_path: 
     _run(cfg, reader=reader)
 
     traj = pd.read_parquet(tmp_path / "out" / "trajectory_diagnostics.parquet")
-    expected_total = float(
-        (traj["active_particles"].astype(float) * cfg.simulation.dt_seconds).sum()
-    ) / cfg.release.n_particles_per_release
+    expected_total = (
+        float((traj["active_particles"].astype(float) * cfg.simulation.dt_seconds).sum())
+        / cfg.release.n_particles_per_release
+    )
 
     fp = xr.open_zarr(tmp_path / "out" / "footprints.zarr")["footprint"]
     actual_total = float(fp.sum())
@@ -1289,9 +1362,10 @@ def test_periodic_release_batch_chunking_preserves_shape_and_conserves_per_chunk
         _run(cfg, reader=reader)
 
         traj = pd.read_parquet(out_path / "trajectory_diagnostics.parquet")
-        expected = float(
-            (traj["active_particles"].astype(float) * cfg.simulation.dt_seconds).sum()
-        ) / cfg.release.n_particles_per_release
+        expected = (
+            float((traj["active_particles"].astype(float) * cfg.simulation.dt_seconds).sum())
+            / cfg.release.n_particles_per_release
+        )
 
         fp = xr.open_zarr(out_path / "footprints.zarr")["footprint"]
         actual = float(fp.sum())
@@ -1325,13 +1399,13 @@ def test_within_met_domain_flags_out_of_bounds_particles() -> None:
     # [lon, lat, alt, weight]; only the first 3 columns are read.
     particles = torch.tensor(
         [
-            [0.0, 0.0, 100.0, 1.0],     # inside
-            [-3.0, 0.0, 100.0, 1.0],    # on lon edge -> inside (inclusive)
-            [-3.01, 0.0, 100.0, 1.0],   # just past lon_min -> outside
-            [3.01, 0.0, 100.0, 1.0],    # past lon_max -> outside
-            [0.0, 2.5, 100.0, 1.0],     # past lat_max -> outside
-            [0.0, 0.0, 5000.1, 1.0],    # above alt_max -> outside
-            [0.0, 0.0, 0.0, 1.0],       # at the surface -> inside (no lower kill)
+            [0.0, 0.0, 100.0, 1.0],  # inside
+            [-3.0, 0.0, 100.0, 1.0],  # on lon edge -> inside (inclusive)
+            [-3.01, 0.0, 100.0, 1.0],  # just past lon_min -> outside
+            [3.01, 0.0, 100.0, 1.0],  # past lon_max -> outside
+            [0.0, 2.5, 100.0, 1.0],  # past lat_max -> outside
+            [0.0, 0.0, 5000.1, 1.0],  # above alt_max -> outside
+            [0.0, 0.0, 0.0, 1.0],  # at the surface -> inside (no lower kill)
         ],
         dtype=torch.float64,
     )
@@ -1346,7 +1420,7 @@ def test_particles_killed_on_met_domain_exit(tmp_path: Path) -> None:
 
     cfg = _make_run_config(
         output_uri=str(tmp_path / "out"),
-        simulation_length_seconds=10800,   # 3 h backward
+        simulation_length_seconds=10800,  # 3 h backward
         dt_seconds=300,
         n_particles=256,
         release_seed=42,
@@ -1441,8 +1515,13 @@ def test_static_step_freezes_inactive_particles() -> None:
     s0 = {k: v.clone() for k, v in state.items()}
 
     particles, state = scheme.step(
-        particles, state, met, t_alpha=0.5, dt_seconds=60.0,
-        active_mask=active, engine=engine,
+        particles,
+        state,
+        met,
+        t_alpha=0.5,
+        dt_seconds=60.0,
+        active_mask=active,
+        engine=engine,
     )
 
     inactive = ~active
@@ -1480,9 +1559,10 @@ def test_static_path_footprint_conservation(tmp_path: Path, monkeypatch) -> None
     _run(cfg, reader=reader)
 
     traj = pd.read_parquet(tmp_path / "out" / "trajectory_diagnostics.parquet")
-    expected_total = float(
-        (traj["active_particles"].astype(float) * cfg.simulation.dt_seconds).sum()
-    ) / cfg.release.n_particles
+    expected_total = (
+        float((traj["active_particles"].astype(float) * cfg.simulation.dt_seconds).sum())
+        / cfg.release.n_particles
+    )
 
     fp = xr.open_zarr(tmp_path / "out" / "footprints.zarr")
     actual_total = float(fp["footprint"].sum())
@@ -1519,8 +1599,13 @@ def test_graph_compile_substep_path_runs_on_cpu(monkeypatch) -> None:
     active = torch.ones(n, dtype=torch.bool)
 
     particles, state = scheme.step(
-        particles, state, met, t_alpha=0.5, dt_seconds=60.0,
-        active_mask=active, engine=engine,
+        particles,
+        state,
+        met,
+        t_alpha=0.5,
+        dt_seconds=60.0,
+        active_mask=active,
+        engine=engine,
     )
 
     assert scheme._graph_compile_state == "ok"  # the graph-compile path engaged
@@ -1566,7 +1651,9 @@ def test_step_core_traces_as_one_graph_no_breaks() -> None:
     torch._dynamo.config.suppress_errors = False  # make breaks raise, don't swallow
     try:
         engine = GPUEngine(device="cpu")
-        scheme = HannaScheme(meander_enabled=True, max_substeps=4)  # meander on → trace that path too
+        scheme = HannaScheme(
+            meander_enabled=True, max_substeps=4
+        )  # meander on → trace that path too
         met = _wmc_met_window(blh_m=2000.0, ustar_m_s=0.4)
 
         n = 48
@@ -1580,9 +1667,16 @@ def test_step_core_traces_as_one_graph_no_breaks() -> None:
 
         compiled = torch.compile(scheme._step_core, fullgraph=True, backend="eager")
         out = compiled(
-            particles=particles, u_prime=state["u_prime"], v_prime=state["v_prime"],
-            w_prime=state["w_prime"], u_meander=state["u_meander"], v_meander=state["v_meander"],
-            active_mask=active, dt_seconds=60.0, n_substeps=scheme.max_substeps, engine=engine,
+            particles=particles,
+            u_prime=state["u_prime"],
+            v_prime=state["v_prime"],
+            w_prime=state["w_prime"],
+            u_meander=state["u_meander"],
+            v_meander=state["v_meander"],
+            active_mask=active,
+            dt_seconds=60.0,
+            n_substeps=scheme.max_substeps,
+            engine=engine,
             **inputs,
         )
         assert len(out) == 6 and all(torch.isfinite(o).all() for o in out)
@@ -1625,9 +1719,16 @@ def test_step_core_does_not_recompile_per_step() -> None:
             active = torch.ones(n, dtype=torch.bool)
             inputs = scheme._gather_static_inputs(met, t_alpha, torch.device("cpu"), torch.float32)
             compiled(
-                particles=particles, u_prime=state["u_prime"], v_prime=state["v_prime"],
-                w_prime=state["w_prime"], u_meander=state["u_meander"], v_meander=state["v_meander"],
-                active_mask=active, dt_seconds=60.0, n_substeps=scheme.max_substeps, engine=engine,
+                particles=particles,
+                u_prime=state["u_prime"],
+                v_prime=state["v_prime"],
+                w_prime=state["w_prime"],
+                u_meander=state["u_meander"],
+                v_meander=state["v_meander"],
+                active_mask=active,
+                dt_seconds=60.0,
+                n_substeps=scheme.max_substeps,
+                engine=engine,
                 **inputs,
             )
 
@@ -1637,11 +1738,11 @@ def test_step_core_does_not_recompile_per_step() -> None:
         # blh_m=4000 → 6000 m top vs 2000 → 4000 m). The level VALUES change every met
         # window in production (weather-dependent geopotential); they must be a dynamic
         # tensor, not a tuple dynamo specialises on (GH200 month run 2026-06-26).
-        met_a = _wmc_met_window(blh_m=2000.0, ustar_m_s=0.4)   # level top 4000 m
-        met_b = _wmc_met_window(blh_m=4000.0, ustar_m_s=0.6)   # level top 6000 m (different F9 axis)
-        call(met_a, 0.3, 1)   # first call: compiles once (not a recompile)
-        call(met_a, 0.7, 2)   # different alpha → must NOT recompile
-        call(met_b, 0.5, 3)   # different alpha + met values + LEVEL array → must NOT recompile
+        met_a = _wmc_met_window(blh_m=2000.0, ustar_m_s=0.4)  # level top 4000 m
+        met_b = _wmc_met_window(blh_m=4000.0, ustar_m_s=0.6)  # level top 6000 m (different F9 axis)
+        call(met_a, 0.3, 1)  # first call: compiles once (not a recompile)
+        call(met_a, 0.7, 2)  # different alpha → must NOT recompile
+        call(met_b, 0.5, 3)  # different alpha + met values + LEVEL array → must NOT recompile
     finally:
         torch._dynamo.config.suppress_errors = prev_sup
         torch._dynamo.config.error_on_recompile = prev_rec
@@ -1666,7 +1767,7 @@ def test_wind_mean_cache_matches_direct_and_invalidates_across_windows() -> None
     cache: dict = {}
     a1, wm1 = _advection_alpha_wind_mean(win1, t_cur, 60.0, device, dtp, cache)
     _, wm2 = _advection_alpha_wind_mean(win1, t_cur, 60.0, device, dtp, cache)  # cache hit
-    _, wm3 = _advection_alpha_wind_mean(win1, t_cur, 60.0, device, dtp, None)   # cache-free
+    _, wm3 = _advection_alpha_wind_mean(win1, t_cur, 60.0, device, dtp, None)  # cache-free
     assert torch.equal(wm1, wm2)
     assert torch.allclose(wm1, wm3)
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import numpy as np
 import torch
@@ -16,8 +16,11 @@ class _InMemoryArcoReader(ArcoEra5ZarrReader):
         # lon-wrap, multi-store) keep asserting pressure-grid shapes/values. The
         # terrain-following resample has its own tests below.
         super().__init__(
-            zarr_store="in-memory", device="cpu", dtype=torch.float64,
-            terrain_following=terrain_following, **kwargs,
+            zarr_store="in-memory",
+            device="cpu",
+            dtype=torch.float64,
+            terrain_following=terrain_following,
+            **kwargs,
         )
         self._dataset = dataset
 
@@ -26,10 +29,12 @@ class _InMemoryArcoReader(ArcoEra5ZarrReader):
 
 
 def _build_mock_era5_dataset(terrain_slope_m_per_deg: float = 0.0) -> xr.Dataset:
-    times = np.array([
-        np.datetime64("2024-01-01T00:00:00"),
-        np.datetime64("2024-01-01T01:00:00"),
-    ])
+    times = np.array(
+        [
+            np.datetime64("2024-01-01T00:00:00"),
+            np.datetime64("2024-01-01T01:00:00"),
+        ]
+    )
     levels = np.array([900.0, 1000.0], dtype=np.float64)  # hPa
     lat = np.array([10.0, 11.0], dtype=np.float64)
     lon = np.array([20.0, 21.0], dtype=np.float64)
@@ -112,8 +117,8 @@ def test_fetch_hourly_window_includes_surface_pressure_and_converts_w() -> None:
             z_max=1050.0,
         ),
         time=TimeBounds(
-            start=datetime(2024, 1, 1, 0, 15, tzinfo=timezone.utc),
-            end=datetime(2024, 1, 1, 1, 0, tzinfo=timezone.utc),
+            start=datetime(2024, 1, 1, 0, 15, tzinfo=UTC),
+            end=datetime(2024, 1, 1, 1, 0, tzinfo=UTC),
         ),
     )
 
@@ -168,8 +173,8 @@ def test_fetch_hourly_window_rejects_unknown_w_units() -> None:
             z_max=1050.0,
         ),
         time=TimeBounds(
-            start=datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc),
-            end=datetime(2024, 1, 1, 1, 0, tzinfo=timezone.utc),
+            start=datetime(2024, 1, 1, 0, 0, tzinfo=UTC),
+            end=datetime(2024, 1, 1, 1, 0, tzinfo=UTC),
         ),
     )
 
@@ -194,8 +199,8 @@ def test_fetch_hourly_window_handles_negative_lon_request_with_360_dataset() -> 
             z_max=1050.0,
         ),
         time=TimeBounds(
-            start=datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc),
-            end=datetime(2024, 1, 1, 1, 0, tzinfo=timezone.utc),
+            start=datetime(2024, 1, 1, 0, 0, tzinfo=UTC),
+            end=datetime(2024, 1, 1, 1, 0, tzinfo=UTC),
         ),
     )
 
@@ -210,8 +215,8 @@ def test_get_time_coverage_returns_dataset_bounds() -> None:
 
     start, end = reader.get_time_coverage()
 
-    assert start == datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
-    assert end == datetime(2024, 1, 1, 1, 0, tzinfo=timezone.utc)
+    assert start == datetime(2024, 1, 1, 0, 0, tzinfo=UTC)
+    assert end == datetime(2024, 1, 1, 1, 0, tzinfo=UTC)
 
 
 def test_fetch_hourly_window_rejects_partial_nan_agl_cells() -> None:
@@ -236,8 +241,8 @@ def test_fetch_hourly_window_rejects_partial_nan_agl_cells() -> None:
             z_max=1050.0,
         ),
         time=TimeBounds(
-            start=datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc),
-            end=datetime(2024, 1, 1, 1, 0, tzinfo=timezone.utc),
+            start=datetime(2024, 1, 1, 0, 0, tzinfo=UTC),
+            end=datetime(2024, 1, 1, 1, 0, tzinfo=UTC),
         ),
     )
 
@@ -250,8 +255,14 @@ def test_fetch_hourly_window_rejects_partial_nan_agl_cells() -> None:
 
 def test_fetch_hourly_window_rejects_all_nan_agl_fields() -> None:
     ds = _build_mock_era5_dataset()
-    ds["geopotential"] = (("time", "level", "latitude", "longitude"), np.full_like(ds["geopotential"].values, np.nan))
-    ds["geopotential_at_surface"] = (("time", "latitude", "longitude"), np.full_like(ds["geopotential_at_surface"].values, np.nan))
+    ds["geopotential"] = (
+        ("time", "level", "latitude", "longitude"),
+        np.full_like(ds["geopotential"].values, np.nan),
+    )
+    ds["geopotential_at_surface"] = (
+        ("time", "latitude", "longitude"),
+        np.full_like(ds["geopotential_at_surface"].values, np.nan),
+    )
     ds["geopotential"].attrs["units"] = "m**2 s**-2"
     ds["geopotential_at_surface"].attrs["units"] = "m**2 s**-2"
 
@@ -266,8 +277,8 @@ def test_fetch_hourly_window_rejects_all_nan_agl_fields() -> None:
             z_max=1050.0,
         ),
         time=TimeBounds(
-            start=datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc),
-            end=datetime(2024, 1, 1, 1, 0, tzinfo=timezone.utc),
+            start=datetime(2024, 1, 1, 0, 0, tzinfo=UTC),
+            end=datetime(2024, 1, 1, 1, 0, tzinfo=UTC),
         ),
     )
 
@@ -285,11 +296,16 @@ def test_hourly_met_tensors_channel_accessors_match_positional() -> None:
     reader = _InMemoryArcoReader(ds)
     request = BoundingBoxRequest(
         spatial=SpatialBounds(
-            lon_min=19.5, lon_max=21.5, lat_min=9.5, lat_max=11.5, z_min=850.0, z_max=1050.0,
+            lon_min=19.5,
+            lon_max=21.5,
+            lat_min=9.5,
+            lat_max=11.5,
+            z_min=850.0,
+            z_max=1050.0,
         ),
         time=TimeBounds(
-            start=datetime(2024, 1, 1, 0, 15, tzinfo=timezone.utc),
-            end=datetime(2024, 1, 1, 1, 0, tzinfo=timezone.utc),
+            start=datetime(2024, 1, 1, 0, 15, tzinfo=UTC),
+            end=datetime(2024, 1, 1, 1, 0, tzinfo=UTC),
         ),
     )
 
@@ -328,11 +344,16 @@ def test_fetch_hourly_window_includes_ustar_and_deaccumulates_shf() -> None:
 
     request = BoundingBoxRequest(
         spatial=SpatialBounds(
-            lon_min=19.5, lon_max=21.5, lat_min=9.5, lat_max=11.5, z_min=850.0, z_max=1050.0,
+            lon_min=19.5,
+            lon_max=21.5,
+            lat_min=9.5,
+            lat_max=11.5,
+            z_min=850.0,
+            z_max=1050.0,
         ),
         time=TimeBounds(
-            start=datetime(2024, 1, 1, 0, 15, tzinfo=timezone.utc),
-            end=datetime(2024, 1, 1, 1, 0, tzinfo=timezone.utc),
+            start=datetime(2024, 1, 1, 0, 15, tzinfo=UTC),
+            end=datetime(2024, 1, 1, 1, 0, tzinfo=UTC),
         ),
     )
 
@@ -366,11 +387,16 @@ def test_fetch_hourly_window_passes_through_instantaneous_shf() -> None:
 
     request = BoundingBoxRequest(
         spatial=SpatialBounds(
-            lon_min=19.5, lon_max=21.5, lat_min=9.5, lat_max=11.5, z_min=850.0, z_max=1050.0,
+            lon_min=19.5,
+            lon_max=21.5,
+            lat_min=9.5,
+            lat_max=11.5,
+            z_min=850.0,
+            z_max=1050.0,
         ),
         time=TimeBounds(
-            start=datetime(2024, 1, 1, 0, 15, tzinfo=timezone.utc),
-            end=datetime(2024, 1, 1, 1, 0, tzinfo=timezone.utc),
+            start=datetime(2024, 1, 1, 0, 15, tzinfo=UTC),
+            end=datetime(2024, 1, 1, 1, 0, tzinfo=UTC),
         ),
     )
 
@@ -501,8 +527,8 @@ def test_multi_store_stitch_returns_combined_time_coverage(tmp_path) -> None:
     )
 
     start, end = reader.get_time_coverage()
-    assert start == datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
-    assert end == datetime(2024, 1, 1, 1, 0, tzinfo=timezone.utc)
+    assert start == datetime(2024, 1, 1, 0, 0, tzinfo=UTC)
+    assert end == datetime(2024, 1, 1, 1, 0, tzinfo=UTC)
 
 
 def test_multi_store_fetch_window_spans_both_stores(tmp_path) -> None:
@@ -523,11 +549,16 @@ def test_multi_store_fetch_window_spans_both_stores(tmp_path) -> None:
 
     request = BoundingBoxRequest(
         spatial=SpatialBounds(
-            lon_min=19.5, lon_max=21.5, lat_min=9.5, lat_max=11.5, z_min=850.0, z_max=1050.0,
+            lon_min=19.5,
+            lon_max=21.5,
+            lat_min=9.5,
+            lat_max=11.5,
+            z_min=850.0,
+            z_max=1050.0,
         ),
         time=TimeBounds(
-            start=datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc),
-            end=datetime(2024, 1, 1, 1, 0, tzinfo=timezone.utc),
+            start=datetime(2024, 1, 1, 0, 0, tzinfo=UTC),
+            end=datetime(2024, 1, 1, 1, 0, tzinfo=UTC),
         ),
     )
 
@@ -617,13 +648,16 @@ def test_fetch_hourly_window_succeeds_on_wrapped_lon_store() -> None:
 
     request = BoundingBoxRequest(
         spatial=SpatialBounds(
-            lon_min=-100.0, lon_max=10.0,
-            lat_min=9.5, lat_max=11.5,
-            z_min=850.0, z_max=1050.0,
+            lon_min=-100.0,
+            lon_max=10.0,
+            lat_min=9.5,
+            lat_max=11.5,
+            z_min=850.0,
+            z_max=1050.0,
         ),
         time=TimeBounds(
-            start=datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc),
-            end=datetime(2024, 1, 1, 1, 0, tzinfo=timezone.utc),
+            start=datetime(2024, 1, 1, 0, 0, tzinfo=UTC),
+            end=datetime(2024, 1, 1, 1, 0, tzinfo=UTC),
         ),
     )
 
@@ -664,11 +698,16 @@ def test_hourly_met_tensors_channel_unknown_name_raises() -> None:
     reader = _InMemoryArcoReader(ds)
     request = BoundingBoxRequest(
         spatial=SpatialBounds(
-            lon_min=19.5, lon_max=21.5, lat_min=9.5, lat_max=11.5, z_min=850.0, z_max=1050.0,
+            lon_min=19.5,
+            lon_max=21.5,
+            lat_min=9.5,
+            lat_max=11.5,
+            z_min=850.0,
+            z_max=1050.0,
         ),
         time=TimeBounds(
-            start=datetime(2024, 1, 1, 0, 15, tzinfo=timezone.utc),
-            end=datetime(2024, 1, 1, 1, 0, tzinfo=timezone.utc),
+            start=datetime(2024, 1, 1, 0, 15, tzinfo=UTC),
+            end=datetime(2024, 1, 1, 1, 0, tzinfo=UTC),
         ),
     )
 
@@ -685,11 +724,16 @@ def test_hourly_met_tensors_channel_unknown_name_raises() -> None:
 def _tf_request(z_max: float = 1050.0) -> BoundingBoxRequest:
     return BoundingBoxRequest(
         spatial=SpatialBounds(
-            lon_min=19.5, lon_max=21.5, lat_min=9.5, lat_max=11.5, z_min=0.0, z_max=z_max,
+            lon_min=19.5,
+            lon_max=21.5,
+            lat_min=9.5,
+            lat_max=11.5,
+            z_min=0.0,
+            z_max=z_max,
         ),
         time=TimeBounds(
-            start=datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc),
-            end=datetime(2024, 1, 1, 1, 0, tzinfo=timezone.utc),
+            start=datetime(2024, 1, 1, 0, 0, tzinfo=UTC),
+            end=datetime(2024, 1, 1, 1, 0, tzinfo=UTC),
         ),
     )
 
@@ -758,11 +802,16 @@ def test_terrain_hour_cache_shares_hour_between_adjacent_windows() -> None:
     def req(h0: int, h1: int) -> BoundingBoxRequest:
         return BoundingBoxRequest(
             spatial=SpatialBounds(
-                lon_min=19.5, lon_max=21.5, lat_min=9.5, lat_max=11.5, z_min=0.0, z_max=1050.0,
+                lon_min=19.5,
+                lon_max=21.5,
+                lat_min=9.5,
+                lat_max=11.5,
+                z_min=0.0,
+                z_max=1050.0,
             ),
             time=TimeBounds(
-                start=datetime(2024, 1, 1, h0, 0, tzinfo=timezone.utc),
-                end=datetime(2024, 1, 1, h1, 0, tzinfo=timezone.utc),
+                start=datetime(2024, 1, 1, h0, 0, tzinfo=UTC),
+                end=datetime(2024, 1, 1, h1, 0, tzinfo=UTC),
             ),
         )
 
@@ -785,11 +834,16 @@ def test_legacy_path_does_not_use_hour_cache() -> None:
     reader = _InMemoryArcoReader(_build_mock_era5_dataset(), terrain_following=False)
     request = BoundingBoxRequest(
         spatial=SpatialBounds(
-            lon_min=19.5, lon_max=21.5, lat_min=9.5, lat_max=11.5, z_min=850.0, z_max=1050.0,
+            lon_min=19.5,
+            lon_max=21.5,
+            lat_min=9.5,
+            lat_max=11.5,
+            z_min=850.0,
+            z_max=1050.0,
         ),
         time=TimeBounds(
-            start=datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc),
-            end=datetime(2024, 1, 1, 1, 0, tzinfo=timezone.utc),
+            start=datetime(2024, 1, 1, 0, 0, tzinfo=UTC),
+            end=datetime(2024, 1, 1, 1, 0, tzinfo=UTC),
         ),
     )
     reader.fetch_hourly_window(request)

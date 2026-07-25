@@ -13,7 +13,7 @@ See docs/VALIDATION.md (T4) and dev/decisions/0003-terrain-following-agl-coordin
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import numpy as np
 import torch
@@ -35,7 +35,9 @@ G = 9.80665
 class _InMemoryReader(ArcoEra5ZarrReader):
     def __init__(self, dataset: xr.Dataset, *, terrain_following: bool) -> None:
         super().__init__(
-            zarr_store="in-memory", device="cpu", dtype=torch.float64,
+            zarr_store="in-memory",
+            device="cpu",
+            dtype=torch.float64,
             channel_names=("u", "v", "w", "blh", "sp"),
             terrain_following=terrain_following,
         )
@@ -54,10 +56,12 @@ def _hill_store(*, u_ms: float, hill_height_m: float, halfwidth_deg: float) -> x
     lon = np.round(np.arange(-3.5, 3.51, 0.1), 3)
     lat = np.array([44.8, 45.0, 45.2])  # ~uniform → negligible lat terrain gradient
     agl_offsets = np.array([20.0, 100.0, 300.0, 700.0, 1500.0, 3000.0, 6000.0, 12000.0])
-    times = np.array([
-        np.datetime64("2024-01-01T00:00:00"),
-        np.datetime64("2024-01-01T01:00:00"),
-    ])
+    times = np.array(
+        [
+            np.datetime64("2024-01-01T00:00:00"),
+            np.datetime64("2024-01-01T01:00:00"),
+        ]
+    )
     nt, nz, ny, nx = times.size, agl_offsets.size, lat.size, lon.size
 
     h_1d = hill_height_m * np.exp(-((lon / halfwidth_deg) ** 2))  # [X]
@@ -75,22 +79,44 @@ def _hill_store(*, u_ms: float, hill_height_m: float, halfwidth_deg: float) -> x
     z = (terrain[None, :, :] + agl_offsets[:, None, None]) * G  # [Z, Y, X]
     ds = xr.Dataset(
         data_vars=dict(
-            u_component_of_wind=(("time", "level", "latitude", "longitude"), np.full((nt, nz, ny, nx), u_ms)),
-            v_component_of_wind=(("time", "level", "latitude", "longitude"), np.zeros((nt, nz, ny, nx))),
+            u_component_of_wind=(
+                ("time", "level", "latitude", "longitude"),
+                np.full((nt, nz, ny, nx), u_ms),
+            ),
+            v_component_of_wind=(
+                ("time", "level", "latitude", "longitude"),
+                np.zeros((nt, nz, ny, nx)),
+            ),
             vertical_velocity=(("time", "level", "latitude", "longitude"), lev_field(w_2d)),
-            temperature=(("time", "level", "latitude", "longitude"), np.full((nt, nz, ny, nx), 280.0)),
-            boundary_layer_height=(("time", "latitude", "longitude"), np.full((nt, ny, nx), 1000.0)),
+            temperature=(
+                ("time", "level", "latitude", "longitude"),
+                np.full((nt, nz, ny, nx), 280.0),
+            ),
+            boundary_layer_height=(
+                ("time", "latitude", "longitude"),
+                np.full((nt, ny, nx), 1000.0),
+            ),
             surface_pressure=(("time", "latitude", "longitude"), np.full((nt, ny, nx), 101325.0)),
-            geopotential=(("time", "level", "latitude", "longitude"), np.broadcast_to(z[None], (nt, nz, ny, nx)).copy()),
-            geopotential_at_surface=(("time", "latitude", "longitude"), np.broadcast_to(z_sfc[None], (nt, ny, nx)).copy()),
+            geopotential=(
+                ("time", "level", "latitude", "longitude"),
+                np.broadcast_to(z[None], (nt, nz, ny, nx)).copy(),
+            ),
+            geopotential_at_surface=(
+                ("time", "latitude", "longitude"),
+                np.broadcast_to(z_sfc[None], (nt, ny, nx)).copy(),
+            ),
         ),
         coords=dict(time=times, level=agl_offsets, latitude=lat, longitude=lon),
     )
     units = {
-        "u_component_of_wind": "m s**-1", "v_component_of_wind": "m s**-1",
-        "vertical_velocity": "m s**-1", "temperature": "K",
-        "boundary_layer_height": "m", "surface_pressure": "Pa",
-        "geopotential": "m**2 s**-2", "geopotential_at_surface": "m**2 s**-2",
+        "u_component_of_wind": "m s**-1",
+        "v_component_of_wind": "m s**-1",
+        "vertical_velocity": "m s**-1",
+        "temperature": "K",
+        "boundary_layer_height": "m",
+        "surface_pressure": "Pa",
+        "geopotential": "m**2 s**-2",
+        "geopotential_at_surface": "m**2 s**-2",
     }
     for k, u in units.items():
         ds[k].attrs["units"] = u
@@ -108,11 +134,16 @@ def _crossing_max_agl_excursion(*, terrain_following: bool) -> tuple[float, floa
     ds = _hill_store(u_ms=u_ms, hill_height_m=hill_height, halfwidth_deg=0.5)
     reader = _InMemoryReader(ds, terrain_following=terrain_following)
 
-    t0 = datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
+    t0 = datetime(2024, 1, 1, 0, 0, tzinfo=UTC)
     window = reader.fetch_hourly_window(
         BoundingBoxRequest(
             spatial=SpatialBounds(
-                lon_min=-3.5, lon_max=3.5, lat_min=44.7, lat_max=45.3, z_min=0.0, z_max=15000.0,
+                lon_min=-3.5,
+                lon_max=3.5,
+                lat_min=44.7,
+                lat_max=45.3,
+                z_min=0.0,
+                z_max=15000.0,
             ),
             time=TimeBounds(start=t0, end=t0 + timedelta(hours=1)),
         )
@@ -128,7 +159,13 @@ def _crossing_max_agl_excursion(*, terrain_following: bool) -> tuple[float, floa
     max_exc = 0.0
     for _ in range(400):  # ~6.7 h at dt=60 s → traverses the hill
         p, _, _ = _advect_active_particles(
-            engine, torch.device("cpu"), p, window, t_mid, 60.0, torch.float64,
+            engine,
+            torch.device("cpu"),
+            p,
+            window,
+            t_mid,
+            60.0,
+            torch.float64,
         )
         lon = float(p[0, 0])
         if abs(lon) < 1.5:  # within the hill's influence

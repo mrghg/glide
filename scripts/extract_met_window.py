@@ -22,7 +22,6 @@ from __future__ import annotations
 import argparse
 import glob
 import shutil
-import sys
 import tarfile
 from pathlib import Path
 
@@ -31,12 +30,12 @@ import xarray as xr
 
 # Logical -> store variable names (mirrors MetReader.DEFAULT_VARIABLE_MAP).
 DEFAULT_VARS = (
-    "geopotential",              # 3D: per-column height -> AGL
-    "geopotential_at_surface",   # 2D: orography (the terrain we're testing against)
-    "temperature",               # 3D: potential temperature -> N^2
-    "u_component_of_wind",       # 3D: shear
-    "v_component_of_wind",       # 3D: shear
-    "boundary_layer_height",     # 2D: BL depth
+    "geopotential",  # 3D: per-column height -> AGL
+    "geopotential_at_surface",  # 2D: orography (the terrain we're testing against)
+    "temperature",  # 3D: potential temperature -> N^2
+    "u_component_of_wind",  # 3D: shear
+    "v_component_of_wind",  # 3D: shear
+    "boundary_layer_height",  # 2D: BL depth
 )
 
 # Default crop: the Europe view where the terrain holes are (Iberia, Alps,
@@ -59,19 +58,30 @@ def open_store_for_time(pattern: str, when: np.datetime64) -> xr.Dataset:
             return ds
         ds.close()
     raise SystemExit(
-        f"{when} not covered by any of:\n  " + "\n  ".join(stores) +
-        "\nPick a --time inside one of these stores."
+        f"{when} not covered by any of:\n  "
+        + "\n  ".join(stores)
+        + "\nPick a --time inside one of these stores."
     )
 
 
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--zarr-store", default="~/data/arco-era5/EUROPE_*.zarr",
-                   help="store or glob (default: the icos-202401 run's io.zarr_store)")
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    p.add_argument(
+        "--zarr-store",
+        default="~/data/arco-era5/EUROPE_*.zarr",
+        help="store or glob (default: the icos-202401 run's io.zarr_store)",
+    )
     p.add_argument("--time", default="2024-01-15T12:00", help="timestep to extract (UTC)")
     p.add_argument("--out-dir", type=Path, default=Path("."), help="where to write the archive")
-    p.add_argument("--extent", type=float, nargs=4, default=list(DEFAULT_EXTENT),
-                   metavar=("LON_MIN", "LON_MAX", "LAT_MIN", "LAT_MAX"))
+    p.add_argument(
+        "--extent",
+        type=float,
+        nargs=4,
+        default=list(DEFAULT_EXTENT),
+        metavar=("LON_MIN", "LON_MAX", "LAT_MIN", "LAT_MAX"),
+    )
     p.add_argument("--full-domain", action="store_true", help="no spatial crop (~4x larger)")
     p.add_argument("--vars", nargs="+", default=list(DEFAULT_VARS))
     p.add_argument("--keep-zarr", action="store_true", help="don't delete the .zarr after tarring")
@@ -96,8 +106,10 @@ def main(argv: list[str] | None = None) -> int:
 
     snap = snap.astype("float32")
     for name in ("latitude", "longitude"):
-        print(f"  {name}: {snap.sizes[name]} points "
-              f"({float(snap[name].min()):.2f} .. {float(snap[name].max()):.2f})")
+        print(
+            f"  {name}: {snap.sizes[name]} points "
+            f"({float(snap[name].min()):.2f} .. {float(snap[name].max()):.2f})"
+        )
     if "level" in snap.sizes:
         print(f"  level: {snap.sizes['level']} pressure levels")
 

@@ -236,11 +236,10 @@ def render(args, frames: np.ndarray, frame_times: np.ndarray, ds: xr.Dataset) ->
     import matplotlib
 
     matplotlib.use("Agg")
+    import imageio_ffmpeg
     import matplotlib.pyplot as plt
     from matplotlib.animation import FFMpegWriter
     from matplotlib.colors import LogNorm
-
-    import imageio_ffmpeg
 
     matplotlib.rcParams["animation.ffmpeg_path"] = imageio_ffmpeg.get_ffmpeg_exe()
 
@@ -290,9 +289,14 @@ def render(args, frames: np.ndarray, frame_times: np.ndarray, ds: xr.Dataset) ->
 
     first = np.ma.masked_less_equal(frames[0], 0.0)
     mesh = ax.pcolormesh(
-        x_edges, y_edges, first,
-        cmap=cmap, norm=LogNorm(vmin=vmin, vmax=vmax),
-        alpha=0.85, shading="flat", zorder=2,
+        x_edges,
+        y_edges,
+        first,
+        cmap=cmap,
+        norm=LogNorm(vmin=vmin, vmax=vmax),
+        alpha=0.85,
+        shading="flat",
+        zorder=2,
     )
 
     site_x, site_y = _site_markers(ds)
@@ -302,8 +306,10 @@ def render(args, frames: np.ndarray, frame_times: np.ndarray, ds: xr.Dataset) ->
     ax.set_ylim(view[2], view[3])
     xticks, xlabels = _degree_ticks(lon_min, lon_max, lon_to_x, "")
     yticks, ylabels = _degree_ticks(lat_min, lat_max, lat_to_y, "N")
-    ax.set_xticks(xticks); ax.set_xticklabels(xlabels, fontsize=8)
-    ax.set_yticks(yticks); ax.set_yticklabels(ylabels, fontsize=8)
+    ax.set_xticks(xticks)
+    ax.set_xticklabels(xlabels, fontsize=8)
+    ax.set_yticks(yticks)
+    ax.set_yticklabels(ylabels, fontsize=8)
     ax.tick_params(length=2, colors="#666666")
     for spine in ax.spines.values():
         spine.set_edgecolor("#cccccc")
@@ -329,7 +335,9 @@ def render(args, frames: np.ndarray, frame_times: np.ndarray, ds: xr.Dataset) ->
     with writer.saving(fig, str(out), dpi):
         for i, when in enumerate(frame_times):
             mesh.set_array(np.ma.masked_less_equal(frames[i], 0.0).ravel())
-            title.set_text(f"GLIDE — {n_sites} sites, 5-day back-trajectory footprint  ·  {stamp(when)}")
+            title.set_text(
+                f"GLIDE — {n_sites} sites, 5-day back-trajectory footprint  ·  {stamp(when)}"
+            )
             writer.grab_frame()
             if (i + 1) % 25 == 0 or i == len(frames) - 1:
                 print(f"\r  rendered {i + 1}/{len(frames)}", end="", flush=True)
@@ -357,10 +365,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         description="Animate GLIDE combined multi-site footprints as an MP4.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument("--run-dir", type=Path, default=Path("~/data/glide/outputs/icos-202401"),
-                   help="GLIDE output directory containing footprints.zarr")
-    p.add_argument("--out", type=Path, default=None,
-                   help="output .mp4 (default: <run-dir name>-footprints.mp4 in outputs/)")
+    p.add_argument(
+        "--run-dir",
+        type=Path,
+        default=Path("~/data/glide/outputs/icos-202401"),
+        help="GLIDE output directory containing footprints.zarr",
+    )
+    p.add_argument(
+        "--out",
+        type=Path,
+        default=None,
+        help="output .mp4 (default: <run-dir name>-footprints.mp4 in outputs/)",
+    )
     p.add_argument("--stride", type=int, default=1, help="use every Nth release time")
     p.add_argument("--max-frames", type=int, default=None, help="stop after N frames")
     p.add_argument("--fps", type=int, default=12, help="frames per second")
@@ -368,21 +384,38 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--dpi", type=int, default=100)
     p.add_argument("--bitrate", type=int, default=6000, help="kbit/s")
     p.add_argument("--cmap", default="magma")
-    p.add_argument("--extent", type=float, nargs=4, default=list(DEFAULT_EXTENT),
-                   metavar=("LON_MIN", "LON_MAX", "LAT_MIN", "LAT_MAX"),
-                   help="map view; default is the Europe/Atlantic region")
+    p.add_argument(
+        "--extent",
+        type=float,
+        nargs=4,
+        default=list(DEFAULT_EXTENT),
+        metavar=("LON_MIN", "LON_MAX", "LAT_MIN", "LAT_MAX"),
+        help="map view; default is the Europe/Atlantic region",
+    )
     p.add_argument("--full-domain", action="store_true", help="view the whole stored grid instead")
     p.add_argument("--zoom", type=int, default=None, help="basemap tile zoom (default: auto)")
-    p.add_argument("--vmin", type=float, default=None, help="colour scale floor (default: vmax/10^decades)")
-    p.add_argument("--vmax", type=float, default=None, help="colour scale ceiling (default: 99.9th pct)")
+    p.add_argument(
+        "--vmin", type=float, default=None, help="colour scale floor (default: vmax/10^decades)"
+    )
+    p.add_argument(
+        "--vmax", type=float, default=None, help="colour scale ceiling (default: 99.9th pct)"
+    )
     p.add_argument("--decades", type=float, default=6.0, help="log decades below vmax")
     p.add_argument("--surface-layer-depth", type=float, default=DEFAULT_SURFACE_LAYER_DEPTH_M)
     p.add_argument("--air-density", type=float, default=DEFAULT_AIR_DENSITY_KG_M3)
     p.add_argument("--batch", type=int, default=8, help="release-times computed per dask pass")
-    p.add_argument("--cache", type=Path, default=None, help="frame cache .npz (default: alongside --out)")
-    p.add_argument("--refresh-cache", action="store_true", help="recompute frames, ignoring any cache")
-    p.add_argument("--tile-cache", type=Path, default=Path("~/.cache/glide/tiles"),
-                   help="on-disk basemap tile cache")
+    p.add_argument(
+        "--cache", type=Path, default=None, help="frame cache .npz (default: alongside --out)"
+    )
+    p.add_argument(
+        "--refresh-cache", action="store_true", help="recompute frames, ignoring any cache"
+    )
+    p.add_argument(
+        "--tile-cache",
+        type=Path,
+        default=Path("~/.cache/glide/tiles"),
+        help="on-disk basemap tile cache",
+    )
     return p.parse_args(argv)
 
 
@@ -412,19 +445,25 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.full_domain:
         args.extent = (
-            float(ds["longitude_edge"].min()), float(ds["longitude_edge"].max()),
-            float(ds["latitude_edge"].min()), float(ds["latitude_edge"].max()),
+            float(ds["longitude_edge"].min()),
+            float(ds["longitude_edge"].max()),
+            float(ds["latitude_edge"].min()),
+            float(ds["latitude_edge"].max()),
         )
     else:
         args.extent = tuple(args.extent)
 
     n_sites = len(set(ds["site"].values.tolist()))
     print(f"store:  {store}")
-    print(f"        {n_sites} sites x {len(np.unique(release_times))} release times "
-          f"= {footprint.sizes['release']} footprints")
-    print(f"frames: {len(frame_times)} (stride {args.stride}) "
-          f"{np.datetime_as_string(frame_times[0], unit='h')} .. "
-          f"{np.datetime_as_string(frame_times[-1], unit='h')}")
+    print(
+        f"        {n_sites} sites x {len(np.unique(release_times))} release times "
+        f"= {footprint.sizes['release']} footprints"
+    )
+    print(
+        f"frames: {len(frame_times)} (stride {args.stride}) "
+        f"{np.datetime_as_string(frame_times[0], unit='h')} .. "
+        f"{np.datetime_as_string(frame_times[-1], unit='h')}"
+    )
     print(f"view:   lon {args.extent[0]}..{args.extent[1]}, lat {args.extent[2]}..{args.extent[3]}")
 
     frames = load_or_compute_frames(args, footprint, release_times, frame_times)

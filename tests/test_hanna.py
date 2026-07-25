@@ -9,6 +9,7 @@ tests/test_main_runtime.py.
 from __future__ import annotations
 
 import math
+from datetime import UTC
 
 import numpy as np
 import pytest
@@ -21,7 +22,6 @@ from lpdm.turbulence.hanna import (
     EARTH_ROTATION_RATE_S,
     FT_KZ_CEIL_M2_S,
     FT_KZ_FLOOR_M2_S,
-    FT_RICHARDSON_CRIT,
     air_density,
     brunt_vaisala_squared,
     convective_velocity,
@@ -116,7 +116,9 @@ def test_in_bl_sigma_at_z_zero_matches_ustar_scaling() -> None:
     h_over_L = torch.tensor([5.0, 0.0, -5.0], dtype=torch.float64)
     lat = torch.tensor([45.0, 45.0, 45.0], dtype=torch.float64)
 
-    sigma_u, sigma_v, sigma_w, T_Lu, T_Lv, T_Lw = in_bl_sigma_TL(z, blh, ustar, w_star, h_over_L, lat)
+    sigma_u, sigma_v, sigma_w, T_Lu, T_Lv, T_Lw = in_bl_sigma_TL(
+        z, blh, ustar, w_star, h_over_L, lat
+    )
 
     # Stable z=0: σ_u = 2.0 u*, σ_v = σ_w = 1.3 u*.
     assert abs(sigma_u[0].item() - 2.0 * 0.5) < 1e-9
@@ -127,7 +129,7 @@ def test_in_bl_sigma_at_z_zero_matches_ustar_scaling() -> None:
     assert abs(sigma_w[1].item() - 1.3 * 0.5) < 1e-9
     assert abs(sigma_v[1].item() - 1.3 * 0.5) < 1e-9
     # Unstable z=0: σ_w² = (1.8 − 1.4·0)·u*² (ζ=0 kills the w* term).
-    expected_sigma_w_unstable = math.sqrt(1.8 * 0.5 ** 2)
+    expected_sigma_w_unstable = math.sqrt(1.8 * 0.5**2)
     assert abs(sigma_w[2].item() - expected_sigma_w_unstable) < 1e-6
     # σ_v tracks σ_w, so it must differ from σ_u wherever u* > 0.
     assert not torch.allclose(sigma_u, sigma_v)
@@ -160,10 +162,18 @@ def test_in_bl_regime_selection_at_boundaries() -> None:
     h_over_L = torch.tensor([0.5, 1.5, -1.5, -10.0], dtype=torch.float64)
     lat = torch.tensor([45.0, 45.0, 45.0, 45.0], dtype=torch.float64)
 
-    sigma_u_neu, _, _, _, _, _ = in_bl_sigma_TL(z[:1], blh[:1], ustar[:1], w_star[:1], h_over_L[:1], lat[:1])
-    sigma_u_stab, _, _, _, _, _ = in_bl_sigma_TL(z[1:2], blh[1:2], ustar[1:2], w_star[1:2], h_over_L[1:2], lat[1:2])
-    sigma_u_unst, _, _, _, _, _ = in_bl_sigma_TL(z[2:3], blh[2:3], ustar[2:3], w_star[2:3], h_over_L[2:3], lat[2:3])
-    sigma_u_deep, _, _, _, _, _ = in_bl_sigma_TL(z[3:], blh[3:], ustar[3:], w_star[3:], h_over_L[3:], lat[3:])
+    sigma_u_neu, _, _, _, _, _ = in_bl_sigma_TL(
+        z[:1], blh[:1], ustar[:1], w_star[:1], h_over_L[:1], lat[:1]
+    )
+    sigma_u_stab, _, _, _, _, _ = in_bl_sigma_TL(
+        z[1:2], blh[1:2], ustar[1:2], w_star[1:2], h_over_L[1:2], lat[1:2]
+    )
+    sigma_u_unst, _, _, _, _, _ = in_bl_sigma_TL(
+        z[2:3], blh[2:3], ustar[2:3], w_star[2:3], h_over_L[2:3], lat[2:3]
+    )
+    sigma_u_deep, _, _, _, _, _ = in_bl_sigma_TL(
+        z[3:], blh[3:], ustar[3:], w_star[3:], h_over_L[3:], lat[3:]
+    )
 
     # sigma_u in unstable regime grows with |h/L|: u* (12 - 0.5*h/L)^(1/3)
     assert sigma_u_deep.item() > sigma_u_unst.item() > 0
@@ -223,7 +233,7 @@ def test_potential_temperature_reference_level() -> None:
     theta = potential_temperature(t, p)
     assert abs(float(theta[0]) - 280.0) < 1e-9
     assert float(theta[1]) > float(t[1])  # 500 hPa: θ ≈ 250 * 2^κ ≈ 305 K
-    assert abs(float(theta[1]) - 250.0 * 2.0 ** kappa) < 1e-6
+    assert abs(float(theta[1]) - 250.0 * 2.0**kappa) < 1e-6
 
 
 def test_brunt_vaisala_sign_follows_stratification() -> None:
@@ -330,8 +340,7 @@ def test_substep_cap_warning_fires_once(caplog) -> None:
     ``dt > 5·T_L`` warning, which was made obsolete by adaptive substepping."""
 
     import logging
-    import math
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
 
     from lpdm.gpu_engine import GPUEngine
     from lpdm.met_reader import HourlyMetTensors, MetFieldMetadata
@@ -341,25 +350,37 @@ def test_substep_cap_warning_fires_once(caplog) -> None:
     n_lev, n_lat, n_lon = 4, 4, 4
     shape = (n_lev, n_lat, n_lon)
     chans = {
-        "u": torch.zeros(shape), "v": torch.zeros(shape), "w": torch.zeros(shape),
-        "blh": torch.full(shape, 1500.0), "sp": torch.full(shape, 101325.0),
-        "t": torch.full(shape, 280.0), "ustar": torch.full(shape, 0.4),
+        "u": torch.zeros(shape),
+        "v": torch.zeros(shape),
+        "w": torch.zeros(shape),
+        "blh": torch.full(shape, 1500.0),
+        "sp": torch.full(shape, 101325.0),
+        "t": torch.full(shape, 280.0),
+        "ustar": torch.full(shape, 0.4),
         "shf": torch.zeros(shape),
     }
     names = ("u", "v", "w", "blh", "sp", "t", "ustar", "shf")
     fields = torch.stack([chans[n] for n in names], dim=0)
     level = np.linspace(0.0, 4000.0, n_lev)
-    t0 = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    t0 = datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC)
     metadata = MetFieldMetadata(
-        lon=np.linspace(-2.0, 2.0, n_lon), lat=np.linspace(-2.0, 2.0, n_lat),
-        level=level, pressure_level_hpa=np.linspace(1000.0, 600.0, n_lev),
-        time_start=t0, time_end=t0 + timedelta(hours=1),
-        variable_units={n: "m/s" for n in names},
+        lon=np.linspace(-2.0, 2.0, n_lon),
+        lat=np.linspace(-2.0, 2.0, n_lat),
+        level=level,
+        pressure_level_hpa=np.linspace(1000.0, 600.0, n_lev),
+        time_start=t0,
+        time_end=t0 + timedelta(hours=1),
+        variable_units=dict.fromkeys(names, "m/s"),
     )
-    height = torch.as_tensor(level, dtype=torch.float32).view(n_lev, 1, 1).expand(shape).contiguous()
+    height = (
+        torch.as_tensor(level, dtype=torch.float32).view(n_lev, 1, 1).expand(shape).contiguous()
+    )
     met = HourlyMetTensors(
-        hour_start=fields, hour_end=fields, metadata=metadata,
-        channel_names=names, height_agl_m=height,
+        hour_start=fields,
+        hour_end=fields,
+        metadata=metadata,
+        channel_names=names,
+        height_agl_m=height,
     )
 
     engine = GPUEngine(device="cpu")
@@ -379,8 +400,13 @@ def test_substep_cap_warning_fires_once(caplog) -> None:
     with caplog.at_level(logging.WARNING, logger="lpdm.turbulence.hanna"):
         for _ in range(3):
             particles, state = scheme.step(
-                particles, state, met, t_alpha=0.5, dt_seconds=300.0,
-                active_mask=active, engine=engine,
+                particles,
+                state,
+                met,
+                t_alpha=0.5,
+                dt_seconds=300.0,
+                active_mask=active,
+                engine=engine,
             )
 
     warnings = [r for r in caplog.records if "max_substeps" in r.getMessage()]
@@ -398,7 +424,7 @@ def test_flexpart_tl_floors_prevent_substep_cap(caplog) -> None:
     (test_substep_cap_warning_fires_once)."""
 
     import logging
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
 
     from lpdm.gpu_engine import GPUEngine
     from lpdm.met_reader import HourlyMetTensors, MetFieldMetadata
@@ -406,25 +432,37 @@ def test_flexpart_tl_floors_prevent_substep_cap(caplog) -> None:
     n_lev, n_lat, n_lon = 4, 4, 4
     shape = (n_lev, n_lat, n_lon)
     chans = {
-        "u": torch.zeros(shape), "v": torch.zeros(shape), "w": torch.zeros(shape),
-        "blh": torch.full(shape, 1500.0), "sp": torch.full(shape, 101325.0),
-        "t": torch.full(shape, 280.0), "ustar": torch.full(shape, 0.4),
+        "u": torch.zeros(shape),
+        "v": torch.zeros(shape),
+        "w": torch.zeros(shape),
+        "blh": torch.full(shape, 1500.0),
+        "sp": torch.full(shape, 101325.0),
+        "t": torch.full(shape, 280.0),
+        "ustar": torch.full(shape, 0.4),
         "shf": torch.zeros(shape),
     }
     names = ("u", "v", "w", "blh", "sp", "t", "ustar", "shf")
     fields = torch.stack([chans[n] for n in names], dim=0)
     level = np.linspace(0.0, 4000.0, n_lev)
-    t0 = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    t0 = datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC)
     metadata = MetFieldMetadata(
-        lon=np.linspace(-2.0, 2.0, n_lon), lat=np.linspace(-2.0, 2.0, n_lat),
-        level=level, pressure_level_hpa=np.linspace(1000.0, 600.0, n_lev),
-        time_start=t0, time_end=t0 + timedelta(hours=1),
-        variable_units={n: "m/s" for n in names},
+        lon=np.linspace(-2.0, 2.0, n_lon),
+        lat=np.linspace(-2.0, 2.0, n_lat),
+        level=level,
+        pressure_level_hpa=np.linspace(1000.0, 600.0, n_lev),
+        time_start=t0,
+        time_end=t0 + timedelta(hours=1),
+        variable_units=dict.fromkeys(names, "m/s"),
     )
-    height = torch.as_tensor(level, dtype=torch.float32).view(n_lev, 1, 1).expand(shape).contiguous()
+    height = (
+        torch.as_tensor(level, dtype=torch.float32).view(n_lev, 1, 1).expand(shape).contiguous()
+    )
     met = HourlyMetTensors(
-        hour_start=fields, hour_end=fields, metadata=metadata,
-        channel_names=names, height_agl_m=height,
+        hour_start=fields,
+        hour_end=fields,
+        metadata=metadata,
+        channel_names=names,
+        height_agl_m=height,
     )
 
     engine = GPUEngine(device="cpu")
@@ -441,8 +479,13 @@ def test_flexpart_tl_floors_prevent_substep_cap(caplog) -> None:
     with caplog.at_level(logging.WARNING, logger="lpdm.turbulence.hanna"):
         for _ in range(3):
             particles, state = scheme.step(
-                particles, state, met, t_alpha=0.5, dt_seconds=300.0,
-                active_mask=active, engine=engine,
+                particles,
+                state,
+                met,
+                t_alpha=0.5,
+                dt_seconds=300.0,
+                active_mask=active,
+                engine=engine,
             )
 
     warnings = [r for r in caplog.records if "max_substeps" in r.getMessage()]
@@ -468,11 +511,20 @@ def test_substep_cap_warning_silent_when_dt_is_small(caplog) -> None:
     with caplog.at_level(logging.WARNING, logger="lpdm.turbulence.hanna"):
         scheme._integrate_vertical_substeps(
             active_xyz=engine_state,
-            u_prime_in=torch.zeros(3), v_prime_in=torch.zeros(3), w_prime_in=torch.zeros(3),
-            sigma_u=sigma, sigma_v=sigma, sigma_w=sigma, sigma_w_sq=sigma_sq,
-            T_Lu=big_T_L, T_Lv=big_T_L, T_Lw=big_T_L,
-            half_dsig2_dz_backward=zeros, density_drift_backward=zeros,
-            dt_seconds=1.0, engine=GPUEngine(device="cpu"),
+            u_prime_in=torch.zeros(3),
+            v_prime_in=torch.zeros(3),
+            w_prime_in=torch.zeros(3),
+            sigma_u=sigma,
+            sigma_v=sigma,
+            sigma_w=sigma,
+            sigma_w_sq=sigma_sq,
+            T_Lu=big_T_L,
+            T_Lv=big_T_L,
+            T_Lw=big_T_L,
+            half_dsig2_dz_backward=zeros,
+            density_drift_backward=zeros,
+            dt_seconds=1.0,
+            engine=GPUEngine(device="cpu"),
         )
 
     warnings = [r for r in caplog.records if "max_substeps" in r.getMessage()]
@@ -515,7 +567,7 @@ def test_z_ubl_constructor_validation() -> None:
 
     import pytest
 
-    HannaScheme(z_ubl_m=0.0)   # legal — disables the UBL clamp
+    HannaScheme(z_ubl_m=0.0)  # legal — disables the UBL clamp
     HannaScheme(z_ubl_m=10.0)  # legal — deeper UBL
     with pytest.raises(ValueError):
         HannaScheme(z_ubl_m=-1.0)
@@ -552,24 +604,36 @@ def _make_meander_test_window(t0, u_start_val: float, u_end_val: float):
 
     def _stack(u_val: float) -> torch.Tensor:
         ch = {
-            "u": u_val * ramp, "v": torch.zeros(shape), "w": torch.zeros(shape),
-            "blh": torch.full(shape, 1500.0), "sp": torch.full(shape, 101325.0),
-            "t": torch.full(shape, 280.0), "ustar": torch.full(shape, 0.4),
+            "u": u_val * ramp,
+            "v": torch.zeros(shape),
+            "w": torch.zeros(shape),
+            "blh": torch.full(shape, 1500.0),
+            "sp": torch.full(shape, 101325.0),
+            "t": torch.full(shape, 280.0),
+            "ustar": torch.full(shape, 0.4),
             "shf": torch.zeros(shape),
         }
         return torch.stack([ch[n] for n in names], dim=0)
 
     level = np.linspace(0.0, 4000.0, n_lev)
     metadata = MetFieldMetadata(
-        lon=np.linspace(-2.0, 2.0, n_lon), lat=np.linspace(-2.0, 2.0, n_lat),
-        level=level, pressure_level_hpa=np.linspace(1000.0, 600.0, n_lev),
-        time_start=t0, time_end=t0 + timedelta(hours=1),
-        variable_units={n: "m/s" for n in names},
+        lon=np.linspace(-2.0, 2.0, n_lon),
+        lat=np.linspace(-2.0, 2.0, n_lat),
+        level=level,
+        pressure_level_hpa=np.linspace(1000.0, 600.0, n_lev),
+        time_start=t0,
+        time_end=t0 + timedelta(hours=1),
+        variable_units=dict.fromkeys(names, "m/s"),
     )
-    height = torch.as_tensor(level, dtype=torch.float32).view(n_lev, 1, 1).expand(shape).contiguous()
+    height = (
+        torch.as_tensor(level, dtype=torch.float32).view(n_lev, 1, 1).expand(shape).contiguous()
+    )
     return HourlyMetTensors(
-        hour_start=_stack(u_start_val), hour_end=_stack(u_end_val),
-        metadata=metadata, channel_names=names, height_agl_m=height,
+        hour_start=_stack(u_start_val),
+        hour_end=_stack(u_end_val),
+        metadata=metadata,
+        channel_names=names,
+        height_agl_m=height,
     )
 
 
@@ -580,11 +644,11 @@ def test_per_window_field_cache_reuses_within_window_and_rebuilds_across() -> No
     window rebuilds them. The cached value is the field evaluated at the window
     MIDPOINT (``t_alpha = 0.5``), not per-step time-interpolated."""
 
-    from datetime import datetime, timezone, timedelta
+    from datetime import datetime, timedelta
 
     scheme = HannaScheme(meander_enabled=True)
     dev, dt = torch.device("cpu"), torch.float32
-    t0 = datetime(2024, 1, 1, 12, tzinfo=timezone.utc)
+    t0 = datetime(2024, 1, 1, 12, tzinfo=UTC)
     met_a = _make_meander_test_window(t0, u_start_val=2.0, u_end_val=4.0)
 
     # Within one window: every field function returns the *same* cached tensor
@@ -633,7 +697,12 @@ def test_per_window_field_cache_reuses_within_window_and_rebuilds_across() -> No
 
 
 def _substep_inputs(
-    n: int, *, T_Lw: object, dt: float = 60.0, seed: int = 7, half_drift: float = -1e-4,
+    n: int,
+    *,
+    T_Lw: object,
+    dt: float = 60.0,
+    seed: int = 7,
+    half_drift: float = -1e-4,
 ) -> dict:
     """Synthetic kwargs for ``_integrate_vertical_substeps[_static]``.
 
@@ -650,10 +719,16 @@ def _substep_inputs(
     tlw = T_Lw if isinstance(T_Lw, torch.Tensor) else torch.full((n,), float(T_Lw))
     return dict(
         active_xyz=xyz,
-        u_prime_in=torch.zeros(n), v_prime_in=torch.zeros(n), w_prime_in=torch.zeros(n),
-        sigma_u=sigma.clone(), sigma_v=sigma.clone(), sigma_w=sigma.clone(),
+        u_prime_in=torch.zeros(n),
+        v_prime_in=torch.zeros(n),
+        w_prime_in=torch.zeros(n),
+        sigma_u=sigma.clone(),
+        sigma_v=sigma.clone(),
+        sigma_w=sigma.clone(),
         sigma_w_sq=sigma.pow(2),
-        T_Lu=tlw.clone(), T_Lv=tlw.clone(), T_Lw=tlw.clone(),
+        T_Lu=tlw.clone(),
+        T_Lv=tlw.clone(),
+        T_Lw=tlw.clone(),
         half_dsig2_dz_backward=torch.full((n,), float(half_drift)),
         density_drift_backward=torch.zeros(n),
         dt_seconds=dt,
@@ -680,8 +755,12 @@ def test_ou_and_displacement_are_noops_at_zero_dt() -> None:
 
     # OU with dt=0 ignores noise and drift entirely → w' unchanged.
     w_out = engine.update_langevin_velocity(
-        w, t_lagrangian=T_L, sigma_w2=sigma2, dt_seconds=0.0,
-        noise=torch.randn(n), drift=torch.full((n,), 3.0),
+        w,
+        t_lagrangian=T_L,
+        sigma_w2=sigma2,
+        dt_seconds=0.0,
+        noise=torch.randn(n),
+        drift=torch.full((n,), 3.0),
     )
     assert torch.equal(w_out, w)
 
@@ -689,7 +768,8 @@ def test_ou_and_displacement_are_noops_at_zero_dt() -> None:
         engine.apply_vertical_turbulence(particles, w, dt_seconds=0.0, backward=True), particles
     )
     assert torch.equal(
-        engine.apply_horizontal_turbulence(particles, w, w, dt_seconds=0.0, backward=True), particles
+        engine.apply_horizontal_turbulence(particles, w, w, dt_seconds=0.0, backward=True),
+        particles,
     )
     p_r, w_r = engine.reflect_surface(particles, w, z_surface=0.0)
     assert torch.equal(p_r, particles) and torch.equal(w_r, w)
@@ -823,12 +903,12 @@ def test_legacy_flag_paths_still_run(legacy_kwargs) -> None:
     state, particles above ground, mass conserved. Guards the otherwise-untested
     `surface_layer_override=True` and `flexpart_tl_floors=False` code paths."""
 
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from lpdm.gpu_engine import GPUEngine
 
     torch.manual_seed(77)
-    t0 = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    t0 = datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC)
     met = _make_meander_test_window(t0, 4.0, 6.0)
     engine = GPUEngine(device="cpu")
     scheme = HannaScheme(meander_enabled=False, **legacy_kwargs)
@@ -842,8 +922,13 @@ def test_legacy_flag_paths_still_run(legacy_kwargs) -> None:
 
     for _ in range(5):
         particles, state = scheme.step(
-            particles=particles, state=state, met_window=met,
-            t_alpha=0.5, dt_seconds=60.0, active_mask=active, engine=engine,
+            particles=particles,
+            state=state,
+            met_window=met,
+            t_alpha=0.5,
+            dt_seconds=60.0,
+            active_mask=active,
+            engine=engine,
         )
 
     assert torch.isfinite(particles).all()
@@ -874,9 +959,9 @@ def test_gather_static_inputs_reuses_buffers_across_steps() -> None:
     (perf #1): alpha and the surface-lerp buffers are refilled in place, never
     reallocated — a reallocation re-stages (or re-records) the cudagraph."""
 
-    from datetime import datetime, timezone
+    from datetime import datetime
 
-    t0 = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    t0 = datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC)
     met = _make_meander_test_window(t0, 4.0, 6.0)
     scheme = HannaScheme(meander_enabled=False)
     dev, dtp = torch.device("cpu"), torch.float32
@@ -884,8 +969,18 @@ def test_gather_static_inputs_reuses_buffers_across_steps() -> None:
     first = scheme._gather_static_inputs(met, 0.25, dev, dtp)
     second = scheme._gather_static_inputs(met, 0.75, dev, dtp)
 
-    for key in ("alpha", "blh_field", "sp_field", "ustar_field", "shf_field",
-                "t_field", "ft_fields", "m_start_uvw", "m_end_uvw", "level_arr"):
+    for key in (
+        "alpha",
+        "blh_field",
+        "sp_field",
+        "ustar_field",
+        "shf_field",
+        "t_field",
+        "ft_fields",
+        "m_start_uvw",
+        "m_end_uvw",
+        "level_arr",
+    ):
         assert second[key] is first[key], f"{key} was reallocated between steps"
     # ...and the per-step values really did update in place.
     assert float(second["alpha"]) == 0.75
