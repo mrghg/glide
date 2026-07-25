@@ -35,11 +35,11 @@ def test_required_vars_cover_all_scheme_dependencies() -> None:
     # Physical ERA5 names the runtime schemes depend on (beyond the advection
     # baseline u/v/w/blh/sp, which are always present).
     scheme_dependencies = {
-        "temperature",            # Hanna T + Emanuel parcel lift
-        "specific_humidity",      # Emanuel convection (q)
-        "friction_velocity",      # Hanna ustar
+        "temperature",  # Hanna T + Emanuel parcel lift
+        "specific_humidity",  # Emanuel convection (q)
+        "friction_velocity",  # Hanna ustar
         "surface_sensible_heat_flux",  # Hanna shf
-        "geopotential",           # AGL height derivation
+        "geopotential",  # AGL height derivation
         "geopotential_at_surface",
     }
     missing = scheme_dependencies - required
@@ -89,7 +89,7 @@ def test_dispatch_rejects_mixing_named_and_adhoc_modes() -> None:
         domain="EUROPE",
         year_month="202401",
         out_dir="data/era5",
-        out_path="data/sample.zarr",   # ad-hoc flag alongside named → conflict
+        out_path="data/sample.zarr",  # ad-hoc flag alongside named → conflict
         time_start=None,
         time_end=None,
         lon_min=None,
@@ -166,7 +166,11 @@ def test_prepare_for_zarr_write_strips_inherited_chunks_for_v2() -> None:
         np.zeros((1, 4, 8), dtype=np.float32),
         dims=("time", "lat", "lon"),
     )
-    da.encoding = {"chunks": (1, 721, 1440), "preferred_chunks": (1, 721, 1440), "_FillValue": -9999.0}
+    da.encoding = {
+        "chunks": (1, 721, 1440),
+        "preferred_chunks": (1, 721, 1440),
+        "_FillValue": -9999.0,
+    }
     ds = xr.Dataset({"surface_sensible_heat_flux": da})
 
     prepared = module._prepare_for_zarr_write(ds, zarr_version=2)
@@ -193,7 +197,9 @@ def test_prepare_for_zarr_write_clears_full_encoding_for_v3() -> None:
     assert prepared["surface_sensible_heat_flux"].encoding == {}
 
 
-def test_replace_store_atomically_restores_existing_store_on_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_replace_store_atomically_restores_existing_store_on_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     module = _load_download_sample_cube_module()
 
     out_store = tmp_path / "sample_met.zarr"

@@ -49,12 +49,12 @@ class TurbulenceScheme(ABC):
     @abstractmethod
     def step(
         self,
-        particles: torch.Tensor,                # (N, 4) [lon, lat, alt, weight]
+        particles: torch.Tensor,  # (N, 4) [lon, lat, alt, weight]
         state: TurbulenceState,
         met_window: HourlyMetTensors,
-        t_alpha: float,                         # temporal interp weight in [0, 1]
+        t_alpha: float,  # temporal interp weight in [0, 1]
         dt_seconds: float,
-        active_mask: torch.Tensor,              # (N,) bool
+        active_mask: torch.Tensor,  # (N,) bool
         engine: GPUEngine,
     ) -> tuple[torch.Tensor, TurbulenceState]:
         """Apply one turbulence step. Returns (updated particles, updated state)."""

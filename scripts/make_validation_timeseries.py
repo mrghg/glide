@@ -67,7 +67,7 @@ def parse_filename(label: str, basename: str) -> dict | None:
     prefix = label + "_"
     if not basename.startswith(prefix) or not basename.endswith(".nc"):
         return None
-    fields = basename[len(prefix):-len(".nc")].split("_")
+    fields = basename[len(prefix) : -len(".nc")].split("_")
     if len(fields) != 5:
         return None
     model, met, domain, species, yyyymm = fields
@@ -93,9 +93,13 @@ def enhancement_for_file(
     try:
         lat = ds["latitude"].values
         lon = ds["longitude"].values
-        if lat.shape != ref_lat.shape or lon.shape != ref_lon.shape or not (
-            np.allclose(lat, ref_lat, atol=GRID_ATOL_DEG)
-            and np.allclose(lon, ref_lon, atol=GRID_ATOL_DEG)
+        if (
+            lat.shape != ref_lat.shape
+            or lon.shape != ref_lon.shape
+            or not (
+                np.allclose(lat, ref_lat, atol=GRID_ATOL_DEG)
+                and np.allclose(lon, ref_lon, atol=GRID_ATOL_DEG)
+            )
         ):
             raise ValueError(
                 f"grid mismatch ({lat.size}x{lon.size}) vs EDGAR "
@@ -139,7 +143,7 @@ def write_csv(
     times = times[order]
     enh = enh[order]
     iso = np.datetime_as_string(times.astype("datetime64[s]"), unit="s")
-    now = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    now = dt.datetime.now(dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     rh_file = "n/a" if release_height_file is None else f"{release_height_file:.1f}"
     header = [
         "# GLIDE validation CH4 enhancement timeseries",
@@ -203,9 +207,20 @@ def process_group(
     enh = np.concatenate(all_enh)
     out_path = out_dir / f"{label}_{model}_{met}.csv"
     write_csv(
-        out_path, label=label, site=site, height_magl=height_magl, model=model, met=met,
-        domain=domain, release_lon=rlon, release_lat=rlat, release_height_file=rh,
-        flux_units=flux_units, edgar_name=edgar_name, times=times, enh=enh,
+        out_path,
+        label=label,
+        site=site,
+        height_magl=height_magl,
+        model=model,
+        met=met,
+        domain=domain,
+        release_lon=rlon,
+        release_lat=rlat,
+        release_height_file=rh,
+        flux_units=flux_units,
+        edgar_name=edgar_name,
+        times=times,
+        enh=enh,
         months=sorted(months),
     )
     return (
@@ -237,13 +252,20 @@ def discover_groups(model_root: Path, year: int, sites: set[str] | None) -> dict
 
 def main() -> None:
     home = Path(os.path.expanduser("~"))
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     ap.add_argument("--flexpart-root", type=Path, default=home / "shared/LPDM/fp_FLEXPART/EUROPE")
     ap.add_argument("--name-root", type=Path, default=home / "shared/LPDM/fp_NAME/EUROPE")
     ap.add_argument("--edgar", type=Path, default=Path("data/EDGAR_CH4_2024_MHD_grid.nc"))
     ap.add_argument("--out-dir", type=Path, default=Path("data/validation-timeseries"))
     ap.add_argument("--year", type=int, default=2024)
-    ap.add_argument("--sites", type=str, default=None, help="comma-separated site labels to restrict to (default: all)")
+    ap.add_argument(
+        "--sites",
+        type=str,
+        default=None,
+        help="comma-separated site labels to restrict to (default: all)",
+    )
     args = ap.parse_args()
 
     sites = set(s.strip() for s in args.sites.split(",")) if args.sites else None
@@ -258,9 +280,17 @@ def main() -> None:
         print(f"\n{model}: {len(groups)} (site, met) groups under {root}")
         for (label, met), files in sorted(groups.items()):
             msg = process_group(
-                files, label=label, model=model, met=met, domain="EUROPE",
-                flux=flux, ref_lat=ref_lat, ref_lon=ref_lon, flux_units=flux_units,
-                edgar_name=edgar_name, out_dir=args.out_dir,
+                files,
+                label=label,
+                model=model,
+                met=met,
+                domain="EUROPE",
+                flux=flux,
+                ref_lat=ref_lat,
+                ref_lon=ref_lon,
+                flux_units=flux_units,
+                edgar_name=edgar_name,
+                out_dir=args.out_dir,
             )
             print(msg)
             if msg.strip().startswith("wrote"):

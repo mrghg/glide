@@ -18,7 +18,6 @@ from lpdm.comparison import (
     to_stilt_surface_footprint,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -105,10 +104,16 @@ def test_to_stilt_time_integration_flag() -> None:
     raw.values[2, 0, 0, 0] = 4.0
 
     integrated = to_stilt_surface_footprint(
-        raw, surface_layer_depth_m=40.0, air_density_kg_m3=1.0, integrate_time=True,
+        raw,
+        surface_layer_depth_m=40.0,
+        air_density_kg_m3=1.0,
+        integrate_time=True,
     )
     by_time = to_stilt_surface_footprint(
-        raw, surface_layer_depth_m=40.0, air_density_kg_m3=1.0, integrate_time=False,
+        raw,
+        surface_layer_depth_m=40.0,
+        air_density_kg_m3=1.0,
+        integrate_time=False,
     )
 
     assert set(by_time.dims) == {"time_ago", "latitude", "longitude"}
@@ -134,7 +139,9 @@ def test_to_stilt_rejects_nonpositive_surface_depth() -> None:
 def test_to_stilt_records_conversion_metadata() -> None:
     raw = _make_raw_footprint(z_edges_m=np.array([0.0, 40.0]))
     stilt = to_stilt_surface_footprint(
-        raw, surface_layer_depth_m=40.0, air_density_kg_m3=1.225,
+        raw,
+        surface_layer_depth_m=40.0,
+        air_density_kg_m3=1.225,
     )
     assert stilt.attrs["units"] == "m**2 s mol**-1"
     assert stilt.attrs["stilt_surface_layer_depth_m"] == 40.0
@@ -384,13 +391,16 @@ def test_surface_air_density_feeds_to_stilt_surface_footprint() -> None:
     # Build a raw footprint matching rho's spatial grid (3x4).
     raw = _make_raw_footprint(
         z_edges_m=np.array([0.0, 40.0, 200.0]),
-        n_lat=rho.sizes["latitude"], n_lon=rho.sizes["longitude"],
+        n_lat=rho.sizes["latitude"],
+        n_lon=rho.sizes["longitude"],
         fill=1.0,
     )
     raw = raw.assign_coords(latitude=rho["latitude"].values, longitude=rho["longitude"].values)
 
     stilt = to_stilt_surface_footprint(
-        raw, surface_layer_depth_m=40.0, air_density_kg_m3=rho,
+        raw,
+        surface_layer_depth_m=40.0,
+        air_density_kg_m3=rho,
     )
     assert stilt.attrs["stilt_air_density_kg_m3"] == "DataArray"
     assert stilt.dims == ("latitude", "longitude")

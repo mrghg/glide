@@ -1,0 +1,45 @@
+# Pre-commit hooks for GLIDE. See https://pre-commit.com.
+#
+# One-time setup (after `uv pip install -e ".[dev]"`):
+#     pre-commit install                 # run automatically on `git commit`
+#     pre-commit install --hook-type pre-push   # also scan for secrets on push
+#
+# Run against the whole repo on demand:
+#     pre-commit run --all-files
+#
+# Hook versions are pinned; bump them with `pre-commit autoupdate`.
+default_language_version:
+  python: python3.11
+
+repos:
+  # Ruff: lint (with autofix) then format. Order matters — lint first so the
+  # formatter has the last word on layout. Config lives in pyproject.toml.
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.0
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+
+  # Gitleaks: block commits (and pushes) that contain secrets/credentials.
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
+
+  # General hygiene. All fast, all uncontroversial.
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+        args: [--markdown-linebreak-ext=md]
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+        args: [--fix=lf]
+      - id: check-merge-conflict
+      - id: check-case-conflict
+      - id: detect-private-key
+      - id: check-yaml
+      - id: check-toml
+      - id: check-added-large-files
+        args: [--maxkb=1024]   # met/validation data must not land in git (see data/README.md)

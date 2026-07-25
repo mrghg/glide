@@ -73,9 +73,7 @@ def test_orientation_invariance():
     f_desc = (2.0 * h_desc + 1.0)[None, :, None, None]
     targets = np.array([0.0, 100.0, 500.0, 2000.0])
     out_desc = regrid_columns_to_agl(f_desc, h_desc[:, None, None], targets)
-    out_asc = regrid_columns_to_agl(
-        f_desc[:, ::-1], h_desc[::-1, None, None], targets
-    )
+    out_asc = regrid_columns_to_agl(f_desc[:, ::-1], h_desc[::-1, None, None], targets)
     assert np.allclose(out_desc, out_asc)
 
 
@@ -129,6 +127,4 @@ def test_weights_split_matches_wrapper_and_is_shareable():
     w = compute_agl_regrid_weights(h, targets)
     for seed in (0, 1):
         f = np.random.default_rng(seed).normal(size=(3, 8, 3, 4))
-        assert np.allclose(
-            apply_agl_regrid(f, w), regrid_columns_to_agl(f, h, targets)
-        )
+        assert np.allclose(apply_agl_regrid(f, w), regrid_columns_to_agl(f, h, targets))

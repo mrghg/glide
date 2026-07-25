@@ -15,9 +15,9 @@ Construction paths:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Annotated, Any, Literal, Union
+from typing import Annotated, Any, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -29,8 +29,8 @@ def _parse_datetime_utc(value: datetime | str) -> datetime:
     else:
         dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
 
 
 class _Frozen(BaseModel):
@@ -64,7 +64,9 @@ class IOConfig(_Frozen):
 
 class SimulationConfig(_Frozen):
     start_time: datetime = Field(..., description="UTC ISO timestamp at start of release window")
-    length_seconds: int = Field(..., gt=0, description="Backward integration length from end of release")
+    length_seconds: int = Field(
+        ..., gt=0, description="Backward integration length from end of release"
+    )
     dt_seconds: int = Field(..., gt=0, description="Integration timestep in seconds")
     device: str = Field("auto", description="Torch device: auto, cpu, cuda, mps, or cuda:N")
 
@@ -185,12 +187,10 @@ class MultiPointPeriodicReleaseConfig(_Frozen):
 
 
 ReleaseConfig = Annotated[
-    Union[
-        PointReleaseConfig,
-        PeriodicPointReleaseConfig,
-        PointScheduleReleaseConfig,
-        MultiPointPeriodicReleaseConfig,
-    ],
+    PointReleaseConfig
+    | PeriodicPointReleaseConfig
+    | PointScheduleReleaseConfig
+    | MultiPointPeriodicReleaseConfig,
     Field(discriminator="kind"),
 ]
 
@@ -293,11 +293,13 @@ class TurbulenceConfig(_Frozen):
     # substep_c) issues fewer kernels — at the cost of a larger near-surface Δt/τ
     # bias. Ignored by non-Hanna schemes.
     substep_c: float = Field(
-        0.5, gt=0,
+        0.5,
+        gt=0,
         description="Target sub-dt / T_Lw ratio. Smaller → more substeps → smaller Δt/τ bias, more cost.",
     )
     max_substeps: int = Field(
-        50, ge=1,
+        50,
+        ge=1,
         description="Cap on per-particle substeps per step. Lower → fewer GPU kernels but coarser near-surface integration.",
     )
     # Near-surface mixing controls (2026-07-02 physics-review follow-up). Defaults
@@ -440,15 +442,13 @@ class RunConfig(_Frozen):
     convection: ConvectionConfig = ConvectionConfig()
 
     @model_validator(mode="after")
-    def _check_simulation_length_vs_release(self) -> "RunConfig":
+    def _check_simulation_length_vs_release(self) -> RunConfig:
         if self.simulation.length_seconds <= self.release.duration_seconds:
-            raise ValueError(
-                "simulation.length_seconds must be > release.duration_seconds"
-            )
+            raise ValueError("simulation.length_seconds must be > release.duration_seconds")
         return self
 
     @model_validator(mode="after")
-    def _check_release_inside_met_domain(self) -> "RunConfig":
+    def _check_release_inside_met_domain(self) -> RunConfig:
         md = self.met_domain
         if isinstance(self.release, MultiPointPeriodicReleaseConfig):
             points = [(s.lon, s.lat, s.alt_agl_m, s.name) for s in self.release.sites]
@@ -565,8 +565,8 @@ class RunConfig(_Frozen):
         return batches
 
     @classmethod
-    def from_yaml(cls, path: str | Path) -> "RunConfig":
-        with open(path, "r", encoding="utf-8") as f:
+    def from_yaml(cls, path: str | Path) -> RunConfig:
+        with open(path, encoding="utf-8") as f:
             data = yaml.safe_load(f)
         if not isinstance(data, dict):
             raise ValueError(f"Top-level YAML in {path} must be a mapping")
@@ -578,7 +578,7 @@ class RunConfig(_Frozen):
         device: str | None = None,
         output_uri: str | None = None,
         start_time: datetime | str | None = None,
-    ) -> "RunConfig":
+    ) -> RunConfig:
         """Return a copy with the given CLI-level overrides applied."""
 
         updates: dict[str, Any] = {}

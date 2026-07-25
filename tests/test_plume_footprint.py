@@ -93,14 +93,26 @@ def plume() -> dict:
         # Mirror the production step order: advect, OU updates, displacements,
         # reflect, accumulate.
         particles = engine.rk2_advect_backward(particles, dt_seconds=DT, wind_fn=wind_fn)
-        v_prime = engine.update_langevin_velocity(v_prime, t_lagrangian=T_L, sigma_w2=SIGMA2, dt_seconds=DT)
-        w_prime = engine.update_langevin_velocity(w_prime, t_lagrangian=T_L, sigma_w2=SIGMA2, dt_seconds=DT)
-        particles = engine.apply_horizontal_turbulence(particles, u_zero, v_prime, dt_seconds=DT, backward=True)
-        particles = engine.apply_vertical_turbulence(particles, w_prime, dt_seconds=DT, backward=True)
+        v_prime = engine.update_langevin_velocity(
+            v_prime, t_lagrangian=T_L, sigma_w2=SIGMA2, dt_seconds=DT
+        )
+        w_prime = engine.update_langevin_velocity(
+            w_prime, t_lagrangian=T_L, sigma_w2=SIGMA2, dt_seconds=DT
+        )
+        particles = engine.apply_horizontal_turbulence(
+            particles, u_zero, v_prime, dt_seconds=DT, backward=True
+        )
+        particles = engine.apply_vertical_turbulence(
+            particles, w_prime, dt_seconds=DT, backward=True
+        )
         particles, w_prime = engine.reflect_surface(particles, w_prime, z_surface=0.0)
         gridder.accumulate(
-            particles=particles[:, :3], active_mask=active, weights=particles[:, 3],
-            t_idx=t_idx, release_idx=release_idx, dt_seconds=DT,
+            particles=particles[:, :3],
+            active_mask=active,
+            weights=particles[:, 3],
+            t_idx=t_idx,
+            release_idx=release_idx,
+            dt_seconds=DT,
         )
 
     raw = gridder.tensor[0, 0, 0].numpy()  # surface bin, [NY, NX], seconds
@@ -121,7 +133,9 @@ def plume() -> dict:
         analytic[:, j] = (DX_M / U_MS) * p_y * p_z
 
     travel_t = -x_centres / U_MS
-    return dict(raw=raw, analytic=analytic, x_centres=x_centres, y_centres=y_centres, travel_t=travel_t)
+    return dict(
+        raw=raw, analytic=analytic, x_centres=x_centres, y_centres=y_centres, travel_t=travel_t
+    )
 
 
 def _band(plume: dict, t_lo: float, t_hi: float) -> np.ndarray:
@@ -132,8 +146,8 @@ def test_footprint_matches_analytic_gaussian_plume(plume: dict) -> None:
     """Crosswind-integrated footprint tracks the plume solution in every band
     beyond the near field, and the 2-D pattern correlates > 0.995."""
     for t_lo, t_hi, tol_max, tol_mean in [
-        (2 * T_L, 5 * T_L, 0.05, 0.02),     # obs max 0.004
-        (5 * T_L, 10 * T_L, 0.15, 0.05),    # obs max 0.102 (far-field statistics)
+        (2 * T_L, 5 * T_L, 0.05, 0.02),  # obs max 0.004
+        (5 * T_L, 10 * T_L, 0.15, 0.05),  # obs max 0.102 (far-field statistics)
         (10 * T_L, N_STEPS * DT, 0.15, 0.05),
     ]:
         cols = _band(plume, t_lo, t_hi)
@@ -182,13 +196,18 @@ def test_stilt_conversion_scales_raw_footprint_exactly(plume: dict) -> None:
         plume["raw"][None, None],  # (time_ago, z_bin, lat, lon)
         dims=("time_ago", "z_bin", "latitude", "longitude"),
         coords=dict(
-            z_bottom_m=("z_bin", [0.0]), z_top_m=("z_bin", [H_SURF]),
-            latitude=plume["y_centres"], longitude=plume["x_centres"],
+            z_bottom_m=("z_bin", [0.0]),
+            z_top_m=("z_bin", [H_SURF]),
+            latitude=plume["y_centres"],
+            longitude=plume["x_centres"],
         ),
     )
     stilt = to_stilt_surface_footprint(
-        da, surface_layer_depth_m=H_SURF, air_density_kg_m3=rho,
-        m_air_kg_per_mol=m_air, integrate_time=True,
+        da,
+        surface_layer_depth_m=H_SURF,
+        air_density_kg_m3=rho,
+        m_air_kg_per_mol=m_air,
+        integrate_time=True,
     )
     expected = plume["raw"] * m_air / (H_SURF * rho)
     assert np.allclose(stilt.values, expected, rtol=1e-12, atol=0.0)

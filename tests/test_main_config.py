@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import textwrap
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -62,7 +62,11 @@ def _base_dict(**section_overrides: dict[str, object]) -> dict[str, object]:
     for section, overrides in section_overrides.items():
         # The release section is polymorphic — a different `kind` brings a
         # disjoint field set, so don't merge against the point-release defaults.
-        if section == "release" and "kind" in overrides and overrides["kind"] != base[section].get("kind"):
+        if (
+            section == "release"
+            and "kind" in overrides
+            and overrides["kind"] != base[section].get("kind")
+        ):
             base[section] = overrides
         else:
             base[section] = {**base[section], **overrides}
@@ -96,9 +100,7 @@ def test_run_config_rejects_negative_release_seed() -> None:
 
 def test_run_config_rejects_z_edges_not_ascending() -> None:
     with pytest.raises(ValidationError, match="ascending"):
-        RunConfig.model_validate(
-            _base_dict(output_grid={"z_edges_m": [0.0, 1000.0, 500.0]})
-        )
+        RunConfig.model_validate(_base_dict(output_grid={"z_edges_m": [0.0, 1000.0, 500.0]}))
 
 
 def test_run_config_rejects_release_outside_met_domain() -> None:
@@ -133,8 +135,10 @@ def test_run_config_accepts_multi_point_periodic() -> None:
 
 def test_multi_site_rejects_site_outside_met_domain() -> None:
     bad = _multi_site_release(
-        sites=[{"name": "A", "lon": 0.0, "lat": 0.0, "alt_agl_m": 100.0},
-               {"name": "B", "lon": 99.0, "lat": 1.0, "alt_agl_m": 200.0}]
+        sites=[
+            {"name": "A", "lon": 0.0, "lat": 0.0, "alt_agl_m": 100.0},
+            {"name": "B", "lon": 99.0, "lat": 1.0, "alt_agl_m": 200.0},
+        ]
     )
     with pytest.raises(ValidationError, match=r"release \(B\) lon=99.0 outside met_domain"):
         RunConfig.model_validate(_base_dict(release=bad))
@@ -142,8 +146,10 @@ def test_multi_site_rejects_site_outside_met_domain() -> None:
 
 def test_multi_site_rejects_duplicate_site_names() -> None:
     dup = _multi_site_release(
-        sites=[{"name": "A", "lon": 0.0, "lat": 0.0, "alt_agl_m": 100.0},
-               {"name": "A", "lon": 1.0, "lat": 1.0, "alt_agl_m": 200.0}]
+        sites=[
+            {"name": "A", "lon": 0.0, "lat": 0.0, "alt_agl_m": 100.0},
+            {"name": "A", "lon": 1.0, "lat": 1.0, "alt_agl_m": 200.0},
+        ]
     )
     with pytest.raises(ValidationError, match="site names must be unique"):
         RunConfig.model_validate(_base_dict(release=dup))
@@ -158,7 +164,9 @@ def test_run_config_rejects_unknown_field() -> None:
 
 def test_run_config_with_overrides_round_trips() -> None:
     cfg = RunConfig.model_validate(_base_dict())
-    overridden = cfg.with_overrides(device="cuda", output_uri="outputs/other", start_time="2025-06-01T00:00:00Z")
+    overridden = cfg.with_overrides(
+        device="cuda", output_uri="outputs/other", start_time="2025-06-01T00:00:00Z"
+    )
     assert overridden.simulation.device == "cuda"
     assert overridden.io.output_uri == "outputs/other"
     assert overridden.simulation.start_time.year == 2025
@@ -279,7 +287,7 @@ def test_periodic_point_expands_to_correct_times_and_seeds() -> None:
     assert len(batches) == 1
     assert len(batches[0].releases) == 5
 
-    expected_t0 = datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
+    expected_t0 = datetime(2024, 1, 1, 0, 0, tzinfo=UTC)
     for i, rel in enumerate(batches[0].releases):
         assert rel.release_idx == i
         assert rel.release_time == expected_t0 + timedelta(seconds=i * 3600)
@@ -350,9 +358,7 @@ def test_periodic_point_rejects_release_outside_met_domain() -> None:
     with pytest.raises(ValidationError, match="outside met_domain"):
         RunConfig.model_validate(
             _base_dict(
-                release=_periodic_release_dict(
-                    point={"lon": 99.0, "lat": 2.0, "alt_agl_m": 400.0}
-                )
+                release=_periodic_release_dict(point={"lon": 99.0, "lat": 2.0, "alt_agl_m": 400.0})
             )
         )
 
@@ -402,10 +408,17 @@ def test_scheme_kwargs_forwards_meander_only_for_hanna() -> None:
     from lpdm.main import _scheme_kwargs
 
     cfg_hanna = RunConfig.model_validate(
-        _base_dict(turbulence={
-            "scheme": "hanna_1982",
-            "meander": {"enabled": True, "coefficient": 0.2, "stencil_radius": 2, "timescale_seconds": 900.0},
-        })
+        _base_dict(
+            turbulence={
+                "scheme": "hanna_1982",
+                "meander": {
+                    "enabled": True,
+                    "coefficient": 0.2,
+                    "stencil_radius": 2,
+                    "timescale_seconds": 900.0,
+                },
+            }
+        )
     )
     kw = _scheme_kwargs(cfg_hanna)
     assert kw == {
@@ -467,8 +480,8 @@ def test_validate_meteorology_time_coverage_rejects_insufficient_history() -> No
     release_end = cfg.simulation.start_time + timedelta(seconds=cfg.release.duration_seconds)
     sim_start = release_end - timedelta(seconds=cfg.simulation.length_seconds)
     reader = _CoverageReader(
-        datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc),
-        datetime(2024, 1, 1, 12, 0, tzinfo=timezone.utc),
+        datetime(2024, 1, 1, 0, 0, tzinfo=UTC),
+        datetime(2024, 1, 1, 12, 0, tzinfo=UTC),
     )
 
     with pytest.raises(ValueError, match="Meteorological dataset does not cover"):

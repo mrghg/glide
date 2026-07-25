@@ -20,6 +20,29 @@ uv pip install -e ".[dev]"        # core + pytest
 `uv` (>= 0.4.0) is recommended; see the [README](README.md) for the full install
 matrix and the GPU (Isambard AI) setup.
 
+## Pre-commit hooks
+
+The `dev` extra installs [pre-commit](https://pre-commit.com). Enable the hooks
+once per clone:
+
+```bash
+pre-commit install                        # lint/format/secret-scan on commit
+pre-commit install --hook-type pre-push   # also scan for secrets before push
+```
+
+On every commit this runs [ruff](https://docs.astral.sh/ruff/) (lint with
+autofix, then format) and [gitleaks](https://github.com/gitleaks/gitleaks)
+(secret scanning), plus a few hygiene checks. Ruff config lives in
+`pyproject.toml`. Run the whole suite manually with:
+
+```bash
+pre-commit run --all-files
+ruff check . && ruff format --check .     # or just ruff directly
+```
+
+Do not bypass the secret scan. If a commit is blocked by a false positive,
+add a scoped allow-list entry rather than disabling the hook.
+
 ## Running the tests
 
 ```bash
@@ -41,8 +64,10 @@ a PR, and add tests for new behaviour.
   promptly. See the `memory:` config section.
 - **Keep the physics interrogable.** Prefer clear, inspectable code over
   premature abstraction — a reader should be able to follow the model.
-- **Match the surrounding style.** Follow existing formatting and naming; comment
-  only non-obvious logic. Prefer explicit validation for new config fields.
+- **Formatting is automated.** Ruff (config in `pyproject.toml`) owns layout —
+  4-space PEP 8 indentation, 100-col lines — so let the formatter decide and
+  don't hand-format. Match existing naming; comment only non-obvious logic.
+  Prefer explicit validation for new config fields.
 - **Small, focused changes.** Avoid broad refactors unless they're the point of
   the PR.
 

@@ -65,7 +65,14 @@ def test_single_particle_lands_in_expected_cell() -> None:
     weights = torch.tensor([0.5], dtype=torch.float64)
     active = torch.tensor([True])
 
-    g.accumulate(particles, active, weights, t_idx=_t_idx(1, 1), release_idx=_release_idx(0, 1), dt_seconds=10.0)
+    g.accumulate(
+        particles,
+        active,
+        weights,
+        t_idx=_t_idx(1, 1),
+        release_idx=_release_idx(0, 1),
+        dt_seconds=10.0,
+    )
 
     assert g.tensor[0, 1, 0, 0, 0].item() == 0.5 * 10.0
     assert g.tensor.sum().item() == 0.5 * 10.0
@@ -86,7 +93,14 @@ def test_total_mass_conservation_in_bounds() -> None:
     active = torch.ones(n, dtype=torch.bool)
 
     dt = 5.0
-    g.accumulate(particles, active, weights, t_idx=_t_idx(0, n), release_idx=_release_idx(0, n), dt_seconds=dt)
+    g.accumulate(
+        particles,
+        active,
+        weights,
+        t_idx=_t_idx(0, n),
+        release_idx=_release_idx(0, n),
+        dt_seconds=dt,
+    )
 
     expected = weights.sum().item() * dt
     assert abs(g.tensor.sum().item() - expected) < 1e-12
@@ -108,7 +122,14 @@ def test_inactive_particles_excluded() -> None:
     weights = torch.tensor([0.5, 0.3, 0.2], dtype=torch.float64)
     active = torch.tensor([True, False, True])
 
-    g.accumulate(particles, active, weights, t_idx=_t_idx(0, 3), release_idx=_release_idx(0, 3), dt_seconds=2.0)
+    g.accumulate(
+        particles,
+        active,
+        weights,
+        t_idx=_t_idx(0, 3),
+        release_idx=_release_idx(0, 3),
+        dt_seconds=2.0,
+    )
 
     # Active weights sum = 0.5 + 0.2 = 0.7; * dt=2.0 = 1.4.
     assert abs(g.tensor.sum().item() - 1.4) < 1e-12
@@ -134,7 +155,14 @@ def test_out_of_bounds_particles_dropped() -> None:
     weights = torch.full((7,), 1.0, dtype=torch.float64)
     active = torch.ones(7, dtype=torch.bool)
 
-    g.accumulate(particles, active, weights, t_idx=_t_idx(0, 7), release_idx=_release_idx(0, 7), dt_seconds=1.0)
+    g.accumulate(
+        particles,
+        active,
+        weights,
+        t_idx=_t_idx(0, 7),
+        release_idx=_release_idx(0, 7),
+        dt_seconds=1.0,
+    )
 
     # Only the last (in-bounds) particle should contribute.
     assert abs(g.tensor.sum().item() - 1.0) < 1e-12
@@ -149,8 +177,22 @@ def test_repeat_accumulate_sums_into_same_bin() -> None:
     weights = torch.tensor([1.0], dtype=torch.float64)
     active = torch.tensor([True])
 
-    g.accumulate(particles, active, weights, t_idx=_t_idx(0, 1), release_idx=_release_idx(0, 1), dt_seconds=2.0)
-    g.accumulate(particles, active, weights, t_idx=_t_idx(0, 1), release_idx=_release_idx(0, 1), dt_seconds=3.0)
+    g.accumulate(
+        particles,
+        active,
+        weights,
+        t_idx=_t_idx(0, 1),
+        release_idx=_release_idx(0, 1),
+        dt_seconds=2.0,
+    )
+    g.accumulate(
+        particles,
+        active,
+        weights,
+        t_idx=_t_idx(0, 1),
+        release_idx=_release_idx(0, 1),
+        dt_seconds=3.0,
+    )
 
     assert g.tensor[0, 0, 0, 0, 0].item() == 5.0
     assert g.tensor.sum().item() == 5.0
@@ -165,8 +207,22 @@ def test_invalid_time_bin_silently_dropped() -> None:
     weights = torch.tensor([1.0], dtype=torch.float64)
     active = torch.tensor([True])
 
-    g.accumulate(particles, active, weights, t_idx=_t_idx(5, 1), release_idx=_release_idx(0, 1), dt_seconds=1.0)
-    g.accumulate(particles, active, weights, t_idx=_t_idx(-1, 1), release_idx=_release_idx(0, 1), dt_seconds=1.0)
+    g.accumulate(
+        particles,
+        active,
+        weights,
+        t_idx=_t_idx(5, 1),
+        release_idx=_release_idx(0, 1),
+        dt_seconds=1.0,
+    )
+    g.accumulate(
+        particles,
+        active,
+        weights,
+        t_idx=_t_idx(-1, 1),
+        release_idx=_release_idx(0, 1),
+        dt_seconds=1.0,
+    )
 
     assert g.tensor.sum().item() == 0.0
 
@@ -183,7 +239,14 @@ def test_empty_active_mask_is_noop() -> None:
     weights = torch.tensor([1.0, 1.0], dtype=torch.float64)
     active = torch.tensor([False, False])
 
-    g.accumulate(particles, active, weights, t_idx=_t_idx(0, 2), release_idx=_release_idx(0, 2), dt_seconds=1.0)
+    g.accumulate(
+        particles,
+        active,
+        weights,
+        t_idx=_t_idx(0, 2),
+        release_idx=_release_idx(0, 2),
+        dt_seconds=1.0,
+    )
 
     assert g.tensor.sum().item() == 0.0
 
@@ -205,16 +268,23 @@ def test_non_uniform_z_edges_assign_correct_bins() -> None:
     # One particle in each of the three asymmetric vertical bins.
     particles = torch.tensor(
         [
-            [-0.5, -0.5, 20.0],     # surface bin (0-40 m)
-            [-0.5, -0.5, 500.0],    # mixed-layer bin (40-1000 m)
-            [-0.5, -0.5, 3000.0],   # free-trop bin (1000-5000 m)
+            [-0.5, -0.5, 20.0],  # surface bin (0-40 m)
+            [-0.5, -0.5, 500.0],  # mixed-layer bin (40-1000 m)
+            [-0.5, -0.5, 3000.0],  # free-trop bin (1000-5000 m)
         ],
         dtype=torch.float64,
     )
     weights = torch.tensor([1.0, 1.0, 1.0], dtype=torch.float64)
     active = torch.ones(3, dtype=torch.bool)
 
-    g.accumulate(particles, active, weights, t_idx=_t_idx(0, 3), release_idx=_release_idx(0, 3), dt_seconds=1.0)
+    g.accumulate(
+        particles,
+        active,
+        weights,
+        t_idx=_t_idx(0, 3),
+        release_idx=_release_idx(0, 3),
+        dt_seconds=1.0,
+    )
 
     # Each particle should land in a different z bin, all at the same horizontal cell.
     assert g.tensor[0, 0, 0].sum().item() == 1.0
@@ -264,7 +334,9 @@ def test_per_particle_t_idx_scatters_into_different_time_bins() -> None:
     active = torch.ones(3, dtype=torch.bool)
     t_idx = torch.tensor([0, 1, 2], dtype=torch.int64)
 
-    g.accumulate(particles, active, weights, t_idx=t_idx, release_idx=_release_idx(0, 3), dt_seconds=1.0)
+    g.accumulate(
+        particles, active, weights, t_idx=t_idx, release_idx=_release_idx(0, 3), dt_seconds=1.0
+    )
 
     # All particles land at the same (z, y, x) cell, one per time bin.
     assert g.tensor[0, 0, 0, 1, 1].item() == 1.0
@@ -292,7 +364,9 @@ def test_per_particle_invalid_t_idx_dropped_others_accumulate() -> None:
     # t_idx values: 0 (valid), -1 (out-of-range below), 1 (valid), 99 (out-of-range above).
     t_idx = torch.tensor([0, -1, 1, 99], dtype=torch.int64)
 
-    g.accumulate(particles, active, weights, t_idx=t_idx, release_idx=_release_idx(0, 4), dt_seconds=1.0)
+    g.accumulate(
+        particles, active, weights, t_idx=t_idx, release_idx=_release_idx(0, 4), dt_seconds=1.0
+    )
 
     # Only the two valid particles should contribute.
     assert g.tensor[0, 0, 0, 1, 1].item() == 1.0
@@ -314,7 +388,14 @@ def test_uniform_t_idx_is_bit_equivalent_to_legacy_scalar_path() -> None:
     weights = torch.full((n,), 1.0 / n, dtype=torch.float64)
     active = torch.ones(n, dtype=torch.bool)
 
-    g.accumulate(particles, active, weights, t_idx=_t_idx(2, n), release_idx=_release_idx(0, n), dt_seconds=4.0)
+    g.accumulate(
+        particles,
+        active,
+        weights,
+        t_idx=_t_idx(2, n),
+        release_idx=_release_idx(0, n),
+        dt_seconds=4.0,
+    )
 
     # Per-particle scatter into time bin 2 should produce a tensor that sums to
     # the same total mass as the legacy scalar-slice scatter would: weights*dt.
@@ -333,10 +414,10 @@ def test_per_release_scatter_into_correct_leading_slice() -> None:
 
     particles = torch.tensor(
         [
-            [-0.5, -0.5, 100.0],   # release 0
-            [-0.5, -0.5, 100.0],   # release 1
-            [-0.5, -0.5, 100.0],   # release 2
-            [-0.5, -0.5, 100.0],   # release 0 again
+            [-0.5, -0.5, 100.0],  # release 0
+            [-0.5, -0.5, 100.0],  # release 1
+            [-0.5, -0.5, 100.0],  # release 2
+            [-0.5, -0.5, 100.0],  # release 0 again
         ],
         dtype=torch.float64,
     )
@@ -361,10 +442,10 @@ def test_per_release_out_of_range_release_idx_dropped() -> None:
 
     particles = torch.tensor(
         [
-            [-0.5, -0.5, 100.0],   # release 0 (valid)
-            [-0.5, -0.5, 100.0],   # release 2 (out of range above)
-            [-0.5, -0.5, 100.0],   # release -1 (out of range below)
-            [-0.5, -0.5, 100.0],   # release 1 (valid)
+            [-0.5, -0.5, 100.0],  # release 0 (valid)
+            [-0.5, -0.5, 100.0],  # release 2 (out of range above)
+            [-0.5, -0.5, 100.0],  # release -1 (out of range below)
+            [-0.5, -0.5, 100.0],  # release 1 (valid)
         ],
         dtype=torch.float64,
     )

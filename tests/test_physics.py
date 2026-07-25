@@ -170,15 +170,21 @@ def test_normalize_coordinates_uses_level_lookup_for_pressure_levels() -> None:
     # 6 levels at [0, 100, 300, 700, 1500, 3000] m.
     levels = (0.0, 100.0, 300.0, 700.0, 1500.0, 3000.0)
     bounds_with_levels = GridInterpolationBounds(
-        lon_first=-1.0, lon_last=1.0,
-        lat_first=-1.0, lat_last=1.0,
-        alt_first=0.0, alt_last=3000.0,
+        lon_first=-1.0,
+        lon_last=1.0,
+        lat_first=-1.0,
+        lat_last=1.0,
+        alt_first=0.0,
+        alt_last=3000.0,
         level_agl_m=levels,
     )
     bounds_linear_legacy = GridInterpolationBounds(
-        lon_first=-1.0, lon_last=1.0,
-        lat_first=-1.0, lat_last=1.0,
-        alt_first=0.0, alt_last=3000.0,
+        lon_first=-1.0,
+        lon_last=1.0,
+        lat_first=-1.0,
+        lat_last=1.0,
+        alt_first=0.0,
+        alt_last=3000.0,
         level_agl_m=None,
     )
 
@@ -218,9 +224,12 @@ def test_normalize_coordinates_handles_descending_level_order() -> None:
     # Descending order: index 0 is the highest altitude.
     levels = (3000.0, 1500.0, 700.0, 300.0, 100.0, 0.0)
     bounds = GridInterpolationBounds(
-        lon_first=-1.0, lon_last=1.0,
-        lat_first=-1.0, lat_last=1.0,
-        alt_first=3000.0, alt_last=0.0,
+        lon_first=-1.0,
+        lon_last=1.0,
+        lat_first=-1.0,
+        lat_last=1.0,
+        alt_first=3000.0,
+        alt_last=0.0,
         level_agl_m=levels,
     )
 
@@ -341,8 +350,11 @@ def test_zero_wind_diffusion_langevin_gaussian_spread() -> None:
     stderr = std / torch.sqrt(torch.tensor(float(n), dtype=std.dtype))
 
     # Integrated OU process variance for z(t) with stationary velocity variance sigma_w2.
-    expected_var = 2.0 * sigma_w2 * t_lagrangian * (
-        total_time - t_lagrangian * (1.0 - torch.exp(torch.tensor(-total_time / t_lagrangian)))
+    expected_var = (
+        2.0
+        * sigma_w2
+        * t_lagrangian
+        * (total_time - t_lagrangian * (1.0 - torch.exp(torch.tensor(-total_time / t_lagrangian))))
     )
     expected_std = torch.sqrt(expected_var)
 
@@ -366,13 +378,22 @@ def test_langevin_drift_term_is_deterministic_increment() -> None:
     a = math.exp(-dt / tl)
 
     no_drift = engine.update_langevin_velocity(
-        w_prev, t_lagrangian=tl, sigma_w2=sig2, dt_seconds=dt, noise=zero_noise,
+        w_prev,
+        t_lagrangian=tl,
+        sigma_w2=sig2,
+        dt_seconds=dt,
+        noise=zero_noise,
     )
     assert torch.allclose(no_drift, a * w_prev, atol=1e-12)
 
     drift = torch.tensor([0.01, 0.02, -0.03], dtype=torch.float64)
     with_drift = engine.update_langevin_velocity(
-        w_prev, t_lagrangian=tl, sigma_w2=sig2, dt_seconds=dt, noise=zero_noise, drift=drift,
+        w_prev,
+        t_lagrangian=tl,
+        sigma_w2=sig2,
+        dt_seconds=dt,
+        noise=zero_noise,
+        drift=drift,
     )
     assert torch.allclose(with_drift, a * w_prev + drift * dt, atol=1e-12)
 
@@ -381,8 +402,6 @@ def test_well_mixed_condition_drift_keeps_uniform_distribution() -> None:
     """Thomson well-mixed test: in inhomogeneous turbulence (σ_w² varying with
     height) an initially-uniform tracer must stay uniform WITH the drift term,
     and must spuriously accumulate in the low-σ region WITHOUT it."""
-
-    import math as _math
 
     torch.manual_seed(7)
     engine = GPUEngine(device="cpu", dtype=torch.float64)
@@ -401,11 +420,13 @@ def test_well_mixed_condition_drift_keeps_uniform_distribution() -> None:
         w = torch.zeros(n, dtype=torch.float64)
         for _ in range(n_steps):
             sig2 = sig2_base + (sig2_top - sig2_base) * (z / H)
-            drift = (
-                0.5 * (1.0 + w.pow(2) / sig2) * dsig2_dz if use_drift else 0.0
-            )
+            drift = 0.5 * (1.0 + w.pow(2) / sig2) * dsig2_dz if use_drift else 0.0
             w = engine.update_langevin_velocity(
-                w, t_lagrangian=tl, sigma_w2=sig2, dt_seconds=dt, drift=drift,
+                w,
+                t_lagrangian=tl,
+                sigma_w2=sig2,
+                dt_seconds=dt,
+                drift=drift,
             )
             z = z + w * dt
             # Reflect at both boundaries AND flip w (Wilson & Flesch 1993 §6 —
@@ -501,10 +522,20 @@ def test_compiled_hot_paths_match_eager_and_never_hard_fail() -> None:
     w = torch.linspace(-2.0, 2.0, 1000)
     noise = torch.linspace(-1.0, 1.0, 1000)
     ref = eager.update_langevin_velocity(
-        w, t_lagrangian=120.0, sigma_w2=0.7, dt_seconds=45.0, noise=noise, drift=0.01,
+        w,
+        t_lagrangian=120.0,
+        sigma_w2=0.7,
+        dt_seconds=45.0,
+        noise=noise,
+        drift=0.01,
     )
     got = compiled.update_langevin_velocity(
-        w, t_lagrangian=120.0, sigma_w2=0.7, dt_seconds=45.0, noise=noise, drift=0.01,
+        w,
+        t_lagrangian=120.0,
+        sigma_w2=0.7,
+        dt_seconds=45.0,
+        noise=noise,
+        drift=0.01,
     )
     assert torch.allclose(ref, got, atol=1e-5)
 
