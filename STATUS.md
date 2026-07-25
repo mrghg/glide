@@ -81,13 +81,31 @@ removed and returns only once the architecture settles (see README "Next Steps")
 
 1. **Physics validation** vs NAME/FLEXPART — the gating item; treat current results
    as indicative, not verified.
-2. **Performance:** sub-time and attack the `residual` and `convection` phases.
-3. **Column releases** (tall-tower / aircraft profiles via importance sampling).
-4. **Satellite-style releases** (many irregular soundings per overpass; the flat
+2. **Native model-level met (HIGH PRIORITY)** — switch the vertical met source from
+   ERA5's 37 pressure levels to its native 137 hybrid model levels, available
+   analysis-ready and already on the 0.25° grid at
+   `gs://gcp-public-data-arco-era5/ar/model-level-1h-0p25deg.zarr-v1`. Model levels
+   are terrain-following by construction (no below-ground levels; the Finding-7
+   problem never arises) and far finer in the boundary layer — lowest level ~10 m
+   AGL, ~20 levels in the lowest ~1.5 km, vs the pressure grid's ~0/300/600 m
+   (1000/975/950 hPa). This is the main lever left on near-surface / BL accuracy,
+   the regime footprints care about most, and it lets us **retire** most of the
+   pressure→AGL resample rather than extend it (it's what FLEXPART does natively).
+   Cost: a new vertical path in `met_reader` — geopotential/height is no longer a
+   supplied field but reconstructed hydrostatically from the 137-level a/b hybrid
+   coefficients + surface pressure + surface geopotential; ~3.7× the vertical data
+   (stream only the lowest ~60–90 levels); check the model-level vertical-velocity
+   encoding (omega vs eta-dot) against the existing omega→m/s conversion.
+   **Sequencing:** like the terrain fix, this shifts footprint magnitudes
+   *everywhere*, so it should land **before** the big validation re-run (#1) —
+   otherwise we validate a configuration we're about to change.
+3. **Performance:** sub-time and attack the `residual` and `convection` phases.
+4. **Column releases** (tall-tower / aircraft profiles via importance sampling).
+5. **Satellite-style releases** (many irregular soundings per overpass; the flat
    `release` axis already accommodates the geometry).
-5. **Particle aggregation** (far-field merging for compute savings; mass/moment
+6. **Particle aggregation** (far-field merging for compute savings; mass/moment
    preserving, no-merge zones in the BL).
-6. **Convection refinements** — full Emanuel quasi-equilibrium closure and
+7. **Convection refinements** — full Emanuel quasi-equilibrium closure and
    per-column (vs bbox-mean) profiles, if the validation shows under-convection.
 
 ## Open follow-ups from reviews
