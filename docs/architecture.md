@@ -3,10 +3,8 @@
 This document records *how the code is constructed to get the most out of the
 hardware it runs on*. It is engineering/architecture reference (for the model
 write-up and for future contributors), complementary to the physics docs
-(`turbulence.md`, `convection.md`, `LPDM_physics_spec.md`) and to
-`../dev/CHECKPOINT.md` (chronological project history). Where this doc and the
-journal overlap, the journal is the dated narrative; this doc is the
-current-state synthesis.
+(`turbulence.md`, `convection.md`, `LPDM_physics_spec.md`), the design decisions
+in `../dev/decisions/`, and the current-state snapshot in `../STATUS.md`.
 
 ---
 
@@ -55,7 +53,7 @@ Device-agnosticism is a core principle: the same code runs on `cuda → mps → 
   Resamples the pressure-level fields onto a fixed **terrain-following AGL grid**
   (`terrain_following=True`, via `vertical_grid.py`), excluding sub-surface
   levels and slope-correcting `w` — so the per-particle vertical mapping is a run
-  constant and correct over orography (dev/CHECKPOINT.md Finding 7). Processing is
+  constant and correct over orography (Finding 7; see `../dev/decisions/0003-terrain-following-agl-coordinate.md`). Processing is
   **per hour through a small LRU** (perf #4): adjacent windows share the common
   hour's processed tensor, so each physical hour is read/converted/regridded once
   and window caches hold shared storage. Returns `hour_start`/`hour_end` 3D

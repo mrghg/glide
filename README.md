@@ -315,9 +315,13 @@ GLIDE is research code; the near-term roadmap:
 
 ## Documentation
 
-In-depth physics and engineering documentation lives in [docs/](docs/) —
-architecture, the LPDM core spec, turbulence, convection, and validation. See
-[docs/README.md](docs/README.md) for the index.
+- **[STATUS.md](STATUS.md)** — current state: what works, what's pending, latest results.
+- **[docs/](docs/)** — in-depth physics & engineering reference (architecture, the
+  LPDM core spec, turbulence, convection, validation). See
+  [docs/README.md](docs/README.md) for the index.
+- **[dev/decisions/](dev/decisions/)** — the major design & physics decisions (why,
+  with rejected alternatives).
+- **[AGENTS.md](AGENTS.md)** — contributor / coding-agent guide.
 
 ## Contributing
 

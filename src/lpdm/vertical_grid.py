@@ -4,7 +4,8 @@ meteorology onto a fixed above-ground-level (AGL) height grid, once per met wind
 GLIDE streams ARCO ERA5 *pressure* levels, which are quasi-horizontal and slice
 through mountains — so below-ground levels exist and, left alone, poison the
 near-surface fields and leave the surface footprint empty over high terrain
-(dev/CHECKPOINT.md Finding 7). Native-model-level LPDMs (FLEXPART) never hit this
+(see dev/decisions/0003-terrain-following-agl-coordinate.md). Native-model-level
+LPDMs (FLEXPART) never hit this
 because their levels already follow the terrain. Here we do what FLEXPART's
 `verttransform` does: regrid onto a fixed terrain-following AGL grid and
 slope-correct the vertical velocity, once per window (amortised over ~60 steps).
