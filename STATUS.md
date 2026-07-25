@@ -65,11 +65,16 @@ The current picture, from a validated GH200 A/B on a representative multi-site r
 
 - **met I/O**: a per-hour processed-met cache cut `met_fetch` ~8× at representative
   scale (−32% wall there; less at full 56-site scale, where met is a smaller share).
-- **New frontier (deferred):** with met handled, the top wall consumers are now the
+- **New frontier (deferred):** with met handled, the standout wall consumer is the
   **untimed per-step "residual"** (wind-mean diagnostic, mask/alive/escape
-  bookkeeping, per-batch particle-gen + output writes, Python loop overhead) and
-  **convection** (~250 ms/window). These, not more CUDA-graph work, are the next
-  levers. First step: sub-time the residual to see what's in it.
+  bookkeeping, per-batch particle-gen + output writes, Python loop overhead) — this,
+  not more CUDA-graph work, is the next lever. First step: sub-time the residual to
+  see what's in it.
+- **Convection needs re-profiling.** That A/B measured convection at ~250 ms/window
+  and flagged it as a co-frontier, but it ran on the *pre*-vectorisation parcel lift.
+  The subsequent fix (commit `9238f1b`) removed the per-level loop and ~1100
+  host syncs/window, so convection should now be much cheaper — how much is
+  unmeasured. Re-profile before treating it as a top consumer again.
 
 ## Hardware / deployment
 
@@ -99,7 +104,10 @@ removed and returns only once the architecture settles (see README "Next Steps")
    **Sequencing:** like the terrain fix, this shifts footprint magnitudes
    *everywhere*, so it should land **before** the big validation re-run (#1) —
    otherwise we validate a configuration we're about to change.
-3. **Performance:** sub-time and attack the `residual` and `convection` phases.
+3. **Performance:** sub-time and attack the `residual` phase. Convection's headline
+   perf issue — the parcel-lift host-sync storm — is already fixed (`9238f1b`);
+   any further convection perf work is gated on a re-profile to confirm it's still
+   a top consumer.
 4. **Column releases** (tall-tower / aircraft profiles via importance sampling).
 5. **Satellite-style releases** (many irregular soundings per overpass; the flat
    `release` axis already accommodates the geometry).
