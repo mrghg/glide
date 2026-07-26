@@ -89,11 +89,12 @@ as **geometric velocity** (`m s**-1`). If it is omega, GLIDE converts it with
 `w = −(R_d·T / (g·p))·omega`, which needs the pressure `p` at each level.
 
 - On **pressure levels**, `p` is the level coordinate — omega works directly.
-- On **model levels**, the level coordinate is not a pressure, so the automatic
-  omega→w conversion has no `p` to use. For model-level met, **supply
-  `vertical_velocity` already in `m s**-1`** unless/until the reader is extended to
-  derive per-level pressure. (ARCO's model-level product ships omega; converting it
-  is part of the model-level reader work — see [STATUS.md](../STATUS.md).)
+- On **model levels**, the level coordinate is not a pressure, so GLIDE
+  reconstructs per-level pressure hydrostatically from `geopotential`,
+  `surface_pressure`, `temperature` and `specific_humidity` (see
+  [Vertical coordinate](#vertical-coordinate)) and uses that. **Omega works on
+  model levels too** — no need to pre-convert (ARCO's model-level product ships
+  omega). Supplying `m s**-1` directly is also accepted and skips the conversion.
 
 ### Sensible heat flux
 
@@ -129,12 +130,22 @@ share the same AGL machinery.
   are assumed hPa, otherwise Pa.
 - Any ascending/descending order and any number of levels.
 
-**Model / hybrid levels** (`level_name="hybrid"`, or whatever you name it):
+**Model / hybrid levels** (auto-detected, or `vertical_coordinate="model"`):
 - The level coordinate is a **level index**, not a pressure. Per-level heights
-  come entirely from the 3-D `geopotential` field.
-- Set the reader's `level_name` to your vertical coordinate's name.
-- Because heights are read directly from `geopotential`, **no hybrid a/b
-  coefficients or hydrostatic reconstruction are required**.
+  come directly from the 3-D `geopotential` field, exactly as on pressure levels.
+- **Per-level pressure is reconstructed hydrostatically** from `geopotential`,
+  `surface_pressure`, `temperature`, and `specific_humidity` (via the hypsometric
+  relation, integrated from the surface). This is needed for the omega→w
+  conversion, air density, and convection. **No hybrid a/b coefficients are
+  required** — deliberately, because ARCO does not ship them and a third-party
+  coefficient table cannot be guaranteed to match the data. `specific_humidity`
+  and `surface_pressure` are therefore mandatory for model-level met.
+- GLIDE auto-detects model mode from the `glide_vertical_coordinate` store attr
+  and auto-corrects `level_name` to the store's vertical coordinate (e.g.
+  `hybrid`). Override explicitly with the reader's `vertical_coordinate` /
+  `level_name` if your store lacks the attr.
+- Model levels require the terrain-following path (`terrain_following=True`, the
+  default).
 
 Store which mode a cube uses in a `glide_vertical_coordinate` attr
 (`"pressure_level"` or `"model_level"`) so it is self-describing on disk;

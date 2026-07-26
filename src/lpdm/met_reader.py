@@ -31,6 +31,7 @@ from lpdm.vertical_grid import (
     apply_agl_regrid,
     compute_agl_regrid_weights,
     default_agl_levels,
+    model_level_pressure_pa,
     slope_correct_w,
     terrain_gradient,
 )
@@ -231,6 +232,7 @@ class ArcoEra5ZarrReader(MetReader):
         lat_name: str = "latitude",
         level_name: str = "level",
         time_name: str = "time",
+        vertical_coordinate: str | None = None,
         chunk_overrides: Mapping[str, int] | None = None,
         accumulation_seconds: int = 3600,
         terrain_following: bool = True,
@@ -255,8 +257,16 @@ class ArcoEra5ZarrReader(MetReader):
                 available via `HourlyMetTensors.channel(name)`.
             lon_name: Longitude coordinate name in source dataset.
             lat_name: Latitude coordinate name in source dataset.
-            level_name: Vertical coordinate name in source dataset.
+            level_name: Vertical coordinate name in source dataset. Auto-corrected
+                on first open if absent (e.g. to "hybrid" for model-level stores).
             time_name: Time coordinate name in source dataset.
+            vertical_coordinate: "pressure" or "model". If None (default), inferred
+                from the store's `glide_vertical_coordinate` attr (written by
+                `download_sample_cube.py`), falling back to "pressure". On model
+                (hybrid) levels the level coordinate is an index, not a pressure, so
+                per-level pressure is reconstructed hydrostatically from geopotential
+                (see `model_level_pressure_pa`). Model levels require
+                `terrain_following=True`.
             chunk_overrides: Optional xarray/dask chunk override dict.
             accumulation_seconds: Period over which accumulated surface fluxes (e.g.
                 surface_sensible_heat_flux as J/m^2) are aggregated. Used to convert
@@ -285,6 +295,15 @@ class ArcoEra5ZarrReader(MetReader):
         self.lat_name = lat_name
         self.level_name = level_name
         self.time_name = time_name
+        # Vertical-coordinate mode. Resolved lazily on first open (from the arg or
+        # the store's `glide_vertical_coordinate` attr); until then assume pressure.
+        self._vertical_coordinate_arg = vertical_coordinate
+        self._is_model_level = str(vertical_coordinate or "").lower() in (
+            "model",
+            "model_level",
+            "hybrid",
+        )
+        self._vertical_resolved = False
         self.chunk_overrides = dict(chunk_overrides or {})
         self.accumulation_seconds = int(accumulation_seconds)
         # Terrain-following (hybrid) vertical coordinate: resample pressure levels
@@ -323,10 +342,40 @@ class ArcoEra5ZarrReader(MetReader):
         """Logical variable keys required for LPDM stepping.
 
         Union of `channel_names` (what gets packed into the channel tensor) with
-        `_DERIVATION_KEYS` (always-needed for omega->w and AGL conversion).
+        `_DERIVATION_KEYS` (always-needed for omega->w and AGL conversion). On model
+        levels, per-level pressure is reconstructed hydrostatically, which also
+        needs surface pressure and humidity.
         """
 
-        return tuple(dict.fromkeys((*self.channel_names, *self._DERIVATION_KEYS)))
+        extra = ("sp", "q") if self._is_model_level else ()
+        return tuple(dict.fromkeys((*self.channel_names, *self._DERIVATION_KEYS, *extra)))
+
+    def _resolve_vertical_mode(self, ds: xr.Dataset) -> None:
+        """Resolve pressure- vs model-level mode and the vertical coord name once.
+
+        Uses the explicit `vertical_coordinate` arg if given, else the store's
+        `glide_vertical_coordinate` attr (falling back to pressure). Also corrects
+        `level_name` if the configured name is absent but a known vertical coord
+        (e.g. "hybrid") is present.
+        """
+
+        if self._vertical_resolved:
+            return
+        if self._vertical_coordinate_arg is None:
+            attr = str(ds.attrs.get("glide_vertical_coordinate", "")).lower()
+            self._is_model_level = attr == "model_level"
+        # Correct the vertical coordinate name if needed.
+        if self.level_name not in ds.dims:
+            for cand in ("hybrid", "level", "model_level"):
+                if cand in ds.dims:
+                    self.level_name = cand
+                    break
+        if self._is_model_level and not self.terrain_following:
+            raise ValueError(
+                "Model-level met requires terrain_following=True (the hybrid levels "
+                "are resampled onto the AGL grid). Set terrain_following=True."
+            )
+        self._vertical_resolved = True
 
     def fetch_hourly_window(self, request: BoundingBoxRequest) -> HourlyMetTensors:
         """Read, slice, materialize, and convert one hourly met window.
@@ -346,6 +395,10 @@ class ArcoEra5ZarrReader(MetReader):
         )
 
         ds = self._open_dataset()
+        # Resolve pressure vs model-level mode (and the vertical coord name) before
+        # selecting variables, so model mode can pull in the extra fields (sp, q)
+        # it needs for the hydrostatic pressure reconstruction.
+        self._resolve_vertical_mode(ds)
         ds = self._select_variables(ds)
 
         try:
@@ -575,14 +628,11 @@ class ArcoEra5ZarrReader(MetReader):
 
         # Bbox-mean pressure per AGL level (hPa) — Hanna-FT / Emanuel read this as a
         # per-level (horizontally-uniform) pressure, so the AGL-grid mean is the same
-        # class of approximation they already make on the pressure grid.
-        level_hpa = np.asarray(ds_hour[self.level_name].values, dtype="float64")
-        # Materialised (not broadcast_to): the torch-backed regrid can't wrap
-        # zero-stride numpy views.
-        pressure_p = np.ascontiguousarray(
-            np.broadcast_to(level_hpa[:, None, None], height_agl_p.shape)
-        )
-        pressure_agl = apply_agl_regrid(pressure_p[None], weights)[0]
+        # class of approximation they already make on the pressure grid. On model
+        # levels the 3-D pressure is the hydrostatic reconstruction; on pressure
+        # levels it is the level coordinate broadcast (identical to before).
+        pressure_p_hpa = np.ascontiguousarray(self._column_pressure_pa(ds_hour) / 100.0)
+        pressure_agl = apply_agl_regrid(pressure_p_hpa[None], weights)[0]
         pressure_level_hpa = pressure_agl.mean(axis=(1, 2))  # already hPa
 
         tensor_agl = torch.as_tensor(arr_agl, dtype=self.dtype, device=self.device)
@@ -715,8 +765,16 @@ class ArcoEra5ZarrReader(MetReader):
         ordered_stores = [self.zarr_stores[i] for i in order]
 
         ref = datasets[0]
+        # Resolve the vertical coordinate name from the store itself: model-level
+        # cubes use "hybrid", not the "level" default. (fetch_hourly_window resolves
+        # this too, but the multi-store coord-match check below runs first.)
+        level_coord = self.level_name
+        if level_coord not in ref.dims:
+            level_coord = next(
+                (c for c in ("hybrid", "level", "model_level") if c in ref.dims), level_coord
+            )
         for i, ds in enumerate(datasets[1:], 1):
-            for coord in (self.lat_name, self.lon_name, self.level_name):
+            for coord in (self.lat_name, self.lon_name, level_coord):
                 if coord not in ds.coords and coord not in ds.variables:
                     raise ValueError(
                         f"Zarr store {ordered_stores[i]!r} is missing coordinate {coord!r}"
@@ -955,6 +1013,39 @@ class ArcoEra5ZarrReader(MetReader):
 
         return level_vals * 100.0 if float(np.nanmax(level_vals)) <= 2000.0 else level_vals
 
+    def _column_pressure_pa(self, ds_time_slice: xr.Dataset) -> np.ndarray:
+        """Per-level pressure ``[Z, Y, X]`` in Pa for one (time-squeezed) slice.
+
+        Pressure levels: the 1-D level coordinate broadcast over the horizontal.
+        Model levels: reconstructed hydrostatically from geopotential + surface
+        pressure + virtual temperature, since the hybrid coordinate is not a
+        pressure (see `model_level_pressure_pa`).
+        """
+
+        if not self._is_model_level:
+            p_1d = self._pressure_levels_to_pa(ds_time_slice)  # [Z] Pa
+            shape = (
+                int(ds_time_slice[self.level_name].size),
+                int(ds_time_slice[self.lat_name].size),
+                int(ds_time_slice[self.lon_name].size),
+            )
+            return np.ascontiguousarray(np.broadcast_to(p_1d[:, None, None], shape))
+
+        vm = self.variable_map
+        q_name = vm.get("q")
+        q = (
+            np.asarray(ds_time_slice[q_name].values)
+            if q_name is not None and q_name in ds_time_slice
+            else None
+        )
+        return model_level_pressure_pa(
+            geopotential_m2s2=np.asarray(ds_time_slice[vm["z"]].values),
+            surface_geopotential_m2s2=np.asarray(ds_time_slice[vm["z_sfc"]].values),
+            surface_pressure_pa=np.asarray(ds_time_slice[vm["sp"]].values),
+            temperature_k=np.asarray(ds_time_slice[vm["t"]].values),
+            specific_humidity=q,
+        )
+
     def _coerce_time_bounds_for_dataset(
         self,
         ds: xr.Dataset,
@@ -1004,6 +1095,10 @@ class ArcoEra5ZarrReader(MetReader):
             raise ValueError("temperature must be a 3D field [z, y, x] for omega->w conversion")
         self._validate_units("t", units_by_key["t"])
 
+        # 3-D pressure for the omega->w conversion: the level coordinate on pressure
+        # levels, or the hydrostatic reconstruction on model levels. Computed once.
+        pressure_pa_3d = self._column_pressure_pa(ds_time_slice) if "w" in logical_keys else None
+
         for key in logical_keys:
             var_name = self.variable_map[key]
             arr = np.asarray(ds_time_slice[var_name].values)
@@ -1022,7 +1117,7 @@ class ArcoEra5ZarrReader(MetReader):
                 arr = self._convert_vertical_velocity_to_m_s(
                     omega_or_w=arr,
                     units=units_by_key[key],
-                    level_hpa=self._pressure_levels_to_pa(ds_time_slice),
+                    pressure_pa=pressure_pa_3d,
                     temperature_k=temperature,
                 )
             elif key == "shf":
@@ -1095,16 +1190,20 @@ class ArcoEra5ZarrReader(MetReader):
         self,
         omega_or_w: np.ndarray,
         units: str,
-        level_hpa: np.ndarray,
+        pressure_pa: np.ndarray,
         temperature_k: np.ndarray,
     ) -> np.ndarray:
         """Convert vertical velocity to geometric m/s when needed.
 
-        ERA5 pressure-level vertical velocity is often provided as omega = dp/dt
-        with units Pa/s. The LPDM particle state uses geometric altitude z (m),
-        so advection requires dz/dt in m/s:
+        ERA5 vertical velocity is often provided as omega = dp/dt with units Pa/s
+        (on both pressure levels and model levels). The LPDM particle state uses
+        geometric altitude z (m), so advection requires dz/dt in m/s:
 
             w = dz/dt = -(R_d * T / (g * p)) * omega
+
+        `pressure_pa` is the full 3-D pressure field ``[Z, Y, X]`` — the level
+        coordinate broadcast on pressure levels, or the hydrostatically
+        reconstructed field on model levels.
         """
 
         norm = self._normalize_units(units)
@@ -1113,11 +1212,9 @@ class ArcoEra5ZarrReader(MetReader):
         if not self._is_pressure_tendency_units(norm):
             raise ValueError(f"Unsupported units {units!r} for vertical velocity")
 
-        p_pa = np.asarray(level_hpa, dtype=np.float64)
-        if p_pa.ndim != 1:
-            raise ValueError("Vertical coordinate must be 1D pressure levels")
-
-        p_3d = p_pa[:, None, None]
+        p_3d = np.asarray(pressure_pa, dtype=np.float64)
+        if p_3d.ndim != 3:
+            raise ValueError("pressure field for omega->w must be 3D [Z, Y, X]")
         omega = np.asarray(omega_or_w, dtype=np.float64)
         temp = np.asarray(temperature_k, dtype=np.float64)
         w_m_s = -(R_DRY_AIR_J_KG_K * temp / (GRAVITY_M_S2 * p_3d)) * omega

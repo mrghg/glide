@@ -7,10 +7,14 @@ import pytest
 
 from lpdm.vertical_grid import (
     default_agl_levels,
+    model_level_pressure_pa,
     regrid_columns_to_agl,
     slope_correct_w,
     terrain_gradient,
 )
+
+_GRAVITY = 9.80665
+_RD = 287.05
 
 
 def test_default_agl_levels_ascending_and_covers_alt_max():
@@ -128,3 +132,66 @@ def test_weights_split_matches_wrapper_and_is_shareable():
     for seed in (0, 1):
         f = np.random.default_rng(seed).normal(size=(3, 8, 3, 4))
         assert np.allclose(apply_agl_regrid(f, w), regrid_columns_to_agl(f, h, targets))
+
+
+# --- model_level_pressure_pa (hydrostatic reconstruction) --------------------
+
+
+def _isothermal_column(z_agl_m, terrain_m=0.0, t_k=250.0, ps_pa=101325.0):
+    """Build a single-column model-level input for an isothermal, dry atmosphere.
+
+    Returns (geopotential [Z,1,1], surface_geopotential [1,1], surface_pressure
+    [1,1], temperature [Z,1,1]).
+    """
+    z_agl_m = np.asarray(z_agl_m, dtype=np.float64)
+    phi_s = np.full((1, 1), terrain_m * _GRAVITY)
+    phi = (terrain_m + z_agl_m)[:, None, None] * _GRAVITY
+    temp = np.full_like(phi, t_k)
+    ps = np.full((1, 1), ps_pa)
+    return phi, phi_s, ps, temp
+
+
+def test_model_level_pressure_matches_isothermal_analytic():
+    # Isothermal, dry: p(z) = ps * exp(-(phi - phi_s)/(Rd*T)) exactly.
+    z = np.array([10.0, 100.0, 1000.0, 5000.0])
+    phi, phi_s, ps, temp = _isothermal_column(z, terrain_m=200.0, t_k=250.0)
+    p = model_level_pressure_pa(phi, phi_s, ps, temp, specific_humidity=None)
+    expected = 101325.0 * np.exp(-(phi[:, 0, 0] - phi_s[0, 0]) / (_RD * 250.0))
+    assert np.allclose(p[:, 0, 0], expected, rtol=1e-10)
+
+
+def test_model_level_pressure_lowest_level_near_surface():
+    # The lowest level (~10 m AGL) sits just below surface pressure.
+    z = np.array([10.0, 200.0, 2000.0])
+    phi, phi_s, ps, temp = _isothermal_column(z, t_k=280.0, ps_pa=100000.0)
+    p = model_level_pressure_pa(phi, phi_s, ps, temp)
+    assert p[0, 0, 0] < 100000.0
+    assert p[0, 0, 0] > 0.998 * 100000.0  # within ~0.2% of ps at 10 m
+
+
+def test_model_level_pressure_moisture_raises_pressure_aloft():
+    # Virtual temperature > T slows the pressure decay, so a moist column has
+    # HIGHER pressure at a given geopotential than a dry one.
+    z = np.array([10.0, 1000.0, 5000.0])
+    phi, phi_s, ps, temp = _isothermal_column(z, t_k=290.0)
+    q = np.full_like(phi, 0.015)  # 15 g/kg
+    p_dry = model_level_pressure_pa(phi, phi_s, ps, temp, None)
+    p_moist = model_level_pressure_pa(phi, phi_s, ps, temp, q)
+    assert np.all(p_moist[1:] > p_dry[1:])
+
+
+def test_model_level_pressure_order_invariant():
+    # Result is returned in input order regardless of level ordering.
+    z = np.array([10.0, 100.0, 1000.0, 5000.0])
+    phi, phi_s, ps, temp = _isothermal_column(z, t_k=260.0)
+    p_up = model_level_pressure_pa(phi, phi_s, ps, temp)  # surface-first
+    rev = slice(None, None, -1)
+    p_dn = model_level_pressure_pa(phi[rev], phi_s, ps, temp[rev])  # top-first
+    assert np.allclose(p_up, p_dn[rev], rtol=1e-12)
+
+
+def test_model_level_pressure_decreases_with_height():
+    z = np.array([10.0, 500.0, 3000.0, 12000.0])
+    phi, phi_s, ps, temp = _isothermal_column(z, t_k=245.0)
+    p = model_level_pressure_pa(phi, phi_s, ps, temp)
+    assert np.all(np.diff(p[:, 0, 0]) < 0)

@@ -19,3 +19,4 @@ alternatives → Status**, with a pointer to the relevant `docs/` page.
 | [0007](0007-reduced-emanuel-convection.md) | Reduced Emanuel deep convection, once per met window |
 | [0008](0008-multi-site-shared-met-batching.md) | Multi-site shared-met batching + per-hour/per-window met caches |
 | [0009](0009-ruff-gitleaks-pre-commit.md) | Ruff + gitleaks pre-commit hooks; standardise on PEP 8 spaces |
+| [0010](0010-model-level-met-reader.md) | Model-level met: reconstruct pressure hydrostatically, not from a/b coefficients |

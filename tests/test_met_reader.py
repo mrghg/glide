@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import numpy as np
+import pytest
 import torch
 import xarray as xr
 
@@ -101,6 +102,131 @@ def _build_mock_era5_dataset_360_lon() -> xr.Dataset:
     ds = _build_mock_era5_dataset()
     ds = ds.assign_coords(longitude=np.array([237.5, 238.5], dtype=np.float64))
     return ds
+
+
+def _build_mock_model_level_dataset() -> xr.Dataset:
+    """A minimal model-level (hybrid) store: 3D fields on a `hybrid` coord (no
+    pressure), surface fields, and the `glide_vertical_coordinate` provenance attr.
+    """
+    times = np.array([np.datetime64("2024-01-01T00:00:00"), np.datetime64("2024-01-01T01:00:00")])
+    hybrid = np.array([1, 2, 3], dtype=np.int64)  # 1 = model top, 3 = near-surface
+    lat = np.array([10.0, 11.0], dtype=np.float64)
+    lon = np.array([20.0, 21.0], dtype=np.float64)
+    shape_4d = (times.size, hybrid.size, lat.size, lon.size)
+    shape_3d = (times.size, lat.size, lon.size)
+
+    g = 9.80665
+    terrain_m = 150.0
+    agl_by_level = np.array([3000.0, 500.0, 30.0])  # matches hybrid order (top->bottom)
+    t_by_level = np.array([250.0, 275.0, 288.0])
+    q_by_level = np.array([0.001, 0.005, 0.008])
+
+    z_sfc = np.full(shape_3d, terrain_m * g)
+    z = np.empty(shape_4d)
+    t = np.empty(shape_4d)
+    q = np.empty(shape_4d)
+    for k, (agl, tk, qk) in enumerate(zip(agl_by_level, t_by_level, q_by_level, strict=True)):
+        z[:, k, :, :] = (terrain_m + agl) * g
+        t[:, k, :, :] = tk
+        q[:, k, :, :] = qk
+
+    ds = xr.Dataset(
+        data_vars={
+            "u_component_of_wind": (
+                ("time", "hybrid", "latitude", "longitude"),
+                np.full(shape_4d, 5.0),
+            ),
+            "v_component_of_wind": (
+                ("time", "hybrid", "latitude", "longitude"),
+                np.full(shape_4d, -2.0),
+            ),
+            "vertical_velocity": (
+                ("time", "hybrid", "latitude", "longitude"),
+                np.full(shape_4d, -0.10),
+            ),
+            "temperature": (("time", "hybrid", "latitude", "longitude"), t),
+            "specific_humidity": (("time", "hybrid", "latitude", "longitude"), q),
+            "geopotential": (("time", "hybrid", "latitude", "longitude"), z),
+            "boundary_layer_height": (("time", "latitude", "longitude"), np.full(shape_3d, 400.0)),
+            "surface_pressure": (("time", "latitude", "longitude"), np.full(shape_3d, 101325.0)),
+            "geopotential_at_surface": (("time", "latitude", "longitude"), z_sfc),
+            "friction_velocity": (("time", "latitude", "longitude"), np.full(shape_3d, 0.4)),
+            "surface_sensible_heat_flux": (
+                ("time", "latitude", "longitude"),
+                np.full(shape_3d, 360_000.0),
+            ),
+        },
+        coords={"time": times, "hybrid": hybrid, "latitude": lat, "longitude": lon},
+    )
+    units = {
+        "u_component_of_wind": "m s**-1",
+        "v_component_of_wind": "m s**-1",
+        "vertical_velocity": "Pa s**-1",
+        "temperature": "K",
+        "specific_humidity": "kg kg**-1",
+        "geopotential": "m**2 s**-2",
+        "boundary_layer_height": "m",
+        "surface_pressure": "Pa",
+        "geopotential_at_surface": "m**2 s**-2",
+        "friction_velocity": "m s**-1",
+        "surface_sensible_heat_flux": "J m**-2",
+    }
+    for name, u in units.items():
+        ds[name].attrs["units"] = u
+    ds["hybrid"].attrs["units"] = "1"
+    ds.attrs["glide_vertical_coordinate"] = "model_level"
+    return ds
+
+
+def _model_level_request() -> BoundingBoxRequest:
+    return BoundingBoxRequest(
+        spatial=SpatialBounds(
+            lon_min=19.5, lon_max=21.5, lat_min=9.5, lat_max=11.5, z_min=0.0, z_max=5000.0
+        ),
+        time=TimeBounds(
+            start=datetime(2024, 1, 1, 0, 15, tzinfo=UTC),
+            end=datetime(2024, 1, 1, 1, 0, tzinfo=UTC),
+        ),
+    )
+
+
+def test_model_level_mode_autodetected_and_coord_renamed() -> None:
+    reader = _InMemoryArcoReader(_build_mock_model_level_dataset(), terrain_following=True)
+    reader.fetch_hourly_window(_model_level_request())
+    assert reader._is_model_level is True
+    assert reader.level_name == "hybrid"  # auto-corrected from the "level" default
+
+
+def test_model_level_fetch_reconstructs_plausible_pressure() -> None:
+    reader = _InMemoryArcoReader(_build_mock_model_level_dataset(), terrain_following=True)
+    result = reader.fetch_hourly_window(_model_level_request())
+
+    p = result.metadata.pressure_level_hpa
+    # Pressure must be reconstructed (the hybrid coord is 1/2/3, not a pressure):
+    # near-surface ~ 1000 hPa and decreasing with the AGL grid. Non-increasing
+    # rather than strictly so: AGL levels below the lowest / above the highest of
+    # the 3 synthetic model levels constant-extrapolate (flat segments).
+    assert 980.0 < p[0] < 1015.0
+    assert np.all(np.diff(p) <= 1e-9)
+    assert p[0] - p[-1] > 250.0  # meaningfully decreasing over the column
+    assert p[-1] < 700.0  # ~5 km aloft
+
+
+def test_model_level_omega_converted_to_geometric_w() -> None:
+    reader = _InMemoryArcoReader(_build_mock_model_level_dataset(), terrain_following=True)
+    result = reader.fetch_hourly_window(_model_level_request())
+    # omega = -0.1 Pa/s (subsidence-sign) -> upward geometric w > 0 via
+    # w = -(Rd T)/(g p) omega. Must differ from the raw omega value.
+    w = result.hour_start[2]
+    assert torch.all(w > 0)
+    assert torch.all(torch.isfinite(w))
+    assert not torch.allclose(w, torch.full_like(w, -0.10))
+
+
+def test_model_level_requires_terrain_following() -> None:
+    reader = _InMemoryArcoReader(_build_mock_model_level_dataset(), terrain_following=False)
+    with pytest.raises(ValueError, match="terrain_following=True"):
+        reader.fetch_hourly_window(_model_level_request())
 
 
 def test_fetch_hourly_window_includes_surface_pressure_and_converts_w() -> None:
