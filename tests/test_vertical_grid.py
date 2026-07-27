@@ -10,6 +10,7 @@ from lpdm.vertical_grid import (
     model_level_pressure_pa,
     regrid_columns_to_agl,
     slope_correct_w,
+    stretched_agl_levels,
     terrain_gradient,
 )
 
@@ -195,3 +196,53 @@ def test_model_level_pressure_decreases_with_height():
     phi, phi_s, ps, temp = _isothermal_column(z, t_k=245.0)
     p = model_level_pressure_pa(phi, phi_s, ps, temp)
     assert np.all(np.diff(p[:, 0, 0]) < 0)
+
+
+# --- stretched_agl_levels (configurable vertical grid) -----------------------
+
+
+@pytest.mark.parametrize("n_levels", [2, 5, 23, 40, 60, 137])
+def test_stretched_grid_spans_domain_with_exact_level_count(n_levels):
+    lv = stretched_agl_levels(n_levels, 15000.0)
+    assert lv.size == n_levels
+    assert lv[0] == 0.0
+    assert lv[-1] == 15000.0
+    assert np.all(np.diff(lv) > 0)
+
+
+def test_stretched_grid_honours_first_layer_thickness():
+    for dz0 in (5.0, 10.0, 25.0):
+        lv = stretched_agl_levels(40, 15000.0, first_layer_m=dz0)
+        assert lv[1] == pytest.approx(dz0, rel=1e-9)
+
+
+def test_stretched_grid_layers_grow_monotonically():
+    """Geometric stretch: every layer is thicker than the one below it."""
+    lv = stretched_agl_levels(50, 15000.0)
+    thicknesses = np.diff(lv)
+    assert np.all(np.diff(thicknesses) > 0)
+    # constant ratio (the defining property), except the top layer which is
+    # pinned to alt_max exactly.
+    ratios = thicknesses[1:-1] / thicknesses[:-2]
+    assert np.allclose(ratios, ratios[0], rtol=1e-6)
+
+
+def test_more_levels_resolves_more_of_the_boundary_layer():
+    """The point of the knob: raising n_levels buys near-surface resolution."""
+    below_1500 = [int((stretched_agl_levels(n, 15000.0) <= 1500.0).sum()) for n in (23, 40, 60)]
+    assert below_1500 == sorted(below_1500)
+    assert below_1500[0] < below_1500[-1]
+    # 23 stretched levels reproduce the hand-tuned default ladder's character
+    assert abs(below_1500[0] - int((default_agl_levels(15000.0) <= 1500.0).sum())) <= 2
+
+
+def test_stretched_grid_rejects_impossible_geometry():
+    with pytest.raises(ValueError, match="n_levels must be >= 2"):
+        stretched_agl_levels(1, 15000.0)
+    with pytest.raises(ValueError, match="alt_max_m must be > 0"):
+        stretched_agl_levels(10, 0.0)
+    with pytest.raises(ValueError, match="first_layer_m must be > 0"):
+        stretched_agl_levels(10, 15000.0, first_layer_m=0.0)
+    # 200 uniform 10 m layers already overshoot a 1000 m top
+    with pytest.raises(ValueError, match="too thick for n_levels"):
+        stretched_agl_levels(200, 1000.0, first_layer_m=10.0)

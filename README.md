@@ -266,6 +266,15 @@ Top-level config sections: `io`, `simulation`, `release`, `turbulence`,
 `simulation.length_seconds > release.duration_seconds`, strictly ascending
 `output_grid.z_edges_m`, and every release point lying inside `met_domain`.
 
+`met_domain.vertical_levels` sets the internal terrain-following AGL grid the met
+is resampled onto — **this, not the met source, is the vertical resolution the
+physics sees**. Give it a count (levels are geometrically stretched from
+`first_layer_m` up to `alt_max_m`) or an explicit ascending list of heights in
+metres; omit it for the built-in 23-level default. Raise it to exploit a
+model-level (hybrid) met source, whose fine near-surface levels the default
+under-uses — but note the met cache scales linearly with the level count. See
+[docs/met_schema.md](docs/met_schema.md).
+
 Memory controls (`memory:` section):
 
 - `met_cache_max_hours` — LRU cache size for met windows. For multi-batch runs set

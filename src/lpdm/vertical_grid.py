@@ -67,6 +67,83 @@ def default_agl_levels(alt_max_m: float) -> np.ndarray:
     return levels
 
 
+def stretched_agl_levels(
+    n_levels: int,
+    alt_max_m: float,
+    first_layer_m: float = 10.0,
+) -> np.ndarray:
+    """Geometrically stretched AGL grid: ``n_levels`` heights from 0 to ``alt_max_m``.
+
+    The lowest layer is ``first_layer_m`` thick and each layer above is a constant
+    ratio thicker — the standard way atmospheric models define a vertical grid, and
+    the shape the fixed :data:`_DEFAULT_AGL_LEVELS_M` ladder approximates by hand.
+    Resolution therefore concentrates where the footprint physics needs it (the
+    surface layer and BL) while still reaching the model top in few levels.
+
+    The stretch ratio is solved so the layers exactly span ``alt_max_m``; there is
+    no free parameter beyond ``n_levels`` and ``first_layer_m``.
+
+    Raising ``n_levels`` is the lever for exploiting a met source with fine native
+    vertical resolution (e.g. ERA5's 137 model levels, lowest ~10 m): the fixed
+    23-level default resolves only ~13 levels below 1.5 km, so it discards
+    near-surface structure the model levels actually carry. Note the met cache
+    scales linearly with ``n_levels``.
+
+    Args:
+        n_levels: Number of grid heights (>= 2), including the 0 m surface.
+        alt_max_m: Top of the grid in metres AGL.
+        first_layer_m: Thickness of the lowest layer (0 -> first level above it).
+
+    Returns:
+        ``[n_levels]`` strictly ascending heights, ``levels[0] == 0`` and
+        ``levels[-1] == alt_max_m``.
+    """
+    if n_levels < 2:
+        raise ValueError(f"n_levels must be >= 2, got {n_levels}")
+    if alt_max_m <= 0:
+        raise ValueError(f"alt_max_m must be > 0, got {alt_max_m}")
+    if first_layer_m <= 0:
+        raise ValueError(f"first_layer_m must be > 0, got {first_layer_m}")
+
+    n_layers = n_levels - 1
+    if n_layers == 1:
+        # A single layer spans the whole domain; `first_layer_m` cannot also apply.
+        return np.array([0.0, float(alt_max_m)], dtype="float64")
+    if first_layer_m * n_layers >= alt_max_m:
+        raise ValueError(
+            f"first_layer_m={first_layer_m} is too thick for n_levels={n_levels} "
+            f"below alt_max_m={alt_max_m}: {n_layers} uniform layers would already "
+            f"span {first_layer_m * n_layers:.0f} m. Use fewer levels, a thinner "
+            "first layer, or a higher top."
+        )
+
+    # Solve first_layer * (r^n_layers - 1) / (r - 1) == alt_max for the ratio r > 1.
+    # The sum is strictly increasing in r, so bisection is robust and dependency-free.
+    def span(ratio: float) -> float:
+        if abs(ratio - 1.0) < 1e-12:
+            return first_layer_m * n_layers
+        return first_layer_m * (ratio**n_layers - 1.0) / (ratio - 1.0)
+
+    lo, hi = 1.0, 2.0
+    while span(hi) < alt_max_m:
+        hi *= 2.0
+        if hi > 1e6:  # unreachable for sane inputs; guards a pathological loop
+            raise ValueError("failed to bracket a stretch ratio; check the inputs")
+    for _ in range(200):
+        mid = 0.5 * (lo + hi)
+        if span(mid) < alt_max_m:
+            lo = mid
+        else:
+            hi = mid
+    ratio = 0.5 * (lo + hi)
+
+    thicknesses = first_layer_m * ratio ** np.arange(n_layers, dtype="float64")
+    levels = np.concatenate(([0.0], np.cumsum(thicknesses)))
+    # Pin the top exactly (bisection leaves a sub-micron residual).
+    levels[-1] = float(alt_max_m)
+    return levels
+
+
 @dataclass(frozen=True)
 class AglRegridWeights:
     """Precomputed per-column bracketing for a pressure->AGL regrid.

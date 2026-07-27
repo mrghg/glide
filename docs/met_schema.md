@@ -130,6 +130,37 @@ share the same AGL machinery.
   are assumed hPa, otherwise Pa.
 - Any ascending/descending order and any number of levels.
 
+### The internal AGL grid sets the resolution the physics sees
+
+Whichever mode a source uses, GLIDE resamples every met hour onto one **fixed
+terrain-following AGL ladder** shared by all columns (that shared 1-D ladder is
+what makes the vertical interpolation cheap enough for the per-step hot path). So
+the *source's* level count does not set the model's effective vertical resolution
+— this grid does, and it also sets the met-cache size.
+
+The default is a 23-level ladder resolving ~13 levels below 1.5 km. That suits the
+37 pressure levels (~5 below 1.5 km) but **under-uses a model-level source**, which
+carries ~20 there. Raise it via `met_domain.vertical_levels`:
+
+```yaml
+met_domain:
+  alt_max_m: 15000.0
+  vertical_levels: 40        # count -> geometrically stretched grid
+  first_layer_m: 10.0        # lowest layer thickness (default: ERA5's lowest model level)
+```
+
+`vertical_levels` accepts either a **count** (levels are geometrically stretched
+from `first_layer_m` to `alt_max_m`, concentrating resolution near the surface) or
+an **explicit ascending list** of AGL heights in metres for full control. Omit it
+to keep the built-in default.
+
+Guidance: ~40 levels roughly matches ERA5 model levels' near-surface density
+(~23 below 1.5 km); beyond that you are interpolating rather than resolving new
+structure. **The host met cache scales linearly with the level count** — at 192
+cached hours on the EUROPE domain, 23 levels ≈ 52 GiB but 40 levels ≈ 90 GiB, so
+raise SLURM `--mem` accordingly (`make_multisite_config.py --vertical-levels N`
+does this arithmetic for you).
+
 **Model / hybrid levels** (auto-detected, or `vertical_coordinate="model"`):
 - The level coordinate is a **level index**, not a pressure. Per-level heights
   come directly from the 3-D `geopotential` field, exactly as on pressure levels.

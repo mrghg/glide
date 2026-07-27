@@ -486,3 +486,87 @@ def test_validate_meteorology_time_coverage_rejects_insufficient_history() -> No
 
     with pytest.raises(ValueError, match="Meteorological dataset does not cover"):
         _validate_meteorology_time_coverage(reader, cfg, release_end, sim_start)
+
+
+# --- met_domain.vertical_levels (configurable internal AGL grid) -------------
+
+
+def test_met_domain_vertical_levels_defaults_to_builtin_ladder() -> None:
+    """Unset => None, i.e. the reader's built-in 23-level default (back-compat)."""
+
+    cfg = RunConfig.model_validate(_base_dict())
+    assert cfg.met_domain.vertical_levels is None
+    assert cfg.met_domain.resolve_agl_levels() is None
+
+
+def test_met_domain_vertical_levels_count_generates_stretched_grid() -> None:
+    cfg = RunConfig.model_validate(
+        _base_dict(
+            met_domain={
+                "lon_bounds": [-3.0, 5.0],
+                "lat_bounds": [-2.0, 6.0],
+                "alt_max_m": 10000.0,
+                "vertical_levels": 40,
+            }
+        )
+    )
+    levels = cfg.met_domain.resolve_agl_levels()
+    assert levels is not None
+    assert levels.size == 40
+    assert levels[0] == 0.0
+    assert levels[-1] == pytest.approx(10000.0)
+    assert (levels[1:] > levels[:-1]).all()
+
+
+def test_met_domain_vertical_levels_explicit_list_used_verbatim() -> None:
+    explicit = [0.0, 25.0, 100.0, 1000.0, 10000.0]
+    cfg = RunConfig.model_validate(
+        _base_dict(
+            met_domain={
+                "lon_bounds": [-3.0, 5.0],
+                "lat_bounds": [-2.0, 6.0],
+                "alt_max_m": 10000.0,
+                "vertical_levels": explicit,
+            }
+        )
+    )
+    assert list(cfg.met_domain.resolve_agl_levels()) == explicit
+
+
+def test_met_domain_first_layer_m_controls_lowest_level() -> None:
+    cfg = RunConfig.model_validate(
+        _base_dict(
+            met_domain={
+                "lon_bounds": [-3.0, 5.0],
+                "lat_bounds": [-2.0, 6.0],
+                "alt_max_m": 10000.0,
+                "vertical_levels": 30,
+                "first_layer_m": 5.0,
+            }
+        )
+    )
+    assert cfg.met_domain.resolve_agl_levels()[1] == pytest.approx(5.0)
+
+
+@pytest.mark.parametrize(
+    ("levels", "match"),
+    [
+        (1, "must be >= 2"),
+        ([0.0], "at least 2 heights"),
+        ([10.0, 100.0, 10000.0], "must start at 0.0"),
+        ([0.0, 500.0, 100.0, 10000.0], "strictly ascending"),
+        ([0.0, 100.0, 500.0], "below alt_max_m"),
+    ],
+)
+def test_met_domain_vertical_levels_rejects_bad_grids(levels, match: str) -> None:
+    with pytest.raises(ValidationError, match=match):
+        RunConfig.model_validate(
+            _base_dict(
+                met_domain={
+                    "lon_bounds": [-3.0, 5.0],
+                    "lat_bounds": [-2.0, 6.0],
+                    "alt_max_m": 10000.0,
+                    "vertical_levels": levels,
+                }
+            )
+        )
