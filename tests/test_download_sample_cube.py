@@ -79,7 +79,10 @@ def test_resolve_domain_bbox_rejects_unknown_domain() -> None:
         module._resolve_domain_bbox("ATLANTIS")
 
 
-def test_dispatch_rejects_mixing_named_and_adhoc_modes() -> None:
+def test_dispatch_rejects_mixing_named_and_adhoc_window_flags() -> None:
+    """--domain/--year-month conflicts with the ad-hoc bbox/time flags (they'd be
+    silently ignored), but NOT with --out-path — see the dedicated override test."""
+
     from argparse import Namespace
 
     module = _load_download_sample_cube_module()
@@ -91,8 +94,8 @@ def test_dispatch_rejects_mixing_named_and_adhoc_modes() -> None:
         domain="EUROPE",
         year_month="202401",
         out_dir="data/era5",
-        out_path="data/sample.zarr",  # ad-hoc flag alongside named → conflict
-        time_start=None,
+        out_path=None,
+        time_start="2024-01-01T00:00:00",  # ad-hoc window flag alongside named → conflict
         time_end=None,
         lon_min=None,
         lon_max=None,
@@ -101,6 +104,46 @@ def test_dispatch_rejects_mixing_named_and_adhoc_modes() -> None:
     )
     with pytest.raises(SystemExit, match="Cannot mix"):
         module._dispatch(args)
+
+
+def test_dispatch_named_mode_out_path_overrides_auto_filename(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--out-path is NOT an ad-hoc-only flag: it overrides the auto-generated
+    filename in named-domain mode while the bbox/time window still come from
+    --domain/--year-month."""
+
+    from argparse import Namespace
+
+    module = _load_download_sample_cube_module()
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(module, "download_sample_cube", lambda **kw: captured.update(kw))
+
+    args = Namespace(
+        store_uri="gs://x",
+        surface_store_uri="gs://sfc",
+        levels="pressure",
+        zarr_version=2,
+        domain="EUROPE",
+        year_month="202401",
+        out_dir="data/era5",  # ignored: out_path takes precedence
+        out_path="/custom/location/my_cube.zarr",
+        time_start=None,
+        time_end=None,
+        lon_min=None,
+        lon_max=None,
+        lat_min=None,
+        lat_max=None,
+    )
+    module._dispatch(args)
+
+    assert captured["out_path"] == "/custom/location/my_cube.zarr"
+    # bbox/time still resolved from the domain registry, not left empty.
+    bbox = module._resolve_domain_bbox("EUROPE")
+    assert captured["lon_min"] == bbox["lon_min"]
+    t_start, t_end = module._resolve_year_month_window("202401")
+    assert captured["time_start"] == t_start
+    assert captured["time_end"] == t_end
 
 
 def test_dispatch_named_mode_writes_to_out_dir_with_auto_filename(

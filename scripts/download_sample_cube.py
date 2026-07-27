@@ -8,7 +8,9 @@ Two invocation modes:
 
    Writes to ``data/era5/<DOMAIN>_<YYYYMM>.zarr``. Bounding box and full pressure
    level set are looked up from :data:`DOMAINS`. Each month is its own Zarr store
-   so multi-month archives are resumable and self-documenting on disk.
+   so multi-month archives are resumable and self-documenting on disk. Pass
+   ``--out-path`` to write to an exact location instead (the bbox/time window
+   still come from ``--domain``/``--year-month``).
 
 2. **Ad-hoc subset** (legacy SF-area smoke tests, custom one-off windows):
 
@@ -427,6 +429,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default=2,
         help="Output Zarr format version (2 is safest; 3 clears inherited v2 codecs).",
     )
+    parser.add_argument(
+        "--out-path",
+        help=(
+            "Exact output path, in EITHER mode. In named-domain mode this overrides "
+            "the auto-generated <out-dir>/<DOMAIN>_<YYYYMM>[_ml].zarr filename (bbox "
+            "and time window still come from --domain/--year-month). Required in "
+            "ad-hoc mode, where there is no domain/year-month to name the file from."
+        ),
+    )
 
     # Named domain + month path (preferred for the FLEXPART comparison archive).
     named = parser.add_argument_group("named-domain mode")
@@ -436,15 +447,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--out-dir",
         default="data/era5",
         help=(
-            "Parent directory for named-domain stores. Filename is always auto-generated "
-            "as <DOMAIN>_<YYYYMM>.zarr inside this directory — point it at an external "
-            "drive or mounted volume to write elsewhere (e.g. --out-dir /Volumes/external/met)."
+            "Parent directory for named-domain stores. Filename is auto-generated as "
+            "<DOMAIN>_<YYYYMM>.zarr inside this directory unless --out-path is set — "
+            "point it at an external drive or mounted volume to write elsewhere "
+            "(e.g. --out-dir /Volumes/external/met)."
         ),
     )
 
     # Ad-hoc subset path (legacy, kept for SF-area smoke tests and custom one-offs).
     adhoc = parser.add_argument_group("ad-hoc subset mode")
-    adhoc.add_argument("--out-path", help="Full output path for ad-hoc subsets.")
     adhoc.add_argument("--time-start", help="ISO datetime, e.g. 2023-12-29T18:00:00.")
     adhoc.add_argument("--time-end", help="ISO datetime.")
     adhoc.add_argument("--lon-min", type=float)
@@ -463,10 +474,15 @@ def _dispatch(args: argparse.Namespace) -> None:
     level_suffix = "_ml" if args.levels == "model" else ""
 
     using_named = args.domain is not None or args.year_month is not None
-    using_adhoc = any(
+    # Flags that define an ad-hoc bbox/time window. These conflict with
+    # named-domain mode because it derives the bbox and time window itself (from
+    # DOMAINS[domain] and --year-month), so a separately-supplied value here would
+    # just be silently ignored. --out-path is deliberately NOT in this set: it's
+    # just a destination, not a bbox/time input, so it works as an override in
+    # EITHER mode (see below).
+    using_adhoc_window = any(
         v is not None
         for v in (
-            args.out_path,
             args.time_start,
             args.time_end,
             args.lon_min,
@@ -476,11 +492,12 @@ def _dispatch(args: argparse.Namespace) -> None:
         )
     )
 
-    if using_named and using_adhoc:
+    if using_named and using_adhoc_window:
         raise SystemExit(
-            "Cannot mix named-domain mode (--domain/--year-month) with ad-hoc flags "
-            "(--out-path/--time-*/--lon-*/--lat-*). Pick one. To write a named-domain "
-            "download to a custom location, set --out-dir (the filename is always auto-generated)."
+            "Cannot mix named-domain mode (--domain/--year-month) with ad-hoc "
+            "bbox/time flags (--time-*/--lon-*/--lat-*): named-domain mode derives "
+            "these from the domain registry and --year-month. Pick one. --out-path "
+            "may be combined with either mode."
         )
 
     if using_named:
@@ -488,7 +505,9 @@ def _dispatch(args: argparse.Namespace) -> None:
             raise SystemExit("--domain and --year-month must be given together.")
         bbox = _resolve_domain_bbox(args.domain)
         t_start, t_end = _resolve_year_month_window(args.year_month)
-        out_path = os.path.join(args.out_dir, f"{args.domain}_{args.year_month}{level_suffix}.zarr")
+        out_path = args.out_path or os.path.join(
+            args.out_dir, f"{args.domain}_{args.year_month}{level_suffix}.zarr"
+        )
         archive_attrs = {
             "glide_domain": args.domain,
             "glide_year_month": args.year_month,
