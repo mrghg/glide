@@ -350,6 +350,36 @@ class ArcoEra5ZarrReader(MetReader):
         extra = ("sp", "q") if self._is_model_level else ()
         return tuple(dict.fromkeys((*self.channel_names, *self._DERIVATION_KEYS, *extra)))
 
+    def _model_level_evidence(self, ds: xr.Dataset) -> str | None:
+        """Return why the vertical coordinate looks like MODEL levels, else None.
+
+        Used to catch a store whose `glide_vertical_coordinate` attr is missing or
+        wrong. Model levels are indices, so reading them as pressures is silent
+        corruption (see `_resolve_vertical_mode`).
+        """
+
+        if self.level_name in ("hybrid", "model_level"):
+            return f"its vertical coordinate is named {self.level_name!r}"
+        if self.level_name not in ds.variables and self.level_name not in ds.coords:
+            return None
+        std_name = str(ds[self.level_name].attrs.get("standard_name", "")).lower()
+        if "hybrid_sigma_pressure" in std_name:
+            return f"its vertical coordinate declares standard_name={std_name!r}"
+        # Consecutive integers (1, 2, ... N) are level indices, never a pressure
+        # ladder: real pressure-level sets are unevenly spaced (1, 2, 3, 5, 7, 10 ...).
+        values = np.asarray(ds[self.level_name].values, dtype="float64")
+        if (
+            values.size >= 3
+            and np.all(np.isfinite(values))
+            and np.all(values == np.round(values))
+            and np.all(np.abs(np.diff(values)) == 1.0)
+        ):
+            return (
+                f"its vertical coordinate is {values.size} consecutive integers "
+                f"({values[0]:.0f}..{values[-1]:.0f}) — level indices, not pressures"
+            )
+        return None
+
     def _resolve_vertical_mode(self, ds: xr.Dataset) -> None:
         """Resolve pressure- vs model-level mode and the vertical coord name once.
 
@@ -357,6 +387,12 @@ class ArcoEra5ZarrReader(MetReader):
         `glide_vertical_coordinate` attr (falling back to pressure). Also corrects
         `level_name` if the configured name is absent but a known vertical coord
         (e.g. "hybrid") is present.
+
+        Guards the silent-corruption case: on model levels the coordinate holds
+        level INDICES, so treating them as pressures (the pressure-mode default)
+        would feed garbage to the omega->w conversion, air density, and convection
+        without raising. If we are about to do that but the coordinate doesn't look
+        like pressures, fail loudly instead.
         """
 
         if self._vertical_resolved:
@@ -370,6 +406,19 @@ class ArcoEra5ZarrReader(MetReader):
                 if cand in ds.dims:
                     self.level_name = cand
                     break
+        if not self._is_model_level:
+            evidence = self._model_level_evidence(ds)
+            if evidence is not None:
+                raise ValueError(
+                    f"Refusing to read this store as PRESSURE levels: {evidence}. "
+                    "Its level values would be interpreted as pressures, silently "
+                    "corrupting the omega->w conversion, air density, and convection. "
+                    "If it is model-level met, tag the store with the attr "
+                    "glide_vertical_coordinate='model_level' (scripts/"
+                    "download_sample_cube.py --levels model does this) or construct "
+                    "the reader with vertical_coordinate='model'. See "
+                    "docs/met_schema.md."
+                )
         if self._is_model_level and not self.terrain_following:
             raise ValueError(
                 "Model-level met requires terrain_following=True (the hybrid levels "

@@ -147,6 +147,14 @@ share the same AGL machinery.
 - Model levels require the terrain-following path (`terrain_following=True`, the
   default).
 
+**Tag your model-level cubes.** GLIDE refuses to read a store as pressure levels
+when the vertical coordinate doesn't look like pressures — it is named `hybrid` /
+`model_level`, declares a `hybrid_sigma_pressure` `standard_name`, or holds
+consecutive integers (level indices). Without that guard the indices would be read
+as pressures, silently corrupting the omega→w conversion, air density, and
+convection. Fix it by tagging the store (below) or constructing the reader with
+`vertical_coordinate="model"`.
+
 Store which mode a cube uses in a `glide_vertical_coordinate` attr
 (`"pressure_level"` or `"model_level"`) so it is self-describing on disk;
 `download_sample_cube.py` does this.

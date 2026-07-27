@@ -229,6 +229,61 @@ def test_model_level_requires_terrain_following() -> None:
         reader.fetch_hourly_window(_model_level_request())
 
 
+def test_untagged_model_level_store_fails_loudly_not_silently() -> None:
+    """A model-level store missing the glide_vertical_coordinate attr must RAISE,
+    not silently read hybrid level indices (1..N) as pressures — that would corrupt
+    omega->w, air density, and convection with no error."""
+
+    ds = _build_mock_model_level_dataset()
+    del ds.attrs["glide_vertical_coordinate"]  # simulate an untagged / hand-built cube
+    reader = _InMemoryArcoReader(ds, terrain_following=True)
+    with pytest.raises(ValueError, match="Refusing to read this store as PRESSURE levels"):
+        reader.fetch_hourly_window(_model_level_request())
+
+
+def test_untagged_model_level_store_accepted_with_explicit_override() -> None:
+    """The explicit vertical_coordinate='model' escape hatch works for stores that
+    can't carry the provenance attr."""
+
+    ds = _build_mock_model_level_dataset()
+    del ds.attrs["glide_vertical_coordinate"]
+    reader = _InMemoryArcoReader(ds, terrain_following=True, vertical_coordinate="model")
+    result = reader.fetch_hourly_window(_model_level_request())
+    assert reader._is_model_level is True
+    assert result.metadata.pressure_level_hpa[0] > 900.0  # reconstructed, not the index
+
+
+def test_consecutive_integer_levels_named_level_still_rejected() -> None:
+    """The guard doesn't rely on the coord being named 'hybrid': consecutive integer
+    level values are indices whatever the dimension is called."""
+
+    ds = _build_mock_model_level_dataset()
+    del ds.attrs["glide_vertical_coordinate"]
+    ds = ds.rename({"hybrid": "level"})
+    reader = _InMemoryArcoReader(ds, terrain_following=True)
+    with pytest.raises(ValueError, match="consecutive integers"):
+        reader.fetch_hourly_window(_model_level_request())
+
+
+def test_genuine_pressure_level_store_is_not_flagged() -> None:
+    """The guard must not fire on real pressure-level met (unevenly spaced hPa)."""
+
+    reader = _InMemoryArcoReader(_build_mock_era5_dataset(), terrain_following=True)
+    result = reader.fetch_hourly_window(
+        BoundingBoxRequest(
+            spatial=SpatialBounds(
+                lon_min=19.5, lon_max=21.5, lat_min=9.5, lat_max=11.5, z_min=0.0, z_max=1100.0
+            ),
+            time=TimeBounds(
+                start=datetime(2024, 1, 1, 0, 15, tzinfo=UTC),
+                end=datetime(2024, 1, 1, 1, 0, tzinfo=UTC),
+            ),
+        )
+    )
+    assert reader._is_model_level is False
+    assert result.hour_start is not None
+
+
 def test_fetch_hourly_window_includes_surface_pressure_and_converts_w() -> None:
     ds = _build_mock_era5_dataset()
     reader = _InMemoryArcoReader(ds)
