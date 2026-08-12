@@ -325,6 +325,15 @@ class ArcoEra5ZarrReader(MetReader):
         self._hour_cache: OrderedDict[tuple, dict] = OrderedDict()
         self._hour_cache_lock = threading.Lock()
         self.hour_cache_hits = 0
+        # Memoized lazy handle on the Zarr store(s). Opening is not free — for a
+        # consolidated local store it costs ~0.3-0.4 s (metadata parse, coordinate
+        # materialization, and for multi-store runs a concat + duplicate-time scan),
+        # which profiling showed to be ~10-13% of a window fetch when repeated on
+        # every call. The handle is lazy (dask-backed), so holding it costs metadata
+        # only; the store is assumed immutable for the reader's lifetime. Call
+        # `close()` to release it.
+        self._dataset_cache: xr.Dataset | None = None
+        self._dataset_lock = threading.Lock()
         self.device = torch.device(device)
         self.dtype = dtype
 
@@ -450,49 +459,45 @@ class ArcoEra5ZarrReader(MetReader):
         self._resolve_vertical_mode(ds)
         ds = self._select_variables(ds)
 
-        try:
-            if self.terrain_following:
-                # Per-hour processing via the hour cache (perf #4): the shared
-                # hour of adjacent windows is fetched/regridded once and its
-                # tensor SHARED between the two windows.
-                bundle_start = self._processed_hour(ds, t0, request.spatial)
-                bundle_end = self._processed_hour(ds, t1, request.spatial)
-            else:
-                start_request = BoundingBoxRequest(
-                    spatial=request_hour.spatial,
-                    time=TimeBounds(start=t0, end=t0),
+        # `ds` is the reader's memoized shared handle — do not close it here.
+        if self.terrain_following:
+            # Per-hour processing via the hour cache (perf #4): the shared
+            # hour of adjacent windows is fetched/regridded once and its
+            # tensor SHARED between the two windows.
+            bundle_start = self._processed_hour(ds, t0, request.spatial)
+            bundle_end = self._processed_hour(ds, t1, request.spatial)
+        else:
+            start_request = BoundingBoxRequest(
+                spatial=request_hour.spatial,
+                time=TimeBounds(start=t0, end=t0),
+            )
+            end_request = BoundingBoxRequest(
+                spatial=request_hour.spatial,
+                time=TimeBounds(start=t1, end=t1),
+            )
+
+            ds_start_lazy = self._slice_spatial_temporal(ds, start_request)
+            ds_end_lazy = self._slice_spatial_temporal(ds, end_request)
+
+            # Ensure time subsets only have 1 step before accessing values
+            t0_sel, _ = self._coerce_time_bounds_for_dataset(ds_start_lazy, t0, t0)
+            _, t1_sel = self._coerce_time_bounds_for_dataset(ds_end_lazy, t1, t1)
+            ds_start_lazy = ds_start_lazy.sel({self.time_name: t0_sel})
+            ds_end_lazy = ds_end_lazy.sel({self.time_name: t1_sel})
+
+            # Subset vertical levels using lazy Dask arrays (only reads Z/Z_SFC
+            # into memory to evaluate the bound)
+            ds_start_sub, ds_end_sub, level_agl_m, height_agl_3d = (
+                self._subset_vertical_levels_by_agl(
+                    ds_start=ds_start_lazy,
+                    ds_end=ds_end_lazy,
+                    spatial=request.spatial,
                 )
-                end_request = BoundingBoxRequest(
-                    spatial=request_hour.spatial,
-                    time=TimeBounds(start=t1, end=t1),
-                )
+            )
 
-                ds_start_lazy = self._slice_spatial_temporal(ds, start_request)
-                ds_end_lazy = self._slice_spatial_temporal(ds, end_request)
-
-                # Ensure time subsets only have 1 step before accessing values
-                t0_sel, _ = self._coerce_time_bounds_for_dataset(ds_start_lazy, t0, t0)
-                _, t1_sel = self._coerce_time_bounds_for_dataset(ds_end_lazy, t1, t1)
-                ds_start_lazy = ds_start_lazy.sel({self.time_name: t0_sel})
-                ds_end_lazy = ds_end_lazy.sel({self.time_name: t1_sel})
-
-                # Subset vertical levels using lazy Dask arrays (only reads Z/Z_SFC
-                # into memory to evaluate the bound)
-                ds_start_sub, ds_end_sub, level_agl_m, height_agl_3d = (
-                    self._subset_vertical_levels_by_agl(
-                        ds_start=ds_start_lazy,
-                        ds_end=ds_end_lazy,
-                        spatial=request.spatial,
-                    )
-                )
-
-                # Materialize only the fully sliced bounding boxes
-                ds_start = ds_start_sub.compute()
-                ds_end = ds_end_sub.compute()
-        finally:
-            close_fn = getattr(ds, "close", None)
-            if callable(close_fn):
-                close_fn()
+            # Materialize only the fully sliced bounding boxes
+            ds_start = ds_start_sub.compute()
+            ds_end = ds_end_sub.compute()
 
         if self.terrain_following:
             agl = bundle_start["level"]
@@ -690,20 +695,16 @@ class ArcoEra5ZarrReader(MetReader):
     def get_time_coverage(self) -> tuple[datetime, datetime]:
         """Return the first and last timestamps available in the dataset."""
 
+        # Shared memoized handle — do not close it here.
         ds = self._open_dataset()
-        try:
-            time_coord = ds[self.time_name]
-            if int(time_coord.size) == 0:
-                raise ValueError(f"Dataset time coordinate {self.time_name!r} is empty")
+        time_coord = ds[self.time_name]
+        if int(time_coord.size) == 0:
+            raise ValueError(f"Dataset time coordinate {self.time_name!r} is empty")
 
-            values = np.asarray(time_coord.values)
-            start = self._time_value_to_utc_datetime(values[0])
-            end = self._time_value_to_utc_datetime(values[-1])
-            return start, end
-        finally:
-            close_fn = getattr(ds, "close", None)
-            if callable(close_fn):
-                close_fn()
+        values = np.asarray(time_coord.values)
+        start = self._time_value_to_utc_datetime(values[0])
+        end = self._time_value_to_utc_datetime(values[-1])
+        return start, end
 
     @staticmethod
     def _resolve_stores(zarr_store: str | Sequence[str]) -> tuple[str, ...]:
@@ -781,6 +782,35 @@ class ArcoEra5ZarrReader(MetReader):
         return ds.assign_coords({self.lon_name: new_lon}).isel({self.lon_name: order})
 
     def _open_dataset(self) -> xr.Dataset:
+        """Return the memoized lazy handle on the configured Zarr store(s).
+
+        Opens on first use and reuses the handle thereafter. Callers must NOT
+        close the returned dataset — it is shared. Use `close()` to release it.
+        """
+
+        cached = self._dataset_cache
+        if cached is not None:
+            return cached
+
+        with self._dataset_lock:
+            if self._dataset_cache is None:
+                self._dataset_cache = self._open_dataset_uncached()
+            return self._dataset_cache
+
+    def close(self) -> None:
+        """Release the memoized store handle (and any file descriptors behind it).
+
+        Safe to call more than once; the next `_open_dataset` reopens.
+        """
+
+        with self._dataset_lock:
+            ds, self._dataset_cache = self._dataset_cache, None
+        if ds is not None:
+            close_fn = getattr(ds, "close", None)
+            if callable(close_fn):
+                close_fn()
+
+    def _open_dataset_uncached(self) -> xr.Dataset:
         """Open the configured Zarr store(s) lazily.
 
         For a single store this is a straight `xr.open_zarr` call. For multiple

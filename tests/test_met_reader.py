@@ -1031,3 +1031,74 @@ def test_legacy_path_does_not_use_hour_cache() -> None:
     reader.fetch_hourly_window(request)
     assert reader.hour_cache_hits == 0
     assert len(reader._hour_cache) == 0
+
+
+def test_open_dataset_is_memoized_across_calls(tmp_path) -> None:
+    """`_open_dataset` must open the store once and reuse the lazy handle.
+
+    Profiling showed the reopen costing ~0.3-0.4 s per `fetch_hourly_window`
+    (~10-13% of a fetch) on a consolidated local store — pure waste, since the
+    store is immutable for the reader's lifetime.
+    """
+
+    ds_src = _build_mock_era5_dataset()
+    path = tmp_path / "memo.zarr"
+    ds_src.to_zarr(path, mode="w", zarr_format=2, consolidated=True)
+
+    reader = ArcoEra5ZarrReader(zarr_store=str(path), device="cpu", dtype=torch.float64)
+
+    opens = {"count": 0}
+    real_open = reader._open_dataset_uncached
+
+    def counting_open():
+        opens["count"] += 1
+        return real_open()
+
+    reader._open_dataset_uncached = counting_open
+
+    first = reader._open_dataset()
+    second = reader._open_dataset()
+    reader.get_time_coverage()
+
+    assert opens["count"] == 1
+    assert first is second
+
+    # close() releases the handle; the next call reopens.
+    reader.close()
+    reader.close()  # idempotent
+    reader._open_dataset()
+    assert opens["count"] == 2
+
+
+def test_fetch_hourly_window_leaves_shared_handle_open(tmp_path) -> None:
+    """A fetch must not close the memoized handle — doing so would poison the
+    cache and make every subsequent read operate on a closed store."""
+
+    ds_src = _build_mock_era5_dataset()
+    path = tmp_path / "reuse.zarr"
+    ds_src.to_zarr(path, mode="w", zarr_format=2, consolidated=True)
+
+    reader = ArcoEra5ZarrReader(
+        zarr_store=str(path),
+        device="cpu",
+        dtype=torch.float64,
+        channel_names=("u", "v", "w", "blh", "sp"),
+        terrain_following=False,
+    )
+
+    request = BoundingBoxRequest(
+        spatial=SpatialBounds(
+            lon_min=19.5, lon_max=21.5, lat_min=9.5, lat_max=11.5, z_min=0.0, z_max=5000.0
+        ),
+        time=TimeBounds(
+            start=datetime(2024, 1, 1, 0, 15, tzinfo=UTC),
+            end=datetime(2024, 1, 1, 1, 0, tzinfo=UTC),
+        ),
+    )
+
+    reader.fetch_hourly_window(request)
+    handle = reader._dataset_cache
+    assert handle is not None
+    # Still usable after the fetch: a second fetch on the same handle succeeds.
+    reader.fetch_hourly_window(request)
+    assert reader._dataset_cache is handle
