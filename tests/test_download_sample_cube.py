@@ -91,6 +91,8 @@ def test_dispatch_rejects_mixing_named_and_adhoc_window_flags() -> None:
         surface_store_uri="gs://sfc",
         levels="pressure",
         zarr_version=2,
+        chunk_tile=module.DEFAULT_CHUNK_TILE,
+        chunk_levels=None,
         domain="EUROPE",
         year_month="202401",
         out_dir="data/era5",
@@ -124,6 +126,8 @@ def test_dispatch_named_mode_out_path_overrides_auto_filename(
         surface_store_uri="gs://sfc",
         levels="pressure",
         zarr_version=2,
+        chunk_tile=module.DEFAULT_CHUNK_TILE,
+        chunk_levels=None,
         domain="EUROPE",
         year_month="202401",
         out_dir="data/era5",  # ignored: out_path takes precedence
@@ -163,6 +167,8 @@ def test_dispatch_named_mode_writes_to_out_dir_with_auto_filename(
         surface_store_uri="gs://sfc",
         levels="pressure",
         zarr_version=2,
+        chunk_tile=module.DEFAULT_CHUNK_TILE,
+        chunk_levels=None,
         domain="EUROPE",
         year_month="202401",
         out_dir="/Volumes/external/met",
@@ -208,6 +214,8 @@ def test_dispatch_model_levels_tags_filename_and_resolves_model_store(
         surface_store_uri=module.PRESSURE_LEVEL_STORE,
         levels="model",
         zarr_version=2,
+        chunk_tile=module.DEFAULT_CHUNK_TILE,
+        chunk_levels=None,
         domain="EUROPE",
         year_month="202401",
         out_dir="data/era5",
@@ -236,6 +244,8 @@ def test_dispatch_requires_both_domain_and_year_month_together() -> None:
         surface_store_uri="gs://sfc",
         levels="pressure",
         zarr_version=2,
+        chunk_tile=module.DEFAULT_CHUNK_TILE,
+        chunk_levels=None,
         domain="EUROPE",
         year_month=None,
         out_dir="data/era5",
@@ -323,3 +333,115 @@ def test_replace_store_atomically_restores_existing_store_on_failure(
     assert out_store.exists()
     assert (out_store / "marker.txt").read_text(encoding="utf-8") == "old"
     assert not (tmp_path / "sample_met.zarr.bak-replace").exists()
+
+
+def test_output_chunks_tiles_horizontal_and_keeps_shallow_levels_whole() -> None:
+    """Pressure-level cube: tile lat/lon, one chunk per hour, all 37 levels together.
+
+    Left to dask, the write lands on domain-spanning chunks (latitude in a single
+    chunk), which makes every bounding-box read decompress the whole domain.
+    """
+
+    import numpy as np
+    import xarray as xr
+
+    module = _load_download_sample_cube_module()
+
+    ds = xr.Dataset(
+        {
+            "temperature": (
+                ("time", "level", "latitude", "longitude"),
+                np.zeros((3, 37, 274, 392), dtype=np.float32),
+            )
+        }
+    )
+    chunks = module._output_chunks(ds, tile=128)
+    assert chunks == {"time": 1, "latitude": 128, "longitude": 128, "level": 37}
+
+
+def test_output_chunks_splits_deep_model_levels() -> None:
+    """137 model levels in one chunk is 8.98 MB and forces a full-depth read even
+    though GLIDE only needs levels below its ceiling; split them instead."""
+
+    import numpy as np
+    import xarray as xr
+
+    module = _load_download_sample_cube_module()
+
+    ds = xr.Dataset(
+        {
+            "temperature": (
+                ("time", "hybrid", "latitude", "longitude"),
+                np.zeros((2, 137, 274, 392), dtype=np.float32),
+            )
+        }
+    )
+    chunks = module._output_chunks(ds, tile=128)
+    assert chunks["hybrid"] == module._DEEP_LEVEL_CHUNK
+    assert chunks["latitude"] == 128
+
+
+def test_output_chunks_clamps_to_dimension_size_and_honours_override() -> None:
+    """A tile larger than the domain must not produce an oversized chunk."""
+
+    import numpy as np
+    import xarray as xr
+
+    module = _load_download_sample_cube_module()
+
+    ds = xr.Dataset(
+        {
+            "boundary_layer_height": (
+                ("time", "latitude", "longitude"),
+                np.zeros((4, 40, 60), dtype=np.float32),
+            )
+        }
+    )
+    chunks = module._output_chunks(ds, tile=128)
+    assert chunks == {"time": 1, "latitude": 40, "longitude": 60}
+
+    ds_3d = xr.Dataset(
+        {
+            "temperature": (
+                ("time", "level", "latitude", "longitude"),
+                np.zeros((2, 37, 40, 60), dtype=np.float32),
+            )
+        }
+    )
+    assert module._output_chunks(ds_3d, tile=128, level_chunk=8)["level"] == 8
+
+
+def test_written_store_uses_requested_chunks(tmp_path: Path) -> None:
+    """End-to-end: the requested chunk shape survives `_prepare_for_zarr_write`
+    and lands on disk. Guards the interaction between dropping inherited `chunks`
+    encoding and setting the dask chunks deliberately."""
+
+    import numpy as np
+    import xarray as xr
+
+    module = _load_download_sample_cube_module()
+
+    ds = xr.Dataset(
+        {
+            "temperature": (
+                ("time", "level", "latitude", "longitude"),
+                np.zeros((3, 5, 40, 60), dtype=np.float32),
+            )
+        },
+        coords={
+            "time": np.arange(3),
+            "level": np.arange(5),
+            "latitude": np.arange(40, dtype=np.float64),
+            "longitude": np.arange(60, dtype=np.float64),
+        },
+    )
+    ds["temperature"].encoding = {"chunks": (1, 5, 721, 1440)}
+
+    prepared = module._prepare_for_zarr_write(ds, zarr_version=2)
+    prepared = prepared.chunk(module._output_chunks(prepared, tile=16))
+
+    out = tmp_path / "chunked.zarr"
+    prepared.to_zarr(out, mode="w", consolidated=True, zarr_format=2)
+
+    reopened = xr.open_zarr(out, consolidated=True)
+    assert reopened["temperature"].encoding["chunks"] == (1, 5, 16, 16)

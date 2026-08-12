@@ -146,7 +146,8 @@ def _prepare_for_zarr_write(ds: xr.Dataset, zarr_version: int) -> xr.Dataset:
        anymore. Writing them into the inherited zarr chunk shape would either be
        parallel-unsafe (multiple dask chunks land in one zarr chunk) or pad with
        junk. We drop ``chunks`` and ``preferred_chunks`` so xarray derives the
-       output chunk shape from dask instead.
+       output chunk shape from dask instead — the caller then sets the dask chunks
+       deliberately via `_output_chunks` rather than leaving them to auto-chunking.
 
     2. **Codec incompatibility (v3 only).** v2-style numcodecs objects (Blosc,
        etc.) are rejected by Zarr v3's codec API. For v3 we clear the full
@@ -163,6 +164,62 @@ def _prepare_for_zarr_write(ds: xr.Dataset, zarr_version: int) -> xr.Dataset:
             enc.pop("preferred_chunks", None)
             ds_out[var_name].encoding = enc
     return ds_out
+
+
+DEFAULT_CHUNK_TILE = 128
+# Above this depth a whole-level chunk gets too fat to be worth it (see
+# `_output_chunks`), so levels are split instead.
+_WHOLE_LEVEL_CHUNK_MAX = 48
+_DEEP_LEVEL_CHUNK = 24
+_LEVEL_DIM_CANDIDATES = ("level", "hybrid", "model_level")
+
+
+def _output_chunks(ds: xr.Dataset, tile: int, level_chunk: int | None = None) -> dict[str, int]:
+    """Pick on-disk chunk sizes for the written cube.
+
+    Left to dask's auto-chunking, a bbox-sliced ERA5 subset lands on chunks that
+    span the *entire* horizontal domain — e.g. ``(1, 37, 274, 392)`` = 15.9 MB for
+    a 68.5-degree-tall pressure-level cube, with latitude as a single chunk. GLIDE
+    reads a particle-cloud bounding box that is usually far smaller than the
+    archive domain, so every read decompresses the whole domain: for a 2-degree box
+    that is ~1678x read amplification (bytes decompressed / bytes used). On a warm
+    page cache this is invisible (decompression and the AGL regrid dominate), but
+    on a cold shared filesystem it is the whole cost of the read.
+
+    Tiling the horizontal to ``tile`` cuts that to ~256x at tile=128, for ~4-10%
+    extra warm-cache time (per-chunk overhead). Smaller tiles keep cutting
+    amplification but the overhead grows faster than the saving: tile=64 measured
+    slower at every box size tested. 128 is the hedge. Storage is essentially
+    chunk-shape-neutral (measured within 0.5% across tile 64/96/128/whole).
+
+    Levels are kept whole when shallow (37 pressure levels = 2.42 MB/chunk), but
+    split when deep: ERA5's 137 model levels in one chunk is 8.98 MB and forces a
+    full-depth read even though GLIDE only needs the levels below its ceiling.
+    (Geopotential is the exception — `_compute_level_agl_m` materialises it at full
+    depth to build the AGL mask — but it is one variable of many.)
+
+    Time is always chunked to 1: GLIDE fetches one hour at a time.
+
+    Returns a dict suitable for `Dataset.chunk`. Because the dask chunks are then
+    exactly the intended zarr chunks, the write is parallel-safe and xarray derives
+    the on-disk shape without any explicit `encoding["chunks"]`.
+    """
+
+    sizes = ds.sizes
+    chunks: dict[str, int] = {}
+    if "time" in sizes:
+        chunks["time"] = 1
+    for dim in ("latitude", "longitude"):
+        if dim in sizes:
+            chunks[dim] = min(int(tile), int(sizes[dim]))
+
+    level_dim = next((d for d in _LEVEL_DIM_CANDIDATES if d in sizes), None)
+    if level_dim is not None:
+        n_levels = int(sizes[level_dim])
+        if level_chunk is None:
+            level_chunk = n_levels if n_levels <= _WHOLE_LEVEL_CHUNK_MAX else _DEEP_LEVEL_CHUNK
+        chunks[level_dim] = min(int(level_chunk), n_levels)
+    return chunks
 
 
 def _replace_store_atomically(tmp_path: str, out_path: str) -> None:
@@ -306,6 +363,8 @@ def download_sample_cube(
     *,
     levels: str = "pressure",
     surface_store_uri: str = PRESSURE_LEVEL_STORE,
+    chunk_tile: int = DEFAULT_CHUNK_TILE,
+    chunk_levels: int | None = None,
 ):
     """Download a localised ERA5 cube on pressure levels or native model levels.
 
@@ -315,6 +374,11 @@ def download_sample_cube(
     ``levels="model"``: the 3D fields come from the model-level store
     ``store_uri`` (on a 137-deep ``hybrid`` coord) and the surface fields are
     merged in from ``surface_store_uri`` — the model-level store has none.
+
+    ``chunk_tile`` sets the horizontal on-disk chunk edge (see `_output_chunks`);
+    pass ``0`` to keep dask's auto-chunking (the pre-2026-08 behaviour, which
+    produces domain-spanning chunks). ``chunk_levels`` overrides the vertical
+    chunk depth; ``None`` picks it from the level count.
     """
 
     print(f"Slicing time: {time_start} to {time_end}")
@@ -370,6 +434,16 @@ def download_sample_cube(
 
     print(f"Downloading and saving data to temporary local Zarr: {tmp_out_path}...")
     ds_to_write = _prepare_for_zarr_write(ds_subset, zarr_version=zarr_version)
+
+    if chunk_tile and chunk_tile > 0:
+        out_chunks = _output_chunks(ds_to_write, chunk_tile, chunk_levels)
+        # Rechunking the already-sliced subset only re-splits blocks that the read
+        # produces anyway — no extra source reads. Matching the dask chunks to the
+        # intended zarr chunks keeps the write parallel-safe.
+        ds_to_write = ds_to_write.chunk(out_chunks)
+        print(f"On-disk chunking: {out_chunks}")
+    else:
+        print("On-disk chunking: dask auto (domain-spanning; --chunk-tile 0)")
 
     with xr.set_options(keep_attrs=True):
         ds_to_write.to_zarr(
@@ -428,6 +502,27 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         choices=[2, 3],
         default=2,
         help="Output Zarr format version (2 is safest; 3 clears inherited v2 codecs).",
+    )
+    parser.add_argument(
+        "--chunk-tile",
+        type=int,
+        default=DEFAULT_CHUNK_TILE,
+        help=(
+            "Horizontal on-disk chunk edge in grid cells (default "
+            f"{DEFAULT_CHUNK_TILE}). GLIDE reads a particle-cloud bounding box, so "
+            "domain-spanning chunks make every read decompress the whole domain. "
+            "Pass 0 to keep dask auto-chunking."
+        ),
+    )
+    parser.add_argument(
+        "--chunk-levels",
+        type=int,
+        default=None,
+        help=(
+            "Vertical on-disk chunk depth. Default: all levels in one chunk when "
+            f"there are <= {_WHOLE_LEVEL_CHUNK_MAX} of them (pressure levels), else "
+            f"{_DEEP_LEVEL_CHUNK} (ERA5's 137 model levels)."
+        ),
     )
     parser.add_argument(
         "--out-path",
@@ -529,6 +624,8 @@ def _dispatch(args: argparse.Namespace) -> None:
             archive_attrs=archive_attrs,
             levels=args.levels,
             surface_store_uri=args.surface_store_uri,
+            chunk_tile=args.chunk_tile,
+            chunk_levels=args.chunk_levels,
         )
         return
 
@@ -558,6 +655,8 @@ def _dispatch(args: argparse.Namespace) -> None:
         zarr_version=args.zarr_version,
         levels=args.levels,
         surface_store_uri=args.surface_store_uri,
+        chunk_tile=args.chunk_tile,
+        chunk_levels=args.chunk_levels,
     )
 
 
