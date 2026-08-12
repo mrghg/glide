@@ -15,7 +15,9 @@ grid you provide. In particular it runs on **either** pressure-level **or**
 model-level (hybrid) met — see [Vertical coordinate](#vertical-coordinate).
 
 `scripts/download_sample_cube.py` produces conforming stores from ARCO ERA5 and is
-the best worked example to imitate.
+the best worked example to imitate. If your source is not ERA5, see
+[Preparing met from a non-ERA5 source](#preparing-met-from-a-non-era5-source) for
+the gaps you will most likely have to close yourself.
 
 ## Container format
 
@@ -27,6 +29,9 @@ the best worked example to imitate.
   along `time`. **All stores in a set must share byte-identical `latitude`,
   `longitude`, and vertical coordinates** — only `time` may differ.
 - **dtype:** `float32` or `float64` (GLIDE casts to `float32` on read by default).
+  **CF `scale_factor`/`add_offset` into `int16` also conforms** — xarray decodes it
+  before GLIDE sees anything — and roughly halves a store for errors far below what
+  the physics resolves — see [Storage precision](#storage-precision).
 - **No non-finite values** in the required variables over the domain you intend to
   run. NaNs/Infs in geopotential are rejected outright; the downloader's
   validator (`_validate_written_store`) refuses to install a store containing any.
@@ -212,6 +217,116 @@ Unit strings are matched case-insensitively and whitespace-insensitively, so
 
 The safest choice is to reproduce the ERA5 CF `units` strings shown in the
 [required-variables table](#required-variables).
+
+## Preparing met from a non-ERA5 source
+
+Archives built for other models tend to miss this contract in a small number of
+predictable ways. The checklist below came out of assessing a terrain-following NWP
+archive (the Met Office UM) against the schema; most of it generalises.
+
+| Gap in the source | What to do about it |
+| --- | --- |
+| No `geopotential` / `geopotential_at_surface` | On a terrain-following source with a `z = level_height + sigma·orog` coordinate, solve for the orography hydrostatically from the store's own 3-D pressure, then form both fields from the coordinate definition |
+| Coarser than hourly | Interpolate the time-varying fields to hourly (see below) |
+| No `friction_velocity` | `u* = sqrt(\|τ\|/ρ)` from the two surface stress components, with `ρ = p_sfc/(R_d·T_v)` and `T_v = T(1 + 0.6077q)` |
+| Heat flux is positive-**up** | Negate it to the ECMWF positive-down convention this page requires |
+| Non-GLIDE variable names | Rename to GLIDE's defaults — `main.py` exposes no `variable_map` override |
+| Level coord is 1..N indices | Tag the store `glide_vertical_coordinate="model_level"`, or GLIDE will refuse it rather than read the indices as pressures |
+| Domain-spanning chunks | Rechunk — see [Chunking](#chunking) |
+
+Three things worth knowing before you start:
+
+- **Time-invariant geopotential.** On a terrain-following source the 3-D
+  geopotential does not change with time, and GLIDE reads it fine written as
+  `(level, latitude, longitude)` with no time dimension — turning a per-timestep
+  3-D field into a few hundred MB. ERA5's varies, so `download_sample_cube.py`
+  cannot do this.
+- **Sub-hourly bracketing is not yet supported.** GLIDE brackets met on whole hours
+  (`_canonicalize_hour_bounds`), so a 3-hourly source has to be interpolated up to
+  hourly before it is read. Linear interpolation costs nothing in accuracy — GLIDE
+  interpolates linearly within the bracket anyway, and composing the two is exact —
+  but it costs 3× the storage. Reading the source cadence directly is a known
+  future change.
+- **Crop before you convert.** An hourly, full-domain rewrite is easily several
+  times the source archive's own volume, and NWP archive domains are usually far
+  wider than a run domain. Drop levels above the run's `alt_max_m` and crop to the
+  bounding box you actually intend to run.
+
+If you control the *extraction* rather than converting after the fact, build to
+this schema at extraction time — it avoids a full read-rewrite pass over the
+archive, and the derivations above are cheaper where the native fields still exist.
+
+## Storage precision
+
+Met stores are large enough that encoding matters. Measured on a converted EUROPE
+crop, writing the time-varying fields as `int16` with CF `scale_factor`/`add_offset`
+and compressing with Blosc/zstd5:
+
+| encoding | relative size |
+| --- | --- |
+| `float32` + lz4 | 1.00× |
+| `float32` + zstd5 | 0.70× |
+| `float32` bitround(12) + zstd5 | 0.55× |
+| **`int16` + zstd5** | **0.48×** |
+
+Round-trip errors at `int16`: 0.003 m s⁻¹ (winds), 0.0015 K, 0.6 Pa, 5e-7 kg kg⁻¹ —
+orders of magnitude below what the physics resolves.
+
+Two rules if you do this:
+
+- **Never quantise `geopotential` / `geopotential_at_surface`.** GLIDE forms
+  near-surface layer thicknesses by differencing them, so quantisation error enters
+  twice on a 20 m bottom layer. They are static on a terrain-following source and a
+  fraction of a percent of the store anyway.
+- **Choose ranges that cannot be exceeded, and check.** Out-of-range values *wrap*
+  under CF scale/offset rather than clipping, turning one anomalous wind speed into
+  a large negative one. Validate each block against its declared range as you
+  write, and abort rather than clip.
+
+One known cost: xarray infers the decoded dtype from the Python type of the stored
+`scale_factor`, and Zarr keeps attrs as JSON, so scale/offset variables always decode
+to `float64`. GLIDE casts to `float32` when it builds the channel tensor, so this is
+a transient 2× on the per-hour bounding-box subset, not on the store.
+
+## Chunking
+
+GLIDE reads **one hour at a time, over the particle cloud's bounding box**, up to its
+vertical ceiling. That box is usually far smaller than the archive domain, so the
+on-disk chunk shape decides how much of the store has to be decompressed to serve it.
+
+Chunk shapes are **storage-neutral** (measured within 0.5% across tile 64/96/128 and
+whole-domain), so there is nothing to trade off against.
+
+Recommended: **one hour per chunk, a 128×128 horizontal tile, levels whole when
+shallow and split around 24 when deep.** `download_sample_cube.py --chunk-tile`
+and `--chunk-levels` set this.
+
+Read amplification (bytes decompressed ÷ bytes used), worst-case straddling
+placement, for a 274×551 ERA5 EUROPE crop on 37 pressure levels:
+
+| chunk `(lev, lat, lon)` | chunk size | 2° box | 10° box | 40° box |
+| --- | --- | --- | --- | --- |
+| `(37, 274, 392)` (dask auto) | 15.90 MB | 1678× | 67× | 8× |
+| **`(37, 128, 128)`** | **2.42 MB** | **256×** | **10×** | **3×** |
+| `(37, 96, 96)` | 1.36 MB | 144× | 6× | 3× |
+| `(37, 64, 64)` | 0.61 MB | 64× | 10× | 1× |
+
+Two caveats worth knowing before you re-chunk an existing archive:
+
+- **This is a cold-cache argument.** With the store already in page cache, tiling is
+  a small *loss* — per-chunk decompression overhead — and the domain-spanning shape
+  won every warm timing tested (tile 128 cost ~4–10%, tile 64 measurably more). The
+  amplification table is what governs a cold read on a shared filesystem.
+- **Chunking is not the dominant cost of a fetch.** Profiling a window fetch:
+  `_resample_hour_to_agl` 74% (of which `compute_agl_regrid_weights` alone is ~50%),
+  the actual dask read only ~17%. Re-chunk when you are writing a store anyway; it
+  is rarely worth a re-download on its own.
+
+Deep vertical coordinates need the level split: ERA5's 137 model levels in a single
+chunk is 8.98 MB and forces a full-depth read even though GLIDE only needs levels
+below its ceiling. `geopotential` is the exception — the AGL mask cannot be built
+without reading it at full depth — but it is one variable among many, and on a
+terrain-following source it should be static (no `time` dim) anyway.
 
 ## Verifying a store
 

@@ -17,8 +17,8 @@ for the *why* behind the major design/physics choices see
   scheme interface and the Hanna (1982) implementation.
 - **[convection.md](convection.md)** — deep-convection scheme (reduced Emanuel).
 - **[met_schema.md](met_schema.md)** — the meteorology input contract: variable
-  names, units, coordinate conventions, and the pressure- vs model-level modes.
-  Read this to prepare met from a non-ERA5 source.
+  names, units, coordinate conventions, storage precision, chunking, and the
+  pressure- vs model-level modes. Read this to prepare met from a non-ERA5 source.
 - **[VALIDATION.md](VALIDATION.md)** — validation suite: scope, test tolerances
   and seeds, and which metrics are still pending external validation.
 
