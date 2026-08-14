@@ -1,276 +1,340 @@
-# GLIDE deep-convection scheme
+# Deep convection
 
-Specification for the reduced port of FLEXPART's Emanuel & Živković-Rothman
-(1999) deep-convection scheme (Forster, Stohl & Seibert 2007). Source-of-truth
-for what `lpdm.convection.EmanuelReducedConvection` implements and why; the
-audit deliverable for the "biggest non-audit dispersion gap" called out in the
-the physics audit (see `../dev/decisions/0007-reduced-emanuel-convection.md`).
-
-## 1. Why convection
-
-The Hanna 1982 boundary-layer turbulence scheme handles small-eddy mixing
-inside the BL (`lpdm.turbulence.hanna`). The gradient-Richardson free-troposphere
-closure handles slow shear-driven mixing above the BL. **Neither captures deep
-moist convection** — cumulus updrafts that loft surface air through the entire
-troposphere in minutes-to-hours. For mid-latitude continental sites in summer
-and tropical sites year-round, this is a major missing transport mechanism:
-particles released in the BL ought to occasionally end up at 8-12 km within
-a few hours, where the resolved horizontal winds are much faster and more
+Boundary-layer turbulence mixes air within the boundary layer; the
+gradient-Richardson closure handles slow shear-driven mixing above it. Neither
+represents **deep moist convection** — cumulus updrafts that loft surface air
+through the whole troposphere in minutes to hours. For mid-latitude continental
+sites in summer, and tropical sites year-round, that is a major missing transport
+mechanism: particles released in the boundary layer ought sometimes to reach
+8–12 km within a few hours, where the resolved winds are far faster and more
 variable.
 
-This is also the dominant remaining physics gap GLIDE has vs FLEXPART (the
-audit `physics-audit-may30` + `physics-audit-followup` PRs closed all the
-WMC-violating gaps Wilson & Flesch 1993 / Stohl & Thomson 1999 documented,
-but convection wasn't in the audit).
+GLIDE's `emanuel_reduced` scheme is a reduced port of the Emanuel &
+Živković-Rothman (1999) mass-flux scheme as FLEXPART implements it (Forster,
+Stohl & Seibert 2007), written at a higher level of abstraction than the ~3000
+lines of `convect43c.f`. It is off by default (`convection.scheme: none`) and
+enabled in the shipped example configs.
 
-## 2. Architecture
+**Contents**
 
-The convection scheme is a separate runtime stage from turbulence:
+1. [Where it runs in the timestep](#1-where-it-runs-in-the-timestep)
+2. [The parcel lift](#2-the-parcel-lift)
+3. [The trigger](#3-the-trigger)
+4. [Cloud-base mass flux](#4-cloud-base-mass-flux)
+5. [The mass-flux matrix](#5-the-mass-flux-matrix)
+6. [Particle redistribution, and the backward transpose](#6-particle-redistribution-and-the-backward-transpose)
+7. [Departures from full Emanuel](#7-departures-from-full-emanuel)
+8. [Configuration](#8-configuration)
+9. [References](#9-references)
 
-```
-src/lpdm/convection/
-    __init__.py
-    base.py            # ConvectionScheme ABC + registry
-    no_convection.py   # NoConvection placeholder (default)
-    emanuel.py         # EmanuelReducedConvection
-```
+---
 
-The runtime calls `scheme.maybe_convect(...)` **once per met-update interval**
-(typically hourly for ARCO ERA5), NOT every integration timestep:
+## 1. Where it runs in the timestep
 
-- Convection redistributes particles non-locally in the vertical (a particle
-  can jump from the surface to the tropopause in one event), whereas
-  turbulence is small Brownian steps each ~dt.
-- The convective mass-flux matrix depends only on the per-column met
-  (temperature + humidity profile), so it doesn't change inside a met
-  window — computing it per timestep would be wasteful.
-- This matches FLEXPART's design (`convmix.f` is called every synctime, not
-  every internal timestep; Stohl 2005 §4.6).
+Convection is a separate runtime stage from turbulence, and it fires **once per
+meteorology window** — typically once an hour — not every integration step. Three
+reasons:
 
-The runtime tracks the met bracket's start time and fires convection
-exactly once whenever the cursor crosses into a new bracket.
+- It redistributes particles **non-locally**. A particle can jump from the
+  surface to the tropopause in one event, whereas turbulence is a sequence of
+  small correlated increments.
+- The mass-flux matrix depends only on the column's $(T, q)$ profile, which is
+  constant within a meteorology window. Recomputing it per step would be pure
+  waste.
+- It matches FLEXPART, whose `convmix` is called every sync-time rather than
+  every internal timestep (Stohl et al. 2005 §4.6).
 
-### 2.1 Met-input contract
+The runtime tracks the current meteorology bracket's start time and fires
+convection exactly once whenever the cursor crosses into a new bracket.
 
-Beyond the baseline (`u/v/w/blh/sp/t`) the scheme requires:
+The only meteorology this scheme needs beyond the baseline is specific humidity:
 
-| Logical key | ARCO ERA5 variable | Units | Type |
+| Key | ERA5 variable | Units | Dims |
 | --- | --- | --- | --- |
-| `q` | `specific_humidity` | kg/kg | 3D (level, lat, lon) |
+| `q` | `specific_humidity` | kg kg⁻¹ | 3-D |
 
-This is the only convection-specific dependency. The reader's
-`DEFAULT_VARIABLE_MAP` already includes `q`; the runtime adds it to the
-required channels when the convection scheme declares it.
+---
 
-### 2.2 Config
+## 2. The parcel lift
+
+A surface parcel $(T_s, q_s, p_s)$ is lifted through the column. Below its
+lifting condensation level it follows a dry adiabat; above, a moist
+pseudo-adiabat.
+
+**LCL**, from Bolton (1980) Eq. 22 for the temperature and Poisson's equation for
+the pressure:
+
+$$
+T_{\mathrm{LCL}} = \frac{2840}{3.5\ln T - \ln e - 4.805} + 55,
+\qquad
+p_{\mathrm{LCL}} = p\left(\frac{T_{\mathrm{LCL}}}{T}\right)^{c_p/R_d}
+$$
+
+with vapour pressure $e$ in hPa, obtained from specific humidity by
+$e = qp/(\epsilon + (1-\epsilon)q)$, $\epsilon = R_d/R_v \approx 0.622$.
+
+**Below the LCL**, dry adiabatic:
+
+$$
+T(p) = \theta_s \left(\frac{p}{p_0}\right)^{\kappa}, \qquad \kappa = R_d/c_p
+$$
+
+**Above the LCL**, equivalent potential temperature is conserved:
+
+$$
+\theta_e \approx \theta \, \exp\!\left(\frac{L_v\,q}{c_p\,T_{\mathrm{LCL}}}\right)
+$$
+
+and the parcel temperature at each level is found by solving
+$\theta_e\big(T, q_{\mathrm{sat}}(T,p), p\big) = \theta_{e,\text{parcel}}$ for
+$T$.
+
+That solve is done by **bisection**, deliberately. Fixed-point iteration and
+Newton both fail to converge near deep-convection temperatures, because
+$\mathrm{d}\theta_e/\mathrm{d}T$ amplifies rapidly with $T$ through
+Clausius–Clapeyron. The bracket $[180, 350]$ K covers polar tropopause to
+tropical surface, and 30 halvings shrink it to $\sim 1.6\times10^{-7}$ K — well
+past converged. The loop runs a fixed count with no convergence check, since the
+check would be a device-to-host synchronisation on every iteration of every
+level.
+
+**Buoyancy** is evaluated in virtual temperature, with the parcel saturated above
+its LCL:
+
+$$
+B = \frac{T_{v,\text{parcel}} - T_{v,\text{env}}}{T_{v,\text{env}}},
+\qquad
+T_v = T\left(1 + \left(\tfrac{1}{\epsilon}-1\right)q\right)
+$$
+
+giving the level of neutral buoyancy (cloud top: the first level above the LCL
+where $B$ crosses zero from positive) and
+
+$$
+\mathrm{CAPE} = \int_{\mathrm{LFC}}^{\mathrm{LNB}} g\,B\;\mathrm{d}z
+$$
+
+with layer thicknesses from the hypsometric relation,
+$\mathrm{d}z \approx R_d \bar{T}\,\mathrm{d}(\ln p)/g$.
+
+---
+
+## 3. The trigger
+
+Convection fires only when **all** of the following hold:
+
+| Condition | Meaning |
+| --- | --- |
+| $i_{\mathrm{LCL}} \ge 0$ | the parcel reaches saturation somewhere in the column |
+| $i_{\mathrm{LNB}} > i_{\mathrm{LCL}}$ | positive cloud depth |
+| $\mathrm{CAPE} \ge 50\ \mathrm{J\,kg^{-1}}$ | sanity floor (`min_cape_j_kg`) |
+| $\Delta T_v\big|_{\mathrm{LCL}+1} \ge 0.9\ \mathrm{K}$ | Forster (2007) Eq. 34 buoyancy threshold (`trigger_dtv_k`) |
+| cloud depth $\ge 500\ \mathrm{m}$ | deep convection only (`min_cloud_depth_m`) — shallow cumulus is the boundary-layer scheme's job |
+
+If any check fails the scheme is a no-op for this meteorology update. A negative
+control test asserts it does **not** fire on a stable winter sounding
+(`test_emanuel_does_not_fire_on_winter_inversion_column`).
+
+---
+
+## 4. Cloud-base mass flux
+
+$$
+w_{\text{buoy}} = \min\!\left(\sqrt{2\,\mathrm{CAPE}},\ 5\ \mathrm{m\,s^{-1}}\right),
+\qquad
+M_b = c_{\text{closure}} \; \rho_{\mathrm{LCL}} \; w_{\text{buoy}}
+$$
+
+with $c_{\text{closure}} = 0.03$ by default.
+
+The cap on $w_{\text{buoy}}$ is not decoration. Without it, $\mathrm{CAPE} > 500\
+\mathrm{J\,kg^{-1}}$ gives $w_{\text{buoy}} > 30\ \mathrm{m\,s^{-1}}$ and an $M_b$
+far outside FLEXPART's realistic $0.05$–$0.5\ \mathrm{kg\,m^{-2}\,s^{-1}}$ range.
+5 m s⁻¹ represents a typical updraft-cell peak rather than the rare 15 m s⁻¹
+extreme. This stands in for the full Emanuel quasi-equilibrium closure (§7).
+
+---
+
+## 5. The mass-flux matrix
+
+$\mathrm{fmass}[i,j]$ is the mass moved from layer $i$ to layer $j$ per
+convection event. It is built to be **non-divergent**:
+
+$$
+\sum_j \mathrm{fmass}[i,j] \;=\; \sum_j \mathrm{fmass}[j,i] \qquad \text{for every } i
+$$
+
+— everything leaving a layer is matched by something entering it. That property
+is the whole game: it is what makes the redistribution preserve a mass-weighted
+(well-mixed) ensemble, in either time direction.
+
+With levels ascending, surface at index 0, cloud spanning $[\mathrm{LCL},
+\mathrm{LNB}]$, and layer air masses $m_i = \Delta p_i / g$:
+
+**Entrainment.** The boundary layer $[0, \mathrm{LCL})$ feeds the updraft, shared
+across its layers *by air mass* so that the total entrained equals $M_b$:
+
+$$
+e_i = M_b \frac{m_i}{\sum_{k < \mathrm{LCL}} m_k}
+$$
+
+(Sharing by mass matters. An earlier version gave each boundary-layer layer the
+full $M_b$, over-venting the boundary layer by a factor of the layer count.)
+
+**Detrainment.** The updraft deposits mass across the cloud with a linear-decay
+profile — 1 at cloud base falling to 0 at cloud top — normalised so the total is
+again $M_b$:
+
+$$
+d_j = M_b \frac{\omega_j}{\sum_k \omega_k},
+\qquad
+\omega_j = 1 - \frac{j - \mathrm{LCL}}{\mathrm{LNB} - \mathrm{LCL}}
+$$
+
+**Direct updraft.** The outer product of the two — boundary-layer source to cloud
+destination, non-local in one event. This is the coherent deep-lofting transport:
+
+$$
+U[i,j] = \frac{e_i\, d_j}{M_b}
+$$
+
+**Compensating subsidence.** Mass carried up by the updraft has to come back
+down. The net upward flux across the interface below layer $k+1$ is
+
+$$
+\Phi_k = \sum_{i \le k} e_i \;-\; \sum_{j \le k} d_j \;\;(\ge 0)
+$$
+
+and the environment sinks at the same rate, so $\mathrm{fmass}[k+1, k]
+\mathrel{+}= \Phi_k$ — a sub-diagonal term.
+
+**CFL cap.** Finally the whole matrix is scaled by a **single scalar** if any
+layer would shed more than 90% of its mass in one event. One scalar, so
+non-divergence survives, and so the "stay" diagonal of §6 stays non-negative.
+
+The matrix is identically zero when there is no cloud.
+
+---
+
+## 6. Particle redistribution, and the backward transpose
+
+Following FLEXPART's `calcmatrix`/`redist`, the diagonal closure makes each row
+sum to the layer's air mass — the diagonal is the mass that *stays*:
+
+$$
+\mathrm{fmassfrac}[i,i] = m_i - \sum_j \mathrm{fmass}[i,j]
+$$
+
+The destination distribution for a particle hosted in layer $i$ is then a row or
+a column, depending on time direction:
+
+$$
+P[i \to j] =
+\begin{cases}
+\mathrm{fmassfrac}[i,j] \,/\, m_i & \text{forward } (\text{ldirect}=+1) \\[1ex]
+\mathrm{fmassfrac}[j,i] \,/\, m_i & \text{backward } (\text{ldirect}=-1)
+\end{cases}
+$$
+
+**GLIDE runs backward, so it samples the column.** This is the adjoint of the
+forward updraft: forward convection lofts boundary-layer air to cloud top, so the
+backward (footprint) operator traces a particle that is aloft *now* down to the
+boundary-layer air it came from.
+
+Sampling is a uniform draw and a cumulative-sum search over the row of $P$; a
+particle whose sampled destination is its own layer keeps its position, and a
+mover is placed at a uniformly random height within the destination layer. Only
+altitude changes — longitude, latitude and weight are untouched, so the particle
+count and total mass are exactly conserved.
+
+**Why non-divergence matters, concretely.** Because $\mathrm{fmass}$ is
+non-divergent, the layer-mass vector $\mathbf{m}$ is a stationary distribution of
+*both* the row- and column-normalised transitions:
+
+$$
+\mathbf{m}^{\mathsf{T}} P = \mathbf{m}^{\mathsf{T}}
+$$
+
+An initially well-mixed (mass-proportional) ensemble therefore stays well-mixed
+after a convection event, in either time direction. This is asserted
+deterministically in the tests, not just checked statistically
+(`test_convection_transition_preserves_mass_distribution_both_directions`). The
+matrix that preceded it had an updraft but no subsidence, was divergent, and
+violated the well-mixed criterion; no ad-hoc move-probability clamp is needed
+once the matrix is built correctly.
+
+---
+
+## 7. Departures from full Emanuel
+
+Each of these is a deliberate simplification, listed with what it costs.
+
+1. **One bounding-box-mean column, not per-(lon, lat) columns.** The full scheme
+   processes every grid column independently; GLIDE uses the domain-mean profile
+   for the parcel lift, so convection fires or does not fire uniformly across the
+   meteorology domain. Fine for a small domain; for something the size of
+   continental Europe it can over- or under-trigger relative to FLEXPART. Fixing
+   this is the same 3-D refactor as the per-column vertical-interpolation
+   follow-up.
+
+2. **Linear detrainment profile**, not Emanuel's buoyancy-sorting spectrum
+   (Forster 2007 Eqs. 35–36). This sets only *where* the updraft deposits mass —
+   the mass-conservation structure is guaranteed by the compensating subsidence
+   regardless of the profile's shape.
+
+3. **No explicit saturated-downdraft branch.** Emanuel (1991 §4b) carries a
+   separate downdraft mass-flux matrix; here the compensating environmental
+   subsidence carries the return flux instead. A few-percent effect.
+
+4. **Capped buoyancy velocity** in place of the quasi-equilibrium closure (§4).
+   The full scheme balances the mass flux against large-scale destabilisation;
+   GLIDE caps $\sqrt{2\,\mathrm{CAPE}}$ to keep $M_b$ realistic. Revisit if
+   validation shows under-convective transport.
+
+5. **Adjacent-layer subsidence.** The environmental return flux moves mass one
+   layer down per event, while the updraft is non-local. Physically apt — a fast
+   coherent updraft against slow broad subsidence — but it means the descent of
+   non-displaced environmental air is a random walk rather than a prescribed
+   velocity.
+
+6. **Convection interval hardcoded at 3600 s.** Correct for hourly ERA5, wrong
+   for anything else. A documented follow-up.
+
+---
+
+## 8. Configuration
 
 ```yaml
 convection:
-  scheme: emanuel_reduced       # or "none" (default, bit-equivalent to no convection)
-  emanuel:                      # only consulted when scheme == "emanuel_reduced"
-    closure_c: 0.03             # cloud-base mass-flux closure constant
-    trigger_dtv_k: 0.9          # Forster 2007 Eq 34 buoyancy threshold
-    min_cape_j_kg: 50.0         # CAPE floor below which convection never fires
-    min_cloud_depth_m: 500.0    # skip shallow convection
+  scheme: emanuel_reduced     # or "none" (default; bit-equivalent to no convection)
+  emanuel:
+    closure_c: 0.03           # cloud-base mass-flux closure constant
+    trigger_dtv_k: 0.9        # Forster 2007 Eq 34 buoyancy threshold, K
+    min_cape_j_kg: 50.0       # CAPE floor below which convection never fires
+    min_cloud_depth_m: 500.0  # skip shallow convection
 ```
 
-Default `scheme: "none"` means YAMLs without a `convection:` block produce
-the same output as before (the bit-equivalence gate for the schema change).
+A YAML with no `convection:` block produces output identical to a run with no
+convection at all.
 
-## 3. Algorithm — `EmanuelReducedConvection`
+**What to expect when you turn it on:** more particles in the free troposphere at
+long backward times, and a more dispersed surface footprint (convective lofting
+feeds faster long-range transport). Mid-latitude January is a weak test — the
+scheme will show much more in summer.
 
-Implements the FLEXPART/Forster (2007) scheme at a higher level of abstraction
-than the FORTRAN `convect43c.f` (~3000 lines). Five steps per met update:
+---
 
-### 3.1 Parcel lift
+## 9. References
 
-Lift a surface parcel `(T_sfc, q_sfc, p_sfc)` through the column:
-
-- **LCL** — Bolton (1980) Eq 22 gives the LCL temperature; Poisson's equation
-  the LCL pressure (`lcl_temperature_bolton`, `lcl_pressure_poisson`).
-- **Dry adiabat** below LCL: `T(p) = θ_sfc · (p/p_0)^κ`, with `κ = R_d/c_p`.
-- **Moist adiabat** above LCL: `θ_e` is conserved. We solve `θ_e(T, q_sat(T,p), p) = θ_e_const`
-  for T at each level via **bisection** (`lift_parcel_moist_pseudo_adiabatic`).
-  Bisection is used because fixed-point iteration on `θ_e` fails to converge
-  under Clausius-Clapeyron's strong nonlinearity (`dθ_e/dT` amplifies fast
-  with T near deep-convection temperatures).
-
-### 3.2 LCL / LNB / CAPE
-
-`compute_lcl_lnb_cape` returns:
-
-- `i_lcl` — first level above the LCL.
-- `i_lnb` — Level of Neutral Buoyancy (cloud top); first level above LCL
-  where buoyancy `(T_v_parcel − T_v_env)` crosses zero from positive.
-- `cape` — `∫_LFC^LNB g · (T_v_p − T_v_env)/T_v_env · dz` (positive part of
-  buoyancy times hypsometric layer thickness).
-- `dtv_lcl_plus_1` — `T_v_parcel − T_v_env` at LCL+1, the Forster 2007 Eq 34
-  trigger diagnostic.
-
-### 3.3 Trigger
-
-The Forster 2007 Eq 34 trigger fires when ALL of:
-
-- `i_lcl ≥ 0` (parcel reaches saturation in the column)
-- `i_lnb > i_lcl` (positive cloud depth)
-- `CAPE ≥ min_cape_j_kg` (sanity floor)
-- `dtv_lcl_plus_1 ≥ trigger_dtv_k` (Eq 34 with `T_threshold = 0.9 K`)
-- cloud depth `≥ min_cloud_depth_m` (DEEP convection only — shallow cumulus
-  is handled by the BL turbulence)
-
-If any check fails, the scheme is a no-op for this met update.
-
-### 3.4 Cloud-base mass flux
-
-The closure (Emanuel 1991 §4; simplified):
-
-```
-w_buoy = min(√(2 · CAPE), UPDRAFT_W_MAX_M_S = 5 m/s)
-M_b = closure_c · ρ_LCL · w_buoy
-```
-
-The cap on `w_buoy` is deliberate — without it CAPE > 500 J/kg gives
-unphysically large M_b (much greater than FLEXPART's 0.05–0.5 kg/m²/s
-realistic range). The 5 m/s cap represents a typical updraft-cell peak
-rather than the rare 15 m/s extreme.
-
-### 3.5 Mass-flux matrix `fmass[i, j]` (non-divergent)
-
-`compute_mass_flux_matrix` builds a **non-divergent** off-diagonal flux matrix —
-a coherent BL→cloud updraft plus compensating environmental subsidence — so that
-the total mass leaving every layer equals the total entering it
-(`Σ_j fmass[i,j] == Σ_j fmass[j,i]`). That property is what makes the
-redistribution well-mixed-preserving (§3.7); the pre-2026-07-02 matrix had
-updraft only and was divergent (Finding 2 of the physics review).
-
-Construction (levels ascending, surface at 0; cloud = [LCL, LNB]):
-
-- **Entrainment** `e[i]` — the boundary layer `[0, LCL)` feeds the updraft,
-  shared across BL layers **by air mass** so the total entrained equals `M_b`.
-  (Fixes Finding 3: previously each BL layer sourced the full `M_b`, over-venting
-  the BL by a factor of the layer count.)
-- **Detrainment** `d[j]` — the updraft deposits mass across the cloud with a
-  linear-decay profile, total `M_b`.
-- **Direct updraft** `U[i,j] = e[i]·d[j]/M_b` — BL source → cloud, non-local
-  (the coherent deep-lofting transport).
-- **Compensating subsidence** — the net upward flux across the interface below
-  layer `k+1` is `Φ[k] = Σ_{i≤k} e[i] − Σ_{j≤k} d[j]` (≥ 0); the environment
-  sinks at the same rate, `fmass[k+1, k] += Φ[k]`.
-
-A single-scalar CFL cap scales the matrix so no layer sheds more than 90 % of its
-mass per event (preserves non-divergence). Zero when there is no cloud.
-
-### 3.6 Particle redistribution
-
-Following FLEXPART `calcmatrix`/`redist`: apply the **diagonal closure** so each
-row of `fmassfrac` sums to the layer air mass `m_i` (the diagonal is the "stay"
-mass), then the per-particle destination distribution is
-
-```
-forward  (ldirect=+1):  P[host → j] = fmassfrac[host, j] / m_host   (matrix row)
-backward (ldirect=−1):  P[host → j] = fmassfrac[j, host] / m_host   (matrix column)
-```
-
-GLIDE runs backward, so it samples the **column**. Sample a uniform `u ∈ [0, 1]`,
-find the destination via cumulative-sum search (the distribution includes the
-stay-diagonal), and place movers at a uniformly random height within the
-destination layer (sub-bin placement). Non-divergence makes both the row- and
-column-normalised transitions valid probability distributions, so no ad-hoc
-move-probability clamp is needed.
-
-### 3.7 Backward mode
-
-Backward sampling uses the transposed (column) transition — the adjoint of the
-forward updraft: forward convection lofts surface air to the cloud top, so the
-backward (footprint) operator traces a particle that is aloft *now* down to the
-BL air it came from. Because `fmass` is non-divergent, the layer-mass vector is a
-stationary distribution of BOTH the forward (row) and backward (column)
-transitions: an initially well-mixed (mass-proportional) ensemble stays
-well-mixed after convection in either time direction (Forster 2007 §3 + Fig 2).
-This is verified deterministically by
-`tests/test_convection.py::test_convection_transition_preserves_mass_distribution_both_directions`
-(mᵀP = mᵀ) and behaviourally by
-`test_emanuel_backward_connects_aloft_particles_to_the_surface`.
-
-## 4. Documented departures from full Emanuel
-
-1. **Bbox-mean column**, not per-(lon,lat) columns. The full Emanuel scheme
-   processes each ECMWF grid column independently; we use the bbox-mean
-   profile for the parcel lift. This means convection fires uniformly across
-   the bbox (one decision for the whole met domain). For small domains this
-   is a fine approximation; for very large domains (e.g. continental Europe)
-   it can over- or under-trigger compared to FLEXPART. Mirrors the F9
-   approximation used in advection (see `../dev/decisions/0003-terrain-following-agl-coordinate.md`).
-
-2. **Linear detrainment profile**, not the Emanuel buoyancy-sorting spectrum
-   (Forster 2007 Eq 35-36). The updraft detrains with `d(z) ∝ (1 − (z−LCL)/
-   (LNB−LCL))`. This sets only WHERE the updraft deposits mass, not the
-   mass-conservation structure — non-divergence (hence the well-mixed property)
-   is guaranteed by the compensating subsidence regardless of the profile shape.
-   The earlier code used the buoyancy-sorting fractions in a divergent matrix
-   that violated the well-mixed criterion; that was replaced 2026-07-02.
-
-3. **No explicit saturated-downdraft branch**. Emanuel 1991 §4.b includes a
-   separate downdraft mass-flux matrix; the compensating environmental
-   subsidence carries the return flux instead. Few-percent effect.
-
-4. **Capped buoyancy velocity** at 5 m/s in the closure. The full scheme
-   has a quasi-equilibrium closure (Emanuel's mass-flux balances large-scale
-   destabilisation); we cap `√(2·CAPE)` to keep M_b in the realistic range.
-
-5. **Compensating subsidence is adjacent-layer**. The environmental return flux
-   moves mass one layer down per event (`fmass[k+1, k] = Φ[k]`), whereas the
-   updraft is non-local (BL → any cloud level in one event). Physically apt
-   (fast coherent updraft, slow broad subsidence), but the subsidence descent of
-   *non-displaced* environmental air is a random walk rather than a prescribed
-   velocity. This is now modelled explicitly (it was absent before 2026-07-02),
-   which is what makes the scheme well-mixed-preserving.
-
-## 5. Tests (tests/test_convection.py)
-
-- **Free-function physics**: q ↔ e round-trip, T_v, LCL temperature / pressure,
-  potential temperature, equivalent potential temperature, saturation specific
-  humidity, moist-adiabat lift (θ_e conserved through lift to a higher level).
-- **CAPE / LCL / LNB**: synthetic moist-unstable column produces CAPE > 100
-  J/kg and meaningful LCL/LNB indices; dry-stable column produces CAPE ≈ 0.
-- **Mass-flux matrix**: zero when no cloud (`i_lcl < 0`); no transport above the
-  cloud top; **non-divergent** (row sum = column sum per layer, i.e. compensating
-  subsidence present); and the derived transition matrix leaves the layer-mass
-  vector stationary (`mᵀP = mᵀ`) for BOTH forward and backward — the well-mixed
-  criterion, proven deterministically.
-- **Scheme-level**: `NoConvection` pass-through; end-to-end **backward** transport
-  connecting aloft particles to the boundary-layer source (net downward, mass
-  conserved); no displacement on a stable sounding; constructor validation.
-
-## 6. Acceptance / next steps
-
-The integration acceptance is the FLEXPART comparison re-run. With the
-convection scheme enabled in `configs/example_mhd_january_periodic.yaml`,
-expect:
-- More particles in the free troposphere at long backward times
-- Surface footprint becomes more dispersed (convective lofting → faster
-  long-range transport)
-- Mid-latitude January 2024 may show modest changes (winter, weak
-  convection); the test will be more meaningful in summer.
-
-If the FLEXPART gap is still meaningful after enabling convection, the most
-likely remaining levers are: per-column (not bbox-mean) profiles for the
-parcel lift, the full Emanuel quasi-equilibrium closure replacing our capped
-buoyancy velocity, and the saturated-downdraft branch.
-
-## 7. References
-
+- Bolton, D. (1980). The computation of equivalent potential temperature. *Mon.
+  Wea. Rev.* 108, 1046–1053.
 - Emanuel, K. A. (1991). A scheme for representing cumulus convection in
   large-scale models. *J. Atmos. Sci.* 48, 2313–2335.
-- Emanuel, K. A., and Živković-Rothman, M. (1999). Development and evaluation
-  of a convection scheme for use in climate models. *J. Atmos. Sci.* 56, 1766–1782.
-- Forster, C., Stohl, A., and Seibert, P. (2007). Parameterization of convective
-  transport in a Lagrangian particle dispersion model and its evaluation.
-  *J. Appl. Meteor. Climatol.* 46, 403–422.
-- Stohl, A., Forster, C., Frank, A., Seibert, P., and Wotawa, G. (2005). Technical
-  note: The Lagrangian particle dispersion model FLEXPART version 6.2.
-  *Atmos. Chem. Phys.* 5, 2461–2474, §4.6 (Moist convection).
-- Bolton, D. (1980). The computation of equivalent potential temperature.
-  *Mon. Wea. Rev.* 108, 1046–1053.
-- Telford, J. W. (1975). Turbulence, entrainment, and mixing in cloud dynamics.
-  *Pure Appl. Geophys.* 113, 1067–1084.
+- Emanuel, K. A., Živković-Rothman, M. (1999). Development and evaluation of a
+  convection scheme for use in climate models. *J. Atmos. Sci.* 56, 1766–1782.
+- Forster, C., Stohl, A., Seibert, P. (2007). Parameterization of convective
+  transport in a Lagrangian particle dispersion model and its evaluation. *J.
+  Appl. Meteor. Climatol.* 46, 403–422.
+- Stohl, A., Forster, C., Frank, A., Seibert, P., Wotawa, G. (2005). Technical
+  note: The Lagrangian particle dispersion model FLEXPART version 6.2. *Atmos.
+  Chem. Phys.* 5, 2461–2474. (§4.6, moist convection.)

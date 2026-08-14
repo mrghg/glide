@@ -1,6 +1,6 @@
 """Hanna 1982 / FLEXPART turbulence scheme.
 
-Implementation per `docs/turbulence.md` §3.2. Three stability regimes (stable,
+Implementation per `docs/turbulence.md`. Three stability regimes (stable,
 neutral, unstable) within the boundary layer, carrying the full Thomson (1987)
 well-mixed drift + Stohl-Thomson (1999) density correction (§3.2.5), a
 Monin-Obukhov surface-layer override for `z < 0.1 h` (§3.2.4), and a
@@ -16,7 +16,7 @@ FLEXPART's. By default GLIDE also applies FLEXPART's Lagrangian-timescale floors
 (10/10/30 s; ``flexpart_tl_floors``) and, like FLEXPART, runs the regime formulas
 to the ground with no surface-layer override (``surface_layer_override=False``);
 the legacy behaviour is retained behind those two flags for A/B comparisons.
-See `docs/turbulence.md` §3.2.2/§3.2.4.
+See `docs/turbulence.md` §4 (BL profiles) / §8 (surface-layer override).
 """
 
 from __future__ import annotations
@@ -80,7 +80,7 @@ T_LU_FLOOR_FLEXPART_S = 10.0
 T_LV_FLOOR_FLEXPART_S = 10.0
 T_LW_FLOOR_FLEXPART_S = 30.0
 
-# Free-troposphere (above-BL) gradient-Richardson closure constants (docs/turbulence.md §3.2.3).
+# Free-troposphere (above-BL) gradient-Richardson closure constants (docs/turbulence.md §6).
 P0_PA = 100000.0  # reference pressure for potential temperature
 KAPPA_POISSON = R_DRY_AIR_J_KG_K / C_P_DRY_AIR_J_KG_K  # ~0.2854
 FT_MIXING_LENGTH_ASYMPTOTE_M = 100.0  # Blackadar asymptotic mixing length (free troposphere)
@@ -95,7 +95,7 @@ FT_T_L_MAX_S = 1000.0  # cap on the buoyancy-derived FT timescale
 # Meander (unresolved-mesoscale) horizontal turbulence — Maryon (1998)
 # "meandering" as adopted by FLEXPART (Stohl et al. 2005 §4.5). σ_meander is the
 # local grid-wind variability times a coefficient; the timescale is ~half the met
-# field interval. See docs/turbulence.md §3.2.8.
+# field interval. See docs/turbulence.md §7.
 MEANDER_COEFFICIENT_DEFAULT = 0.16  # FLEXPART `turbmesoscale`
 MEANDER_STENCIL_RADIUS_DEFAULT = 1  # 3x3 neighbourhood
 MEANDER_TIMESCALE_S_DEFAULT = 1800.0  # half of the hourly ERA5 field interval
@@ -399,7 +399,7 @@ def free_trop_sigma_TL(
 
 
 def surface_layer_sigma_w(z: torch.Tensor, ustar: torch.Tensor, L: torch.Tensor) -> torch.Tensor:
-    """σ_w in the surface layer, Monin-Obukhov scaling (docs/turbulence.md §3.2.4).
+    """σ_w in the surface layer, Monin-Obukhov scaling (docs/turbulence.md §8).
 
     Stable:    `1.3 u*` (constant). σ_w/u* ≈ 1.3 is roughly height-independent in
                the stable surface layer (Flesch, Wilson & Yee 1995 App. B). The
@@ -429,7 +429,7 @@ def surface_layer_sigma_w(z: torch.Tensor, ustar: torch.Tensor, L: torch.Tensor)
 
 @register_scheme
 class HannaScheme(TurbulenceScheme):
-    """Hanna 1982 / FLEXPART turbulence scheme. See `docs/turbulence.md` §3.2."""
+    """Hanna 1982 / FLEXPART turbulence scheme. See `docs/turbulence.md`."""
 
     name: ClassVar[str] = "hanna_1982"
 
@@ -451,7 +451,7 @@ class HannaScheme(TurbulenceScheme):
 
         Meander (unresolved-mesoscale horizontal turbulence) is off by default so
         existing runs stay bit-identical; enable it via the YAML ``turbulence.meander``
-        block. See ``docs/turbulence.md`` §3.2.8.
+        block. See ``docs/turbulence.md`` §7.
 
         ``substep_c`` and ``max_substeps`` control the F4 Tier 2 adaptive substepping
         (audit 2026-05-30). Each particle's OU + displacement + reflection is

@@ -33,5 +33,5 @@ per-substep σ re-evaluation and per-column (vs bbox-mean) vertical sampling are
 documented follow-ups.
 
 **Status.** In force. See [docs/turbulence.md](../../docs/turbulence.md) for the
-assembled formulation and [docs/LPDM_physics_spec.md](../../docs/LPDM_physics_spec.md)
-for the audit spec. Physics not yet externally validated ([STATUS.md](../../STATUS.md)).
+assembled formulation and [docs/physics.md](../../docs/physics.md) for the
+core model the coefficients feed. Physics not yet externally validated ([STATUS.md](../../STATUS.md)).

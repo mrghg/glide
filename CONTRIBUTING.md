@@ -13,7 +13,7 @@ investing time in a PR.
 ```bash
 uv venv --python 3.11 .venv
 source .venv/bin/activate
-uv pip install -e ".[dev]"        # core + pytest
+uv pip install -e ".[dev]"        # core + pytest, pre-commit, ruff
 # add the notebook/plotting stack with ".[viz,dev]"
 ```
 
@@ -50,9 +50,11 @@ add a scoped allow-list entry rather than disabling the hook.
 .venv/bin/python -m pytest -q tests/test_hanna.py   # a single module
 ```
 
-The suite runs in well under a minute with no network access — all tests use
-synthetic met via `AnalyticMetReader`. Please make sure it passes before opening
-a PR, and add tests for new behaviour.
+The suite is 298 tests and runs in about two minutes with no network access — all
+tests use synthetic met via `AnalyticMetReader`. Please make sure it passes
+before opening a PR, and add tests for new behaviour. See
+[docs/VALIDATION.md](docs/VALIDATION.md) for what the suite covers and how to add
+a physics test.
 
 ## Conventions
 
@@ -76,7 +78,9 @@ a PR, and add tests for new behaviour.
 Update the docs in the same PR as the code:
 
 - [README.md](README.md) for user-facing flags, configs, or behaviour changes.
-- The relevant page under [docs/](docs/) for physics or architecture changes.
+- The relevant page under [docs/](docs/) for physics or architecture changes
+  ([physics.md](docs/physics.md), [turbulence.md](docs/turbulence.md),
+  [convection.md](docs/convection.md), [architecture.md](docs/architecture.md)).
 
 ## Data
 

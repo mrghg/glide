@@ -7,7 +7,7 @@ quasi-horizontal and slice through mountains — below-ground levels exist by
 construction. An early version mapped particles through a **bbox-mean AGL profile**,
 which over an ocean-dominated domain is effectively height-above-*sea-level*: it
 left the surface footprint **zero over all high terrain** and released elevated
-tower sites up to ~2 km underground (Finding 7).
+tower sites up to ~2 km underground.
 
 **Decision.** Particles carry **geometric metres AGL** internally (convert once, so
 the hot loop never touches pressure coordinates). The reader **resamples the

@@ -484,8 +484,8 @@ class GPUEngine:
         velocity must be reversed. Reflecting only `z` (the older behaviour) leaves
         each reflected particle pointing downward into the boundary for ~τ_L worth
         of steps, biasing near-surface residence time and inflating the surface
-        footprint. See `docs/turbulence.md` §3.2.4 and `docs/LPDM_physics_spec.md`
-        §B for the derivation and the WMC consequence.
+        footprint. See `docs/physics.md` §5 for the derivation and the WMC
+        consequence.
 
         Returns ``(particles, w_prime)`` with the same shapes as inputs; entries
         that did not reflect are unchanged.
