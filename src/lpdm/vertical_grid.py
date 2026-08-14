@@ -67,6 +67,83 @@ def default_agl_levels(alt_max_m: float) -> np.ndarray:
     return levels
 
 
+def stretched_agl_levels(
+    n_levels: int,
+    alt_max_m: float,
+    first_layer_m: float = 10.0,
+) -> np.ndarray:
+    """Geometrically stretched AGL grid: ``n_levels`` heights from 0 to ``alt_max_m``.
+
+    The lowest layer is ``first_layer_m`` thick and each layer above is a constant
+    ratio thicker — the standard way atmospheric models define a vertical grid, and
+    the shape the fixed :data:`_DEFAULT_AGL_LEVELS_M` ladder approximates by hand.
+    Resolution therefore concentrates where the footprint physics needs it (the
+    surface layer and BL) while still reaching the model top in few levels.
+
+    The stretch ratio is solved so the layers exactly span ``alt_max_m``; there is
+    no free parameter beyond ``n_levels`` and ``first_layer_m``.
+
+    Raising ``n_levels`` is the lever for exploiting a met source with fine native
+    vertical resolution (e.g. ERA5's 137 model levels, lowest ~10 m): the fixed
+    23-level default resolves only ~13 levels below 1.5 km, so it discards
+    near-surface structure the model levels actually carry. Note the met cache
+    scales linearly with ``n_levels``.
+
+    Args:
+        n_levels: Number of grid heights (>= 2), including the 0 m surface.
+        alt_max_m: Top of the grid in metres AGL.
+        first_layer_m: Thickness of the lowest layer (0 -> first level above it).
+
+    Returns:
+        ``[n_levels]`` strictly ascending heights, ``levels[0] == 0`` and
+        ``levels[-1] == alt_max_m``.
+    """
+    if n_levels < 2:
+        raise ValueError(f"n_levels must be >= 2, got {n_levels}")
+    if alt_max_m <= 0:
+        raise ValueError(f"alt_max_m must be > 0, got {alt_max_m}")
+    if first_layer_m <= 0:
+        raise ValueError(f"first_layer_m must be > 0, got {first_layer_m}")
+
+    n_layers = n_levels - 1
+    if n_layers == 1:
+        # A single layer spans the whole domain; `first_layer_m` cannot also apply.
+        return np.array([0.0, float(alt_max_m)], dtype="float64")
+    if first_layer_m * n_layers >= alt_max_m:
+        raise ValueError(
+            f"first_layer_m={first_layer_m} is too thick for n_levels={n_levels} "
+            f"below alt_max_m={alt_max_m}: {n_layers} uniform layers would already "
+            f"span {first_layer_m * n_layers:.0f} m. Use fewer levels, a thinner "
+            "first layer, or a higher top."
+        )
+
+    # Solve first_layer * (r^n_layers - 1) / (r - 1) == alt_max for the ratio r > 1.
+    # The sum is strictly increasing in r, so bisection is robust and dependency-free.
+    def span(ratio: float) -> float:
+        if abs(ratio - 1.0) < 1e-12:
+            return first_layer_m * n_layers
+        return first_layer_m * (ratio**n_layers - 1.0) / (ratio - 1.0)
+
+    lo, hi = 1.0, 2.0
+    while span(hi) < alt_max_m:
+        hi *= 2.0
+        if hi > 1e6:  # unreachable for sane inputs; guards a pathological loop
+            raise ValueError("failed to bracket a stretch ratio; check the inputs")
+    for _ in range(200):
+        mid = 0.5 * (lo + hi)
+        if span(mid) < alt_max_m:
+            lo = mid
+        else:
+            hi = mid
+    ratio = 0.5 * (lo + hi)
+
+    thicknesses = first_layer_m * ratio ** np.arange(n_layers, dtype="float64")
+    levels = np.concatenate(([0.0], np.cumsum(thicknesses)))
+    # Pin the top exactly (bisection leaves a sub-micron residual).
+    levels[-1] = float(alt_max_m)
+    return levels
+
+
 @dataclass(frozen=True)
 class AglRegridWeights:
     """Precomputed per-column bracketing for a pressure->AGL regrid.
@@ -237,3 +314,89 @@ def slope_correct_w(
     taper = np.clip(1.0 - agl_levels / max(float(z_top_m), 1.0), 0.0, 1.0)  # [Za]
     slope_w = u_agl * dhdx[None] + v_agl * dhdy[None]  # [Za, Y, X]
     return w_agl - taper[:, None, None] * slope_w
+
+
+# Constants for the hydrostatic pressure reconstruction (match met_reader; kept
+# local to avoid a circular import).
+_GRAVITY_M_S2 = 9.80665
+_R_DRY_AIR_J_KG_K = 287.05
+# Virtual-temperature coefficient: Tv = T * (1 + _TV_COEFF * q), with
+# _TV_COEFF = R_v/R_d - 1 = 1/0.622 - 1.
+_TV_COEFF = 0.6077
+
+
+def model_level_pressure_pa(
+    geopotential_m2s2: np.ndarray,
+    surface_geopotential_m2s2: np.ndarray,
+    surface_pressure_pa: np.ndarray,
+    temperature_k: np.ndarray,
+    specific_humidity: np.ndarray | None = None,
+) -> np.ndarray:
+    """Per-level pressure (Pa) on hybrid model levels, by hydrostatic integration.
+
+    Model-level met carries geopotential directly but no pressure. We recover
+    pressure from the *same archive's* fields via the hypsometric relation,
+    integrated layer-by-layer from the surface upward:
+
+        p(k) = p(k-1) * exp( -(phi(k) - phi(k-1)) / (R_d * Tv_layer) )
+
+    with the first segment running from the surface (`surface_geopotential`,
+    `surface_pressure`) to the lowest level, and `Tv = T * (1 + 0.6077 q)` the
+    virtual temperature (dry, `Tv = T`, if humidity is not supplied). This needs
+    no hybrid a/b coefficients — deliberately, since ARCO does not ship them and a
+    third-party table cannot be trusted to match the data
+    (see dev/decisions/0010-model-level-met-reader.md).
+
+    Levels may be in any vertical order (sorted internally by mean geopotential);
+    the result is returned in the input order. Exact for an isothermal column.
+
+    Args:
+        geopotential_m2s2: ``[Z, Y, X]`` geopotential (m^2 s^-2), NOT height.
+        surface_geopotential_m2s2: ``[Y, X]`` or ``[1, Y, X]`` surface geopotential.
+        surface_pressure_pa: ``[Y, X]`` surface pressure (Pa).
+        temperature_k: ``[Z, Y, X]`` temperature (K).
+        specific_humidity: optional ``[Z, Y, X]`` specific humidity (kg/kg).
+
+    Returns:
+        ``[Z, Y, X]`` pressure in Pa, in the input level order.
+    """
+    phi = np.asarray(geopotential_m2s2, dtype=np.float64)
+    if phi.ndim != 3:
+        raise ValueError("geopotential must be a 3D field [Z, Y, X]")
+    phi_s = np.asarray(surface_geopotential_m2s2, dtype=np.float64)
+    if phi_s.ndim == 3:
+        phi_s = phi_s[0]
+    ps = np.asarray(surface_pressure_pa, dtype=np.float64)
+    if ps.ndim == 3:
+        ps = ps[0]
+    temp = np.asarray(temperature_k, dtype=np.float64)
+    tv = (
+        temp
+        if specific_humidity is None
+        else temp * (1.0 + _TV_COEFF * np.asarray(specific_humidity, dtype=np.float64))
+    )
+
+    # Order surface -> top by mean geopotential (geopotential increases with height;
+    # model levels do not cross, so a per-level mean gives a consistent global order).
+    order = np.argsort(phi.mean(axis=(1, 2)))
+    phi_o = phi[order]
+    tv_o = tv[order]
+
+    # Geopotential thickness of each segment (surface -> lowest level, then
+    # level-to-level) and its layer-mean virtual temperature.
+    dphi = np.empty_like(phi_o)
+    dphi[0] = phi_o[0] - phi_s  # surface -> lowest level ([Y, X] - [Y, X])
+    dphi[1:] = phi_o[1:] - phi_o[:-1]
+    tv_layer = np.empty_like(tv_o)
+    tv_layer[0] = tv_o[0]  # surface -> lowest level: use the lowest-level value
+    tv_layer[1:] = 0.5 * (tv_o[1:] + tv_o[:-1])
+
+    # ln p decreases cumulatively from the surface.
+    dlnp = dphi / (_R_DRY_AIR_J_KG_K * tv_layer)
+    lnp_o = np.log(ps)[None] - np.cumsum(dlnp, axis=0)
+    p_o = np.exp(lnp_o)
+
+    # Restore the input level order.
+    inverse = np.empty_like(order)
+    inverse[order] = np.arange(order.size)
+    return p_o[inverse]

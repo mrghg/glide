@@ -57,8 +57,20 @@ _BYTES_PER_GIB = float(1024**3)
 # cache spanning the overlapping backward windows, so this drives HOST RAM (SLURM
 # --mem), NOT device memory. ~20 GiB more is fixed run overhead (python/torch,
 # particle staging, prefetch buffers).
-_MET_GIB_PER_HOUR = 0.27
+#
+# The cache holds hours RESAMPLED onto the internal AGL grid, so the footprint is
+# set by that grid's level count — NOT by the met source's (37 pressure vs 137
+# model levels both land on the same ladder). The empirical figure was measured on
+# the built-in 23-level default, so scale it when --vertical-levels raises that.
+_MET_GIB_PER_HOUR_AT_23_LEVELS = 0.27
+_DEFAULT_AGL_LEVEL_COUNT = 23
 _HOST_RESERVE_GIB = 20.0
+
+
+def _met_gib_per_hour(n_levels: int) -> float:
+    """Per-cached-hour host RAM, linear in the AGL level count."""
+    return _MET_GIB_PER_HOUR_AT_23_LEVELS * (n_levels / _DEFAULT_AGL_LEVEL_COUNT)
+
 
 # EUROPE domain + output grid, identical to configs/example_mhd_january_periodic.yaml
 # (these come from the FLEXPART validation file; do not diverge or the comparison breaks).
@@ -221,6 +233,16 @@ def main() -> None:
     )
     ap.add_argument("--zarr-store", default="~/data/arco-era5/EUROPE_*.zarr")
     ap.add_argument(
+        "--vertical-levels",
+        type=int,
+        default=None,
+        help="Number of internal terrain-following AGL levels the met is resampled "
+        "onto (default: the built-in 23-level ladder). This grid — not the met "
+        "source — sets the vertical resolution the physics sees, so raise it to "
+        "exploit a model-level (hybrid) source: ~40 matches ERA5 model levels' "
+        "near-surface density. Host met-cache RAM scales LINEARLY with it.",
+    )
+    ap.add_argument(
         "--output-uri", default="outputs/icos-validation"
     )  # matches notebooks/multisite_validation.ipynb
     ap.add_argument("-o", "--output-config", default="configs/multisite_validation_48h.yaml")
@@ -230,6 +252,14 @@ def main() -> None:
     n_sites = len(sites)
     total_releases = n_sites * args.n_releases
     meander_enabled = True  # set in the turbulence block below
+
+    # Internal AGL grid: drives both the config's met_domain block and the host
+    # met-cache estimate (the cache is one resampled hour per level, so linear in it).
+    n_agl_levels = args.vertical_levels or _DEFAULT_AGL_LEVEL_COUNT
+    met_gib_per_hour = _met_gib_per_hour(n_agl_levels)
+    met_domain = dict(MET_DOMAIN)
+    if args.vertical_levels:
+        met_domain["vertical_levels"] = args.vertical_levels
 
     # --- Batch sizing -------------------------------------------------------
     if args.max_releases_per_batch:
@@ -265,7 +295,7 @@ def main() -> None:
     # cache is still CORRECT — it just re-fetches the cross-batch overlap from zarr.
     if args.host_memory_gib is not None and not args.met_cache_max_hours:
         affordable_hours = int(
-            max(8.0, (args.host_memory_gib - _HOST_RESERVE_GIB) / _MET_GIB_PER_HOUR)
+            max(8.0, (args.host_memory_gib - _HOST_RESERVE_GIB) / met_gib_per_hour)
         )
         if met_cache_hours > affordable_hours:
             met_cache_hours = affordable_hours
@@ -296,7 +326,7 @@ def main() -> None:
         },
         "convection": {"scheme": "emanuel_reduced", "emanuel": {"closure_c": 0.03}},
         "output_grid": OUTPUT_GRID,
-        "met_domain": MET_DOMAIN,
+        "met_domain": met_domain,
         # Batch size is auto-chosen to the "active window" (releases whose backward
         # windows overlap at peak) — the compute-optimal target on the static GPU
         # path (bigger batches just step more inactive particles each step). Capped
@@ -336,7 +366,7 @@ def main() -> None:
     # Sizing report.
     per_release_mb = _device_bytes_per_release(args.n_particles, meander_enabled) / 1e6
     batch_device_gib = max_per_batch * per_release_mb / 1024.0
-    host_cache_gib = met_cache_hours * _MET_GIB_PER_HOUR
+    host_cache_gib = met_cache_hours * met_gib_per_hour
     host_total_gib = host_cache_gib + _HOST_RESERVE_GIB  # cache + run overhead; drives SLURM --mem
 
     print(f"wrote {out_path}")

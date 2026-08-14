@@ -19,8 +19,11 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
+import numpy as np
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from lpdm.vertical_grid import stretched_agl_levels
 
 
 def _parse_datetime_utc(value: datetime | str) -> datetime:
@@ -390,6 +393,21 @@ class MetDomainConfig(_Frozen):
     lon_bounds: tuple[float, float]
     lat_bounds: tuple[float, float]
     alt_max_m: float = Field(..., gt=0)
+    # Internal terrain-following AGL grid every met hour is resampled onto. Either:
+    #   - an int  -> that many geometrically stretched levels (see
+    #     `vertical_grid.stretched_agl_levels`); the user-friendly form, and
+    #   - a list  -> explicit ascending AGL heights in metres, for full control.
+    # None (default) keeps the fixed 23-level built-in ladder.
+    #
+    # This grid, NOT the met source, sets the vertical resolution the physics sees:
+    # the default resolves ~13 levels below 1.5 km, which under-uses a model-level
+    # (hybrid) source carrying ~20 there. Raise it to exploit such a source — but
+    # note the met cache scales LINEARLY with the level count, so `met_cache_max_hours`
+    # x levels drives host RAM.
+    vertical_levels: int | list[float] | None = None
+    # Lowest-layer thickness (m) when `vertical_levels` is a count. The default
+    # matches ERA5's lowest model level (~10 m AGL).
+    first_layer_m: float = Field(10.0, gt=0)
 
     @field_validator("lon_bounds", "lat_bounds")
     @classmethod
@@ -397,6 +415,44 @@ class MetDomainConfig(_Frozen):
         if v[0] >= v[1]:
             raise ValueError("bounds must satisfy lower < upper")
         return v
+
+    @field_validator("vertical_levels")
+    @classmethod
+    def _validate_vertical_levels(cls, v: int | list[float] | None) -> int | list[float] | None:
+        if v is None:
+            return v
+        if isinstance(v, int):
+            if v < 2:
+                raise ValueError("vertical_levels count must be >= 2")
+            return v
+        if len(v) < 2:
+            raise ValueError("vertical_levels list must have at least 2 heights")
+        if v[0] != 0.0:
+            raise ValueError("vertical_levels list must start at 0.0 m (the surface)")
+        if any(b <= a for a, b in zip(v[:-1], v[1:], strict=True)):
+            raise ValueError("vertical_levels list must be strictly ascending")
+        return v
+
+    @model_validator(mode="after")
+    def _check_grid_reaches_top(self) -> MetDomainConfig:
+        levels = self.vertical_levels
+        if isinstance(levels, list) and levels[-1] < self.alt_max_m:
+            raise ValueError(
+                f"vertical_levels top ({levels[-1]} m) is below alt_max_m "
+                f"({self.alt_max_m} m); the grid must span the met domain."
+            )
+        return self
+
+    def resolve_agl_levels(self) -> np.ndarray | None:
+        """The explicit AGL height grid for this config, or None for the built-in default."""
+
+        if self.vertical_levels is None:
+            return None
+        if isinstance(self.vertical_levels, int):
+            return stretched_agl_levels(
+                self.vertical_levels, self.alt_max_m, first_layer_m=self.first_layer_m
+            )
+        return np.asarray(self.vertical_levels, dtype="float64")
 
 
 class MemoryConfig(_Frozen):

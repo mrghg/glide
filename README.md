@@ -238,6 +238,20 @@ The EUROPE domain at 37 pressure levels is ~80 GB/month uncompressed
 Public ARCO buckets are opened anonymously (no credentials needed). Pass
 `--zarr-version 2` (default) or `3` to choose the output store format.
 
+Stores are written one hour per chunk on a 128×128 horizontal tile
+(`--chunk-tile`, `--chunk-levels`). GLIDE reads a particle-cloud bounding box, so
+the domain-spanning chunks dask would otherwise pick make every read decompress
+the whole domain — see
+[docs/met_schema.md § Chunking](docs/met_schema.md#chunking) for the numbers and
+the (real) caveats. Pass `--chunk-tile 0` for the old auto-chunked behaviour.
+
+**Non-ERA5 sources.** Any store meeting [docs/met_schema.md](docs/met_schema.md)
+runs, on pressure levels or native model levels. That page's
+[non-ERA5 checklist](docs/met_schema.md#preparing-met-from-a-non-era5-source)
+covers the gaps other NWP archives usually have to close first — absent
+geopotential, coarser-than-hourly cadence, missing friction velocity, and the
+heat-flux sign convention.
+
 > The validation/comparison datasets (NAME, FLEXPART, EDGAR) are **not**
 > redistributed with this repo — see [data/README.md](data/README.md). The core
 > model runs end-to-end on the ERA5 smoke test without them.
@@ -265,6 +279,15 @@ Top-level config sections: `io`, `simulation`, `release`, `turbulence`,
 `convection`, `output_grid`, `met_domain`, `memory`, `batch`. Validation includes
 `simulation.length_seconds > release.duration_seconds`, strictly ascending
 `output_grid.z_edges_m`, and every release point lying inside `met_domain`.
+
+`met_domain.vertical_levels` sets the internal terrain-following AGL grid the met
+is resampled onto — **this, not the met source, is the vertical resolution the
+physics sees**. Give it a count (levels are geometrically stretched from
+`first_layer_m` up to `alt_max_m`) or an explicit ascending list of heights in
+metres; omit it for the built-in 23-level default. Raise it to exploit a
+model-level (hybrid) met source, whose fine near-surface levels the default
+under-uses — but note the met cache scales linearly with the level count. See
+[docs/met_schema.md](docs/met_schema.md).
 
 Memory controls (`memory:` section):
 

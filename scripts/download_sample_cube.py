@@ -8,7 +8,9 @@ Two invocation modes:
 
    Writes to ``data/era5/<DOMAIN>_<YYYYMM>.zarr``. Bounding box and full pressure
    level set are looked up from :data:`DOMAINS`. Each month is its own Zarr store
-   so multi-month archives are resumable and self-documenting on disk.
+   so multi-month archives are resumable and self-documenting on disk. Pass
+   ``--out-path`` to write to an exact location instead (the bbox/time window
+   still come from ``--domain``/``--year-month``).
 
 2. **Ad-hoc subset** (legacy SF-area smoke tests, custom one-off windows):
 
@@ -17,6 +19,18 @@ Two invocation modes:
            --lon-min -127.0 --lon-max -117.0 --lat-min 33.0 --lat-max 43.0
 
    You must provide ``--out-path``, ``--time-*`` and all four lon/lat bounds.
+
+Vertical coordinate (either mode): ``--levels pressure`` (default) downloads the
+37 pressure levels from the unified store; ``--levels model`` downloads ERA5's
+137 native hybrid model levels (finer near-surface, terrain-following) and merges
+in the surface fields from the pressure/surface store, since the model-level store
+carries none. Named-domain model cubes are written with an ``_ml`` suffix
+(``<DOMAIN>_<YYYYMM>_ml.zarr``) and every cube records its type in the
+``glide_vertical_coordinate`` attr, so the two met types are distinguishable on
+disk. Model-level stores use a ``hybrid`` vertical coord (vs ``level``), so the
+reader must be pointed at it with ``level_name="hybrid"``.
+
+       python scripts/download_sample_cube.py --domain EUROPE --year-month 202401 --levels model
 """
 
 from __future__ import annotations
@@ -30,29 +44,49 @@ from pathlib import Path
 import numpy as np
 import xarray as xr
 
-# Logical to ERA5 physical mapping required by the runtime.
-# - friction_velocity and surface_sensible_heat_flux are required by the Hanna
-#   turbulence scheme (see docs/turbulence.md). They are surface fields so
-#   adding them is cheap.
-# - specific_humidity is required by the Emanuel deep-convection scheme (see
-#   docs/convection.md). It is a 3D pressure-level field, so it adds roughly as
-#   much volume as temperature/geopotential — but the example periodic config
-#   enables convection by default, so a cube without it cannot run that config.
-# Downloading all of them keeps the local cube ready for placeholder, Hanna,
-# and convection-enabled runs alike.
-REQUIRED_VARS = [
+# ARCO ERA5 analysis-ready source stores (0.25 deg, hourly, on GCS).
+#
+# - Pressure levels: ONE "unified" store carrying both the 37-pressure-level 3D
+#   fields and the surface fields.
+# - Model levels: the 3D fields live on ERA5's 137 native hybrid levels in a
+#   SEPARATE store that has NO surface fields. The surface fields must therefore
+#   be merged in from the pressure/surface store. Confirmed against the store
+#   metadata 2026-07-25: the model-level store provides `geopotential` directly
+#   on the hybrid levels, so the geometric-height/AGL conversion is unchanged
+#   (no hybrid a/b coefficients or hydrostatic integration needed).
+PRESSURE_LEVEL_STORE = "gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3"
+MODEL_LEVEL_STORE = "gs://gcp-public-data-arco-era5/ar/model-level-1h-0p25deg.zarr-v1"
+
+# 3D fields, carried on whichever vertical coordinate the chosen store uses
+# (`level` for pressure levels, `hybrid` for model levels).
+# - u/v/vertical_velocity: advection (vertical_velocity is omega, Pa/s).
+# - temperature: needed for the omega->w conversion.
+# - geopotential: geometric-height / AGL conversion.
+# - specific_humidity: Emanuel deep convection (docs/convection.md). The example
+#   periodic config enables convection, so a cube without it cannot run it.
+THREE_D_VARS = [
     "u_component_of_wind",
     "v_component_of_wind",
     "vertical_velocity",
+    "temperature",
+    "geopotential",
+    "specific_humidity",
+]
+
+# Surface / single-level fields (2D: time, lat, lon), always from the
+# pressure/surface store. friction_velocity and surface_sensible_heat_flux drive
+# the Hanna turbulence scheme (docs/turbulence.md); geopotential_at_surface is
+# the orography used by the terrain-following AGL conversion.
+SURFACE_VARS = [
     "boundary_layer_height",
     "surface_pressure",
-    "temperature",
-    "specific_humidity",
-    "geopotential",
     "geopotential_at_surface",
     "friction_velocity",
     "surface_sensible_heat_flux",
 ]
+
+# The full unified pressure-level list (3D + surface) lives in one store.
+REQUIRED_VARS = THREE_D_VARS + SURFACE_VARS
 
 
 # Registry of named meteorological-archive domains. Add new domains here rather
@@ -112,7 +146,8 @@ def _prepare_for_zarr_write(ds: xr.Dataset, zarr_version: int) -> xr.Dataset:
        anymore. Writing them into the inherited zarr chunk shape would either be
        parallel-unsafe (multiple dask chunks land in one zarr chunk) or pad with
        junk. We drop ``chunks`` and ``preferred_chunks`` so xarray derives the
-       output chunk shape from dask instead.
+       output chunk shape from dask instead — the caller then sets the dask chunks
+       deliberately via `_output_chunks` rather than leaving them to auto-chunking.
 
     2. **Codec incompatibility (v3 only).** v2-style numcodecs objects (Blosc,
        etc.) are rejected by Zarr v3's codec API. For v3 we clear the full
@@ -129,6 +164,62 @@ def _prepare_for_zarr_write(ds: xr.Dataset, zarr_version: int) -> xr.Dataset:
             enc.pop("preferred_chunks", None)
             ds_out[var_name].encoding = enc
     return ds_out
+
+
+DEFAULT_CHUNK_TILE = 128
+# Above this depth a whole-level chunk gets too fat to be worth it (see
+# `_output_chunks`), so levels are split instead.
+_WHOLE_LEVEL_CHUNK_MAX = 48
+_DEEP_LEVEL_CHUNK = 24
+_LEVEL_DIM_CANDIDATES = ("level", "hybrid", "model_level")
+
+
+def _output_chunks(ds: xr.Dataset, tile: int, level_chunk: int | None = None) -> dict[str, int]:
+    """Pick on-disk chunk sizes for the written cube.
+
+    Left to dask's auto-chunking, a bbox-sliced ERA5 subset lands on chunks that
+    span the *entire* horizontal domain — e.g. ``(1, 37, 274, 392)`` = 15.9 MB for
+    a 68.5-degree-tall pressure-level cube, with latitude as a single chunk. GLIDE
+    reads a particle-cloud bounding box that is usually far smaller than the
+    archive domain, so every read decompresses the whole domain: for a 2-degree box
+    that is ~1678x read amplification (bytes decompressed / bytes used). On a warm
+    page cache this is invisible (decompression and the AGL regrid dominate), but
+    on a cold shared filesystem it is the whole cost of the read.
+
+    Tiling the horizontal to ``tile`` cuts that to ~256x at tile=128, for ~4-10%
+    extra warm-cache time (per-chunk overhead). Smaller tiles keep cutting
+    amplification but the overhead grows faster than the saving: tile=64 measured
+    slower at every box size tested. 128 is the hedge. Storage is essentially
+    chunk-shape-neutral (measured within 0.5% across tile 64/96/128/whole).
+
+    Levels are kept whole when shallow (37 pressure levels = 2.42 MB/chunk), but
+    split when deep: ERA5's 137 model levels in one chunk is 8.98 MB and forces a
+    full-depth read even though GLIDE only needs the levels below its ceiling.
+    (Geopotential is the exception — `_compute_level_agl_m` materialises it at full
+    depth to build the AGL mask — but it is one variable of many.)
+
+    Time is always chunked to 1: GLIDE fetches one hour at a time.
+
+    Returns a dict suitable for `Dataset.chunk`. Because the dask chunks are then
+    exactly the intended zarr chunks, the write is parallel-safe and xarray derives
+    the on-disk shape without any explicit `encoding["chunks"]`.
+    """
+
+    sizes = ds.sizes
+    chunks: dict[str, int] = {}
+    if "time" in sizes:
+        chunks["time"] = 1
+    for dim in ("latitude", "longitude"):
+        if dim in sizes:
+            chunks[dim] = min(int(tile), int(sizes[dim]))
+
+    level_dim = next((d for d in _LEVEL_DIM_CANDIDATES if d in sizes), None)
+    if level_dim is not None:
+        n_levels = int(sizes[level_dim])
+        if level_chunk is None:
+            level_chunk = n_levels if n_levels <= _WHOLE_LEVEL_CHUNK_MAX else _DEEP_LEVEL_CHUNK
+        chunks[level_dim] = min(int(level_chunk), n_levels)
+    return chunks
 
 
 def _replace_store_atomically(tmp_path: str, out_path: str) -> None:
@@ -154,7 +245,7 @@ def _replace_store_atomically(tmp_path: str, out_path: str) -> None:
             shutil.rmtree(backup_store)
 
 
-def _validate_written_store(out_path: str) -> None:
+def _validate_written_store(out_path: str, expected_vars: list[str]) -> None:
     """Stream-check the written store for non-finite values without loading whole vars into RAM.
 
     Uses xarray's dask-backed reductions: ``isfinite().all()`` lazily evaluates
@@ -165,7 +256,7 @@ def _validate_written_store(out_path: str) -> None:
 
     ds = xr.open_zarr(out_path, consolidated=True)
     try:
-        for var_name in REQUIRED_VARS:
+        for var_name in expected_vars:
             all_finite = bool(np.isfinite(ds[var_name]).all().compute().item())
             if not all_finite:
                 raise ValueError(
@@ -206,36 +297,31 @@ def _resolve_domain_bbox(domain: str) -> dict[str, float]:
     }
 
 
-def download_sample_cube(
-    out_path: str,
-    store_uri: str,
+def _require_vars(ds: xr.Dataset, required: list[str], store_uri: str) -> None:
+    missing = [v for v in required if v not in ds.variables]
+    if missing:
+        raise ValueError(f"Missing required variables in {store_uri!r}: {missing}")
+
+
+def _slice_domain(
+    ds: xr.Dataset,
     time_start: str,
     time_end: str,
     lon_min: float,
     lon_max: float,
     lat_min: float,
     lat_max: float,
-    zarr_version: int,
-    archive_attrs: dict[str, str] | None = None,
-):
-    print(f"Opening remote Zarr store at {store_uri}...")
-    # Public ARCO bucket access should use anonymous GCS token via gcsfs.
-    ds = xr.open_zarr(store_uri, consolidated=True, storage_options={"token": "anon"})
+) -> xr.Dataset:
+    """Slice a global ARCO dataset to the requested time/lat/lon box.
 
-    missing = [v for v in REQUIRED_VARS if v not in ds.variables]
-    if missing:
-        raise ValueError(f"Missing required variables in dataset: {missing}")
-
-    ds = ds[REQUIRED_VARS]
+    Handles ERA5's 0..360 longitude (incl. Greenwich-crossing boxes) and
+    descending latitude, and returns a store with a strictly ascending
+    -180..180 longitude coordinate. Purely lazy — no chunk data is read.
+    """
 
     # ERA5 uses 0..360 for longitude. Convert negative requested longitudes.
     req_lon_min = lon_min + 360.0 if lon_min < 0 else lon_min
     req_lon_max = lon_max + 360.0 if lon_max < 0 else lon_max
-
-    print(f"Slicing time: {time_start} to {time_end}")
-    print(
-        f"Slicing spatial: Lat [{lat_min}, {lat_max}], Lon [{lon_min}, {lon_max}] (ERA5 lon coords [{req_lon_min}, {req_lon_max}])"
-    )
 
     # ERA5 latitudes are typically stored descending (90 to -90).
     lat_values = ds["latitude"].values
@@ -244,12 +330,7 @@ def download_sample_cube(
     else:
         lat_slice = slice(lat_min, lat_max)
 
-    ds_subset = ds.sel(
-        {
-            "time": slice(time_start, time_end),
-            "latitude": lat_slice,
-        }
-    )
+    ds_subset = ds.sel({"time": slice(time_start, time_end), "latitude": lat_slice})
 
     # Handle longitudes bridging the 0/360 wrap.
     if req_lon_min <= req_lon_max:
@@ -265,12 +346,79 @@ def download_sample_cube(
     # non-monotonic, which breaks .sel(slice(...)) lookups in any downstream
     # consumer. The conversion only relabels the coord, so it's a lazy op
     # that does not touch chunk data.
-    ds_subset = _normalise_longitude_to_ascending(ds_subset)
+    return _normalise_longitude_to_ascending(ds_subset)
 
-    if archive_attrs:
-        # Persist provenance into the local store's attrs so we can answer
-        # "what is this?" by opening the Zarr alone.
-        ds_subset.attrs = {**ds_subset.attrs, **archive_attrs}
+
+def download_sample_cube(
+    out_path: str,
+    store_uri: str,
+    time_start: str,
+    time_end: str,
+    lon_min: float,
+    lon_max: float,
+    lat_min: float,
+    lat_max: float,
+    zarr_version: int,
+    archive_attrs: dict[str, str] | None = None,
+    *,
+    levels: str = "pressure",
+    surface_store_uri: str = PRESSURE_LEVEL_STORE,
+    chunk_tile: int = DEFAULT_CHUNK_TILE,
+    chunk_levels: int | None = None,
+):
+    """Download a localised ERA5 cube on pressure levels or native model levels.
+
+    ``levels="pressure"`` (default): all fields come from the single unified
+    pressure/surface store ``store_uri`` (the 3D fields sit on a ``level`` coord).
+
+    ``levels="model"``: the 3D fields come from the model-level store
+    ``store_uri`` (on a 137-deep ``hybrid`` coord) and the surface fields are
+    merged in from ``surface_store_uri`` — the model-level store has none.
+
+    ``chunk_tile`` sets the horizontal on-disk chunk edge (see `_output_chunks`);
+    pass ``0`` to keep dask's auto-chunking (the pre-2026-08 behaviour, which
+    produces domain-spanning chunks). ``chunk_levels`` overrides the vertical
+    chunk depth; ``None`` picks it from the level count.
+    """
+
+    print(f"Slicing time: {time_start} to {time_end}")
+    print(f"Slicing spatial: Lat [{lat_min}, {lat_max}], Lon [{lon_min}, {lon_max}]")
+    box = (time_start, time_end, lon_min, lon_max, lat_min, lat_max)
+    # Public ARCO bucket access should use anonymous GCS token via gcsfs.
+    anon = {"token": "anon"}
+
+    if levels == "pressure":
+        print(f"Opening unified pressure/surface store at {store_uri}...")
+        ds = xr.open_zarr(store_uri, consolidated=True, storage_options=anon)
+        _require_vars(ds, REQUIRED_VARS, store_uri)
+        ds_subset = _slice_domain(ds[REQUIRED_VARS], *box)
+        written_vars = REQUIRED_VARS
+    elif levels == "model":
+        print(f"Opening model-level 3D store at {store_uri}...")
+        ds_ml = xr.open_zarr(store_uri, consolidated=True, storage_options=anon)
+        _require_vars(ds_ml, THREE_D_VARS, store_uri)
+        print(f"Opening surface store at {surface_store_uri}...")
+        ds_sfc = xr.open_zarr(surface_store_uri, consolidated=True, storage_options=anon)
+        _require_vars(ds_sfc, SURFACE_VARS, surface_store_uri)
+
+        ds_3d = _slice_domain(ds_ml[THREE_D_VARS], *box)
+        ds_surface = _slice_domain(ds_sfc[SURFACE_VARS], *box)
+        # Both are 0.25 deg ar products on identical time/lat/lon grids, so an
+        # exact-join merge aligns them; any mismatch fails loudly rather than
+        # silently dropping timestamps. The 3D store carries the `hybrid` coord;
+        # the surface fields have no vertical dim, so there is no name collision.
+        print("Merging model-level 3D fields with surface fields...")
+        ds_subset = xr.merge([ds_3d, ds_surface], join="exact", combine_attrs="drop_conflicts")
+        written_vars = THREE_D_VARS + SURFACE_VARS
+    else:
+        raise ValueError(f"Unknown levels={levels!r}; expected 'pressure' or 'model'.")
+
+    # Persist provenance (incl. the vertical coordinate type) into the store's
+    # attrs so we can answer "what is this?" by opening the Zarr alone, and so
+    # consumers can tell pressure- from model-level cubes apart.
+    attrs = dict(archive_attrs or {})
+    attrs["glide_vertical_coordinate"] = "model_level" if levels == "model" else "pressure_level"
+    ds_subset.attrs = {**ds_subset.attrs, **attrs}
 
     print(
         f"Subset computed. Estimated size in memory (uncompressed): {ds_subset.nbytes / (1024**3):.2f} GB"
@@ -287,6 +435,16 @@ def download_sample_cube(
     print(f"Downloading and saving data to temporary local Zarr: {tmp_out_path}...")
     ds_to_write = _prepare_for_zarr_write(ds_subset, zarr_version=zarr_version)
 
+    if chunk_tile and chunk_tile > 0:
+        out_chunks = _output_chunks(ds_to_write, chunk_tile, chunk_levels)
+        # Rechunking the already-sliced subset only re-splits blocks that the read
+        # produces anyway — no extra source reads. Matching the dask chunks to the
+        # intended zarr chunks keeps the write parallel-safe.
+        ds_to_write = ds_to_write.chunk(out_chunks)
+        print(f"On-disk chunking: {out_chunks}")
+    else:
+        print("On-disk chunking: dask auto (domain-spanning; --chunk-tile 0)")
+
     with xr.set_options(keep_attrs=True):
         ds_to_write.to_zarr(
             tmp_out_path,
@@ -295,7 +453,7 @@ def download_sample_cube(
             zarr_format=zarr_version,
         )
 
-    _validate_written_store(tmp_out_path)
+    _validate_written_store(tmp_out_path, written_vars)
     _replace_store_atomically(tmp_out_path, out_path)
 
     print(f"Download and local store setup complete: {out_path}")
@@ -311,9 +469,32 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--levels",
+        choices=["pressure", "model"],
+        default="pressure",
+        help=(
+            "Vertical coordinate to download. 'pressure' (default): 37 pressure "
+            "levels from the unified store. 'model': ERA5's 137 native hybrid "
+            "levels (finer near-surface, terrain-following) merged with surface "
+            "fields from the pressure/surface store. Named-domain model cubes get "
+            "an '_ml' filename suffix."
+        ),
+    )
+    parser.add_argument(
         "--store-uri",
-        default="gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3",
-        help="ARCO ERA5 Zarr store URI on GCS.",
+        default=None,
+        help=(
+            "ARCO ERA5 3D-field Zarr store on GCS. Defaults to the store matching "
+            f"--levels: pressure -> {PRESSURE_LEVEL_STORE}; model -> {MODEL_LEVEL_STORE}."
+        ),
+    )
+    parser.add_argument(
+        "--surface-store-uri",
+        default=PRESSURE_LEVEL_STORE,
+        help=(
+            "Store to source the 2D surface fields from when --levels model (the "
+            "model-level store has none). Ignored for --levels pressure."
+        ),
     )
     parser.add_argument(
         "--zarr-version",
@@ -321,6 +502,36 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         choices=[2, 3],
         default=2,
         help="Output Zarr format version (2 is safest; 3 clears inherited v2 codecs).",
+    )
+    parser.add_argument(
+        "--chunk-tile",
+        type=int,
+        default=DEFAULT_CHUNK_TILE,
+        help=(
+            "Horizontal on-disk chunk edge in grid cells (default "
+            f"{DEFAULT_CHUNK_TILE}). GLIDE reads a particle-cloud bounding box, so "
+            "domain-spanning chunks make every read decompress the whole domain. "
+            "Pass 0 to keep dask auto-chunking."
+        ),
+    )
+    parser.add_argument(
+        "--chunk-levels",
+        type=int,
+        default=None,
+        help=(
+            "Vertical on-disk chunk depth. Default: all levels in one chunk when "
+            f"there are <= {_WHOLE_LEVEL_CHUNK_MAX} of them (pressure levels), else "
+            f"{_DEEP_LEVEL_CHUNK} (ERA5's 137 model levels)."
+        ),
+    )
+    parser.add_argument(
+        "--out-path",
+        help=(
+            "Exact output path, in EITHER mode. In named-domain mode this overrides "
+            "the auto-generated <out-dir>/<DOMAIN>_<YYYYMM>[_ml].zarr filename (bbox "
+            "and time window still come from --domain/--year-month). Required in "
+            "ad-hoc mode, where there is no domain/year-month to name the file from."
+        ),
     )
 
     # Named domain + month path (preferred for the FLEXPART comparison archive).
@@ -331,15 +542,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--out-dir",
         default="data/era5",
         help=(
-            "Parent directory for named-domain stores. Filename is always auto-generated "
-            "as <DOMAIN>_<YYYYMM>.zarr inside this directory — point it at an external "
-            "drive or mounted volume to write elsewhere (e.g. --out-dir /Volumes/external/met)."
+            "Parent directory for named-domain stores. Filename is auto-generated as "
+            "<DOMAIN>_<YYYYMM>.zarr inside this directory unless --out-path is set — "
+            "point it at an external drive or mounted volume to write elsewhere "
+            "(e.g. --out-dir /Volumes/external/met)."
         ),
     )
 
     # Ad-hoc subset path (legacy, kept for SF-area smoke tests and custom one-offs).
     adhoc = parser.add_argument_group("ad-hoc subset mode")
-    adhoc.add_argument("--out-path", help="Full output path for ad-hoc subsets.")
     adhoc.add_argument("--time-start", help="ISO datetime, e.g. 2023-12-29T18:00:00.")
     adhoc.add_argument("--time-end", help="ISO datetime.")
     adhoc.add_argument("--lon-min", type=float)
@@ -351,11 +562,22 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 
 
 def _dispatch(args: argparse.Namespace) -> None:
+    # Resolve the 3D-field store from --levels unless explicitly overridden.
+    store_uri = args.store_uri or (
+        MODEL_LEVEL_STORE if args.levels == "model" else PRESSURE_LEVEL_STORE
+    )
+    level_suffix = "_ml" if args.levels == "model" else ""
+
     using_named = args.domain is not None or args.year_month is not None
-    using_adhoc = any(
+    # Flags that define an ad-hoc bbox/time window. These conflict with
+    # named-domain mode because it derives the bbox and time window itself (from
+    # DOMAINS[domain] and --year-month), so a separately-supplied value here would
+    # just be silently ignored. --out-path is deliberately NOT in this set: it's
+    # just a destination, not a bbox/time input, so it works as an override in
+    # EITHER mode (see below).
+    using_adhoc_window = any(
         v is not None
         for v in (
-            args.out_path,
             args.time_start,
             args.time_end,
             args.lon_min,
@@ -365,11 +587,12 @@ def _dispatch(args: argparse.Namespace) -> None:
         )
     )
 
-    if using_named and using_adhoc:
+    if using_named and using_adhoc_window:
         raise SystemExit(
-            "Cannot mix named-domain mode (--domain/--year-month) with ad-hoc flags "
-            "(--out-path/--time-*/--lon-*/--lat-*). Pick one. To write a named-domain "
-            "download to a custom location, set --out-dir (the filename is always auto-generated)."
+            "Cannot mix named-domain mode (--domain/--year-month) with ad-hoc "
+            "bbox/time flags (--time-*/--lon-*/--lat-*): named-domain mode derives "
+            "these from the domain registry and --year-month. Pick one. --out-path "
+            "may be combined with either mode."
         )
 
     if using_named:
@@ -377,16 +600,20 @@ def _dispatch(args: argparse.Namespace) -> None:
             raise SystemExit("--domain and --year-month must be given together.")
         bbox = _resolve_domain_bbox(args.domain)
         t_start, t_end = _resolve_year_month_window(args.year_month)
-        out_path = os.path.join(args.out_dir, f"{args.domain}_{args.year_month}.zarr")
+        out_path = args.out_path or os.path.join(
+            args.out_dir, f"{args.domain}_{args.year_month}{level_suffix}.zarr"
+        )
         archive_attrs = {
             "glide_domain": args.domain,
             "glide_year_month": args.year_month,
-            "glide_source_store": args.store_uri,
+            "glide_source_store": store_uri,
             "glide_domain_description": str(DOMAINS[args.domain]["description"]),
         }
+        if args.levels == "model":
+            archive_attrs["glide_surface_store"] = args.surface_store_uri
         download_sample_cube(
             out_path=out_path,
-            store_uri=args.store_uri,
+            store_uri=store_uri,
             time_start=t_start,
             time_end=t_end,
             lon_min=bbox["lon_min"],
@@ -395,6 +622,10 @@ def _dispatch(args: argparse.Namespace) -> None:
             lat_max=bbox["lat_max"],
             zarr_version=args.zarr_version,
             archive_attrs=archive_attrs,
+            levels=args.levels,
+            surface_store_uri=args.surface_store_uri,
+            chunk_tile=args.chunk_tile,
+            chunk_levels=args.chunk_levels,
         )
         return
 
@@ -414,7 +645,7 @@ def _dispatch(args: argparse.Namespace) -> None:
         )
     download_sample_cube(
         out_path=args.out_path,
-        store_uri=args.store_uri,
+        store_uri=store_uri,
         time_start=args.time_start,
         time_end=args.time_end,
         lon_min=args.lon_min,
@@ -422,6 +653,10 @@ def _dispatch(args: argparse.Namespace) -> None:
         lat_min=args.lat_min,
         lat_max=args.lat_max,
         zarr_version=args.zarr_version,
+        levels=args.levels,
+        surface_store_uri=args.surface_store_uri,
+        chunk_tile=args.chunk_tile,
+        chunk_levels=args.chunk_levels,
     )
 
 

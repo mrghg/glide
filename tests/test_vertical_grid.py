@@ -7,10 +7,15 @@ import pytest
 
 from lpdm.vertical_grid import (
     default_agl_levels,
+    model_level_pressure_pa,
     regrid_columns_to_agl,
     slope_correct_w,
+    stretched_agl_levels,
     terrain_gradient,
 )
+
+_GRAVITY = 9.80665
+_RD = 287.05
 
 
 def test_default_agl_levels_ascending_and_covers_alt_max():
@@ -128,3 +133,116 @@ def test_weights_split_matches_wrapper_and_is_shareable():
     for seed in (0, 1):
         f = np.random.default_rng(seed).normal(size=(3, 8, 3, 4))
         assert np.allclose(apply_agl_regrid(f, w), regrid_columns_to_agl(f, h, targets))
+
+
+# --- model_level_pressure_pa (hydrostatic reconstruction) --------------------
+
+
+def _isothermal_column(z_agl_m, terrain_m=0.0, t_k=250.0, ps_pa=101325.0):
+    """Build a single-column model-level input for an isothermal, dry atmosphere.
+
+    Returns (geopotential [Z,1,1], surface_geopotential [1,1], surface_pressure
+    [1,1], temperature [Z,1,1]).
+    """
+    z_agl_m = np.asarray(z_agl_m, dtype=np.float64)
+    phi_s = np.full((1, 1), terrain_m * _GRAVITY)
+    phi = (terrain_m + z_agl_m)[:, None, None] * _GRAVITY
+    temp = np.full_like(phi, t_k)
+    ps = np.full((1, 1), ps_pa)
+    return phi, phi_s, ps, temp
+
+
+def test_model_level_pressure_matches_isothermal_analytic():
+    # Isothermal, dry: p(z) = ps * exp(-(phi - phi_s)/(Rd*T)) exactly.
+    z = np.array([10.0, 100.0, 1000.0, 5000.0])
+    phi, phi_s, ps, temp = _isothermal_column(z, terrain_m=200.0, t_k=250.0)
+    p = model_level_pressure_pa(phi, phi_s, ps, temp, specific_humidity=None)
+    expected = 101325.0 * np.exp(-(phi[:, 0, 0] - phi_s[0, 0]) / (_RD * 250.0))
+    assert np.allclose(p[:, 0, 0], expected, rtol=1e-10)
+
+
+def test_model_level_pressure_lowest_level_near_surface():
+    # The lowest level (~10 m AGL) sits just below surface pressure.
+    z = np.array([10.0, 200.0, 2000.0])
+    phi, phi_s, ps, temp = _isothermal_column(z, t_k=280.0, ps_pa=100000.0)
+    p = model_level_pressure_pa(phi, phi_s, ps, temp)
+    assert p[0, 0, 0] < 100000.0
+    assert p[0, 0, 0] > 0.998 * 100000.0  # within ~0.2% of ps at 10 m
+
+
+def test_model_level_pressure_moisture_raises_pressure_aloft():
+    # Virtual temperature > T slows the pressure decay, so a moist column has
+    # HIGHER pressure at a given geopotential than a dry one.
+    z = np.array([10.0, 1000.0, 5000.0])
+    phi, phi_s, ps, temp = _isothermal_column(z, t_k=290.0)
+    q = np.full_like(phi, 0.015)  # 15 g/kg
+    p_dry = model_level_pressure_pa(phi, phi_s, ps, temp, None)
+    p_moist = model_level_pressure_pa(phi, phi_s, ps, temp, q)
+    assert np.all(p_moist[1:] > p_dry[1:])
+
+
+def test_model_level_pressure_order_invariant():
+    # Result is returned in input order regardless of level ordering.
+    z = np.array([10.0, 100.0, 1000.0, 5000.0])
+    phi, phi_s, ps, temp = _isothermal_column(z, t_k=260.0)
+    p_up = model_level_pressure_pa(phi, phi_s, ps, temp)  # surface-first
+    rev = slice(None, None, -1)
+    p_dn = model_level_pressure_pa(phi[rev], phi_s, ps, temp[rev])  # top-first
+    assert np.allclose(p_up, p_dn[rev], rtol=1e-12)
+
+
+def test_model_level_pressure_decreases_with_height():
+    z = np.array([10.0, 500.0, 3000.0, 12000.0])
+    phi, phi_s, ps, temp = _isothermal_column(z, t_k=245.0)
+    p = model_level_pressure_pa(phi, phi_s, ps, temp)
+    assert np.all(np.diff(p[:, 0, 0]) < 0)
+
+
+# --- stretched_agl_levels (configurable vertical grid) -----------------------
+
+
+@pytest.mark.parametrize("n_levels", [2, 5, 23, 40, 60, 137])
+def test_stretched_grid_spans_domain_with_exact_level_count(n_levels):
+    lv = stretched_agl_levels(n_levels, 15000.0)
+    assert lv.size == n_levels
+    assert lv[0] == 0.0
+    assert lv[-1] == 15000.0
+    assert np.all(np.diff(lv) > 0)
+
+
+def test_stretched_grid_honours_first_layer_thickness():
+    for dz0 in (5.0, 10.0, 25.0):
+        lv = stretched_agl_levels(40, 15000.0, first_layer_m=dz0)
+        assert lv[1] == pytest.approx(dz0, rel=1e-9)
+
+
+def test_stretched_grid_layers_grow_monotonically():
+    """Geometric stretch: every layer is thicker than the one below it."""
+    lv = stretched_agl_levels(50, 15000.0)
+    thicknesses = np.diff(lv)
+    assert np.all(np.diff(thicknesses) > 0)
+    # constant ratio (the defining property), except the top layer which is
+    # pinned to alt_max exactly.
+    ratios = thicknesses[1:-1] / thicknesses[:-2]
+    assert np.allclose(ratios, ratios[0], rtol=1e-6)
+
+
+def test_more_levels_resolves_more_of_the_boundary_layer():
+    """The point of the knob: raising n_levels buys near-surface resolution."""
+    below_1500 = [int((stretched_agl_levels(n, 15000.0) <= 1500.0).sum()) for n in (23, 40, 60)]
+    assert below_1500 == sorted(below_1500)
+    assert below_1500[0] < below_1500[-1]
+    # 23 stretched levels reproduce the hand-tuned default ladder's character
+    assert abs(below_1500[0] - int((default_agl_levels(15000.0) <= 1500.0).sum())) <= 2
+
+
+def test_stretched_grid_rejects_impossible_geometry():
+    with pytest.raises(ValueError, match="n_levels must be >= 2"):
+        stretched_agl_levels(1, 15000.0)
+    with pytest.raises(ValueError, match="alt_max_m must be > 0"):
+        stretched_agl_levels(10, 0.0)
+    with pytest.raises(ValueError, match="first_layer_m must be > 0"):
+        stretched_agl_levels(10, 15000.0, first_layer_m=0.0)
+    # 200 uniform 10 m layers already overshoot a 1000 m top
+    with pytest.raises(ValueError, match="too thick for n_levels"):
+        stretched_agl_levels(200, 1000.0, first_layer_m=10.0)

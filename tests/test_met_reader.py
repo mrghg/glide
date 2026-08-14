@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import numpy as np
+import pytest
 import torch
 import xarray as xr
 
@@ -101,6 +102,186 @@ def _build_mock_era5_dataset_360_lon() -> xr.Dataset:
     ds = _build_mock_era5_dataset()
     ds = ds.assign_coords(longitude=np.array([237.5, 238.5], dtype=np.float64))
     return ds
+
+
+def _build_mock_model_level_dataset() -> xr.Dataset:
+    """A minimal model-level (hybrid) store: 3D fields on a `hybrid` coord (no
+    pressure), surface fields, and the `glide_vertical_coordinate` provenance attr.
+    """
+    times = np.array([np.datetime64("2024-01-01T00:00:00"), np.datetime64("2024-01-01T01:00:00")])
+    hybrid = np.array([1, 2, 3], dtype=np.int64)  # 1 = model top, 3 = near-surface
+    lat = np.array([10.0, 11.0], dtype=np.float64)
+    lon = np.array([20.0, 21.0], dtype=np.float64)
+    shape_4d = (times.size, hybrid.size, lat.size, lon.size)
+    shape_3d = (times.size, lat.size, lon.size)
+
+    g = 9.80665
+    terrain_m = 150.0
+    agl_by_level = np.array([3000.0, 500.0, 30.0])  # matches hybrid order (top->bottom)
+    t_by_level = np.array([250.0, 275.0, 288.0])
+    q_by_level = np.array([0.001, 0.005, 0.008])
+
+    z_sfc = np.full(shape_3d, terrain_m * g)
+    z = np.empty(shape_4d)
+    t = np.empty(shape_4d)
+    q = np.empty(shape_4d)
+    for k, (agl, tk, qk) in enumerate(zip(agl_by_level, t_by_level, q_by_level, strict=True)):
+        z[:, k, :, :] = (terrain_m + agl) * g
+        t[:, k, :, :] = tk
+        q[:, k, :, :] = qk
+
+    ds = xr.Dataset(
+        data_vars={
+            "u_component_of_wind": (
+                ("time", "hybrid", "latitude", "longitude"),
+                np.full(shape_4d, 5.0),
+            ),
+            "v_component_of_wind": (
+                ("time", "hybrid", "latitude", "longitude"),
+                np.full(shape_4d, -2.0),
+            ),
+            "vertical_velocity": (
+                ("time", "hybrid", "latitude", "longitude"),
+                np.full(shape_4d, -0.10),
+            ),
+            "temperature": (("time", "hybrid", "latitude", "longitude"), t),
+            "specific_humidity": (("time", "hybrid", "latitude", "longitude"), q),
+            "geopotential": (("time", "hybrid", "latitude", "longitude"), z),
+            "boundary_layer_height": (("time", "latitude", "longitude"), np.full(shape_3d, 400.0)),
+            "surface_pressure": (("time", "latitude", "longitude"), np.full(shape_3d, 101325.0)),
+            "geopotential_at_surface": (("time", "latitude", "longitude"), z_sfc),
+            "friction_velocity": (("time", "latitude", "longitude"), np.full(shape_3d, 0.4)),
+            "surface_sensible_heat_flux": (
+                ("time", "latitude", "longitude"),
+                np.full(shape_3d, 360_000.0),
+            ),
+        },
+        coords={"time": times, "hybrid": hybrid, "latitude": lat, "longitude": lon},
+    )
+    units = {
+        "u_component_of_wind": "m s**-1",
+        "v_component_of_wind": "m s**-1",
+        "vertical_velocity": "Pa s**-1",
+        "temperature": "K",
+        "specific_humidity": "kg kg**-1",
+        "geopotential": "m**2 s**-2",
+        "boundary_layer_height": "m",
+        "surface_pressure": "Pa",
+        "geopotential_at_surface": "m**2 s**-2",
+        "friction_velocity": "m s**-1",
+        "surface_sensible_heat_flux": "J m**-2",
+    }
+    for name, u in units.items():
+        ds[name].attrs["units"] = u
+    ds["hybrid"].attrs["units"] = "1"
+    ds.attrs["glide_vertical_coordinate"] = "model_level"
+    return ds
+
+
+def _model_level_request() -> BoundingBoxRequest:
+    return BoundingBoxRequest(
+        spatial=SpatialBounds(
+            lon_min=19.5, lon_max=21.5, lat_min=9.5, lat_max=11.5, z_min=0.0, z_max=5000.0
+        ),
+        time=TimeBounds(
+            start=datetime(2024, 1, 1, 0, 15, tzinfo=UTC),
+            end=datetime(2024, 1, 1, 1, 0, tzinfo=UTC),
+        ),
+    )
+
+
+def test_model_level_mode_autodetected_and_coord_renamed() -> None:
+    reader = _InMemoryArcoReader(_build_mock_model_level_dataset(), terrain_following=True)
+    reader.fetch_hourly_window(_model_level_request())
+    assert reader._is_model_level is True
+    assert reader.level_name == "hybrid"  # auto-corrected from the "level" default
+
+
+def test_model_level_fetch_reconstructs_plausible_pressure() -> None:
+    reader = _InMemoryArcoReader(_build_mock_model_level_dataset(), terrain_following=True)
+    result = reader.fetch_hourly_window(_model_level_request())
+
+    p = result.metadata.pressure_level_hpa
+    # Pressure must be reconstructed (the hybrid coord is 1/2/3, not a pressure):
+    # near-surface ~ 1000 hPa and decreasing with the AGL grid. Non-increasing
+    # rather than strictly so: AGL levels below the lowest / above the highest of
+    # the 3 synthetic model levels constant-extrapolate (flat segments).
+    assert 980.0 < p[0] < 1015.0
+    assert np.all(np.diff(p) <= 1e-9)
+    assert p[0] - p[-1] > 250.0  # meaningfully decreasing over the column
+    assert p[-1] < 700.0  # ~5 km aloft
+
+
+def test_model_level_omega_converted_to_geometric_w() -> None:
+    reader = _InMemoryArcoReader(_build_mock_model_level_dataset(), terrain_following=True)
+    result = reader.fetch_hourly_window(_model_level_request())
+    # omega = -0.1 Pa/s (subsidence-sign) -> upward geometric w > 0 via
+    # w = -(Rd T)/(g p) omega. Must differ from the raw omega value.
+    w = result.hour_start[2]
+    assert torch.all(w > 0)
+    assert torch.all(torch.isfinite(w))
+    assert not torch.allclose(w, torch.full_like(w, -0.10))
+
+
+def test_model_level_requires_terrain_following() -> None:
+    reader = _InMemoryArcoReader(_build_mock_model_level_dataset(), terrain_following=False)
+    with pytest.raises(ValueError, match="terrain_following=True"):
+        reader.fetch_hourly_window(_model_level_request())
+
+
+def test_untagged_model_level_store_fails_loudly_not_silently() -> None:
+    """A model-level store missing the glide_vertical_coordinate attr must RAISE,
+    not silently read hybrid level indices (1..N) as pressures — that would corrupt
+    omega->w, air density, and convection with no error."""
+
+    ds = _build_mock_model_level_dataset()
+    del ds.attrs["glide_vertical_coordinate"]  # simulate an untagged / hand-built cube
+    reader = _InMemoryArcoReader(ds, terrain_following=True)
+    with pytest.raises(ValueError, match="Refusing to read this store as PRESSURE levels"):
+        reader.fetch_hourly_window(_model_level_request())
+
+
+def test_untagged_model_level_store_accepted_with_explicit_override() -> None:
+    """The explicit vertical_coordinate='model' escape hatch works for stores that
+    can't carry the provenance attr."""
+
+    ds = _build_mock_model_level_dataset()
+    del ds.attrs["glide_vertical_coordinate"]
+    reader = _InMemoryArcoReader(ds, terrain_following=True, vertical_coordinate="model")
+    result = reader.fetch_hourly_window(_model_level_request())
+    assert reader._is_model_level is True
+    assert result.metadata.pressure_level_hpa[0] > 900.0  # reconstructed, not the index
+
+
+def test_consecutive_integer_levels_named_level_still_rejected() -> None:
+    """The guard doesn't rely on the coord being named 'hybrid': consecutive integer
+    level values are indices whatever the dimension is called."""
+
+    ds = _build_mock_model_level_dataset()
+    del ds.attrs["glide_vertical_coordinate"]
+    ds = ds.rename({"hybrid": "level"})
+    reader = _InMemoryArcoReader(ds, terrain_following=True)
+    with pytest.raises(ValueError, match="consecutive integers"):
+        reader.fetch_hourly_window(_model_level_request())
+
+
+def test_genuine_pressure_level_store_is_not_flagged() -> None:
+    """The guard must not fire on real pressure-level met (unevenly spaced hPa)."""
+
+    reader = _InMemoryArcoReader(_build_mock_era5_dataset(), terrain_following=True)
+    result = reader.fetch_hourly_window(
+        BoundingBoxRequest(
+            spatial=SpatialBounds(
+                lon_min=19.5, lon_max=21.5, lat_min=9.5, lat_max=11.5, z_min=0.0, z_max=1100.0
+            ),
+            time=TimeBounds(
+                start=datetime(2024, 1, 1, 0, 15, tzinfo=UTC),
+                end=datetime(2024, 1, 1, 1, 0, tzinfo=UTC),
+            ),
+        )
+    )
+    assert reader._is_model_level is False
+    assert result.hour_start is not None
 
 
 def test_fetch_hourly_window_includes_surface_pressure_and_converts_w() -> None:
@@ -850,3 +1031,74 @@ def test_legacy_path_does_not_use_hour_cache() -> None:
     reader.fetch_hourly_window(request)
     assert reader.hour_cache_hits == 0
     assert len(reader._hour_cache) == 0
+
+
+def test_open_dataset_is_memoized_across_calls(tmp_path) -> None:
+    """`_open_dataset` must open the store once and reuse the lazy handle.
+
+    Profiling showed the reopen costing ~0.3-0.4 s per `fetch_hourly_window`
+    (~10-13% of a fetch) on a consolidated local store — pure waste, since the
+    store is immutable for the reader's lifetime.
+    """
+
+    ds_src = _build_mock_era5_dataset()
+    path = tmp_path / "memo.zarr"
+    ds_src.to_zarr(path, mode="w", zarr_format=2, consolidated=True)
+
+    reader = ArcoEra5ZarrReader(zarr_store=str(path), device="cpu", dtype=torch.float64)
+
+    opens = {"count": 0}
+    real_open = reader._open_dataset_uncached
+
+    def counting_open():
+        opens["count"] += 1
+        return real_open()
+
+    reader._open_dataset_uncached = counting_open
+
+    first = reader._open_dataset()
+    second = reader._open_dataset()
+    reader.get_time_coverage()
+
+    assert opens["count"] == 1
+    assert first is second
+
+    # close() releases the handle; the next call reopens.
+    reader.close()
+    reader.close()  # idempotent
+    reader._open_dataset()
+    assert opens["count"] == 2
+
+
+def test_fetch_hourly_window_leaves_shared_handle_open(tmp_path) -> None:
+    """A fetch must not close the memoized handle — doing so would poison the
+    cache and make every subsequent read operate on a closed store."""
+
+    ds_src = _build_mock_era5_dataset()
+    path = tmp_path / "reuse.zarr"
+    ds_src.to_zarr(path, mode="w", zarr_format=2, consolidated=True)
+
+    reader = ArcoEra5ZarrReader(
+        zarr_store=str(path),
+        device="cpu",
+        dtype=torch.float64,
+        channel_names=("u", "v", "w", "blh", "sp"),
+        terrain_following=False,
+    )
+
+    request = BoundingBoxRequest(
+        spatial=SpatialBounds(
+            lon_min=19.5, lon_max=21.5, lat_min=9.5, lat_max=11.5, z_min=0.0, z_max=5000.0
+        ),
+        time=TimeBounds(
+            start=datetime(2024, 1, 1, 0, 15, tzinfo=UTC),
+            end=datetime(2024, 1, 1, 1, 0, tzinfo=UTC),
+        ),
+    )
+
+    reader.fetch_hourly_window(request)
+    handle = reader._dataset_cache
+    assert handle is not None
+    # Still usable after the fetch: a second fetch on the same handle succeeds.
+    reader.fetch_hourly_window(request)
+    assert reader._dataset_cache is handle

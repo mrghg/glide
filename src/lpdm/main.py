@@ -53,6 +53,7 @@ from lpdm.output_writer import OutputWriter
 from lpdm.release_generator import generate_batch_particles
 from lpdm.runtime import DEVICE
 from lpdm.turbulence import TurbulenceScheme, get_scheme, list_schemes
+from lpdm.vertical_grid import default_agl_levels
 
 LOGGER = logging.getLogger(__name__)
 
@@ -1185,6 +1186,25 @@ def _run(
             zarr_store=cfg.io.zarr_store,
             channel_names=required_channels,
             device=reader_device,
+            # None => the reader's built-in 23-level ladder. Set met_domain.vertical_levels
+            # to resolve more of a fine-vertical-resolution source (e.g. model levels).
+            agl_levels_m=cfg.met_domain.resolve_agl_levels(),
+        )
+        # The AGL grid sets the vertical resolution the physics actually sees (and the
+        # met cache size), so record it — it is not otherwise recoverable from the log.
+        _agl = reader.agl_levels_m
+        if _agl is None:
+            _agl = default_agl_levels(cfg.met_domain.alt_max_m)
+            _origin = "built-in default"
+        else:
+            _origin = "met_domain.vertical_levels"
+        LOGGER.info(
+            "met vertical grid: %d AGL levels to %.0f m (%s); %d below 1.5 km, lowest %.1f m",
+            _agl.size,
+            _agl[-1],
+            _origin,
+            int((_agl <= 1500.0).sum()),
+            float(_agl[1]) if _agl.size > 1 else 0.0,
         )
     engine = GPUEngine(device=device_str)
     writer = OutputWriter()
