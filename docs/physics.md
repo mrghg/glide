@@ -155,9 +155,9 @@ $$
 \mathbf{x}_{n-1} = \mathbf{x}_n - \Delta t\; \mathbf{U}\!\left(\mathbf{x}^{*}, t_{n-1/2}\right)
 $$
 
-Both stages evaluate the wind at the **same** midpoint time $t_{n-1/2} = t_n -
-\Delta t/2$, which is what makes this the midpoint rule rather than a
-half-and-half hybrid. $\mathbf{U}$ comes from trilinear interpolation
+Both stages evaluate the wind at the **same** midpoint time
+$t_{n-1/2} = t_n - \Delta t/2$, which is what makes this the midpoint rule
+rather than a half-and-half hybrid. $\mathbf{U}$ comes from trilinear interpolation
 (`grid_sample`) of the two bracketing meteorology hours, linearly weighted in
 time by $\alpha = (t_{n-1/2} - t_{\mathrm{hour}}) / 3600$.
 
@@ -185,8 +185,9 @@ $$
 Two properties are worth stating explicitly.
 
 *It is unconditionally stationary.* Set $a_{\mathrm{drift}} = 0$: if
-$\mathrm{Var}(u'_n) = \sigma^2$ then $\mathrm{Var}(u'_{n+1}) = a^2\sigma^2 +
-\sigma^2(1-a^2) = \sigma^2$, for **any** $\Delta t$. A naive Euler
+$\mathrm{Var}(u'_n) = \sigma^2$ then
+$\mathrm{Var}(u'_{n+1}) = a^2\sigma^2 + \sigma^2(1-a^2) = \sigma^2$, for
+**any** $\Delta t$. A naive Euler
 discretisation of $\mathrm{d}u' = -u'/T_L\,\mathrm{d}t + b\,\mathrm{d}\xi$ loses
 this and blows up once $\Delta t > 2T_L$. The accuracy limit on $\Delta t$ in
 GLIDE therefore comes from the *drift* term and from position integration, not
@@ -365,8 +366,8 @@ The outer step $\Delta t$ is `simulation.dt_seconds` (60 s in the shipped
 configs). Because the OU update is unconditionally stationary (§3.2), the
 constraint on $\Delta t$ comes from two other places:
 
-- the **forward-Euler drift increment**, whose error grows once $\Delta t
-  \gtrsim T_L/5$. Wilson & Flesch (1993) derive an explicit bias velocity
+- the **forward-Euler drift increment**, whose error grows once
+  $\Delta t \gtrsim T_L/5$. Wilson & Flesch (1993) derive an explicit bias velocity
   $w_B/\sigma_w \approx -\alpha\beta(\Delta t/T_L)$ for the near-surface layer;
   Stohl & Thomson (1999) recommend the stricter $\Delta t \le 0.05\,T_L$.
 - the **reflection bias**, whose magnitude also scales with $\Delta t/T_L$.
@@ -453,9 +454,9 @@ $$
 giving $\mathrm{m^2\,s\,mol^{-1}}$, equivalently
 $(\mathrm{mol/mol})/(\mathrm{mol\,m^{-2}\,s^{-1}})$. $h$ is the surface-layer
 depth, $\bar{\rho}$ the surface air density (a scalar, or a 2-D field derived from
-the meteorology by `surface_air_density_from_met`), $m_{\mathrm{air}} = 0.02897\
-\mathrm{kg\,mol^{-1}}$. Bins that only partially overlap the chosen surface layer
-are credited by their overlap fraction.
+the meteorology by `surface_air_density_from_met`), and
+$m_{\mathrm{air}} = 0.02897\ \mathrm{kg\,mol^{-1}}$. Bins that only partially
+overlap the chosen surface layer are credited by their overlap fraction.
 
 The whole chain — advection, turbulence, reflection, gridding, and the STILT
 conversion — is validated end-to-end against an analytic reflected-Gaussian plume

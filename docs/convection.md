@@ -147,9 +147,10 @@ $$
 
 with $c_{\text{closure}} = 0.03$ by default.
 
-The cap on $w_{\text{buoy}}$ is not decoration. Without it, $\mathrm{CAPE} > 500\
-\mathrm{J\,kg^{-1}}$ gives $w_{\text{buoy}} > 30\ \mathrm{m\,s^{-1}}$ and an $M_b$
-far outside FLEXPART's realistic $0.05$–$0.5\ \mathrm{kg\,m^{-2}\,s^{-1}}$ range.
+The cap on $w_{\text{buoy}}$ is not decoration. Without it,
+$\mathrm{CAPE} > 500\ \mathrm{J\,kg^{-1}}$ gives
+$w_{\text{buoy}} > 30\ \mathrm{m\,s^{-1}}$ and an $M_b$ far outside FLEXPART's
+realistic $0.05$–$0.5\ \mathrm{kg\,m^{-2}\,s^{-1}}$ range.
 5 m s⁻¹ represents a typical updraft-cell peak rather than the rare 15 m s⁻¹
 extreme. This stands in for the full Emanuel quasi-equilibrium closure (§7).
 
@@ -168,8 +169,8 @@ $$
 is the whole game: it is what makes the redistribution preserve a mass-weighted
 (well-mixed) ensemble, in either time direction.
 
-With levels ascending, surface at index 0, cloud spanning $[\mathrm{LCL},
-\mathrm{LNB}]$, and layer air masses $m_i = \Delta p_i / g$:
+With levels ascending, surface at index 0, cloud spanning
+$[\mathrm{LCL}, \mathrm{LNB}]$, and layer air masses $m_i = \Delta p_i / g$:
 
 **Entrainment.** The boundary layer $[0, \mathrm{LCL})$ feeds the updraft, shared
 across its layers *by air mass* so that the total entrained equals $M_b$:
@@ -205,8 +206,8 @@ $$
 \Phi_k = \sum_{i \le k} e_i \;-\; \sum_{j \le k} d_j \;\;(\ge 0)
 $$
 
-and the environment sinks at the same rate, so $\mathrm{fmass}[k+1, k]
-\mathrel{+}= \Phi_k$ — a sub-diagonal term.
+and the environment sinks at the same rate, adding $\Phi_k$ to
+$\mathrm{fmass}[k+1, k]$ — a sub-diagonal term.
 
 **CFL cap.** Finally the whole matrix is scaled by a **single scalar** if any
 layer would shed more than 90% of its mass in one event. One scalar, so

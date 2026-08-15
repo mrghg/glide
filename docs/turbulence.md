@@ -67,8 +67,9 @@ per-step call; it never inlines these away.
 
 ## 2. How a profile is assembled
 
-`_column_turbulence(z)` returns $(\sigma_u, \sigma_v, \sigma_w, T_{Lu}, T_{Lv},
-T_{Lw})$ at any height, for every particle at once. It is callable at arbitrary
+`_column_turbulence(z)` returns
+$(\sigma_u, \sigma_v, \sigma_w, T_{Lu}, T_{Lv}, T_{Lw})$ at any height, for
+every particle at once. It is callable at arbitrary
 $z$ because the well-mixed drift needs to finite-difference $\sigma_w$ through
 the profile, including across regime seams. The order of operations matters:
 

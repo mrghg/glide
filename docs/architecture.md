@@ -296,8 +296,9 @@ defeats this entirely (40,320 releases at one z-integrated store is 51.6 GiB of
 footprint plus ~29 GiB of particles).
 
 **The compute-optimal batch is the "active window"** — the set of releases whose
-backward windows overlap the cursor at peak, $\lceil \text{length}/\text{period}
-\rceil \times n_{\text{sites}}$. Larger batches step ever more inactive
+backward windows overlap the cursor at peak,
+$\lceil \text{length}/\text{period} \rceil \times n_{\text{sites}}$. Larger
+batches step ever more inactive
 particles; smaller batches trade device memory for a larger *host* met cache,
 since consecutive batches re-read the overlapping backward meteorology.
 `scripts/make_multisite_config.py` does this arithmetic, sizing the batch to the

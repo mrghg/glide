@@ -101,8 +101,9 @@ Seed 9021 throughout.
 
 The production OU + Thomson drift + reflection, run with an inhomogeneous
 $K(z) = 0.02 + 0.12\min(z, 200\ \mathrm{m})$, compared against a conservative
-flux-form Crank–Nicolson solution of $\partial c/\partial t = \partial_z(K
-\partial_z c)$. The release slab (5–15 m) sits deliberately *inside* the low-$K$
+flux-form Crank–Nicolson solution of
+$\partial c/\partial t = \partial_z(K \partial_z c)$. The release slab
+(5–15 m) sits deliberately *inside* the low-$K$
 layer — a mid-column release was measured to be insensitive to near-surface $K$
 and would not have discriminated.
 
