@@ -6,14 +6,15 @@ system, the backward-in-time construction, the boundary conditions, and the
 definition of the footprint it produces.
 
 The two parameterisations that supply coefficients to those equations get their
-own pages — [turbulence.md](turbulence.md) for $\sigma$ and $T_L$, and
+own pages — [turbulence.md](turbulence.md) for the turbulence strength $\sigma$
+and memory timescale $T_L$ (both defined in §2), and
 [convection.md](convection.md) for deep convective transport. How the code is
 organised to run this at scale is [architecture.md](architecture.md).
 
 **Contents**
 
 1. [What a footprint is](#1-what-a-footprint-is)
-2. [Coordinates and particle state](#2-coordinates-and-particle-state)
+2. [Coordinates, state, and notation](#2-coordinates-state-and-notation)
 3. [The governing equations](#3-the-governing-equations)
 4. [Running backward in time](#4-running-backward-in-time)
 5. [Boundary conditions](#5-boundary-conditions)
@@ -34,11 +35,23 @@ $$
 \Delta c(\mathbf{x}_r, t_r) \ =\  \int  \int f(\mathbf{x}_r, t_r \ |\  \mathbf{x}_s, t_s)\  F(\mathbf{x}_s, t_s)\  \mathrm{d}\mathbf{x}_s \  \mathrm{d}t_s
 $$
 
-where $F$ is the surface flux and $f$ is the footprint. Computing $f$ for one
-receptor by running a forward model from every possible source is hopeless;
-running **one backward simulation from the receptor** gives the whole field at
-once. That adjoint relationship is why LPDMs used for flux inversion run
-backward, and it is what GLIDE is built to do.
+Reading that from the inside out:
+
+- $\mathbf{x}_r, t_r$ — where and when the **receptor** measures.
+- $\mathbf{x}_s, t_s$ — where and when a **source** emits. The integral runs over
+  every source location and every earlier time.
+- $F$ — the surface flux at that source (e.g. mol m⁻² s⁻¹).
+- $f$ — the **footprint**: how much the receptor's reading responds to a unit
+  flux at that source. Large where the air arriving at the receptor recently
+  touched the ground; zero where it never went.
+- $\Delta c$ — the resulting enhancement in measured concentration above
+  background.
+
+Computing $f$ for one receptor by running a forward model from every possible
+source is hopeless; running **one backward simulation from the receptor** gives
+the whole field at once. That adjoint relationship is why Lagrangian particle
+dispersion models (LPDMs) used for flux inversion run backward, and it is what
+GLIDE is built to do.
 
 Following Seibert & Frank (2004), the footprint of a backward run is the
 **residence time** the released particle ensemble spends in each source volume,
@@ -48,7 +61,7 @@ concentration-per-flux sensitivity in STILT units is a post-processing step
 
 ---
 
-## 2. Coordinates and particle state
+## 2. Coordinates, state, and notation
 
 Each particle carries four numbers:
 
@@ -56,13 +69,42 @@ Each particle carries four numbers:
 | --- | --- | --- |
 | $\lambda$ | longitude | degrees east |
 | $\phi$ | latitude | degrees north |
-| $z$ | height **above ground level** | metres |
-| $w_p$ | mass weight | dimensionless |
+| $z$ | height **above ground level** (AGL) | metres |
+| $m_p$ | mass weight — the share of the release this particle represents | dimensionless |
 
-plus turbulent velocity state $(u', v', w')$, and $(u_m, v_m)$ when the meander
-process is enabled.
+plus the turbulent velocity state $(u', v', w')$ described below, and
+$(u_m, v_m)$ when the *meander* process is enabled — an extra, slower horizontal
+wobble standing in for eddies too large for the turbulence scheme but too small
+for the meteorology grid to resolve (see [turbulence.md §7](turbulence.md#7-meander-unresolved-mesoscale-motion)).
 
-Two choices in that table do real work.
+### Notation
+
+These recur throughout, and are worth having in one place.
+
+| Symbol | What it means |
+| --- | --- |
+| $u, v, w$ | wind components: eastward, northward, upward (m s⁻¹) |
+| $\mathbf{U}$ | the **resolved** wind — what the meteorology actually carries, interpolated to the particle |
+| $u', v', w'$ | the **turbulent fluctuation** each particle carries: its own departure from the resolved wind. This is the model's memory of the eddy it is riding, and it is a state variable, not a random number redrawn each step. |
+| $\sigma_u, \sigma_v, \sigma_w$ | how vigorous the turbulence is in each direction — the standard deviation of the corresponding fluctuation (m s⁻¹) |
+| $T_{Lu}, T_{Lv}, T_{Lw}$ | **Lagrangian timescales**: how long a particle remembers its fluctuation before it decorrelates (s). Written $T_L$ where the component does not matter. |
+| $K = \sigma_w^2 T_{Lw}$ | the eddy diffusivity these two imply — a convenient single number for "how fast does this layer mix" (m² s⁻¹) |
+| $h$ | boundary-layer depth (m) |
+| $\rho$ | air density, $\rho = p/(R_d T)$, with $p$ pressure, $T$ temperature and $R_d = 287.05$ J kg⁻¹ K⁻¹ the gas constant for dry air |
+| $\Delta t$ | the integration step (`simulation.dt_seconds`; 60 s in the shipped configs) |
+| $N$ | the number of particles in one release |
+| $g_a$ | the density-weighted velocity PDF — the distribution of vertical velocities the *air itself* has at a given height. The well-mixed condition is a statement about this. |
+| $a$, $b$ | the **drift** (deterministic acceleration) and **diffusion** (random forcing) coefficients of the Langevin equation, §3 |
+| $C_0$, $\varepsilon$ | the Kolmogorov constant for the Lagrangian structure function, and the turbulent kinetic energy dissipation rate — the inertial-subrange quantities $b$ is tied to |
+
+Two conventions worth stating, because both are easy to misread:
+
+- **A prime always means a turbulent fluctuation, never a derivative.** $w'$ is
+  the particle's vertical velocity departure from the resolved wind.
+- **Subscripts $u$, $v$, $w$ on $\sigma$ and $T_L$ select the component**, not a
+  derivative or a location. $T_{Lw}$ is the vertical Lagrangian timescale.
+
+Two choices in the state table do real work.
 
 **Height is geometric metres above ground, not pressure.** Every piece of the
 physics is naturally posed in AGL: $\sigma_w$ and $T_L$ scale with $z/h$ where
@@ -80,16 +122,22 @@ ladder** shared by all columns, excluding sub-surface levels, in the manner of
 FLEXPART's `verttransform`. The vertical velocity is transformed into that frame:
 
 $$
-w_{\mathrm{AGL}} \ =\  w \ -\  \tau(z)\left(u\ \frac{\partial h_s}{\partial x} + v\ \frac{\partial h_s}{\partial y}\right),
+w_{\mathrm{AGL}} \ =\  w \ -\  s(z)\left(u\ \frac{\partial h_s}{\partial x} + v\ \frac{\partial h_s}{\partial y}\right),
 \qquad
-\tau(z) = \max\left(0,\  1 - \frac{z}{z_{\mathrm{top}}}\right)
+s(z) = \max\left(0,\  1 - \frac{z}{z_{\mathrm{top}}}\right)
 $$
 
-$h_s$ is the surface elevation. The bracketed term is the vertical velocity a
-particle riding the horizontal wind needs simply to hold its height above sloping
-ground; subtracting it leaves the motion *relative to the terrain*, which is what
-an AGL coordinate should evolve. The taper $\tau$ relaxes the correction to zero
-at the model top so orography does not perturb the stratosphere.
+Here $h_s$ is the surface elevation (m), $x$ and $y$ are eastward and northward
+distance (m), so $\partial h_s/\partial x$ and $\partial h_s/\partial y$ are the
+terrain slopes; $z_{\mathrm{top}}$ is the top of the AGL grid
+(`met_domain.alt_max_m`), and $s(z)$ is a taper running from 1 at the ground to 0
+there.
+
+The bracketed term is the vertical velocity a particle riding the horizontal wind
+needs simply to hold its height above sloping ground; subtracting it leaves the
+motion *relative to the terrain*, which is what an AGL coordinate should evolve.
+The taper relaxes the correction to zero at the model top so orography does not
+perturb the stratosphere.
 
 Without this, a near-surface particle crossing an 800 m hill rides the terrain
 upward by roughly the full hill height; with it, it holds its AGL to a few metres
@@ -133,8 +181,23 @@ $$
 \mathrm{d}x_i = \left(U_i + u_i'\right)\mathrm{d}t
 $$
 
-with $U_i$ the resolved (meteorology) wind, $u_i'$ the turbulent fluctuation,
-and $\mathrm{d}\xi$ a Wiener increment of variance $\mathrm{d}t$.
+The index $i$ runs over the three directions (east, north, up), so this is three
+coupled equations. Term by term:
+
+- $x_i$, $U_i$, $u_i'$ — position, resolved wind and turbulent fluctuation in
+  direction $i$. The second equation just says the particle moves at the total
+  wind, resolved plus turbulent.
+- $a_i$ — the **drift**: the deterministic part of how the fluctuation evolves
+  (units m s⁻²). Mostly it pulls $u_i'$ back toward zero over a time $T_L$, but
+  not only that — §3.3 is entirely about the rest of it.
+- $b_{ij}$ — the **diffusion coefficient**: how hard the random kicks are, in
+  $\mathrm{m\ s^{-3/2}}$. GLIDE's is diagonal, so each component is kicked
+  independently.
+- $\mathrm{d}\xi_j$ — a Wiener increment: Gaussian white noise with mean zero and
+  variance $\mathrm{d}t$. This is the only stochastic ingredient.
+
+That the *velocity* gets the random kick, and the position merely integrates the
+velocity, is what makes this a first-order model.
 
 GLIDE integrates this by **operator splitting**: within one step, the resolved
 advection is applied first, then the turbulent velocity is updated and its
@@ -155,11 +218,17 @@ $$
 \mathbf{x}_{n-1} = \mathbf{x}_n - \Delta t\  \mathbf{U}\left(\mathbf{x}^{\ast}, t_{n-1/2}\right)
 $$
 
+Here $\mathbf{x}_n$ is the particle position at step $n$; the starred quantity is
+a throwaway half-step probe, used only to get a better wind estimate. The state
+that survives is the position at step $n-1$, one step further back in time.
+
 Both stages evaluate the wind at the **same** midpoint time
 $t_{n-1/2} = t_n - \Delta t/2$, which is what makes this the midpoint rule
 rather than a half-and-half hybrid. $\mathbf{U}$ comes from trilinear interpolation
 (`grid_sample`) of the two bracketing meteorology hours, linearly weighted in
-time by $\alpha = (t_{n-1/2} - t_{\mathrm{hour}}) / 3600$.
+time by $\alpha = (t_{n-1/2} - t_{\mathrm{hour}}) / 3600$, where
+$t_{\mathrm{hour}}$ is the start of the bracketing hour — so $\alpha$ runs from 0
+at the start of that hour to 1 at the end.
 
 The vertical index used by that interpolation is a piecewise-linear lookup into
 the AGL level array, not a linear-in-metres mapping — the ladder is stretched, so
@@ -176,15 +245,32 @@ process over $\Delta t$, with the inhomogeneous drift added as a forward-Euler
 increment:
 
 $$
-\boxed{u_{n+1}' = a\ u_n' + a_{\mathrm{drift}}\ \Delta t + \sigma\sqrt{1 - a^2}\ \eta,
-\qquad a = e^{-\Delta t / T_L},\quad \eta \sim \mathcal{N}(0,1)}
+\boxed{u_{n+1}' = r\ u_n' + a_{\mathrm{drift}}\ \Delta t + \sigma\sqrt{1 - r^2}\ \eta,
+\qquad r = e^{-\Delta t / T_L},\quad \eta \sim \mathcal{N}(0,1)}
 $$
+
+with
+
+- $u_n'$ — the fluctuation at step $n$; $u_{n+1}'$ is the same particle one step
+  later. The formula is applied to each of $u'$, $v'$, $w'$ with that component's
+  own $\sigma$ and $T_L$.
+- $r$ — how much of the old fluctuation is retained over one step. It is exactly
+  the autocorrelation at lag $\Delta t$: $r \to 1$ for a step much shorter than
+  $T_L$ (perfect memory), $r \to 0$ for a step much longer (memory lost).
+- $a_{\mathrm{drift}}$ — the drift $a$ from the equation above, minus the
+  relaxation part that $r$ already accounts for. In GLIDE this is the well-mixed
+  correction of §3.3, and it is zero for the horizontal components.
+- $\sigma$ — the target standard deviation for this component, so
+  $\sigma\sqrt{1-r^2}$ is exactly the amount of fresh randomness needed to keep
+  the spread at $\sigma$.
+- $\eta$ — a fresh standard normal draw (mean 0, variance 1) per particle per
+  step.
 
 Two properties are worth stating explicitly.
 
 *It is unconditionally stationary.* Set $a_{\mathrm{drift}} = 0$: if
 $\mathrm{Var}(u_n') = \sigma^2$ then
-$\mathrm{Var}(u_{n+1}') = a^2\sigma^2 + \sigma^2(1-a^2) = \sigma^2$, for
+$\mathrm{Var}(u_{n+1}') = r^2\sigma^2 + \sigma^2(1-r^2) = \sigma^2$, for
 **any** $\Delta t$. A naive Euler
 discretisation of $\mathrm{d}u' = -u'/T_L\ \mathrm{d}t + b\ \mathrm{d}\xi$ loses
 this and blows up once $\Delta t > 2T_L$. The accuracy limit on $\Delta t$ in
@@ -192,26 +278,36 @@ GLIDE therefore comes from the *drift* term and from position integration, not
 from stability (§6).
 
 *It has the right inertial-subrange limit.* As $\Delta t / T_L \to 0$,
-$\sigma\sqrt{1-a^2} \to \sigma\sqrt{2\Delta t/T_L}$, i.e. $b\sqrt{\Delta t}$ with
+$\sigma\sqrt{1-r^2} \to \sigma\sqrt{2\Delta t/T_L}$, i.e. $b\sqrt{\Delta t}$ with
 
 $$
 b^2 = \frac{2\sigma^2}{T_L}
 $$
 
-which is the standard Thomson (1987) diffusion coefficient, tied to
-$C_0\varepsilon$ through the same identification. $b$ is diagonal — GLIDE carries
-no cross-correlation between $u$ and $w$, in common with FLEXPART and other
-regional models
+which is the standard Thomson (1987) diffusion coefficient. It is what ties the
+model to real turbulence: in the inertial subrange the theory fixes
+$b^2 = C_0\varepsilon$, with $C_0$ the Kolmogorov constant for the Lagrangian
+structure function and $\varepsilon$ the rate at which turbulent kinetic energy
+dissipates. Choosing $\sigma$ and $T_L$ is therefore equivalent to choosing
+$C_0 \varepsilon$. $b$ is diagonal — GLIDE carries no cross-correlation between
+$u$ and $w$, in common with FLEXPART and other regional models
 (Stohl & Thomson 1999).
 
-The autocorrelation $R(\tau) = e^{-\tau/T_L}$ and the stationary variance are
-both verified numerically (`test_ou_autocorrelation_and_stationarity`), as is the
-resulting Taylor dispersion curve across the ballistic-to-diffusive transition
+Two consequences are checked numerically. The **autocorrelation**, i.e. how
+strongly a particle's vertical velocity now resembles its velocity a lag $\tau$
+ago, should decay as $R(\tau) = e^{-\tau/T_L}$; that and the stationary variance
+are verified by `test_ou_autocorrelation_and_stationarity`. And the **Taylor
+dispersion curve** — the growth of $\sigma_z^2$, the variance of particle height
+about the ensemble mean, as travel time $t$ increases — should follow
 (`test_taylor_dispersion_curve_ballistic_to_diffusive`):
 
 $$
 \sigma_z^2(t) = 2\sigma_w^2 T_L\left[t - T_L\left(1 - e^{-t/T_L}\right)\right]
 $$
+
+which is $\sigma_w t$ at short times (**ballistic** — particles still fly
+straight) crossing over to $\sqrt{2Kt}$ at long times (**diffusive** — memory
+lost, ordinary random walk).
 
 ### 3.3 The drift term, and why it is not just $-w'/T_L$
 
@@ -286,9 +382,15 @@ a^{b} \ =\  -a^{f} \ +\  b^2 \frac{\partial \ln g_a}{\partial w'}
 \ =\  -a^{f} - \frac{2w'}{T_{Lw}}
 $$
 
-for a symmetric Gaussian $g_a$. Substituting the forward drift from §3.3, the
-$-w'/T_{Lw}$ relaxation comes back **unchanged**, while the two inhomogeneity
-terms flip sign together:
+where $a^{f}$ and $a^{b}$ are the forward and backward drifts, and $g_a$ is the
+density-weighted velocity PDF — the distribution of vertical velocities the air
+itself holds at that height. The $\partial \ln g_a / \partial w'$ term is what
+makes the reversal non-trivial: it knows about the *shape* of that distribution,
+so the answer depends on the turbulence, not just on the sign of time.
+
+For a symmetric Gaussian $g_a$ it evaluates to $-2w'/T_{Lw}$, as above.
+Substituting the forward drift from §3.3, the $-w'/T_{Lw}$ relaxation comes back
+**unchanged**, while the two inhomogeneity terms flip sign together:
 
 $$
 a^{b}_w \ =\  -\frac{w'}{T_{Lw}}
@@ -297,7 +399,7 @@ a^{b}_w \ =\  -\frac{w'}{T_{Lw}}
 $$
 
 In code this is exactly what happens: the forward drift is assembled and then
-negated, with the relaxation supplied separately by the exact-OU factor $a$.
+negated, with the relaxation supplied separately by the exact-OU factor $r$.
 
 Getting this sign wrong is not a small error. It converts the $\sigma$-gradient
 correction into a one-way upward pump; when it was wrong, the entire Mace Head
@@ -306,7 +408,9 @@ particle population lofted to ~2 km and stayed there.
 The random forcing is symmetric, so the noise term needs no sign treatment. The
 displacement of position simply runs the other way: $z_{n+1} = z_n - w'\Delta t$.
 
-**Mass bookkeeping.** Particles carry a weight $w_p = 1/N$ set at release and
+**Mass bookkeeping.** Each particle carries a weight $m_p = 1/N$, where $N$ is
+the number of particles in that release — so one particle represents $1/N$ of the
+released mass and the weights of a release sum to 1. It is set at release and
 never modified by transport; convection redistributes particles between levels
 but conserves their number and weight. Total weight is checked in the physics
 tests as a conservation invariant.
@@ -366,9 +470,11 @@ configs). Because the OU update is unconditionally stationary (§3.2), the
 constraint on $\Delta t$ comes from two other places:
 
 - the **forward-Euler drift increment**, whose error grows once
-  $\Delta t \gtrsim T_L/5$. Wilson & Flesch (1993) derive an explicit bias velocity
-  $w_B/\sigma_w \approx -\alpha\beta(\Delta t/T_L)$ for the near-surface layer;
-  Stohl & Thomson (1999) recommend the stricter $\Delta t \le 0.05\ T_L$.
+  $\Delta t \gtrsim T_L/5$. Wilson & Flesch (1993) derive an explicit spurious
+  "bias velocity" $w_B$ for the near-surface layer, growing in proportion to
+  $\Delta t/T_L$ — that is, the integration itself invents a slow drift that is
+  not in the physics. Stohl & Thomson (1999) recommend the stricter
+  $\Delta t \le 0.05\ T_L$.
 - the **reflection bias**, whose magnitude also scales with $\Delta t/T_L$.
 
 Near-surface $T_{Lw}$ can fall to tens of seconds, so a single global $\Delta t$
@@ -376,12 +482,20 @@ small enough for the worst particle would be ruinously expensive for the rest.
 GLIDE instead **sub-steps per particle**:
 
 $$
-k_i = \left\lceil \frac{\Delta t}{c\  T_{Lw,i}} \right\rceil,
+k_p = \left\lceil \frac{\Delta t}{c\  T_{Lw,p}} \right\rceil,
 \qquad
-\Delta t_{\mathrm{sub},i} = \frac{\Delta t}{k_i},
+\Delta t_{\mathrm{sub},p} = \frac{\Delta t}{k_p},
 \qquad
-c = 0.5,\quad k_i \le k_{\max}
+c = 0.5,\quad k_p \le k_{\max}
 $$
+
+The subscript $p$ is the particle (not a direction, as $i$ was in §3): each
+particle looks at the local vertical timescale $T_{Lw,p}$ it currently sits in,
+and splits the outer step into $k_p$ equal sub-steps — as many as it needs for
+its own sub-step to come in under a fraction $c$ of that timescale, up to a cap
+$k_{\max}$ (`max_substeps`). A particle in vigorous near-surface turbulence
+therefore takes many small sub-steps while one drifting in the free troposphere
+takes a single full step.
 
 Inside the sub-step loop, the OU update, the displacement, and the ground
 reflection all run at $\Delta t_{\mathrm{sub}}$, so a particle that crosses the
@@ -417,7 +531,7 @@ drift into a NaN. FLEXPART has the equivalent clip.
 At every step, every live particle inside the output grid adds
 
 $$
-\Delta f = w_p \  \Delta t
+\Delta f = m_p \  \Delta t
 $$
 
 to the cell it occupies, in its own time-ago bin, in its own release's slice. The
@@ -447,15 +561,17 @@ index contribute nothing.
 **Conversion to STILT units.** Lin et al. (2003) Eq. 5:
 
 $$
-f_{\mathrm{STILT}}(y,x) \ =\  \frac{m_{\mathrm{air}}}{h\ \bar{\rho}} \sum_{t}\sum_{z \in \text{surface layer}} f\big[t,z,y,x\big]
+f_{\mathrm{STILT}}(y,x) \ =\  \frac{m_{\mathrm{air}}}{h_{\mathrm{sfc}}\ \bar{\rho}} \sum_{t}\sum_{z \in \text{surface layer}} f\big[t,z,y,x\big]
 $$
 
 giving $\mathrm{m^2\ s\ mol^{-1}}$, equivalently
-$(\mathrm{mol/mol})/(\mathrm{mol\ m^{-2}\ s^{-1}})$. $h$ is the surface-layer
-depth, $\bar{\rho}$ the surface air density (a scalar, or a 2-D field derived from
-the meteorology by `surface_air_density_from_met`), and
-$m_{\mathrm{air}} = 0.02897\ \mathrm{kg\ mol^{-1}}$. Bins that only partially
-overlap the chosen surface layer are credited by their overlap fraction.
+$(\mathrm{mol/mol})/(\mathrm{mol\ m^{-2}\ s^{-1}})$. Here $h_{\mathrm{sfc}}$ is
+the depth of the surface layer being integrated over — 40 m by convention, and
+**not** the boundary-layer depth $h$ of §2 — $\bar{\rho}$ is the surface air
+density (a scalar, or a 2-D field derived from the meteorology by
+`surface_air_density_from_met`), and $m_{\mathrm{air}} = 0.02897\ \mathrm{kg\ mol^{-1}}$
+is the molar mass of dry air. Bins that only partially overlap the chosen surface
+layer are credited by their overlap fraction.
 
 The whole chain — advection, turbulence, reflection, gridding, and the STILT
 conversion — is validated end-to-end against an analytic reflected-Gaussian plume

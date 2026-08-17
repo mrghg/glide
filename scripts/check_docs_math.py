@@ -116,14 +116,18 @@ def check_file(path: Path) -> list[str]:
             if in_table and "|" in m:
                 report(n, r"'|' inside math in a table cell — splits the cell; use \vert")
 
-    # 2. emphasis pairing: two punctuation-flanked underscores in one paragraph
+    # 2. emphasis pairing: two punctuation-flanked underscores in one block.
+    # A blank line ends a block, and so does the start of a new list item or
+    # table row — CommonMark parses each of those as its own block, so emphasis
+    # cannot pair across them (checked against GitHub's renderer).
+    new_block = re.compile(r"^\s*(?:[-*+]\s|\d+\.\s|\|)")
     para: list[tuple[int, str]] = []
     for n, line, kind in _iter_blocks(text):
         if kind == "display":
             continue
-        if not line.strip():
+        if not line.strip() or new_block.match(line):
             _check_underscores(para, report)
-            para = []
+            para = [(n, line)] if line.strip() else []
         else:
             para.append((n, line))
     _check_underscores(para, report)
