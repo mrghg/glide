@@ -245,8 +245,8 @@ process over $\Delta t$, with the inhomogeneous drift added as a forward-Euler
 increment:
 
 $$
-\boxed{u_{n+1}' = r\ u_n' + a_{\mathrm{drift}}\ \Delta t + \sigma\sqrt{1 - r^2}\ \eta,
-\qquad r = e^{-\Delta t / T_L},\quad \eta \sim \mathcal{N}(0,1)}
+u_{n+1}' = r\ u_n' + a_{\mathrm{drift}}\ \Delta t + \sigma\sqrt{1 - r^2}\ \eta,
+\qquad r = e^{-\Delta t / T_L},\quad \eta \sim \mathcal{N}(0,1)
 $$
 
 with
