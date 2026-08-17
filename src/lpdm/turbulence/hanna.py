@@ -211,9 +211,13 @@ def _in_bl_stable(
     sigma_v = sigma_w
     # Small-z floor so ζ^0.8 / √ζ → 0 doesn't force T_L = 0 exactly at the surface.
     z_over_h_floor = z_over_h.clamp(min=1e-6)
-    # Eq 7.22 T_Lu = 0.15 h/σ_u·√ζ; Eq 7.23 T_Lv = 0.467 T_Lu; Eq 7.24 T_Lw = 0.1 h/σ_w·ζ^0.8.
+    # Eq 7.22 T_Lu = 0.15 h/σ_u·√ζ; Eq 7.23 T_Lv = 0.07 h/σ_v·√ζ; Eq 7.24 T_Lw = 0.10 h/σ_w·ζ^0.8.
+    # Each component divides by its OWN σ. Writing T_Lv = 0.467·T_Lu reproduces the
+    # coefficient ratio (0.07/0.15 = 0.467) but leaves it divided by σ_u instead of σ_v,
+    # and here σ_u = 2.0 u*(1−ζ) while σ_v = 1.3 u*(1−ζ) — so that form came out short by
+    # σ_v/σ_u = 0.65 at every height (fixed 2026-08-17).
     T_Lu = 0.15 * blh / sigma_u.clamp(min=SIGMA_MIN_M_S) * z_over_h_floor.pow(0.5)
-    T_Lv = 0.467 * T_Lu
+    T_Lv = 0.07 * blh / sigma_v.clamp(min=SIGMA_MIN_M_S) * z_over_h_floor.pow(0.5)
     T_Lw = 0.10 * blh / sigma_w.clamp(min=SIGMA_MIN_M_S) * z_over_h_floor.pow(0.8)
     return sigma_u, sigma_v, sigma_w, T_Lu, T_Lv, T_Lw
 

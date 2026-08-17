@@ -35,7 +35,7 @@ been compared against external references. The comparison machinery exists
 (`src/lpdm/comparison.py`, the notebooks under `notebooks/`), and a
 NAME/FLEXPART/EDGAR comparison is in progress, but nothing is signed off.
 
-Two things a reader should know about the comparison history:
+Three things a reader should know about the comparison history:
 
 - An earlier round over-estimated mean CH₄ enhancements, worst at polluted
   low-inlet sites, and this was traced to weak near-surface mixing on stable
@@ -46,6 +46,12 @@ Two things a reader should know about the comparison history:
 - The terrain-following coordinate changes footprint magnitudes **everywhere**,
   not only over mountains. So **all** site comparisons predating it need
   re-running before any magnitude is trusted — not just the elevated sites.
+- The stable-regime $T_{Lv}$ was 35% too small until 2026-08-17 (it divided by
+  $\sigma_u$ rather than $\sigma_v$). The effect is confined to meridional
+  turbulent spread under stable stratification — roughly 20% narrow in the
+  crosswind direction on stable nights, with no effect on vertical mixing or on
+  footprint magnitude. Found by comparing against an independent implementation
+  of the same Hanna equations.
 
 The same "changes magnitudes everywhere" argument applies to the switch to native
 model levels, which is why it is sequenced *before* the big validation run below
