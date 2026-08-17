@@ -1,4 +1,4 @@
-"""T2 — analytic Gaussian-plume footprint (flagship; docs/VALIDATION.md, T2).
+"""Analytic Gaussian-plume footprint — the flagship end-to-end check (docs/VALIDATION.md §3).
 
 Backward release from height z_r in uniform wind U with homogeneous OU turbulence
 (sigma_v = sigma_w, T_L) and ground reflection. With deterministic along-wind

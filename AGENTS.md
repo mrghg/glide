@@ -9,13 +9,14 @@ This file is the agent-agnostic contributor guide (the `AGENTS.md` convention;
 
 **Where things live**
 - Current status — what works, what's pending, latest results: [STATUS.md](STATUS.md).
-- Physics & systems docs: [docs/](docs/) (architecture, turbulence, convection,
-  validation, LPDM spec).
+- Physics & systems docs: [docs/](docs/) — start with
+  [docs/physics.md](docs/physics.md) (model formulation), then turbulence,
+  convection, architecture, met schema, validation. Index in
+  [docs/README.md](docs/README.md).
 - Major design/physics decisions (why, with rejected alternatives):
   [dev/decisions/](dev/decisions/).
-- Historical dated work-orders (physics/test reviews): [dev/](dev/). The
-  stream-of-consciousness journal was retired 2026-07-24; its durable content
-  moved to STATUS / decisions / docs, and full history is in git.
+- Historical dated work-orders (physics/test reviews) were retired; their durable
+  content lives in STATUS / decisions / docs, and full history is in git.
 
 ## Scope and priorities
 - Prioritise memory safety and predictable runtime behaviour over raw speed.

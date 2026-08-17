@@ -8,7 +8,7 @@ its height above ground while crossing the hill — the mechanism that fills the
 surface-footprint holes over high terrain. The `terrain_following=False` path (no slope
 correction) must fail the same check, so the test has teeth.
 
-See docs/VALIDATION.md (T4) and dev/decisions/0003-terrain-following-agl-coordinate.md.
+See docs/VALIDATION.md §3 and dev/decisions/0003-terrain-following-agl-coordinate.md.
 """
 
 from __future__ import annotations

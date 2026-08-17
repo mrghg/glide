@@ -1,4 +1,4 @@
-"""Analytic dispersion verification (docs/VALIDATION.md, T1/T5a/T5b).
+"""Analytic dispersion verification (docs/VALIDATION.md §3).
 
 Quantitative checks of the stochastic transport against closed-form results, at
 the engine-OU level with prescribed constant (sigma_w, T_L):

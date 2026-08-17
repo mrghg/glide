@@ -1,4 +1,4 @@
-"""T3 — Langevin diffusion limit vs Crank-Nicolson PDE (docs/VALIDATION.md, T3).
+"""Langevin diffusion limit vs a Crank-Nicolson PDE reference (docs/VALIDATION.md §3).
 
 For t >> T_L the Langevin model must converge to the diffusion equation
 dc/dt = d/dz(K(z) dc/dz) with K = sigma_w^2 T_L. Well-mixed tests cannot see a

@@ -1,9 +1,9 @@
 # Example GLIDE multi-release config: Mace Head (MHD, Ireland), hourly footprints
-# for January 2024, each backward-integrated 30 days.
+# for January 2024, each backward-integrated 5 days.
 #
-# This is the M5-stage-5+ analog of configs/example_mhd_january.yaml: instead of
-# one release, it produces 720 hourly footprints (30 days × 24 hours) in a single
-# Zarr indexed by release_time. Cell-for-cell aligned with the FLEXPART reference
+# The multi-release analogue of configs/example_mhd_january.yaml: instead of one
+# release, it produces 720 hourly footprints (30 days × 24 hours) in a single
+# Zarr indexed along the `release` axis. Cell-for-cell aligned with the FLEXPART reference
 # fixture data/FLEXPART/FLEXPART_MHD_test_202401.nc — the 96-footprint subset
 # there can be compared directly to the matching release_time slices of this run.
 #
