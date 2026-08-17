@@ -163,7 +163,7 @@ CI:
 
 Two classes of regression silently destroy the CUDA-graph capture and cost a 4–6×
 slowdown with no error message. Both are caught without a GPU (see
-[architecture.md §5](architecture.md#5-the-per-step-path-and-cuda-graphs)):
+[architecture.md §5](architecture.md#5-making-the-gpu-work-one-step-one-launch)):
 
 - `test_step_core_traces_as_one_graph_no_breaks` — compiles the per-step core with
   `fullgraph=True, backend="eager"` and raises on any **graph break**.
