@@ -31,7 +31,7 @@ surface fluxes upwind of it. The **footprint** is the linear sensitivity that
 connects the two:
 
 $$
-\Delta c(\mathbf{x}_r, t_r) \;=\; \int \! \int f(\mathbf{x}_r, t_r \,|\, \mathbf{x}_s, t_s)\; F(\mathbf{x}_s, t_s)\; \mathrm{d}\mathbf{x}_s \, \mathrm{d}t_s
+\Delta c(\mathbf{x}_r, t_r) \ =\  \int  \int f(\mathbf{x}_r, t_r \ |\  \mathbf{x}_s, t_s)\  F(\mathbf{x}_s, t_s)\  \mathrm{d}\mathbf{x}_s \  \mathrm{d}t_s
 $$
 
 where $F$ is the surface flux and $f$ is the footprint. Computing $f$ for one
@@ -80,9 +80,9 @@ ladder** shared by all columns, excluding sub-surface levels, in the manner of
 FLEXPART's `verttransform`. The vertical velocity is transformed into that frame:
 
 $$
-w_{\mathrm{AGL}} \;=\; w \;-\; \tau(z)\left(u\,\frac{\partial h_s}{\partial x} + v\,\frac{\partial h_s}{\partial y}\right),
+w_{\mathrm{AGL}} \ =\  w \ -\  \tau(z)\left(u\ \frac{\partial h_s}{\partial x} + v\ \frac{\partial h_s}{\partial y}\right),
 \qquad
-\tau(z) = \max\!\left(0,\, 1 - \frac{z}{z_{\mathrm{top}}}\right)
+\tau(z) = \max\left(0,\  1 - \frac{z}{z_{\mathrm{top}}}\right)
 $$
 
 $h_s$ is the surface elevation. The bracketed term is the vertical velocity a
@@ -106,7 +106,7 @@ Horizontal displacements are computed in metres and converted to degrees with a
 local spherical metric,
 
 $$
-\frac{\partial \lambda}{\partial x} = \frac{1}{111320 \, \lvert\cos\phi\rvert}\ \mathrm{deg\ m^{-1}},
+\frac{\partial \lambda}{\partial x} = \frac{1}{111320 \  \lvert\cos\phi\rvert}\ \mathrm{deg\ m^{-1}},
 \qquad
 \frac{\partial \phi}{\partial y} = \frac{1}{110540}\ \mathrm{deg\ m^{-1}}
 $$
@@ -128,7 +128,7 @@ gets wrong, and it is where the footprint is largest.
 The trajectory of one particle obeys
 
 $$
-\mathrm{d}u_i' = a_i(\mathbf{x}, \mathbf{u}', t)\,\mathrm{d}t \;+\; b_{ij}\,\mathrm{d}\xi_j,
+\mathrm{d}u_i' = a_i(\mathbf{x}, \mathbf{u}', t)\ \mathrm{d}t \ +\  b_{ij}\ \mathrm{d}\xi_j,
 \qquad
 \mathrm{d}x_i = \left(U_i + u_i'\right)\mathrm{d}t
 $$
@@ -150,9 +150,9 @@ $$
 integrated with a second-order Runge–Kutta midpoint step. Backward in time:
 
 $$
-\mathbf{x}^{*} = \mathbf{x}_n - \tfrac{1}{2}\Delta t\; \mathbf{U}\!\left(\mathbf{x}_n, t_{n-1/2}\right),
+\mathbf{x}^{\ast} = \mathbf{x}_n - \tfrac{1}{2}\Delta t\  \mathbf{U}\left(\mathbf{x}_n, t_{n-1/2}\right),
 \qquad
-\mathbf{x}_{n-1} = \mathbf{x}_n - \Delta t\; \mathbf{U}\!\left(\mathbf{x}^{*}, t_{n-1/2}\right)
+\mathbf{x}_{n-1} = \mathbf{x}_n - \Delta t\  \mathbf{U}\left(\mathbf{x}^{\ast}, t_{n-1/2}\right)
 $$
 
 Both stages evaluate the wind at the **same** midpoint time
@@ -176,19 +176,17 @@ process over $\Delta t$, with the inhomogeneous drift added as a forward-Euler
 increment:
 
 $$
-\boxed{\;
-u'_{n+1} \;=\; a\,u'_n \;+\; a_{\mathrm{drift}}\,\Delta t \;+\; \sigma\sqrt{1 - a^2}\;\eta,
-\qquad a = e^{-\Delta t / T_L},\quad \eta \sim \mathcal{N}(0,1)
-\;}
+\boxed{u_{n+1}' = a\ u_n' + a_{\mathrm{drift}}\ \Delta t + \sigma\sqrt{1 - a^2}\ \eta,
+\qquad a = e^{-\Delta t / T_L},\quad \eta \sim \mathcal{N}(0,1)}
 $$
 
 Two properties are worth stating explicitly.
 
 *It is unconditionally stationary.* Set $a_{\mathrm{drift}} = 0$: if
-$\mathrm{Var}(u'_n) = \sigma^2$ then
-$\mathrm{Var}(u'_{n+1}) = a^2\sigma^2 + \sigma^2(1-a^2) = \sigma^2$, for
+$\mathrm{Var}(u_n') = \sigma^2$ then
+$\mathrm{Var}(u_{n+1}') = a^2\sigma^2 + \sigma^2(1-a^2) = \sigma^2$, for
 **any** $\Delta t$. A naive Euler
-discretisation of $\mathrm{d}u' = -u'/T_L\,\mathrm{d}t + b\,\mathrm{d}\xi$ loses
+discretisation of $\mathrm{d}u' = -u'/T_L\ \mathrm{d}t + b\ \mathrm{d}\xi$ loses
 this and blows up once $\Delta t > 2T_L$. The accuracy limit on $\Delta t$ in
 GLIDE therefore comes from the *drift* term and from position integration, not
 from stability (§6).
@@ -202,7 +200,8 @@ $$
 
 which is the standard Thomson (1987) diffusion coefficient, tied to
 $C_0\varepsilon$ through the same identification. $b$ is diagonal — GLIDE carries
-no $u$–$w$ cross-correlation, in common with FLEXPART and other regional models
+no cross-correlation between $u$ and $w$, in common with FLEXPART and other
+regional models
 (Stohl & Thomson 1999).
 
 The autocorrelation $R(\tau) = e^{-\tau/T_L}$ and the stationary variance are
@@ -227,9 +226,9 @@ model wrong in a specific, measurable way.
 For a density-weighted Gaussian velocity PDF, the forward vertical drift is
 
 $$
-a_w \;=\; \underbrace{-\frac{w'}{T_{Lw}}}_{\text{relaxation}}
-\;+\; \underbrace{\frac{1}{2}\left(1 + \frac{w'^2}{\sigma_w^2}\right)\frac{\partial \sigma_w^2}{\partial z}}_{\sigma\text{-gradient (Thomson 1987)}}
-\;+\; \underbrace{\frac{\sigma_w^2}{\rho}\frac{\partial \rho}{\partial z}}_{\text{density (Stohl and Thomson 1999)}}
+a_w \ =\  \underbrace{-\frac{w'}{T_{Lw}}}_{\text{relaxation}}
+\ +\  \underbrace{\frac{1}{2}\left(1 + \frac{w'^2}{\sigma_w^2}\right)\frac{\partial \sigma_w^2}{\partial z}}_{\sigma\text{-gradient (Thomson 1987)}}
+\ +\  \underbrace{\frac{\sigma_w^2}{\rho}\frac{\partial \rho}{\partial z}}_{\text{density (Stohl and Thomson 1999)}}
 $$
 
 **The $\sigma$-gradient term** pushes particles down the gradient of turbulence
@@ -283,8 +282,8 @@ $U$-reversed forward model — is false in inhomogeneous turbulence.
 From Flesch, Wilson & Yee (1995), the backward drift is
 
 $$
-a^{b} \;=\; -a^{f} \;+\; b^2 \frac{\partial \ln g_a}{\partial w'}
-\;=\; -a^{f} - \frac{2w'}{T_{Lw}}
+a^{b} \ =\  -a^{f} \ +\  b^2 \frac{\partial \ln g_a}{\partial w'}
+\ =\  -a^{f} - \frac{2w'}{T_{Lw}}
 $$
 
 for a symmetric Gaussian $g_a$. Substituting the forward drift from §3.3, the
@@ -292,9 +291,9 @@ $-w'/T_{Lw}$ relaxation comes back **unchanged**, while the two inhomogeneity
 terms flip sign together:
 
 $$
-a^{b}_w \;=\; -\frac{w'}{T_{Lw}}
-\;-\; \frac{1}{2}\left(1 + \frac{w'^2}{\sigma_w^2}\right)\frac{\partial \sigma_w^2}{\partial z}
-\;-\; \frac{\sigma_w^2}{\rho}\frac{\partial \rho}{\partial z}
+a^{b}_w \ =\  -\frac{w'}{T_{Lw}}
+\ -\  \frac{1}{2}\left(1 + \frac{w'^2}{\sigma_w^2}\right)\frac{\partial \sigma_w^2}{\partial z}
+\ -\  \frac{\sigma_w^2}{\rho}\frac{\partial \rho}{\partial z}
 $$
 
 In code this is exactly what happens: the forward drift is assembled and then
@@ -323,7 +322,7 @@ is where correctness matters most.
 sub-step is reflected by the *joint* mapping
 
 $$
-(z,\; w') \;\longmapsto\; (-z,\; -w')
+(z,\  w') \ \longmapsto\  (-z,\  -w')
 $$
 
 Both must reverse. Reflecting only the position — a real bug in GLIDE's history —
@@ -340,7 +339,7 @@ declare a thin basal layer over which the statistics are held constant. GLIDE
 does this by clamping the *sampling* height:
 
 $$
-z_{\mathrm{eval}} = \max(z,\; z_{\mathrm{ubl}}), \qquad z_{\mathrm{ubl}} = 2\ \mathrm{m\ (default)}
+z_{\mathrm{eval}} = \max(z,\  z_{\mathrm{ubl}}), \qquad z_{\mathrm{ubl}} = 2\ \mathrm{m\ (default)}
 $$
 
 $\sigma$, $T_L$, the drift, and the density gradient are all evaluated at
@@ -369,7 +368,7 @@ constraint on $\Delta t$ comes from two other places:
 - the **forward-Euler drift increment**, whose error grows once
   $\Delta t \gtrsim T_L/5$. Wilson & Flesch (1993) derive an explicit bias velocity
   $w_B/\sigma_w \approx -\alpha\beta(\Delta t/T_L)$ for the near-surface layer;
-  Stohl & Thomson (1999) recommend the stricter $\Delta t \le 0.05\,T_L$.
+  Stohl & Thomson (1999) recommend the stricter $\Delta t \le 0.05\ T_L$.
 - the **reflection bias**, whose magnitude also scales with $\Delta t/T_L$.
 
 Near-surface $T_{Lw}$ can fall to tens of seconds, so a single global $\Delta t$
@@ -377,7 +376,7 @@ small enough for the worst particle would be ruinously expensive for the rest.
 GLIDE instead **sub-steps per particle**:
 
 $$
-k_i = \left\lceil \frac{\Delta t}{c\, T_{Lw,i}} \right\rceil,
+k_i = \left\lceil \frac{\Delta t}{c\  T_{Lw,i}} \right\rceil,
 \qquad
 \Delta t_{\mathrm{sub},i} = \frac{\Delta t}{k_i},
 \qquad
@@ -402,7 +401,7 @@ configs set `max_substeps: 6`.
 **Rogue-trajectory clip.** At the end of each sub-step's velocity update,
 
 $$
-\lvert u_i' \rvert \le 4\,\sigma_i
+\lvert u_i' \rvert \le 4\ \sigma_i
 $$
 
 A true Gaussian exceeds $4\sigma$ with probability $\sim 6\times10^{-5}$, so this
@@ -418,14 +417,14 @@ drift into a NaN. FLEXPART has the equivalent clip.
 At every step, every live particle inside the output grid adds
 
 $$
-\Delta f = w_p \, \Delta t
+\Delta f = w_p \  \Delta t
 $$
 
 to the cell it occupies, in its own time-ago bin, in its own release's slice. The
 grid is 5-dimensional:
 
 $$
-f\big[\,\text{release},\ \text{time\_ago},\ z,\ \text{lat},\ \text{lon}\,\big]
+f\big[\ \text{release},\ \text{time ago},\ z,\ \text{lat},\ \text{lon}\ \big]
 $$
 
 Raw units are **seconds** (weight is dimensionless and sums to 1 per release), so
@@ -448,14 +447,14 @@ index contribute nothing.
 **Conversion to STILT units.** Lin et al. (2003) Eq. 5:
 
 $$
-f_{\mathrm{STILT}}(y,x) \;=\; \frac{m_{\mathrm{air}}}{h\,\bar{\rho}} \sum_{t}\sum_{z \in \text{surface layer}} f\big[t,z,y,x\big]
+f_{\mathrm{STILT}}(y,x) \ =\  \frac{m_{\mathrm{air}}}{h\ \bar{\rho}} \sum_{t}\sum_{z \in \text{surface layer}} f\big[t,z,y,x\big]
 $$
 
-giving $\mathrm{m^2\,s\,mol^{-1}}$, equivalently
-$(\mathrm{mol/mol})/(\mathrm{mol\,m^{-2}\,s^{-1}})$. $h$ is the surface-layer
+giving $\mathrm{m^2\ s\ mol^{-1}}$, equivalently
+$(\mathrm{mol/mol})/(\mathrm{mol\ m^{-2}\ s^{-1}})$. $h$ is the surface-layer
 depth, $\bar{\rho}$ the surface air density (a scalar, or a 2-D field derived from
 the meteorology by `surface_air_density_from_met`), and
-$m_{\mathrm{air}} = 0.02897\ \mathrm{kg\,mol^{-1}}$. Bins that only partially
+$m_{\mathrm{air}} = 0.02897\ \mathrm{kg\ mol^{-1}}$. Bins that only partially
 overlap the chosen surface layer are credited by their overlap fraction.
 
 The whole chain — advection, turbulence, reflection, gridding, and the STILT

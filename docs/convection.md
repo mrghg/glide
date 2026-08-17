@@ -82,7 +82,7 @@ $$
 **Above the LCL**, equivalent potential temperature is conserved:
 
 $$
-\theta_e \approx \theta \, \exp\!\left(\frac{L_v\,q}{c_p\,T_{\mathrm{LCL}}}\right)
+\theta_e \approx \theta \  \exp\left(\frac{L_v\ q}{c_p\ T_{\mathrm{LCL}}}\right)
 $$
 
 and the parcel temperature at each level is found by solving
@@ -111,11 +111,11 @@ giving the level of neutral buoyancy (cloud top: the first level above the LCL
 where $B$ crosses zero from positive) and
 
 $$
-\mathrm{CAPE} = \int_{\mathrm{LFC}}^{\mathrm{LNB}} g\,B\;\mathrm{d}z
+\mathrm{CAPE} = \int_{\mathrm{LFC}}^{\mathrm{LNB}} g\ B\ \mathrm{d}z
 $$
 
 with layer thicknesses from the hypsometric relation,
-$\mathrm{d}z \approx R_d \bar{T}\,\mathrm{d}(\ln p)/g$.
+$\mathrm{d}z \approx R_d \bar{T}\ \mathrm{d}(\ln p)/g$.
 
 ---
 
@@ -127,8 +127,8 @@ Convection fires only when **all** of the following hold:
 | --- | --- |
 | $i_{\mathrm{LCL}} \ge 0$ | the parcel reaches saturation somewhere in the column |
 | $i_{\mathrm{LNB}} > i_{\mathrm{LCL}}$ | positive cloud depth |
-| $\mathrm{CAPE} \ge 50\ \mathrm{J\,kg^{-1}}$ | sanity floor (`min_cape_j_kg`) |
-| $\Delta T_v\big|_{\mathrm{LCL}+1} \ge 0.9\ \mathrm{K}$ | Forster (2007) Eq. 34 buoyancy threshold (`trigger_dtv_k`) |
+| $\mathrm{CAPE} \ge 50\ \mathrm{J\ kg^{-1}}$ | sanity floor (`min_cape_j_kg`) |
+| $\Delta T_v\big\vert_{\mathrm{LCL}+1} \ge 0.9\ \mathrm{K}$ | Forster (2007) Eq. 34 buoyancy threshold (`trigger_dtv_k`) |
 | cloud depth $\ge 500\ \mathrm{m}$ | deep convection only (`min_cloud_depth_m`) — shallow cumulus is the boundary-layer scheme's job |
 
 If any check fails the scheme is a no-op for this meteorology update. A negative
@@ -140,17 +140,17 @@ control test asserts it does **not** fire on a stable winter sounding
 ## 4. Cloud-base mass flux
 
 $$
-w_{\text{buoy}} = \min\!\left(\sqrt{2\,\mathrm{CAPE}},\ 5\ \mathrm{m\,s^{-1}}\right),
+w_{\text{buoy}} = \min\left(\sqrt{2\ \mathrm{CAPE}},\ 5\ \mathrm{m\ s^{-1}}\right),
 \qquad
-M_b = c_{\text{closure}} \; \rho_{\mathrm{LCL}} \; w_{\text{buoy}}
+M_b = c_{\text{closure}} \  \rho_{\mathrm{LCL}} \  w_{\text{buoy}}
 $$
 
 with $c_{\text{closure}} = 0.03$ by default.
 
 The cap on $w_{\text{buoy}}$ is not decoration. Without it,
-$\mathrm{CAPE} > 500\ \mathrm{J\,kg^{-1}}$ gives
-$w_{\text{buoy}} > 30\ \mathrm{m\,s^{-1}}$ and an $M_b$ far outside FLEXPART's
-realistic $0.05$–$0.5\ \mathrm{kg\,m^{-2}\,s^{-1}}$ range.
+$\mathrm{CAPE} > 500\ \mathrm{J\ kg^{-1}}$ gives
+$w_{\text{buoy}} > 30\ \mathrm{m\ s^{-1}}$ and an $M_b$ far outside FLEXPART's
+realistic $0.05\text{–}0.5\ \mathrm{kg\ m^{-2}\ s^{-1}}$ range.
 5 m s⁻¹ represents a typical updraft-cell peak rather than the rare 15 m s⁻¹
 extreme. This stands in for the full Emanuel quasi-equilibrium closure (§7).
 
@@ -162,7 +162,7 @@ $\mathrm{fmass}[i,j]$ is the mass moved from layer $i$ to layer $j$ per
 convection event. It is built to be **non-divergent**:
 
 $$
-\sum_j \mathrm{fmass}[i,j] \;=\; \sum_j \mathrm{fmass}[j,i] \qquad \text{for every } i
+\sum_j \mathrm{fmass}[i,j] \ =\  \sum_j \mathrm{fmass}[j,i] \qquad \text{for every } i
 $$
 
 — everything leaving a layer is matched by something entering it. That property
@@ -196,14 +196,14 @@ $$
 destination, non-local in one event. This is the coherent deep-lofting transport:
 
 $$
-U[i,j] = \frac{e_i\, d_j}{M_b}
+U[i,j] = \frac{e_i\  d_j}{M_b}
 $$
 
 **Compensating subsidence.** Mass carried up by the updraft has to come back
 down. The net upward flux across the interface below layer $k+1$ is
 
 $$
-\Phi_k = \sum_{i \le k} e_i \;-\; \sum_{j \le k} d_j \;\;(\ge 0)
+\Phi_k = \sum_{i \le k} e_i \ -\  \sum_{j \le k} d_j \ \ (\ge 0)
 $$
 
 and the environment sinks at the same rate, adding $\Phi_k$ to
@@ -232,8 +232,8 @@ a column, depending on time direction:
 $$
 P[i \to j] =
 \begin{cases}
-\mathrm{fmassfrac}[i,j] \,/\, m_i & \text{forward } (\text{ldirect}=+1) \\[1ex]
-\mathrm{fmassfrac}[j,i] \,/\, m_i & \text{backward } (\text{ldirect}=-1)
+\mathrm{fmassfrac}[i,j] \ /\  m_i & \text{forward } (\text{ldirect}=+1) \cr[1ex]
+\mathrm{fmassfrac}[j,i] \ /\  m_i & \text{backward } (\text{ldirect}=-1)
 \end{cases}
 $$
 
@@ -289,7 +289,7 @@ Each of these is a deliberate simplification, listed with what it costs.
 
 4. **Capped buoyancy velocity** in place of the quasi-equilibrium closure (§4).
    The full scheme balances the mass flux against large-scale destabilisation;
-   GLIDE caps $\sqrt{2\,\mathrm{CAPE}}$ to keep $M_b$ realistic. Revisit if
+   GLIDE caps $\sqrt{2\ \mathrm{CAPE}}$ to keep $M_b$ realistic. Revisit if
    validation shows under-convective transport.
 
 5. **Adjacent-layer subsidence.** The environmental return flux moves mass one

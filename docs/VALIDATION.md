@@ -71,15 +71,15 @@ a companion test showing the check *fails* when the physics is wrong.
 
 | Test | Reference | Tolerance (observed) | Seed |
 | --- | --- | --- | --- |
-| `test_ou_autocorrelation_and_stationarity` | $R(\tau) = e^{-\tau/T_L}$ at $\tau/T_L \in \{0.5, 1, 2\}$; stationary $\mathrm{Var} = \sigma_w^2$ | $\lvert R - e^{-\tau/T_L}\rvert < 0.02$ (obs ~0.003); variance ±3% | 4111 |
+| `test_ou_autocorrelation_and_stationarity` | $R(\tau) = e^{-\tau/T_L}$ at $\tau/T_L \in \lbrace 0.5, 1, 2\rbrace $; stationary $\mathrm{Var} = \sigma_w^2$ | $\lvert R - e^{-\tau/T_L}\rvert < 0.02$ (obs ~0.003); variance ±3% | 4111 |
 | `test_solid_body_rotation_advection_returns_to_start` | circular trajectory closes after one period; RK2 second order | error ratio > 3.5× per $\Delta t$ halving (obs 4.00); finest return < $10^{-3} r$ | deterministic |
 | `test_taylor_dispersion_curve_ballistic_to_diffusive` | $\sigma_z^2(t) = 2\sigma_w^2 T_L[t - T_L(1-e^{-t/T_L})]$ at 6 checkpoints, plus both asymptotes | curve < 5% (obs ~0.1%); ballistic < 5%; diffusive < 8% | 2201 |
 | `test_taylor_dispersion_position_integration_bias_with_dt` | forward-Euler position bias | tight at $\Delta t/T_L = 0.01$ (< 2%), bounded at 0.2 (< 15%) | 71 |
 
 ### The flagship: an analytic plume footprint — `test_plume_footprint.py`
 
-One backward-plume simulation ($z_r = 50$ m, $U = 5\ \mathrm{m\,s^{-1}}$,
-$\sigma_v = \sigma_w = 0.5\ \mathrm{m\,s^{-1}}$, $T_L = 100$ s, 200k particles,
+One backward-plume simulation ($z_r = 50$ m, $U = 5\ \mathrm{m\ s^{-1}}$,
+$\sigma_v = \sigma_w = 0.5\ \mathrm{m\ s^{-1}}$, $T_L = 100$ s, 200k particles,
 $\Delta t = 5$ s, ground reflection) compared against the **exact cell-integrated
 reflected-Gaussian surface residence**, with $\sigma(t)$ from Taylor. Raw
 residence time is asserted first — no unit ambiguity — and the STILT conversion is
@@ -103,9 +103,9 @@ The production OU + Thomson drift + reflection, run with an inhomogeneous
 $K(z) = 0.02 + 0.12\min(z, 200\ \mathrm{m})$, compared against a conservative
 flux-form Crank–Nicolson solution of
 $\partial c/\partial t = \partial_z(K \partial_z c)$. The release slab
-(5–15 m) sits deliberately *inside* the low-$K$
-layer — a mid-column release was measured to be insensitive to near-surface $K$
-and would not have discriminated.
+(5–15 m) sits deliberately *inside* the low-diffusivity layer — a mid-column
+release was measured to be insensitive to near-surface $K$ and would not have
+discriminated.
 
 | Test | Asserts | Tolerance (observed) |
 | --- | --- | --- |
@@ -183,11 +183,11 @@ degrades to eager rather than killing the run.
 
 - Quantitative endpoint spread, time–height structure, and column-integrated
   footprint magnitude under the Hanna scheme. The unit tests pin local
-  $\sigma$/$T_L$ values against literature forms and the analytic tests pin
+  $\sigma$ and $T_L$ values against literature forms and the analytic tests pin
   dispersion against closed-form solutions, but a systematic comparison against
   NAME/FLEXPART on identical release setups has not been completed.
 - Free-troposphere transport accuracy. The engine-level OU dispersion that the
-  Richardson closure feeds is verified; the closure's own $\sigma$/$T_L$
+  Richardson closure feeds is verified; the closure's own $\sigma$ and $T_L$
   magnitudes are not.
 - Convective transport magnitude. The matrix is proven mass-conserving and
   well-mixed-preserving; whether it moves the *right amount* of mass is untested
@@ -245,7 +245,7 @@ stilt = to_stilt_surface_footprint(
 ```
 
 Raw footprints are in seconds per cell; this applies Lin et al. (2003) Eq. 5 to
-get $\mathrm{m^2\,s\,mol^{-1}}$.
+get $\mathrm{m^2\ s\ mol^{-1}}$.
 
 ### Step 3 — compare cell for cell
 

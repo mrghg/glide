@@ -136,7 +136,7 @@ Per hour, the reader:
 2. validates units on every variable (a missing or unrecognised `units` attribute
    is a hard error — GLIDE will not guess);
 3. converts ω → geometric $w$ where the source supplies a pressure tendency,
-   $w = -(R_d T)/(g p)\,\omega$;
+   $w = -(R_d T)/(g p)\ \omega$;
 4. de-accumulates surface fluxes if they arrive as J m⁻², and flips the ECMWF
    heat-flux sign convention;
 5. derives height above ground from geopotential, $(z - z_{sfc})/g$;
@@ -286,7 +286,7 @@ A batch is the unit of both memory and wasted work. It holds all its releases'
 particles in one buffer and one dense footprint tensor:
 
 $$
-\text{peak} \;\approx\; n_{\text{releases/batch}} \times \Big( n_{\text{particles}} \times 112\ \mathrm{B} \;+\; \text{footprint bytes per release} \Big)
+\text{peak} \ \approx\  n_{\text{releases/batch}} \times \Big( n_{\text{particles}} \times 112\ \mathrm{B} \ +\  \text{footprint bytes per release} \Big)
 $$
 
 **Footprints are streamed.** The Zarr store is created once, sized for all

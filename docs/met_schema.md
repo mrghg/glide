@@ -74,7 +74,7 @@ the reader's `variable_map`, but matching them means no remap is needed.
 | `boundary_layer_height` | BL depth | surface | `m` | |
 | `surface_pressure` | surface pressure | surface | `Pa` | |
 | `geopotential_at_surface` | orography | surface (2-D or 3-D) | `m**2 s**-2` | the terrain reference for the AGL conversion |
-| `friction_velocity` | $u_*$ | surface | `m s**-1` | Hanna turbulence |
+| `friction_velocity` | $u_\ast$ | surface | `m s**-1` | Hanna turbulence |
 | `surface_sensible_heat_flux` | sensible heat flux | surface | `W m**-2` **or** `J m**-2` | **sign convention matters** — see below |
 
 A conforming store contains exactly this set plus coordinates; there are no
@@ -93,7 +93,7 @@ each fails silently rather than loudly.
 **geometric velocity** (`m s**-1`). If it is omega, GLIDE converts it:
 
 $$
-w = -\frac{R_d\, T}{g\, p}\,\omega
+w = -\frac{R_d\  T}{g\  p}\ \omega
 $$
 
 which needs the pressure $p$ at each level.
@@ -157,9 +157,9 @@ be derived, and GLIDE reconstructs it **hydrostatically** from the archive's own
 fields by integrating the hypsometric relation upward from the surface:
 
 $$
-p(k) = p(k-1)\,\exp\!\left(-\frac{\Phi(k) - \Phi(k-1)}{R_d\, T_v^{\text{layer}}}\right),
+p(k) = p(k-1)\ \exp\left(-\frac{\Phi(k) - \Phi(k-1)}{R_d\  T_v^{\text{layer}}}\right),
 \qquad
-T_v = T\,(1 + 0.6077\,q)
+T_v = T\ (1 + 0.6077\ q)
 $$
 
 with the first segment running from the surface. It is exact for an isothermal
@@ -250,9 +250,9 @@ NWP archive (the Met Office UM) against the schema; most of it generalises.
 
 | Gap in the source | What to do |
 | --- | --- |
-| No `geopotential` / `geopotential_at_surface` | On a terrain-following source with a $z = z_{\text{lev}} + \sigma\,h_s$ coordinate, solve for the orography hydrostatically from the store's own 3-D pressure, then form both fields from the coordinate definition |
+| No `geopotential` / `geopotential_at_surface` | On a terrain-following source with a $z = z_{\text{lev}} + \sigma\ h_s$ coordinate, solve for the orography hydrostatically from the store's own 3-D pressure, then form both fields from the coordinate definition |
 | Coarser than hourly | Interpolate the time-varying fields to hourly (see below) |
-| No `friction_velocity` | $u_* = \sqrt{\lvert\tau\rvert/\rho}$ from the two surface stress components, with $\rho = p_s/(R_d T_v)$ and $T_v = T(1 + 0.6077q)$ |
+| No `friction_velocity` | $u_\ast = \sqrt{\lvert\tau\rvert/\rho}$ from the two surface stress components, with $\rho = p_s/(R_d T_v)$ and $T_v = T(1 + 0.6077q)$ |
 | Heat flux is positive-**up** | Negate it to the ECMWF positive-down convention |
 | Non-GLIDE variable names | Rename to GLIDE's defaults — `main.py` exposes no `variable_map` override |
 | Level coordinate is 1..N indices | Tag the store `glide_vertical_coordinate="model_level"`, or GLIDE will refuse it rather than read the indices as pressures |

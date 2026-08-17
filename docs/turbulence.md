@@ -55,7 +55,7 @@ Two schemes are registered:
 | Name | Role |
 | --- | --- |
 | `hanna_1982` | Production. State `{u', v', w'}`, plus `{u_m, v_m}` with meander enabled. Requires `t`, `ustar`, `shf` beyond the baseline. |
-| `placeholder_constant_ou` | Regression pin only. Vertical OU with fixed $T_L = 300$ s, $\sigma_w^2 = 1\ \mathrm{m^2\,s^{-2}}$, no horizontal turbulence, no drift. Requires no meteorology. Used to isolate runtime plumbing from physics in a few end-to-end tests. |
+| `placeholder_constant_ou` | Regression pin only. Vertical OU with fixed $T_L = 300$ s, $\sigma_w^2 = 1\ \mathrm{m^2\ s^{-2}}$, no horizontal turbulence, no drift. Requires no meteorology. Used to isolate runtime plumbing from physics in a few end-to-end tests. |
 
 The physics itself lives in **standalone free functions** —
 `in_bl_sigma_TL`, `obukhov_length`, `free_trop_diffusivity`,
@@ -101,16 +101,16 @@ unresolved basal layer described in [physics.md §5](physics.md#5-boundary-condi
 The regime follows the ratio of boundary-layer depth to Obukhov length.
 
 $$
-L \;=\; -\,\frac{u_*^3\, T_v\, \rho\, c_p}{\kappa\, g\, H}
+L \ =\  -\ \frac{u_\ast^3\  T_v\  \rho\  c_p}{\kappa\  g\  H}
 \qquad
-w_* \;=\; \left(\frac{g\, h\, H}{T\, \rho\, c_p}\right)^{1/3}
+w_\ast \ =\  \left(\frac{g\  h\  H}{T\  \rho\  c_p}\right)^{1/3}
 $$
 
-with $\kappa = 0.4$, $c_p = 1005\ \mathrm{J\,kg^{-1}K^{-1}}$,
-$g = 9.80665\ \mathrm{m\,s^{-2}}$, $\rho = p_s/(R_d T)$, and $h$ the
+with $\kappa = 0.4$, $c_p = 1005\ \mathrm{J\ kg^{-1}K^{-1}}$,
+$g = 9.80665\ \mathrm{m\ s^{-2}}$, $\rho = p_s/(R_d T)$, and $h$ the
 boundary-layer depth. $T$ is the temperature at the lowest model level, used as a
 surface proxy; $T_v$ is approximated by $T$ (the humidity correction is small and
-deferred). $w_*$ is set to zero wherever $H \le 0$, where it is undefined.
+deferred). $w_\ast$ is set to zero wherever $H \le 0$, where it is undefined.
 
 $H$ is the **upward** sensible heat flux. This is worth stating loudly, because
 ERA5 stores the opposite: ECMWF's convention is positive *downward*, so a daytime
@@ -122,8 +122,8 @@ wrong when preparing meteorology from a non-ERA5 source (see
 
 $$
 \begin{aligned}
-h/L > 1 &\quad\Rightarrow\quad \text{stable} \\
--1 \le h/L \le 1 &\quad\Rightarrow\quad \text{neutral} \\
+h/L > 1 &\quad\Rightarrow\quad \text{stable} \cr
+-1 \le h/L \le 1 &\quad\Rightarrow\quad \text{neutral} \cr
 h/L < -1 &\quad\Rightarrow\quad \text{unstable / convective}
 \end{aligned}
 $$
@@ -135,25 +135,25 @@ numerical threshold. Thresholds match FLEXPART's defaults.
 
 ## 4. Boundary-layer profiles
 
-Throughout, $\zeta = z/h$ and $u_*$ is friction velocity. Note two things that
-are easy to misread: $\sigma_v$ tracks $\sigma_w$ (both $1.3u_*$), **not**
+Throughout, $\zeta = z/h$ and $u_\ast$ is friction velocity. Note two things that
+are easy to misread: $\sigma_v$ tracks $\sigma_w$ (both $1.3u_\ast$), **not**
 $\sigma_u$; and the three $T_L$ components differ from one another in the stable
 regime but not the neutral one.
 
 ### Stable — Hanna (1982) Eqs. 7.19–7.24
 
 $$
-\sigma_u = 2.0\,u_*(1-\zeta),
+\sigma_u = 2.0\ u_\ast(1-\zeta),
 \qquad
-\sigma_v = \sigma_w = 1.3\,u_*(1-\zeta)
+\sigma_v = \sigma_w = 1.3\ u_\ast(1-\zeta)
 $$
 
 $$
-T_{Lu} = 0.15\,\frac{h}{\sigma_u}\,\zeta^{1/2},
+T_{Lu} = 0.15\ \frac{h}{\sigma_u}\ \zeta^{1/2},
 \qquad
-T_{Lv} = 0.467\,T_{Lu},
+T_{Lv} = 0.467\ T_{Lu},
 \qquad
-T_{Lw} = 0.10\,\frac{h}{\sigma_w}\,\zeta^{0.8}
+T_{Lw} = 0.10\ \frac{h}{\sigma_w}\ \zeta^{0.8}
 $$
 
 The $\sigma$ profiles are **linear** in $(1-\zeta)$, not $(1-\zeta)^{3/4}$ — a
@@ -163,13 +163,13 @@ FLEXPART v11.
 ### Neutral — Hanna (1982) Eqs. 7.25–7.27
 
 $$
-\sigma_u = 2.0\,u_*\,e^{-3|f|z/u_*},
+\sigma_u = 2.0\ u_\ast\ e^{-3|f|z/u_\ast},
 \qquad
-\sigma_v = \sigma_w = 1.3\,u_*\,e^{-2|f|z/u_*}
+\sigma_v = \sigma_w = 1.3\ u_\ast\ e^{-2|f|z/u_\ast}
 $$
 
 $$
-T_{Lu} = T_{Lv} = T_{Lw} = \frac{0.5\,z}{\sigma_w\left(1 + 15|f|z/u_*\right)}
+T_{Lu} = T_{Lv} = T_{Lw} = \frac{0.5\ z}{\sigma_w\left(1 + 15|f|z/u_\ast\right)}
 $$
 
 Note the differing Ekman-decay exponents, $3|f|$ for $\sigma_u$ against $2|f|$ for
@@ -184,15 +184,15 @@ equator degenerates.
 ### Unstable / convective — Caughey (1982) Eq. 4.15; Ryall & Maryon (1998); Hanna (1982) Eq. 7.17
 
 $$
-\sigma_u = \sigma_v = u_*\left(12 - 0.5\,\frac{h}{L}\right)^{1/3}
+\sigma_u = \sigma_v = u_\ast\left(12 - 0.5\ \frac{h}{L}\right)^{1/3}
 $$
 
 $$
-\sigma_w = \sqrt{\,1.2\,w_*^2\,(1 - 0.9\zeta)\,\zeta^{2/3} \;+\; (1.8 - 1.4\zeta)\,u_*^2\,}
+\sigma_w = \sqrt{\ 1.2\ w_\ast^2\ (1 - 0.9\zeta)\ \zeta^{2/3} \ +\  (1.8 - 1.4\zeta)\ u_\ast^2\ }
 $$
 
 $$
-T_{Lu} = T_{Lv} = 0.15\,\frac{h}{\sigma_u}
+T_{Lu} = T_{Lv} = 0.15\ \frac{h}{\sigma_u}
 $$
 
 $T_{Lw}$ is piecewise, tested in the order shown:
@@ -200,13 +200,13 @@ $T_{Lw}$ is piecewise, tested in the order shown:
 $$
 T_{Lw} =
 \begin{cases}
-\dfrac{0.10\,z}{\sigma_w\left(0.55 - 0.38\,|z/L|\right)} & |z/L| < 1 \quad \text{(near-surface)} \\[2.2ex]
-\dfrac{0.59\,z}{\sigma_w} & \zeta < 0.1 \quad \text{(shallow)} \\[2.2ex]
-0.15\,\dfrac{h}{\sigma_w}\left(1 - e^{-5\zeta}\right) & \text{otherwise (bulk mixed layer)}
+\dfrac{0.10\ z}{\sigma_w\left(0.55 - 0.38\ |z/L|\right)} & |z/L| < 1 \quad \text{(near-surface)} \cr[2.2ex]
+\dfrac{0.59\ z}{\sigma_w} & \zeta < 0.1 \quad \text{(shallow)} \cr[2.2ex]
+0.15\ \dfrac{h}{\sigma_w}\left(1 - e^{-5\zeta}\right) & \text{otherwise (bulk mixed layer)}
 \end{cases}
 $$
 
-The two $\sigma_w$ contributions are the convective ($w_*$) and shear ($u_*$)
+The two $\sigma_w$ contributions are the convective ($w_\ast$) and shear ($u_\ast$)
 scalings: near the surface the second dominates, in the mid mixed layer the
 first.
 
@@ -215,7 +215,7 @@ first.
 ## 5. The Lagrangian-timescale floors
 
 $$
-T_{Lu},\,T_{Lv} \ge 10\ \mathrm{s}, \qquad T_{Lw} \ge 30\ \mathrm{s}
+T_{Lu},\ T_{Lv} \ge 10\ \mathrm{s}, \qquad T_{Lw} \ge 30\ \mathrm{s}
 $$
 
 These are FLEXPART v11's floors, and they are on by default
@@ -263,22 +263,22 @@ $$
 $$
 F(\mathrm{Ri}) =
 \begin{cases}
-\sqrt{1 - 16\,\mathrm{Ri}} & \mathrm{Ri} < 0 \quad\text{(unstable; rare aloft)}\\[1ex]
-\left(1 - \mathrm{Ri}/\mathrm{Ri}_c\right)^2 & 0 \le \mathrm{Ri} < \mathrm{Ri}_c \\[1ex]
+\sqrt{1 - 16\ \mathrm{Ri}} & \mathrm{Ri} < 0 \quad\text{(unstable; rare aloft)}\cr[1ex]
+\left(1 - \mathrm{Ri}/\mathrm{Ri}_c\right)^2 & 0 \le \mathrm{Ri} < \mathrm{Ri}_c \cr[1ex]
 0 & \mathrm{Ri} \ge \mathrm{Ri}_c = 0.25 \quad\text{(sub-critical, laminar)}
 \end{cases}
 $$
 
 $$
-K_z = \mathrm{clamp}\!\left(\ell^2 \left|\frac{\partial \mathbf{U}}{\partial z}\right| F(\mathrm{Ri}),\ \ 0.1,\ \ 50\right)\ \mathrm{m^2\,s^{-1}}
+K_z = \mathrm{clamp}\left(\ell^2 \left|\frac{\partial \mathbf{U}}{\partial z}\right| F(\mathrm{Ri}),\ \ 0.1,\ \ 50\right)\ \mathrm{m^2\ s^{-1}}
 $$
 
 which is then split into the $(\sigma_w, T_{Lw})$ pair the Langevin equation
 needs, using the buoyancy timescale:
 
 $$
-T_{Lw} = \mathrm{clamp}\!\left(\frac{0.5}{N},\ 1,\ 1000\right)\ \mathrm{s}
-\quad\text{(100 s where } N^2 \le 10^{-6}\,\mathrm{s^{-2}}\text{)},
+T_{Lw} = \mathrm{clamp}\left(\frac{0.5}{N},\ 1,\ 1000\right)\ \mathrm{s}
+\quad\text{(100 s where } N^2 \le 10^{-6}\ \mathrm{s^{-2}}\text{)},
 \qquad
 \sigma_w = \sqrt{K_z / T_{Lw}}
 $$
@@ -287,9 +287,9 @@ Horizontal free-troposphere turbulence is treated as isotropic with the vertical
 $\sigma_u = \sigma_v = \sigma_w$; the *horizontal* spread that actually matters
 aloft comes from the meander process (§7), which runs at all altitudes.
 
-**The $K_z$ floor of $0.1\ \mathrm{m^2\,s^{-1}}$ is load-bearing.** The scheme
-this replaced used fixed constants ($\sigma = 0.1\ \mathrm{m\,s^{-1}}$,
-$T_L = 100$ s, so $K \approx 1\ \mathrm{m^2\,s^{-1}}$), and that was a one-way
+**The $K_z$ floor of $0.1\ \mathrm{m^2\ s^{-1}}$ is load-bearing.** The scheme
+this replaced used fixed constants ($\sigma = 0.1\ \mathrm{m\ s^{-1}}$,
+$T_L = 100$ s, so $K \approx 1\ \mathrm{m^2\ s^{-1}}$), and that was a one-way
 trap: a particle that left the boundary layer was effectively frozen and could
 never mix back down, starving the surface footprint. A background floor
 guarantees the free troposphere is never fully still.
@@ -315,9 +315,9 @@ FLEXPART adopted — an **independent** horizontal OU process layered on top of 
 Hanna $u'/v'$ turbulence, applied at all altitudes:
 
 $$
-\sigma_{m,i} = C_m \cdot \mathrm{std}_{\text{local}}(U_i), \quad i \in \{u, v\}
+\sigma_{m,i} = C_m \cdot \mathrm{std}_{\text{local}}(U_i), \quad i \in \lbrace u, v\rbrace
 \qquad
-\tau_m = \tfrac{1}{2}\,\Delta t_{\text{met}} \approx 1800\ \mathrm{s}
+\tau_m = \tfrac{1}{2}\ \Delta t_{\text{met}} \approx 1800\ \mathrm{s}
 $$
 
 $\mathrm{std}_{\text{local}}$ is the standard deviation of the grid-scale wind
@@ -356,8 +356,8 @@ $z_{sl} = 0.1h$:
 $$
 \sigma_w =
 \begin{cases}
-1.3\,u_*\left(1 - 3z/L\right)^{1/3} & \text{unstable } (z/L < 0)\\
-1.3\,u_* & \text{stable / neutral}
+1.3\ u_\ast\left(1 - 3z/L\right)^{1/3} & \text{unstable } (z/L < 0)\cr
+1.3\ u_\ast & \text{stable / neutral}
 \end{cases}
 \qquad
 T_L = \frac{\kappa z}{\sigma}
@@ -371,7 +371,7 @@ $z \to 0$, undercutting the floors that §5 exists to impose. Second, it puts a
 discontinuity in $K$ at the $0.1h$ seam.
 
 The stable branch being **constant in height** is itself a correction. An earlier
-form, $1.3u_*(1 + 5z/L)$, *grew* with stability — that expression is the $\phi_m$
+form, $1.3u_\ast(1 + 5z/L)$, *grew* with stability — that expression is the $\phi_m$
 momentum-gradient function, not a $\sigma_w$ scaling — and it over-mixed the
 nocturnal near-surface layer.
 
@@ -404,8 +404,8 @@ shipped configs set 6. Raise it only if you lower `simulation.dt_seconds` or
 | Key | ERA5 variable | Units | Used for |
 | --- | --- | --- | --- |
 | `ustar` | `friction_velocity` | m s⁻¹ | all $\sigma$, $T_L$ |
-| `shf` | `surface_sensible_heat_flux` | W m⁻² (or J m⁻², de-accumulated) | $L$, $w_*$ |
-| `t` | `temperature` | K | $L$, $w_*$, $\rho$, $\theta$, $N^2$ |
+| `shf` | `surface_sensible_heat_flux` | W m⁻² (or J m⁻², de-accumulated) | $L$, $w_\ast$ |
+| `t` | `temperature` | K | $L$, $w_\ast$, $\rho$, $\theta$, $N^2$ |
 
 ---
 

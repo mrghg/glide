@@ -27,6 +27,19 @@ repos:
     hooks:
       - id: gitleaks
 
+  # Docs: LaTeX that GitHub's markdown pass would silently mangle before MathJax
+  # sees it (\, \; \! \{ \\ -> backslash stripped; paired * or _ eaten as
+  # emphasis; | splitting a table cell; $a$/$b$ adjacency). Renders fine in most
+  # local previewers, so it only shows up on github.com — hence the lint.
+  - repo: local
+    hooks:
+      - id: docs-math
+        name: check LaTeX survives GitHub markdown
+        entry: python3 scripts/check_docs_math.py
+        language: system
+        files: \.md$
+        pass_filenames: false
+
   # General hygiene. All fast, all uncontroversial.
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
