@@ -151,6 +151,51 @@ def test_in_bl_stable_sigma_vanishes_at_top_of_bl() -> None:
     assert sigma_w[0].item() < 1e-2
 
 
+def test_in_bl_stable_timescales_match_hanna() -> None:
+    """Stable T_Lu / T_Lv / T_Lw each divide by their OWN sigma (Hanna 1982 7.22-7.24).
+
+        T_Lu = 0.15 h/sigma_u sqrt(zeta)
+        T_Lv = 0.07 h/sigma_v sqrt(zeta)
+        T_Lw = 0.10 h/sigma_w zeta^0.8
+
+    Regression guard: T_Lv was computed as 0.467*T_Lu, which reproduces the
+    coefficient ratio 0.07/0.15 but divides by sigma_u instead of sigma_v. Since
+    sigma_u = 2.0 u*(1-zeta) and sigma_v = 1.3 u*(1-zeta), that left T_Lv short by
+    sigma_v/sigma_u = 0.65 at every height.
+    """
+
+    ustar_val, blh_val = 0.3, 500.0
+    heights = [25.0, 100.0, 250.0, 400.0]
+
+    z = torch.tensor(heights, dtype=torch.float64)
+    blh = torch.full_like(z, blh_val)
+    ustar = torch.full_like(z, ustar_val)
+    w_star = torch.zeros_like(z)
+    h_over_L = torch.full_like(z, 5.0)  # stable
+    lat = torch.full_like(z, 45.0)
+
+    sigma_u, sigma_v, sigma_w, T_Lu, T_Lv, T_Lw = in_bl_sigma_TL(
+        z, blh, ustar, w_star, h_over_L, lat
+    )
+
+    for i, z_val in enumerate(heights):
+        zeta = z_val / blh_val
+        su = 2.0 * ustar_val * (1.0 - zeta)
+        sv = 1.3 * ustar_val * (1.0 - zeta)
+        assert abs(sigma_u[i].item() - su) < 1e-9
+        assert abs(sigma_v[i].item() - sv) < 1e-9
+        assert abs(sigma_w[i].item() - sv) < 1e-9  # sigma_w == sigma_v when stable
+
+        assert abs(T_Lu[i].item() - 0.15 * blh_val / su * zeta**0.5) < 1e-6
+        assert abs(T_Lv[i].item() - 0.07 * blh_val / sv * zeta**0.5) < 1e-6
+        assert abs(T_Lw[i].item() - 0.10 * blh_val / sv * zeta**0.8) < 1e-6
+
+    # The specific regression: T_Lv must NOT be a scalar multiple of T_Lu, because
+    # the two divide by different sigmas. 0.467*T_Lu is 0.65x the correct value.
+    assert not torch.allclose(T_Lv, 0.467 * T_Lu, rtol=1e-3)
+    assert torch.allclose(T_Lv / T_Lu, torch.full_like(T_Lu, 0.718), rtol=1e-3)
+
+
 def test_in_bl_regime_selection_at_boundaries() -> None:
     """h/L just past +-1 should pick the stable / unstable branch, not neutral."""
 

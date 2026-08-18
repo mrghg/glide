@@ -151,7 +151,7 @@ $$
 $$
 T_{Lu} = 0.15\ \frac{h}{\sigma_u}\ \zeta^{1/2},
 \qquad
-T_{Lv} = 0.467\ T_{Lu},
+T_{Lv} = 0.07\ \frac{h}{\sigma_v}\ \zeta^{1/2},
 \qquad
 T_{Lw} = 0.10\ \frac{h}{\sigma_w}\ \zeta^{0.8}
 $$
@@ -159,6 +159,14 @@ $$
 The $\sigma$ profiles are **linear** in $(1-\zeta)$, not $(1-\zeta)^{3/4}$ — a
 form that appears in some secondary references and was corrected here against
 FLEXPART v11.
+
+Each timescale divides by **its own** $\sigma$. That is easy to lose: the
+coefficient ratio $0.07/0.15 = 0.467$ tempts you to write
+$T_{Lv} = 0.467\ T_{Lu}$, but since $\sigma_u = 2.0\ u_\ast(1-\zeta)$ and
+$\sigma_v = 1.3\ u_\ast(1-\zeta)$ that leaves $T_{Lv}$ short by
+$\sigma_v/\sigma_u = 0.65$ at every height. GLIDE had exactly that error until
+2026-08-17; `test_in_bl_stable_timescales_match_hanna` now pins all three
+components against the published equations.
 
 ### Neutral — Hanna (1982) Eqs. 7.25–7.27
 
