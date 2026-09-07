@@ -165,6 +165,11 @@ than opening whole NetCDF or GRIB files, GLIDE treats the archive as something t
 sip from: it asks for **one hour, over the box currently containing the particle
 cloud, up to its vertical ceiling**.
 
+Throughout this page "hour" is shorthand for **one meteorology window**, which is
+one timestep of the source. That is an hour for ERA5, and the reader measures it
+from the store's time coordinate rather than assuming it, so a 3-hourly archive
+is read on 3-hourly windows with no change to any of the machinery below.
+
 Zarr stores an array as many small compressed blocks ("chunks") rather than one
 continuous file, and each can be fetched independently. So a request for a small
 region only decompresses the handful of blocks that overlap it, instead of
@@ -207,7 +212,7 @@ top of that:
 | Layer | What it remembers | Why |
 | --- | --- | --- |
 | **Processed hours** (in the reader; 6 kept) | one fully processed meteorology hour | Consecutive steps interpolate between two bracketing hours, and neighbouring windows share one of them. Without this cache, every hour is read, converted and regridded **twice**. |
-| **Meteorology windows** (in the run loop; `memory.met_cache_max_hours`) | a whole window, ready to use | Consecutive batches walk back over overlapping periods. Set this too small and the run repeatedly discards hours it is about to need again and re-fetches them; the run warns at startup if the setting looks too low. |
+| **Meteorology windows** (in the run loop; `memory.met_cache_max_hours`) | a whole window, ready to use | Consecutive batches walk back over overlapping periods. Set this too small and the run repeatedly discards windows it is about to need again and re-fetches them; the run warns at startup if the setting looks too low. Despite the name it counts **windows**, so at 3-hourly met each entry holds three hours. |
 | **Derived turbulence fields** (in the scheme) | air density, free-troposphere σ and $T_L$, meander σ, on the meteorology grid | These are built **once at the middle of each meteorology hour** ($\alpha = 0.5$) and reused for every step within it. |
 
 The third is a physics approximation, and a deliberate one: those fields change
