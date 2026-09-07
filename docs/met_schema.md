@@ -51,10 +51,9 @@ Coordinate names are configurable on the reader (`lon_name`, `lat_name`,
 resistance. The one you *will* set is `level_name` for model-level stores — and
 even that is auto-corrected when the store is tagged (see below).
 
-Hourly cadence is assumed by the accumulated-flux de-accumulation
-(`accumulation_seconds`, default 3600 s). If your source uses a different
-accumulation window, set `accumulation_seconds` to match, or supply instantaneous
-fluxes.
+Cadence and flux accumulation are independent: the accumulated-flux period comes
+from the store's `glide_flux_accumulation_seconds` attr (see
+[Sensible heat flux](#sensible-heat-flux)), not from the time coordinate.
 
 ## Required variables
 
@@ -116,8 +115,45 @@ If your source is already positive-upward, negate it before writing. Getting thi
 wrong inverts the stability classification on every field — GLIDE will run
 happily and produce nonsense.
 
-Accumulated (`J m**-2`) fluxes are de-accumulated by dividing by
-`accumulation_seconds`; instantaneous (`W m**-2`) fluxes pass through unscaled.
+Accumulated (`J m**-2`) fluxes are de-accumulated before use; instantaneous
+(`W m**-2`) fluxes pass through unscaled.
+
+**Tag the accumulation period.** `J m**-2` says the field is accumulated but not
+over how long, and the period is not recoverable from the data. GLIDE therefore
+**refuses** to de-accumulate an accumulated flux unless the store says:
+
+```
+glide_flux_accumulation_seconds = 3600
+```
+
+(`download_sample_cube.py` writes it; the reader's `accumulation_seconds`
+argument overrides it for a store whose attr is wrong.) A store whose fluxes are
+already instantaneous never needs the attr.
+
+This is the **source's** accumulation period, and it does not change when you
+subset or subsample the store in time: ERA5 accumulates over one hour, so an ERA5
+cube thinned to 3-hourly still carries `3600`. Getting it wrong is a silent
+rescaling of the surface heat flux — which sets the Obukhov length, and so the
+stable/convective regime the turbulence scheme picks for every column.
+
+A cube downloaded before this attr existed will be refused. Retagging one is a
+metadata-only edit — no data is rewritten:
+
+```python
+import zarr
+
+g = zarr.open_group("EUROPE_202401.zarr", mode="r+")
+g.attrs["glide_flux_accumulation_seconds"] = 3600  # ERA5
+zarr.consolidate_metadata(g.store)
+```
+
+As a backstop, GLIDE checks the converted flux on the first window it reads and
+rejects a peak magnitude above 2000 W m⁻² (real values peak near 600–800 over hot
+dry land; an undivided hourly accumulation lands near 3.6 × 10⁵). That catches a
+missing or order-of-magnitude-wrong divisor whatever the attrs claim. It cannot
+catch a small wrong factor — reading hourly-accumulated data as 3-hourly puts
+midday flux at 300 W m⁻² instead of 100, and both are plausible — which is why
+the attr is mandatory rather than defaulted.
 
 ### Geopotential, not geopotential height
 
@@ -256,6 +292,7 @@ NWP archive (the Met Office UM) against the schema; most of it generalises.
 | Heat flux is positive-**up** | Negate it to the ECMWF positive-down convention |
 | Non-GLIDE variable names | Rename to GLIDE's defaults — `main.py` exposes no `variable_map` override |
 | Level coordinate is 1..N indices | Tag the store `glide_vertical_coordinate="model_level"`, or GLIDE will refuse it rather than read the indices as pressures |
+| Heat flux is accumulated (`J m**-2`) | Tag the store `glide_flux_accumulation_seconds=<source period>`, or GLIDE will refuse to guess the divisor |
 | Domain-spanning chunks | Rechunk — see [Chunking](#chunking) |
 
 Three things worth knowing before you start:

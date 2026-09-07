@@ -88,6 +88,14 @@ SURFACE_VARS = [
 # The full unified pressure-level list (3D + surface) lives in one store.
 REQUIRED_VARS = THREE_D_VARS + SURFACE_VARS
 
+# ERA5 accumulates surface fluxes (surface_sensible_heat_flux, J/m^2) over one hour.
+# This is a property of the SOURCE product, not of how we slice it: subsetting in time
+# or subsampling the cadence does not change the period each stored value covers. It is
+# written into the cube's attrs because the reader cannot recover it from the data --
+# `J m**-2` says "accumulated" but not over how long -- and guessing rescales the
+# surface heat flux (see met_reader._convert_shf_to_w_per_m2).
+ERA5_FLUX_ACCUMULATION_SECONDS = 3600
+
 
 # Registry of named meteorological-archive domains. Add new domains here rather
 # than hard-coding bboxes at call sites. lon/lat bounds are inclusive cell-centre
@@ -418,6 +426,7 @@ def download_sample_cube(
     # consumers can tell pressure- from model-level cubes apart.
     attrs = dict(archive_attrs or {})
     attrs["glide_vertical_coordinate"] = "model_level" if levels == "model" else "pressure_level"
+    attrs["glide_flux_accumulation_seconds"] = str(ERA5_FLUX_ACCUMULATION_SECONDS)
     ds_subset.attrs = {**ds_subset.attrs, **attrs}
 
     print(

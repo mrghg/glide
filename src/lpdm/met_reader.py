@@ -14,6 +14,7 @@ Design goals:
 from __future__ import annotations
 
 import glob
+import logging
 import os
 import threading
 from abc import ABC, abstractmethod
@@ -36,8 +37,19 @@ from lpdm.vertical_grid import (
     terrain_gradient,
 )
 
+LOGGER = logging.getLogger(__name__)
+
 GRAVITY_M_S2 = 9.80665
 R_DRY_AIR_J_KG_K = 287.05
+
+# Plausibility ceiling for surface sensible heat flux (W/m^2) AFTER de-accumulation
+# and the sign flip. Real values peak near 600-800 W/m^2 over hot dry land, so this
+# leaves wide physical headroom; an hourly-accumulated field that was never divided
+# arrives near 3.6e5, three orders of magnitude clear of it. This catches a missing
+# or order-of-magnitude-wrong divisor. It CANNOT catch a small wrong factor (reading
+# hourly-accumulated data as 3-hourly puts midday flux at 300 W/m^2 instead of 100 —
+# both plausible); that is what the mandatory store attr is for.
+SHF_PLAUSIBLE_MAX_W_M2 = 2000.0
 
 
 @dataclass(frozen=True)
@@ -234,7 +246,7 @@ class ArcoEra5ZarrReader(MetReader):
         time_name: str = "time",
         vertical_coordinate: str | None = None,
         chunk_overrides: Mapping[str, int] | None = None,
-        accumulation_seconds: int = 3600,
+        accumulation_seconds: int | None = None,
         terrain_following: bool = True,
         agl_levels_m: Sequence[float] | None = None,
         device: torch.device | str = DEVICE,
@@ -269,9 +281,15 @@ class ArcoEra5ZarrReader(MetReader):
                 `terrain_following=True`.
             chunk_overrides: Optional xarray/dask chunk override dict.
             accumulation_seconds: Period over which accumulated surface fluxes (e.g.
-                surface_sensible_heat_flux as J/m^2) are aggregated. Used to convert
-                accumulated flux fields back to instantaneous W/m^2. Default 3600 s
-                matches ERA5 hourly accumulation.
+                surface_sensible_heat_flux as J/m^2) are aggregated, used to convert
+                them back to mean W/m^2. If None (default), read from the store's
+                `glide_flux_accumulation_seconds` attr (written by
+                `download_sample_cube.py`). There is deliberately NO fallback
+                default: the period is not recoverable from the data or its units,
+                and a wrong one silently rescales the surface heat flux (and with it
+                the Obukhov length and the whole stable/convective regime choice).
+                A store whose flux fields are already instantaneous (W/m^2) never
+                needs it. An explicit value here overrides the store attr.
             terrain_following: If True (default), resample the pressure-level met onto
                 a fixed terrain-following AGL grid once per window and slope-correct
                 the vertical velocity (Finding 7 fix). If False, ship fields on the
@@ -305,7 +323,17 @@ class ArcoEra5ZarrReader(MetReader):
         )
         self._vertical_resolved = False
         self.chunk_overrides = dict(chunk_overrides or {})
-        self.accumulation_seconds = int(accumulation_seconds)
+        # Accumulation period for accumulated surface fluxes. Resolved lazily on first
+        # open (from the arg or the store's `glide_flux_accumulation_seconds` attr) and
+        # stays None if neither supplies it — `_convert_shf_to_w_per_m2` then refuses to
+        # guess rather than de-accumulating with an invented divisor.
+        self._accumulation_seconds_arg = (
+            int(accumulation_seconds) if accumulation_seconds is not None else None
+        )
+        self.accumulation_seconds: int | None = self._accumulation_seconds_arg
+        self._flux_accumulation_resolved = False
+        # One-shot magnitude guard on the converted flux (see SHF_PLAUSIBLE_MAX_W_M2).
+        self._shf_magnitude_checked = False
         # Terrain-following (hybrid) vertical coordinate: resample pressure levels
         # onto a fixed AGL grid once per window (Finding 7). Off => legacy path that
         # ships fields on the pressure grid with a bbox-mean level array (biased over
@@ -343,7 +371,7 @@ class ArcoEra5ZarrReader(MetReader):
                 f"channel_names contains keys with no entry in variable_map: {unknown}. "
                 f"Add them to variable_map or remove from channel_names."
             )
-        if self.accumulation_seconds <= 0:
+        if self._accumulation_seconds_arg is not None and self._accumulation_seconds_arg <= 0:
             raise ValueError("accumulation_seconds must be > 0")
 
     @property
@@ -388,6 +416,48 @@ class ArcoEra5ZarrReader(MetReader):
                 f"({values[0]:.0f}..{values[-1]:.0f}) — level indices, not pressures"
             )
         return None
+
+    def _resolve_flux_accumulation(self, ds: xr.Dataset) -> None:
+        """Resolve the accumulated-flux period once, from the arg or the store attr.
+
+        Leaves `accumulation_seconds` as None when neither supplies it; the error is
+        raised later, in `_convert_shf_to_w_per_m2`, and only if a flux variable is
+        actually in accumulated units. A store carrying instantaneous W/m^2 fluxes
+        has no accumulation period, so demanding the attr unconditionally would just
+        train people to write a meaningless number into it.
+        """
+
+        if self._flux_accumulation_resolved:
+            return
+
+        raw = ds.attrs.get("glide_flux_accumulation_seconds")
+        store_value: int | None = None
+        if raw is not None and str(raw).strip() != "":
+            try:
+                store_value = int(round(float(raw)))
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"Store attr glide_flux_accumulation_seconds={raw!r} is not a number. "
+                    "It must be the period in seconds over which the source accumulates "
+                    "surface fluxes (3600 for ERA5). See docs/met_schema.md."
+                ) from exc
+            if store_value <= 0:
+                raise ValueError(f"Store attr glide_flux_accumulation_seconds={raw!r} must be > 0.")
+
+        if self._accumulation_seconds_arg is not None:
+            if store_value is not None and store_value != self._accumulation_seconds_arg:
+                LOGGER.warning(
+                    "accumulation_seconds=%d passed to the reader overrides the store's "
+                    "glide_flux_accumulation_seconds=%d. The store attr is written from the "
+                    "source's own accumulation period, so prefer it unless you know it is wrong.",
+                    self._accumulation_seconds_arg,
+                    store_value,
+                )
+            self.accumulation_seconds = self._accumulation_seconds_arg
+        else:
+            self.accumulation_seconds = store_value
+
+        self._flux_accumulation_resolved = True
 
     def _resolve_vertical_mode(self, ds: xr.Dataset) -> None:
         """Resolve pressure- vs model-level mode and the vertical coord name once.
@@ -457,6 +527,7 @@ class ArcoEra5ZarrReader(MetReader):
         # selecting variables, so model mode can pull in the extra fields (sp, q)
         # it needs for the hydrostatic pressure reconstruction.
         self._resolve_vertical_mode(ds)
+        self._resolve_flux_accumulation(ds)
         ds = self._select_variables(ds)
 
         # `ds` is the reader's memoized shared handle — do not close it here.
@@ -1378,8 +1449,62 @@ class ArcoEra5ZarrReader(MetReader):
         if self._is_flux_density_units(norm):
             flux_w_m2 = arr
         elif self._is_flux_accumulated_units(norm):
+            if self.accumulation_seconds is None:
+                raise ValueError(
+                    f"Refusing to de-accumulate surface_sensible_heat_flux: its units "
+                    f"({units!r}) say the field is ACCUMULATED, but the store does not say "
+                    "over what period. The units carry no period, so it cannot be inferred "
+                    "from the data, and a wrong divisor silently rescales the surface heat "
+                    "flux -- which sets the Obukhov length and therefore the stable/"
+                    "convective regime the turbulence scheme picks. Tag the store with the "
+                    "attr glide_flux_accumulation_seconds (3600 for ERA5; "
+                    "scripts/download_sample_cube.py does this), or construct the reader "
+                    "with accumulation_seconds=<period>. Note this is the SOURCE's "
+                    "accumulation period, which does not change if you subsample the store "
+                    "in time. See docs/met_schema.md."
+                )
             flux_w_m2 = arr / float(self.accumulation_seconds)
         else:
             raise ValueError(f"Unsupported units {units!r} for surface_sensible_heat_flux")
         # ECMWF downward-positive -> GLIDE upward-positive.
-        return -flux_w_m2
+        flux_w_m2 = -flux_w_m2
+        self._check_shf_magnitude(flux_w_m2, units)
+        return flux_w_m2
+
+    def _check_shf_magnitude(self, flux_w_m2: np.ndarray, units: str) -> None:
+        """Fail once per reader if the converted heat flux is physically impossible.
+
+        Independent of the units attr and the store tag, so it catches the case where
+        both lie: a field left undivided, or divided by something orders of magnitude
+        wrong. Runs on the first converted window only -- the field is already in
+        memory, so the cost is one reduction per reader, and a later window cannot be
+        wrong in a way the first was not.
+
+        Deliberately one-sided. Over-division leaves a small field, and a calm night
+        genuinely has |H| of a few W/m^2, so a lower bound would fire on real data.
+        """
+
+        if self._shf_magnitude_checked:
+            return
+        self._shf_magnitude_checked = True
+
+        finite = flux_w_m2[np.isfinite(flux_w_m2)]
+        if finite.size == 0:
+            return
+        peak = float(np.max(np.abs(finite)))
+        if peak <= SHF_PLAUSIBLE_MAX_W_M2:
+            return
+
+        divisor = (
+            "no de-accumulation (units read as instantaneous W/m^2)"
+            if self.accumulation_seconds is None
+            else f"a divisor of {self.accumulation_seconds} s"
+        )
+        raise ValueError(
+            f"surface_sensible_heat_flux converts to a peak magnitude of {peak:.3g} W/m^2, "
+            f"above the physical ceiling of {SHF_PLAUSIBLE_MAX_W_M2:.0f} W/m^2, using {divisor} "
+            f"on units {units!r}. Either the units attr misdescribes the field or the "
+            "accumulation period is wrong by orders of magnitude; both corrupt the Obukhov "
+            "length and the turbulence regime choice. Check the store's units and its "
+            "glide_flux_accumulation_seconds attr. See docs/met_schema.md."
+        )
