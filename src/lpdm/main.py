@@ -1693,7 +1693,16 @@ def _run(
     metadata = {
         "config": _config_metadata(cfg, schedule_release_end, schedule_sim_start),
         "runtime": _runtime_metadata(
-            cfg, step_count, hour_windows, memory_stats, status="completed"
+            cfg,
+            step_count,
+            hour_windows,
+            memory_stats,
+            status="completed",
+            # The period actually used to de-accumulate surface fluxes, not the one
+            # configured: it is normally resolved from the store attr, and a run whose
+            # heat fluxes look wrong is diagnosed by reading it back here rather than
+            # re-deriving it from the cube.
+            flux_accumulation_seconds=getattr(reader, "accumulation_seconds", None),
         ),
         "schedule": {
             "n_batches": len(batches),

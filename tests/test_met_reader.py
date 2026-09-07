@@ -94,6 +94,7 @@ def _build_mock_era5_dataset(terrain_slope_m_per_deg: float = 0.0) -> xr.Dataset
     ds["friction_velocity"].attrs["units"] = "m s**-1"
     ds["surface_sensible_heat_flux"].attrs["units"] = "J m**-2"
     ds["level"].attrs["units"] = "hPa"
+    ds.attrs["glide_flux_accumulation_seconds"] = "3600"
 
     return ds
 
@@ -175,6 +176,7 @@ def _build_mock_model_level_dataset() -> xr.Dataset:
         ds[name].attrs["units"] = u
     ds["hybrid"].attrs["units"] = "1"
     ds.attrs["glide_vertical_coordinate"] = "model_level"
+    ds.attrs["glide_flux_accumulation_seconds"] = "3600"
     return ds
 
 
@@ -599,6 +601,9 @@ def test_shf_sign_flip_maps_ecmwf_downward_to_upward_positive() -> None:
 
     reader = ArcoEra5ZarrReader.__new__(ArcoEra5ZarrReader)
     reader.accumulation_seconds = 3600
+    # Bypassing __init__ leaves the one-shot magnitude guard's flag unset; these
+    # fluxes are all plausible, so the guard is a no-op either way.
+    reader._shf_magnitude_checked = False
 
     # Accumulated J/m^2: ECMWF-negative (upward flux) -> GLIDE-positive.
     acc = np.array([[-360_000.0]], dtype=np.float64)  # -100 W/m^2 downward
@@ -1102,3 +1107,121 @@ def test_fetch_hourly_window_leaves_shared_handle_open(tmp_path) -> None:
     # Still usable after the fetch: a second fetch on the same handle succeeds.
     reader.fetch_hourly_window(request)
     assert reader._dataset_cache is handle
+
+
+def _shf_request() -> BoundingBoxRequest:
+    """The standard bbox/time request used by the surface-flux guard tests."""
+
+    return BoundingBoxRequest(
+        spatial=SpatialBounds(
+            lon_min=19.5,
+            lon_max=21.5,
+            lat_min=9.5,
+            lat_max=11.5,
+            z_min=850.0,
+            z_max=1050.0,
+        ),
+        time=TimeBounds(
+            start=datetime(2024, 1, 1, 0, 15, tzinfo=UTC),
+            end=datetime(2024, 1, 1, 1, 0, tzinfo=UTC),
+        ),
+    )
+
+
+def _shf_reader(ds: xr.Dataset, **kwargs) -> _InMemoryArcoReader:
+    reader = _InMemoryArcoReader(ds, **kwargs)
+    reader.channel_names = ("u", "v", "w", "blh", "sp", "ustar", "shf")
+    return reader
+
+
+def test_accumulated_shf_without_store_attr_is_refused() -> None:
+    """An accumulated flux field with no accumulation period must fail loudly.
+
+    The units say J/m^2 but not over how long, so de-accumulating with an invented
+    divisor silently rescales the heat flux (and the Obukhov length with it). The
+    reader must refuse rather than assume the old hardcoded 3600 s.
+    """
+
+    ds = _build_mock_era5_dataset()
+    del ds.attrs["glide_flux_accumulation_seconds"]
+
+    with pytest.raises(ValueError, match="glide_flux_accumulation_seconds"):
+        _shf_reader(ds).fetch_hourly_window(_shf_request())
+
+
+def test_instantaneous_shf_needs_no_accumulation_attr() -> None:
+    """A W/m^2 store has no accumulation period, so the attr must not be required."""
+
+    ds = _build_mock_era5_dataset()
+    del ds.attrs["glide_flux_accumulation_seconds"]
+    ds["surface_sensible_heat_flux"] = ds["surface_sensible_heat_flux"] / 3600.0
+    ds["surface_sensible_heat_flux"].attrs["units"] = "W m**-2"
+
+    result = _shf_reader(ds).fetch_hourly_window(_shf_request())
+
+    shf_start, _ = result.channel("shf")
+    assert torch.allclose(shf_start, torch.full_like(shf_start, -100.0))
+
+
+def test_store_attr_supplies_the_accumulation_period() -> None:
+    """A cube accumulated over 3 h de-accumulates by 10800 s, not by an assumed hour."""
+
+    ds = _build_mock_era5_dataset()
+    ds.attrs["glide_flux_accumulation_seconds"] = "10800"
+
+    reader = _shf_reader(ds)
+    result = reader.fetch_hourly_window(_shf_request())
+
+    assert reader.accumulation_seconds == 10800
+    # +360_000 J/m^2 over 10800 s = +33.33 W/m^2 downward -> -33.33 upward.
+    shf_start, _ = result.channel("shf")
+    assert torch.allclose(shf_start, torch.full_like(shf_start, -360_000.0 / 10800.0))
+
+
+def test_explicit_accumulation_seconds_overrides_the_store_attr() -> None:
+    """The constructor arg stays an escape hatch for a store whose attr is wrong."""
+
+    ds = _build_mock_era5_dataset()
+    ds.attrs["glide_flux_accumulation_seconds"] = "10800"
+
+    reader = _shf_reader(ds, accumulation_seconds=3600)
+    result = reader.fetch_hourly_window(_shf_request())
+
+    assert reader.accumulation_seconds == 3600
+    shf_start, _ = result.channel("shf")
+    assert torch.allclose(shf_start, torch.full_like(shf_start, -100.0))
+
+
+def test_non_numeric_accumulation_attr_is_refused() -> None:
+    ds = _build_mock_era5_dataset()
+    ds.attrs["glide_flux_accumulation_seconds"] = "hourly"
+
+    with pytest.raises(ValueError, match="not a number"):
+        _shf_reader(ds).fetch_hourly_window(_shf_request())
+
+
+def test_implausible_shf_magnitude_is_refused() -> None:
+    """The magnitude guard catches a mislabelled field even when the store is tagged.
+
+    Here an accumulated field is labelled W/m^2, so nothing divides it and the
+    converted flux lands at 3.6e5 W/m^2 — physically impossible. Neither the units
+    attr nor the accumulation attr can catch this; only the value can.
+    """
+
+    ds = _build_mock_era5_dataset()
+    ds["surface_sensible_heat_flux"].attrs["units"] = "W m**-2"
+
+    with pytest.raises(ValueError, match="above the physical ceiling"):
+        _shf_reader(ds).fetch_hourly_window(_shf_request())
+
+
+def test_plausible_shf_magnitude_passes_the_guard() -> None:
+    """A hot-desert-scale flux (700 W/m^2) is real data and must not trip the guard."""
+
+    ds = _build_mock_era5_dataset()
+    ds["surface_sensible_heat_flux"] = ds["surface_sensible_heat_flux"] * 0.0 - 700.0 * 3600.0
+
+    result = _shf_reader(ds).fetch_hourly_window(_shf_request())
+
+    shf_start, _ = result.channel("shf")
+    assert torch.allclose(shf_start, torch.full_like(shf_start, 700.0))
