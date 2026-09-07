@@ -298,8 +298,9 @@ Each of these is a deliberate simplification, listed with what it costs.
    non-displaced environmental air is a random walk rather than a prescribed
    velocity.
 
-6. **Convection interval hardcoded at 3600 s.** Correct for hourly ERA5, wrong
-   for anything else. A documented follow-up.
+6. **Convection fires once per met window**, and scales the mass flux by that
+   window's own duration, read from the window metadata. It therefore follows
+   whatever cadence the meteorology has rather than assuming an hour.
 
 ---
 

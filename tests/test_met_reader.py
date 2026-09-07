@@ -1225,3 +1225,111 @@ def test_plausible_shf_magnitude_passes_the_guard() -> None:
 
     shf_start, _ = result.channel("shf")
     assert torch.allclose(shf_start, torch.full_like(shf_start, 700.0))
+
+
+# --- meteorology cadence ------------------------------------------------------
+
+
+def _retimed_mock_dataset(start: str, step_hours: int, n_steps: int = 4) -> xr.Dataset:
+    """The standard mock store, re-stamped onto an arbitrary uniform time grid."""
+
+    ds = _build_mock_era5_dataset()
+    times = np.array(
+        [np.datetime64(start) + np.timedelta64(step_hours * i, "h") for i in range(n_steps)]
+    )
+    # Repeat the two source timesteps to fill the requested length.
+    ds = xr.concat([ds.isel(time=i % 2) for i in range(n_steps)], dim="time")
+    return ds.assign_coords(time=times)
+
+
+def test_hourly_cadence_is_measured_from_the_time_coordinate() -> None:
+    reader = _InMemoryArcoReader(_build_mock_era5_dataset())
+
+    assert reader.met_interval_seconds == 3600
+
+
+def test_three_hourly_store_brackets_on_three_hours() -> None:
+    """A 3-hourly store must bracket [00, 03), not [00, 01) — the window is one
+    source timestep, and both ends have to land on real timestamps."""
+
+    ds = _retimed_mock_dataset("2024-01-01T00:00:00", step_hours=3)
+    reader = _InMemoryArcoReader(ds)
+
+    assert reader.met_interval_seconds == 10800
+
+    result = reader.fetch_hourly_window(
+        BoundingBoxRequest(
+            spatial=SpatialBounds(
+                lon_min=19.5, lon_max=21.5, lat_min=9.5, lat_max=11.5, z_min=850.0, z_max=1050.0
+            ),
+            time=TimeBounds(
+                start=datetime(2024, 1, 1, 1, 20, tzinfo=UTC),
+                end=datetime(2024, 1, 1, 2, 0, tzinfo=UTC),
+            ),
+        )
+    )
+
+    assert result.metadata.time_start == datetime(2024, 1, 1, 0, 0, tzinfo=UTC)
+    assert result.metadata.time_end == datetime(2024, 1, 1, 3, 0, tzinfo=UTC)
+
+
+def test_window_grid_is_anchored_on_the_stores_own_first_timestamp() -> None:
+    """A store sampled at :30 past has windows at :30, not on the hour. Flooring to
+    the wall-clock hour would ask for a timestamp the store does not have."""
+
+    ds = _retimed_mock_dataset("2024-01-01T01:30:00", step_hours=3)
+    reader = _InMemoryArcoReader(ds)
+
+    assert reader.floor_to_window_start(datetime(2024, 1, 1, 3, 0, tzinfo=UTC)) == datetime(
+        2024, 1, 1, 1, 30, tzinfo=UTC
+    )
+    assert reader.floor_to_window_start(datetime(2024, 1, 1, 4, 45, tzinfo=UTC)) == datetime(
+        2024, 1, 1, 4, 30, tzinfo=UTC
+    )
+
+
+def test_floor_to_window_start_is_exact_on_a_window_boundary() -> None:
+    """A cursor sitting exactly on a timestamp must not slip back a whole window."""
+
+    reader = _InMemoryArcoReader(_retimed_mock_dataset("2024-01-01T00:00:00", step_hours=3))
+
+    on_boundary = datetime(2024, 1, 1, 3, 0, tzinfo=UTC)
+    assert reader.floor_to_window_start(on_boundary) == on_boundary
+
+
+def test_floor_to_window_start_handles_times_before_the_store_origin() -> None:
+    """Backward runs walk earlier in time; flooring must stay on the same grid when
+    the cursor precedes the origin rather than snapping forward to it."""
+
+    reader = _InMemoryArcoReader(_retimed_mock_dataset("2024-01-01T00:00:00", step_hours=3))
+
+    assert reader.floor_to_window_start(datetime(2023, 12, 31, 22, 10, tzinfo=UTC)) == datetime(
+        2023, 12, 31, 21, 0, tzinfo=UTC
+    )
+
+
+def test_ragged_time_coordinate_is_refused() -> None:
+    """A gap makes some windows silently longer than others, mis-weighting the
+    linear interpolation inside them."""
+
+    ds = _retimed_mock_dataset("2024-01-01T00:00:00", step_hours=1)
+    ds = ds.assign_coords(
+        time=np.array(
+            [
+                np.datetime64("2024-01-01T00:00:00"),
+                np.datetime64("2024-01-01T01:00:00"),
+                np.datetime64("2024-01-01T02:00:00"),
+                np.datetime64("2024-01-01T06:00:00"),  # gap
+            ]
+        )
+    )
+
+    with pytest.raises(ValueError, match="not uniformly.*spaced"):
+        assert _InMemoryArcoReader(ds).met_interval_seconds
+
+
+def test_explicit_met_interval_overrides_the_measured_cadence() -> None:
+    ds = _retimed_mock_dataset("2024-01-01T00:00:00", step_hours=3)
+    reader = _InMemoryArcoReader(ds, met_interval_seconds=3600)
+
+    assert reader.met_interval_seconds == 3600

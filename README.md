@@ -226,8 +226,9 @@ the caveats.
 runs, on pressure levels or native model levels. That page's
 [non-ERA5 checklist](docs/met_schema.md#preparing-meteorology-from-a-non-era5-source)
 covers the gaps other NWP archives usually have to close first — absent
-geopotential, coarser-than-hourly cadence, missing friction velocity, and the
-heat-flux sign convention.
+geopotential, missing friction velocity, and the heat-flux sign and accumulation
+conventions. Cadence is not one of them: GLIDE reads whatever uniform timestep
+the store has.
 
 > The validation and comparison datasets (NAME, FLEXPART, EDGAR) are **not**
 > redistributed here — see [data/README.md](data/README.md). The model runs
