@@ -71,7 +71,7 @@ class ConvectionScheme(ABC):
         """Possibly redistribute particles vertically in convectively active columns.
 
         Called once per met-update interval (the runtime fires this whenever the
-        hourly met window advances, NOT every integration timestep). Implementations
+        met window advances, NOT every integration timestep). Implementations
         decide which columns are convectively active and randomly displace particles
         in those columns according to a per-column mass-flux matrix.
 
@@ -84,7 +84,9 @@ class ConvectionScheme(ABC):
                 dt_seconds: integration-loop dt — only used as the closure timescale
                         `τ_conv` for converting the steady-state mass flux into a
                         per-call redistribution probability. The actual cadence at which
-                        this method is called is the met-update interval.
+                        this method is called is the met-update interval, which a scheme
+                        reads from the window itself (`metadata.time_end - time_start`)
+                        rather than assuming hourly.
                 active_mask: (N,) bool. Particles outside this mask must be unchanged.
                 engine: `GPUEngine` instance — exposed for future use (currently
                         only the device/dtype are read).

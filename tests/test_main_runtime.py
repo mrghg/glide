@@ -49,6 +49,14 @@ class AnalyticMetReader(MetReader):
     channel_names: tuple[str, ...] = ("u", "v", "w", "blh", "sp")
     device: torch.device | str = "cpu"
     dtype: torch.dtype = torch.float32
+    # Source cadence this synthetic store pretends to have. The base class exposes
+    # `met_interval_seconds` as a read-only property, so readers declare their
+    # cadence by overriding it (as ArcoEra5ZarrReader does from the time coord).
+    interval_seconds: int = 3600
+
+    @property
+    def met_interval_seconds(self) -> int:
+        return self.interval_seconds
 
     def get_time_coverage(self) -> tuple[datetime, datetime]:
         return self.coverage_start, self.coverage_end
@@ -1820,3 +1828,88 @@ def test_memory_guard_trip_aborts_and_writes_diagnostics(tmp_path: Path) -> None
     assert "RSS" in meta["reason"]
     assert "guard_limit_rss_bytes" in text
     assert "guard_observed_rss_bytes" in text
+
+
+# --- meteorology cadence ------------------------------------------------------
+
+
+def _cadence_run(tmp_path: Path, interval_seconds: int) -> dict:
+    """Identical constant-wind run, driven by met at the given source cadence."""
+
+    cfg = _make_run_config(
+        release_duration_seconds=60,
+        simulation_length_seconds=10800,
+        dt_seconds=300,
+        release_lon=0.0,
+        release_lat=0.0,
+        n_particles=256,
+        release_seed=42,
+        output_uri=str(tmp_path / f"out_{interval_seconds}"),
+    )
+    # Coverage is padded by a whole window at each end: a coarser source has to
+    # cover the window ENCLOSING the run, not just its endpoints.
+    reader = AnalyticMetReader(
+        coverage_start=cfg.simulation.start_time
+        - timedelta(seconds=cfg.simulation.length_seconds + 2 * interval_seconds),
+        coverage_end=cfg.simulation.start_time
+        + timedelta(seconds=cfg.release.duration_seconds + 2 * interval_seconds),
+        wind_fn=lambda _: (5.0, 0.0, 0.0),
+        interval_seconds=interval_seconds,
+    )
+    return _run(cfg, reader=reader)
+
+
+def test_three_hourly_met_run_completes_and_fetches_fewer_windows(tmp_path: Path) -> None:
+    """A 3-hourly source must drive the run end to end, bracketing on 3 h rather than
+    failing on a timestamp it does not have — and it should read a third as many
+    windows over the same simulated period."""
+
+    hourly = _cadence_run(tmp_path, 3600)
+    three_hourly = _cadence_run(tmp_path, 10800)
+
+    assert hourly["runtime"]["status"] == "completed"
+    assert three_hourly["runtime"]["status"] == "completed"
+    assert three_hourly["runtime"]["hour_windows"] < hourly["runtime"]["hour_windows"]
+
+
+def test_met_cadence_does_not_change_constant_wind_transport(tmp_path: Path) -> None:
+    """Under a constant wind the interpolation is exact at any cadence, so the mean
+    trajectory must be identical — this isolates bracketing changes from physics."""
+
+    _cadence_run(tmp_path, 3600)
+    _cadence_run(tmp_path, 10800)
+
+    hourly = pd.read_parquet(tmp_path / "out_3600" / "trajectory_diagnostics.parquet")
+    three_hourly = pd.read_parquet(tmp_path / "out_10800" / "trajectory_diagnostics.parquet")
+
+    assert abs(float(hourly.iloc[-1]["mean_lon"]) - float(three_hourly.iloc[-1]["mean_lon"])) < 1e-9
+
+
+def test_met_cache_thrash_threshold_counts_windows_not_hours(caplog) -> None:
+    """The cache counts WINDOWS. At 3-hourly met a 143 h batch span is only ~48 entries,
+    so a 144-entry cache is ample — comparing hours against the limit would warn anyway
+    and push the user into a 3x larger host-RAM cache than the run needs."""
+
+    from types import SimpleNamespace
+
+    from lpdm.main import _warn_if_met_cache_thrashes
+
+    base = datetime(2024, 1, 1, tzinfo=UTC)
+
+    def _rel(secs: int) -> SimpleNamespace:
+        return SimpleNamespace(release_time=base + timedelta(seconds=secs), duration_seconds=3600)
+
+    b0 = SimpleNamespace(releases=[_rel(h * 3600) for h in range(24)])
+    b1 = SimpleNamespace(releases=[_rel(86400 + h * 3600) for h in range(24)])
+    sim_len = 5 * 86400.0
+    cfg = _make_run_config(met_cache_max_hours=144)
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        _warn_if_met_cache_thrashes(cfg, [b0, b1], sim_len, 3600)
+    assert "below the cross-batch reuse threshold" in caplog.text  # 144 < 167 windows
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        _warn_if_met_cache_thrashes(cfg, [b0, b1], sim_len, 10800)
+    assert "cross-batch reuse threshold" not in caplog.text  # 144 >= ~56 windows

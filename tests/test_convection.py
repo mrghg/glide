@@ -25,6 +25,7 @@ from lpdm.convection import (
     get_scheme,
     list_schemes,
 )
+from lpdm.convection import emanuel as emanuel_module
 from lpdm.convection.emanuel import (
     _layer_masses_per_area,
     compute_lcl_lnb_cape,
@@ -382,9 +383,14 @@ def test_no_convection_is_pass_through() -> None:
     assert torch.equal(particles, out)
 
 
-def _build_convective_met_window(blh_m: float = 1500.0) -> HourlyMetTensors:
+def _build_convective_met_window(
+    blh_m: float = 1500.0, window_hours: float = 1.0
+) -> HourlyMetTensors:
     """Build a met window where Emanuel's parcel lift WILL trigger deep
-    convection. Spatially uniform; columns built from a moist-unstable sounding."""
+    convection. Spatially uniform; columns built from a moist-unstable sounding.
+
+    `window_hours` sets the bracket width, which is also the interval the scheme
+    fires on and therefore the timescale it scales the mass flux by."""
 
     from datetime import datetime, timedelta
 
@@ -424,7 +430,7 @@ def _build_convective_met_window(blh_m: float = 1500.0) -> HourlyMetTensors:
         level=height,  # ascending altitude
         pressure_level_hpa=(np.asarray(p_col, dtype=float) / 100.0),
         time_start=t0,
-        time_end=t0 + timedelta(hours=1),
+        time_end=t0 + timedelta(hours=window_hours),
         variable_units=dict.fromkeys(names, ""),
     )
     height_3d = (
@@ -692,3 +698,79 @@ def test_emanuel_does_not_fire_on_winter_inversion_column() -> None:
     assert torch.equal(particles_out[:, 2], z_initial), (
         "Emanuel convection fired on a stable winter-inversion column"
     )
+
+
+def _captured_m_b_for_window(monkeypatch, window_hours: float) -> float:
+    """The `m_b` the scheme hands to the mass-flux matrix for a window of this width.
+
+    Spying on the argument rather than counting displaced particles: the
+    redistribution probability saturates well before 3-hourly at realistic closure
+    settings, so a particle count cannot distinguish the two.
+    """
+
+    from lpdm.gpu_engine import GPUEngine
+
+    captured: dict[str, float] = {}
+    real = emanuel_module.compute_mass_flux_matrix
+
+    def _spy(*args, m_b: float, **kwargs):
+        captured["m_b"] = float(m_b)
+        return real(*args, m_b=m_b, **kwargs)
+
+    monkeypatch.setattr(emanuel_module, "compute_mass_flux_matrix", _spy)
+
+    torch.manual_seed(20260601)
+    met = _build_convective_met_window(window_hours=window_hours)
+    scheme = EmanuelReducedConvection(closure_c=0.1, trigger_dtv_k=0.1)
+    n = 64
+    particles = torch.zeros(n, 4, dtype=torch.float32)
+    particles[:, 2] = 3000.0
+    particles[:, 3] = 1.0 / n
+
+    scheme.maybe_convect(
+        particles,
+        scheme.initialize_state(n, device=torch.device("cpu"), dtype=torch.float32),
+        met,
+        t_alpha=0.5,
+        dt_seconds=300.0,
+        active_mask=torch.ones(n, dtype=torch.bool),
+        engine=GPUEngine(device="cpu"),
+    )
+    return captured["m_b"]
+
+
+def test_convective_mass_flux_follows_the_met_window_width(monkeypatch) -> None:
+    """The scheme fires once per met window and redistributes the mass the cloud-base
+    flux moves over that window, so the mass it redistributes must scale with the
+    window. The interval was hardcoded at 3600 s, which under-convected a 3-hourly
+    source by exactly this factor of 3."""
+
+    hourly = _captured_m_b_for_window(monkeypatch, 1.0)
+    three_hourly = _captured_m_b_for_window(monkeypatch, 3.0)
+
+    assert hourly > 0.0
+    assert three_hourly == pytest.approx(3.0 * hourly, rel=1e-9)
+
+
+def test_non_positive_met_window_is_refused_by_convection() -> None:
+    """A zero-width window would silently zero the convective mass flux."""
+
+    from lpdm.gpu_engine import GPUEngine
+
+    met = _build_convective_met_window(window_hours=0.0)
+    scheme = EmanuelReducedConvection(closure_c=0.1, trigger_dtv_k=0.1)
+    n = 8
+    particles = torch.zeros(n, 4, dtype=torch.float32)
+    particles[:, 2] = 3000.0
+    particles[:, 3] = 1.0 / n
+
+    with pytest.raises(ValueError, match="non-positive duration"):
+        scheme.maybe_convect(
+            particles,
+            scheme.initialize_state(n, device=torch.device("cpu"), dtype=torch.float32),
+            met,
+            t_alpha=0.5,
+            dt_seconds=300.0,
+            active_mask=torch.ones(n, dtype=torch.bool),
+            engine=GPUEngine(device="cpu"),
+        )

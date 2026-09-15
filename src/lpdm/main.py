@@ -23,7 +23,7 @@ from collections import OrderedDict, defaultdict
 from collections.abc import Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -377,8 +377,19 @@ def _format_gib(num_bytes: int | None) -> str:
     return f"{num_bytes / (1024**3):.3f} GiB"
 
 
-def _hour_floor(dt: datetime) -> datetime:
-    return dt.astimezone(UTC).replace(minute=0, second=0, microsecond=0)
+def _met_window_start(reader: MetReader, dt: datetime) -> datetime:
+    """Start of the met window containing `dt`, on the reader's own sample grid.
+
+    This is the met-cache key and the identity of the current bracket, so it has to
+    agree exactly with what the reader will fetch. Asking the reader keeps the two
+    in step for any source cadence.
+    """
+
+    return reader.floor_to_window_start(dt)
+
+
+def _met_interval(reader: MetReader) -> timedelta:
+    return timedelta(seconds=reader.met_interval_seconds)
 
 
 def _footprint_time_bin_index(release_end: datetime, t_cursor: datetime, n_time_bins: int) -> int:
@@ -451,16 +462,18 @@ def _validate_meteorology_time_coverage(
     release_end: datetime,
     sim_start: datetime,
 ) -> None:
-    """Fail early when the configured run requires hours outside dataset coverage."""
+    """Fail early when the configured run requires times outside dataset coverage."""
 
     available_start, available_end = reader.get_time_coverage()
-    required_start = _hour_floor(sim_start)
-    required_end = _hour_floor(release_end) + timedelta(hours=1)
+    required_start = _met_window_start(reader, sim_start)
+    required_end = _met_window_start(reader, release_end) + _met_interval(reader)
 
     if required_start < available_start or required_end > available_end:
+        cadence_h = reader.met_interval_seconds / 3600.0
         raise PreflightValidationError(
             "Meteorological dataset does not cover the requested simulation window. "
-            f"Need hourly data from {required_start.isoformat()} through {required_end.isoformat()}, "
+            f"Need {cadence_h:g}-hourly data from {required_start.isoformat()} through "
+            f"{required_end.isoformat()}, "
             f"but dataset only covers {available_start.isoformat()} through {available_end.isoformat()}. "
             "Reduce simulation.length_seconds, choose a different start_time, or use a dataset with wider time coverage."
         )
@@ -717,7 +730,7 @@ def _get_hourly_met_window(
     t_cursor: datetime,
     met_cache: OrderedDict[datetime, HourlyMetTensors],
 ) -> tuple[HourlyMetTensors, int]:
-    hour_key = _hour_floor(t_cursor)
+    hour_key = _met_window_start(reader, t_cursor)
     if cfg.memory.met_cache_max_hours > 0 and hour_key in met_cache:
         met_cache.move_to_end(hour_key)
         return met_cache[hour_key], 0
@@ -725,7 +738,7 @@ def _get_hourly_met_window(
     met_window = reader.fetch_hourly_window(
         BoundingBoxRequest(
             spatial=_met_domain_bounds(cfg),
-            time=TimeBounds(start=hour_key, end=hour_key + timedelta(hours=1)),
+            time=TimeBounds(start=hour_key, end=hour_key + _met_interval(reader)),
         )
     )
 
@@ -738,19 +751,28 @@ def _get_hourly_met_window(
     return met_window, 1
 
 
-def _warn_if_met_cache_thrashes(cfg: RunConfig, batches: list, sim_length_s: float) -> None:
+def _warn_if_met_cache_thrashes(
+    cfg: RunConfig,
+    batches: list,
+    sim_length_s: float,
+    met_interval_seconds: int = 3600,
+) -> None:
     """Warn when `met_cache_max_hours` is too small to retain the met OVERLAP between
     consecutive backward batches, so each batch RE-FETCHES it (LRU thrash — GH200 2026-06-29).
 
     The cursor walks latest→earliest, so at a batch's end the LRU-oldest entry is the *top*
-    hour — exactly what the next batch (shifted later by one batch-advance) needs first. With
-    the cache barely large enough, the next batch's new top-hour fetches evict the overlap
+    window — exactly what the next batch (shifted later by one batch-advance) needs first. With
+    the cache barely large enough, the next batch's new top-window fetches evict the overlap
     right before it would be reused → ~zero reuse. Full reuse needs roughly one batch's met
     span PLUS one batch's advance. Setting the cache to *exactly* the span gives NO benefit;
-    this guard catches that silent footgun at startup."""
+    this guard catches that silent footgun at startup.
 
-    max_hours = cfg.memory.met_cache_max_hours
-    if max_hours <= 0 or len(batches) < 2:
+    The cache counts WINDOWS, not hours, so the batch spans are converted at the source
+    cadence before the comparison: at 3-hourly met a 240 h span is 80 cache entries, and
+    comparing 240 against the limit would demand a 3x larger cache than the run needs."""
+
+    max_windows = cfg.memory.met_cache_max_hours
+    if max_windows <= 0 or len(batches) < 2:
         return
 
     def _start(b) -> datetime:
@@ -762,25 +784,27 @@ def _warn_if_met_cache_thrashes(cfg: RunConfig, batches: list, sim_length_s: flo
         )
         return earliest_end - timedelta(seconds=sim_length_s)
 
-    span_h = (_start(batches[0]) - _terminus(batches[0])).total_seconds() / 3600.0
-    advance_h = abs((_start(batches[1]) - _start(batches[0])).total_seconds()) / 3600.0
-    overlap_h = span_h - advance_h
-    if overlap_h <= 0:
+    window_s = float(met_interval_seconds)
+    span_windows = (_start(batches[0]) - _terminus(batches[0])).total_seconds() / window_s
+    advance_windows = abs((_start(batches[1]) - _start(batches[0])).total_seconds()) / window_s
+    overlap_windows = span_windows - advance_windows
+    if overlap_windows <= 0:
         return  # batches don't overlap in met time → caching can't help, no thrash to warn about
-    threshold = math.ceil(span_h + advance_h)
-    if max_hours >= threshold:
+    threshold = math.ceil(span_windows + advance_windows)
+    if max_windows >= threshold:
         return
     LOGGER.warning(
-        "met_cache_max_hours=%d is below the cross-batch reuse threshold ~%d h (batch met span "
-        "~%.0f h + advance ~%.0f h): consecutive batches will RE-FETCH the ~%.0f h overlap "
-        "(LRU thrash, ~%.1fx redundant met I/O). Raise met_cache_max_hours to >= %d to reuse it"
-        "%s.",
-        max_hours,
+        "met_cache_max_hours=%d (a count of met WINDOWS, %.0f h each) is below the cross-batch "
+        "reuse threshold ~%d windows (batch met span ~%.0f + advance ~%.0f): consecutive "
+        "batches will RE-FETCH the ~%.0f-window overlap (LRU thrash, ~%.1fx redundant met I/O). "
+        "Raise met_cache_max_hours to >= %d to reuse it%s.",
+        max_windows,
+        window_s / 3600.0,
         threshold,
-        span_h,
-        advance_h,
-        overlap_h,
-        span_h / max(advance_h, 1e-6),
+        span_windows,
+        advance_windows,
+        overlap_windows,
+        span_windows / max(advance_windows, 1e-6),
         threshold,
         " (cached in host RAM since met_cache_on_host=True)"
         if cfg.memory.met_cache_on_host
@@ -832,7 +856,7 @@ class MetPrefetcher:
         return self._reader.fetch_hourly_window(
             BoundingBoxRequest(
                 spatial=_met_domain_bounds(self._cfg),
-                time=TimeBounds(start=hour_key, end=hour_key + timedelta(hours=1)),
+                time=TimeBounds(start=hour_key, end=hour_key + _met_interval(self._reader)),
             )
         )
 
@@ -853,7 +877,7 @@ class MetPrefetcher:
         """Return (window, fetched) for ``t_cursor``'s hour; ``fetched`` is 1 on a real read
         (cache miss), 0 on a cache hit — same accounting as the synchronous path."""
 
-        hour_key = _hour_floor(t_cursor)
+        hour_key = _met_window_start(self._reader, t_cursor)
         if self._max_hours > 0 and hour_key in self._cache:
             self._cache.move_to_end(hour_key)
             window, fetched = self._cache[hour_key], 0
@@ -875,7 +899,7 @@ class MetPrefetcher:
     def _schedule_prefetch(self, hour_key: datetime) -> None:
         if self._executor is None:
             return
-        nxt = hour_key - timedelta(hours=1)
+        nxt = hour_key - _met_interval(self._reader)
         if (self._max_hours > 0 and nxt in self._cache) or self._pending_key == nxt:
             return
         self._cancel_pending()
@@ -1244,13 +1268,26 @@ def _run(
     schedule_sim_start = min(all_window_ends) - timedelta(seconds=sim.length_seconds)
     _validate_meteorology_time_coverage(reader, cfg, schedule_release_end, schedule_sim_start)
 
+    # Source cadence drives the met bracketing, the cache key and the convection
+    # cadence, so log what was actually measured: it is not recoverable from the
+    # output otherwise, and it changes how much wall time a run spends on met I/O.
+    met_interval_s = reader.met_interval_seconds
+    LOGGER.info("met cadence: %.0f s (%.2f h) per window", met_interval_s, met_interval_s / 3600.0)
+    if met_interval_s > 3600:
+        LOGGER.warning(
+            "met cadence is %.1f h. GLIDE interpolates the wind linearly across a window, so "
+            "sub-window features (the diurnal PBL cycle, frontal passages) are smoothed out; "
+            "hourly met is what the physics is tuned against.",
+            met_interval_s / 3600.0,
+        )
+
     LOGGER.info(
         "schedule expanded: %d release(s) across %d batch(es), max %d per batch",
         total_releases,
         len(batches),
         cfg.batch.max_releases_per_batch,
     )
-    _warn_if_met_cache_thrashes(cfg, batches, float(sim.length_seconds))
+    _warn_if_met_cache_thrashes(cfg, batches, float(sim.length_seconds), met_interval_s)
 
     # Bookkeeping shared across batches.
     diag_rows: list[dict[str, float | int | str]] = []

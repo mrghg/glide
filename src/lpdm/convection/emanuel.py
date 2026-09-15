@@ -661,10 +661,18 @@ class EmanuelReducedConvection(ConvectionScheme):
 
         # 4) Mass-flux matrix (kg/m² / met-update). Multiply by dt_seconds to
         # get the per-call redistribution mass — but our scheme is called only
-        # at met-update boundaries (~hourly), so use the met interval. We
-        # approximate the met interval as 3600 s (hourly ERA5); the runtime
-        # could pass it explicitly in a future refinement.
-        convection_call_interval_s = 3600.0
+        # at met-update boundaries, so the met interval is the right timescale.
+        # The window carries its own width, so this follows the source cadence
+        # instead of assuming hourly ERA5.
+        convection_call_interval_s = (
+            met_window.metadata.time_end - met_window.metadata.time_start
+        ).total_seconds()
+        if convection_call_interval_s <= 0:
+            raise ValueError(
+                "Met window has non-positive duration "
+                f"({met_window.metadata.time_start} -> {met_window.metadata.time_end}); "
+                "cannot scale the convective mass flux."
+            )
         fmass = compute_mass_flux_matrix(
             t_col,
             q_col,

@@ -132,8 +132,8 @@ relevant docs page with its consequence.
 - **Per-sub-step $\sigma$ re-evaluation.** FLEXPART re-evaluates $\sigma$ and
   $T_L$ every sub-step; GLIDE holds them at the outer-step value (the
   velocity-dependent part of the drift *is* re-evaluated).
-- **Convection interval hardcoded at 3600 s.** Correct for hourly ERA5 only.
-- **Sub-hourly meteorology cadence not supported.** GLIDE brackets on whole
-  hours, so a 3-hourly source must be interpolated up to hourly first.
+- **Meander timescale is not tied to the met cadence.** It defaults to 1800 s,
+  half the hourly ERA5 interval, and stays there on a coarser source. Left as an
+  explicit knob because changing it moves results.
 - **Forward/backward reciprocity test deferred.** It would test the backward
   formulation directly, which nothing else does.

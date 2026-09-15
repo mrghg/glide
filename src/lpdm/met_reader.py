@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import glob
 import logging
+import math
 import os
 import threading
 from abc import ABC, abstractmethod
@@ -168,13 +169,15 @@ class HourlyMetTensors:
 class MetReader(ABC):
     """Abstract meteorology reader interface.
 
-    Any concrete reader must provide a method that returns two hourly snapshots
-    already loaded in memory and converted to torch tensors.
+    Any concrete reader must provide a method that returns the two snapshots
+    bracketing a met window, already loaded in memory and converted to torch
+    tensors. The window is one source timestep wide -- an hour for ERA5, but the
+    runtime reads that width from the reader rather than assuming it.
     """
 
     @abstractmethod
     def fetch_hourly_window(self, request: BoundingBoxRequest) -> HourlyMetTensors:
-        """Fetch and convert meteorology for a single hourly bracket.
+        """Fetch and convert meteorology for a single met bracket.
 
         Args:
             request: Bounding-box and time-window request generated from current
@@ -187,6 +190,43 @@ class MetReader(ABC):
     @abstractmethod
     def get_time_coverage(self) -> tuple[datetime, datetime]:
         """Return the dataset time coverage as UTC datetimes."""
+
+    @property
+    def met_interval_seconds(self) -> int:
+        """Spacing of the source's time coordinate, in seconds.
+
+        One met window spans exactly this. The base class answers 3600 s because
+        the synthetic readers used in tests are hourly; a reader backed by a real
+        store should override it with the cadence it actually found.
+        """
+
+        return 3600
+
+    def floor_to_window_start(self, when: datetime) -> datetime:
+        """Snap `when` back to the start of the met window containing it.
+
+        The runtime uses this as the met-cache key and as the identity of the
+        current bracket, so it must land exactly on a source timestamp. The base
+        class anchors the grid at midnight UTC; a reader that knows the store's own
+        first timestamp should anchor there instead, since a store whose samples sit
+        at :30 past has windows at :30, not on the hour.
+        """
+
+        return self._floor_to_grid(when, self.met_interval_seconds, self._window_origin(when))
+
+    def _window_origin(self, when: datetime) -> datetime:
+        """Anchor timestamp the window grid is aligned to. Midnight UTC by default."""
+
+        return when.astimezone(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+
+    @staticmethod
+    def _floor_to_grid(when: datetime, interval_seconds: int, origin: datetime) -> datetime:
+        """Largest `origin + n*interval` (integer n, possibly negative) that is <= `when`."""
+
+        when_utc = when.astimezone(UTC)
+        elapsed = (when_utc - origin).total_seconds()
+        n = math.floor(elapsed / float(interval_seconds))
+        return origin + timedelta(seconds=n * interval_seconds)
 
 
 class ArcoEra5ZarrReader(MetReader):
@@ -247,6 +287,7 @@ class ArcoEra5ZarrReader(MetReader):
         vertical_coordinate: str | None = None,
         chunk_overrides: Mapping[str, int] | None = None,
         accumulation_seconds: int | None = None,
+        met_interval_seconds: int | None = None,
         terrain_following: bool = True,
         agl_levels_m: Sequence[float] | None = None,
         device: torch.device | str = DEVICE,
@@ -290,6 +331,12 @@ class ArcoEra5ZarrReader(MetReader):
                 the Obukhov length and the whole stable/convective regime choice).
                 A store whose flux fields are already instantaneous (W/m^2) never
                 needs it. An explicit value here overrides the store attr.
+            met_interval_seconds: Spacing of the store's time coordinate, in seconds
+                (3600 for hourly ERA5). If None (default), measured from the time
+                coordinate itself, which must be uniformly spaced. Unlike the flux
+                accumulation period this IS recoverable from the data, so the
+                argument is only an escape hatch for a store whose coordinate is
+                irregular for reasons you understand.
             terrain_following: If True (default), resample the pressure-level met onto
                 a fixed terrain-following AGL grid once per window and slope-correct
                 the vertical velocity (Finding 7 fix). If False, ship fields on the
@@ -332,6 +379,16 @@ class ArcoEra5ZarrReader(MetReader):
         )
         self.accumulation_seconds: int | None = self._accumulation_seconds_arg
         self._flux_accumulation_resolved = False
+        # Met cadence: one window spans one source timestep. Measured from the time
+        # coordinate on first open (or taken from the arg), together with the origin
+        # the window grid aligns to -- the store's own first timestamp, so a store
+        # sampled at :30 past brackets on :30 rather than on the hour.
+        self._met_interval_seconds_arg = (
+            int(met_interval_seconds) if met_interval_seconds is not None else None
+        )
+        self._met_interval_seconds: int | None = self._met_interval_seconds_arg
+        self._window_origin_ts: datetime | None = None
+        self._cadence_resolved = False
         # One-shot magnitude guard on the converted flux (see SHF_PLAUSIBLE_MAX_W_M2).
         self._shf_magnitude_checked = False
         # Terrain-following (hybrid) vertical coordinate: resample pressure levels
@@ -373,6 +430,8 @@ class ArcoEra5ZarrReader(MetReader):
             )
         if self._accumulation_seconds_arg is not None and self._accumulation_seconds_arg <= 0:
             raise ValueError("accumulation_seconds must be > 0")
+        if self._met_interval_seconds_arg is not None and self._met_interval_seconds_arg <= 0:
+            raise ValueError("met_interval_seconds must be > 0")
 
     @property
     def required_variable_keys(self) -> tuple[str, ...]:
@@ -416,6 +475,90 @@ class ArcoEra5ZarrReader(MetReader):
                 f"({values[0]:.0f}..{values[-1]:.0f}) — level indices, not pressures"
             )
         return None
+
+    def _resolve_time_cadence(self, ds: xr.Dataset) -> None:
+        """Measure the store's time-coordinate spacing and window-grid origin, once.
+
+        The cadence is a property of the data, not a declaration, so it is measured
+        rather than tagged: `np.diff` over the (small, 1-D) time coordinate. Uniform
+        spacing is required -- every met window is one spacing wide and the physics
+        interpolates linearly across it, so a ragged coordinate would silently give
+        some windows the wrong duration and mis-weight the interpolation inside them.
+        """
+
+        if self._cadence_resolved:
+            return
+
+        values = np.asarray(ds[self.time_name].values)
+        if values.size == 0:
+            raise ValueError(f"Dataset time coordinate {self.time_name!r} is empty")
+
+        origin = self._time_value_to_utc_datetime(values[0])
+
+        if values.size == 1:
+            # A single-timestamp store cannot be bracketed at all; fetches will fail
+            # on the missing end snapshot with a clearer message than we could give
+            # here. Fall back to the arg (or hourly) so preflight can get that far.
+            interval = self._met_interval_seconds_arg or 3600
+        else:
+            stamps = np.array(
+                [self._time_value_to_utc_datetime(v).timestamp() for v in values],
+                dtype="float64",
+            )
+            deltas = np.diff(stamps)
+            interval = int(round(float(deltas[0])))
+            if interval <= 0:
+                raise ValueError(
+                    f"Dataset time coordinate {self.time_name!r} is not increasing "
+                    f"(first spacing {interval} s)."
+                )
+            # Tolerate sub-second float noise, nothing more.
+            ragged = np.abs(deltas - deltas[0]) > 1.0
+            if bool(ragged.any()):
+                i = int(np.argmax(ragged))
+                raise ValueError(
+                    f"Meteorology time coordinate {self.time_name!r} is not uniformly "
+                    f"spaced: {deltas[0]:.0f} s between the first two samples but "
+                    f"{deltas[i]:.0f} s between "
+                    f"{self._time_value_to_utc_datetime(values[i]).isoformat()} and "
+                    f"{self._time_value_to_utc_datetime(values[i + 1]).isoformat()}. "
+                    "GLIDE brackets on one source timestep and interpolates linearly "
+                    "across it, so a ragged coordinate would give some windows the "
+                    "wrong duration. Fill the gap, split the run, or pass "
+                    "met_interval_seconds explicitly if the spacing is deliberate."
+                )
+
+        if self._met_interval_seconds_arg is not None:
+            if values.size > 1 and interval != self._met_interval_seconds_arg:
+                LOGGER.warning(
+                    "met_interval_seconds=%d passed to the reader overrides the %d s "
+                    "spacing measured from the store's own time coordinate.",
+                    self._met_interval_seconds_arg,
+                    interval,
+                )
+            self._met_interval_seconds = self._met_interval_seconds_arg
+        else:
+            self._met_interval_seconds = interval
+
+        self._window_origin_ts = origin
+        self._cadence_resolved = True
+
+    @property
+    def met_interval_seconds(self) -> int:
+        """Measured spacing of the store's time coordinate, in seconds."""
+
+        if not self._cadence_resolved:
+            self._resolve_time_cadence(self._open_dataset())
+        assert self._met_interval_seconds is not None
+        return self._met_interval_seconds
+
+    def _window_origin(self, when: datetime) -> datetime:
+        """Anchor the window grid on the store's first timestamp, not on midnight."""
+
+        if not self._cadence_resolved:
+            self._resolve_time_cadence(self._open_dataset())
+        assert self._window_origin_ts is not None
+        return self._window_origin_ts
 
     def _resolve_flux_accumulation(self, ds: xr.Dataset) -> None:
         """Resolve the accumulated-flux period once, from the arg or the store attr.
@@ -528,6 +671,7 @@ class ArcoEra5ZarrReader(MetReader):
         # it needs for the hydrostatic pressure reconstruction.
         self._resolve_vertical_mode(ds)
         self._resolve_flux_accumulation(ds)
+        self._resolve_time_cadence(ds)
         ds = self._select_variables(ds)
 
         # `ds` is the reader's memoized shared handle — do not close it here.
@@ -1227,10 +1371,14 @@ class ArcoEra5ZarrReader(MetReader):
         raise TypeError(f"Unsupported time coordinate value type: {type(value)!r}")
 
     def _canonicalize_hour_bounds(self, bounds: TimeBounds) -> tuple[datetime, datetime]:
-        """Return exact hour start/end timestamps used for met interpolation."""
+        """Return the exact met-window start/end timestamps used for interpolation.
 
-        t0 = bounds.start.astimezone(UTC).replace(minute=0, second=0, microsecond=0)
-        t1 = t0 + timedelta(hours=1)
+        One window is one source timestep wide, snapped onto the store's own sample
+        grid, so both ends land on real timestamps and `.sel` finds them exactly.
+        """
+
+        t0 = self.floor_to_window_start(bounds.start)
+        t1 = t0 + timedelta(seconds=self.met_interval_seconds)
         return t0, t1
 
     def _dataset_to_channel_tensor(self, ds_time_slice: xr.Dataset) -> torch.Tensor:

@@ -41,7 +41,7 @@ for the gaps you will most likely have to close yourself.
 
 | Coordinate | Default name | Requirement |
 | --- | --- | --- |
-| Time | `time` | `datetime64`, **UTC**, hourly cadence. Must cover the run's backward window. |
+| Time | `time` | `datetime64`, **UTC**, any *uniform* cadence. Must cover the run's backward window. |
 | Latitude | `latitude` | Degrees north. Ascending or descending both accepted. |
 | Longitude | `longitude` | Degrees east. Either $-180..180$ or $0..360$; GLIDE detects and normalises. |
 | Vertical | `level` | 1-D. Its *meaning* depends on the vertical mode below. |
@@ -51,9 +51,34 @@ Coordinate names are configurable on the reader (`lon_name`, `lat_name`,
 resistance. The one you *will* set is `level_name` for model-level stores — and
 even that is auto-corrected when the store is tagged (see below).
 
+**Cadence is measured, not declared.** GLIDE reads the spacing of the time
+coordinate and makes one met window exactly one source timestep wide — hourly,
+3-hourly, 15-minute, whatever the store holds. The spacing must be **uniform**: a
+ragged coordinate would give some windows the wrong duration and mis-weight the
+linear interpolation inside them, so GLIDE refuses it and names the gap. The
+window grid is anchored on the store's own first timestamp, so a store sampled at
+:30 past brackets on :30 rather than on the hour.
+
 Cadence and flux accumulation are independent: the accumulated-flux period comes
 from the store's `glide_flux_accumulation_seconds` attr (see
-[Sensible heat flux](#sensible-heat-flux)), not from the time coordinate.
+[Sensible heat flux](#sensible-heat-flux)), not from the time coordinate. An
+hourly-accumulated ERA5 cube thinned to 3-hourly has a 10800 s cadence and a
+3600 s accumulation period.
+
+Coarser meteorology is read directly, but it is not free of consequence: GLIDE
+interpolates the wind linearly across a window, so anything varying inside one —
+the diurnal boundary-layer cycle, a frontal passage — is smoothed. The physics is
+tuned against hourly ERA5, and a run coarser than that logs a warning at startup.
+Two settings that are tied to the source interval and do **not** follow it
+automatically:
+
+- `turbulence.meander_timescale_seconds` defaults to 1800 s, half the hourly
+  interval. Meander parameterises the mesoscale motion the met does not resolve,
+  so on a coarser source consider setting it to half your interval. It is left as
+  an explicit knob because changing it moves results.
+- `memory.met_cache_max_hours` counts met **windows**, not hours. At 3-hourly
+  cadence a value of 48 caches six days of meteorology, and the host RAM it uses
+  scales with the window count, not the wall-clock span.
 
 ## Required variables
 
@@ -287,7 +312,7 @@ NWP archive (the Met Office UM) against the schema; most of it generalises.
 | Gap in the source | What to do |
 | --- | --- |
 | No `geopotential` / `geopotential_at_surface` | On a terrain-following source with a $z = z_{\text{lev}} + \sigma\ h_s$ coordinate, solve for the orography hydrostatically from the store's own 3-D pressure, then form both fields from the coordinate definition |
-| Coarser than hourly | Interpolate the time-varying fields to hourly (see below) |
+| Coarser than hourly | Nothing — GLIDE reads the source cadence directly. Check the caveats under [Coordinates](#coordinates) first |
 | No `friction_velocity` | $u_\ast = \sqrt{\lvert\tau\rvert/\rho}$ from the two surface stress components, with $\rho = p_s/(R_d T_v)$ and $T_v = T(1 + 0.6077q)$ |
 | Heat flux is positive-**up** | Negate it to the ECMWF positive-down convention |
 | Non-GLIDE variable names | Rename to GLIDE's defaults — `main.py` exposes no `variable_map` override |
@@ -302,11 +327,12 @@ Three things worth knowing before you start:
   `(level, latitude, longitude)` with no time dimension — turning a per-timestep
   3-D field into a few hundred MB. ERA5's varies, so `download_sample_cube.py`
   cannot do this.
-- **Sub-hourly bracketing is not supported.** GLIDE brackets on whole hours, so a
-  3-hourly source must be interpolated up to hourly before it is read. Linear
-  interpolation costs nothing in accuracy — GLIDE interpolates linearly within
-  the bracket anyway, and composing the two is exact — but it costs 3× the
-  storage. Reading the source cadence directly is a known future change.
+- **You no longer need to interpolate to hourly.** GLIDE brackets on the source's
+  own timestep, so a 3-hourly archive is read as-is — no 3× storage cost for an
+  upsampled copy. Interpolating up would have been exactly equivalent
+  numerically (GLIDE interpolates linearly within the bracket anyway, and
+  composing the two is exact), so this is a storage and bookkeeping win rather
+  than an accuracy one: 3-hourly met still resolves less than hourly met.
 - **Crop before you convert.** An hourly, full-domain rewrite is easily several
   times the source archive's own volume, and NWP archive domains are usually far
   wider than a run domain. Drop levels above the run's `alt_max_m` and crop to

@@ -281,7 +281,7 @@ class MeanderConfig(_Frozen):
     timescale_seconds: float | None = Field(
         None,
         gt=0,
-        description="Lagrangian timescale of the meander process. None → scheme default (half the hourly met interval, 1800 s).",
+        description="Lagrangian timescale of the meander process. None → scheme default (1800 s). Set to half the source met interval if not running hourly met: meander parameterises the mesoscale motion the met does not resolve.",
     )
 
 

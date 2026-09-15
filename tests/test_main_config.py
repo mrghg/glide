@@ -15,6 +15,7 @@ from lpdm.config import (
     RunConfig,
 )
 from lpdm.main import _footprint_time_bin_index, _validate_meteorology_time_coverage
+from lpdm.met_reader import MetReader
 
 
 def _base_dict(**section_overrides: dict[str, object]) -> dict[str, object]:
@@ -461,13 +462,19 @@ def test_footprint_time_bin_index_advances_each_hour() -> None:
     assert _footprint_time_bin_index(release_end, release_end - timedelta(minutes=125), 3) == 2
 
 
-class _CoverageReader:
+class _CoverageReader(MetReader):
+    """Coverage-only stub. Subclasses MetReader for its cadence/bracketing defaults,
+    which the preflight check uses to round the required window to met timestamps."""
+
     def __init__(self, start: datetime, end: datetime) -> None:
         self._start = start
         self._end = end
 
     def get_time_coverage(self) -> tuple[datetime, datetime]:
         return self._start, self._end
+
+    def fetch_hourly_window(self, request):  # pragma: no cover - never fetched
+        raise NotImplementedError
 
 
 def test_validate_meteorology_time_coverage_rejects_insufficient_history() -> None:
