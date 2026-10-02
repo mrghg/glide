@@ -2,7 +2,8 @@
 
 _For the human directing the work. The agents read
 [dev/agent/INSTRUCTIONS.md](agent/INSTRUCTIONS.md); this page is what you do
-before, during and after their sessions. Written 2026-09-16._
+before, during and after their sessions. Written 2026-09-16, revised
+2026-10-02._
 
 **Contents**
 
@@ -24,12 +25,19 @@ before, during and after their sessions. Written 2026-09-16._
   and validation, sequential, strongest model) and **B** (infrastructure,
   parallel, cheaper model). The GATES repository has its own queue in its code
   review document.
-- **One task per session.** A session starts cold, reads the durable state
-  ([dev/agent/PROGRESS.md](agent/PROGRESS.md)), claims the next task, works on
-  its own branch, tests on CPU and GPU, opens a PR, writes its progress entry
-  and stops. The next session picks up from the file, not from the previous
-  conversation. This bounds the damage any one session can do and survives
-  allocations ending.
+- **One piece of work per session.** A session starts cold, works out from the
+  repository what to do next, does it on its own branch, tests on CPU and GPU,
+  opens a PR and stops. The next session starts from the repository, not from
+  the previous conversation. This bounds the damage any one session can do and
+  survives allocations ending.
+- **State lives in the repository.** Each task has a progress file,
+  `dev/agent/progress/<ID>.md`, which the agent creates on its branch and pushes
+  at once as its claim. The file reaches `main` only when you merge the PR, so
+  a file on `main` means the task is merged. An open PR or an `agent/<ID>-*`
+  branch means it is in flight.
+- **PROGRESS.md is yours.** [dev/agent/PROGRESS.md](agent/PROGRESS.md) holds
+  the current state, the data inventory and your resume requests. Agents read it
+  and never edit it, so pull requests never conflict on it.
 - **Branch per task, PR per task, human merges.** Agents never commit to
   `main`. CI runs the CPU suite on every PR. A fresh agent session reviews each
   PR before you do.
@@ -37,21 +45,23 @@ before, during and after their sessions. Written 2026-09-16._
   and asks on physics changes outside scope, output-contract changes,
   validation-threshold changes, data deletion, met downloads, and unexpected
   GPU parity failures. Everything else it decides alone.
+- **Environment-specific values stay out of the repository.** The SLURM account,
+  data paths and scratch paths live in an untracked
+  `dev/agent/isambard/env.local.sh`. Agents refer to them by variable name.
 
 ---
 
 ## 2. Phase 0: what to prepare
 
-Work through this once. Everything here is either done by the documents in this
-PR or is something only you can do. The queue assumes all of it.
+Work through this once. The queue assumes all of it.
 
-### Repository (done by this PR, check they are merged)
+### Repository
 
-- [ ] `dev/roadmap.md`, `docs/validation-plan.md`, `dev/agent/*`, decision
-      records 0011–0015, pointer edits in `AGENTS.md`, `STATUS.md`,
-      `README.md`, `docs/README.md`.
-- [ ] Fill the `<<PLACEHOLDER>>` fields in `dev/agent/INSTRUCTIONS.md` §6 (data
-      paths, account, partition) and in `dev/agent/isambard/*`.
+- [ ] Review and merge the plan PR.
+- [ ] On Isambard, copy `dev/agent/isambard/env.local.sh.example` to
+      `env.local.sh` in the same directory and fill it in. It is gitignored.
+- [ ] Fill the data inventory in `dev/agent/PROGRESS.md`, with paths relative to
+      `$GLIDE_DATA`.
 
 ### Environment on Isambard AI
 
@@ -61,38 +71,39 @@ PR or is something only you can do. The queue assumes all of it.
 - [ ] `gcc-native/14.2` loads and `GLIDE_COMPILE=1` produces a captured graph
       (no "WON'T CONVERT" in a smoke-test log).
 - [ ] Claude Code installed for linux-arm64 and runnable from a compute node.
-- [ ] Outbound HTTPS to the Anthropic API from a **compute** node (run
-      `claude -p "say ok"` inside a short GPU job).
-- [ ] Outbound HTTPS to GCS from a compute node, for the few tasks that need a
-      new cube (or decide that all cubes are downloaded by you in advance).
+- [ ] Outbound HTTPS to the Anthropic API from a **compute** node. The driver's
+      pre-flight checks this, so a short test allocation is enough.
 - [ ] `git push` to GitHub and `gh pr create` work from a compute node
       (deploy key or token with repo scope; `gh auth status`).
-- [ ] `uv` cache and Triton cache pointed at fast local or project scratch, not
-      home, via `UV_CACHE_DIR` and `TRITON_CACHE_DIR`.
+- [ ] `GLIDE_SCRATCH` points at fast project scratch, not home; the uv and
+      Triton caches go there.
+- [ ] Outbound HTTPS to GCS from a compute node only if you want tasks to read
+      ARCO ERA5 directly. Otherwise download every cube yourself in advance.
 
 ### Data inventory
 
-- [ ] Every local ERA5 cube listed in `dev/agent/PROGRESS.md` §"Data inventory"
-      with path, domain, period, level type, cadence, size.
-- [ ] The reference multi-site configuration (`configs/example_multisite_january.yaml`
-      or its successor) points at a cube that exists.
+- [ ] Every local ERA5 cube listed in PROGRESS.md, with domain, period, level
+      type, cadence and size.
+- [ ] The reference multi-site configuration
+      (`configs/example_multisite_january.yaml` or its successor) points at a
+      cube that exists.
 - [ ] A small cube for smoke tests and a medium cube for benchmarks, both local.
-- [ ] Decide which additional cubes you will download yourself before the tasks
-      that need them: model-level cube (existing item 1), ETEX Oct–Nov 1994
-      European cube (Tier 3), UK cube (v1.x).
+- [ ] Decide which additional cubes you will download before the tasks that
+      need them: a model-level cube (existing item 1), an ETEX Oct–Nov 1994
+      European cube (Tier 3), a UK cube (v1.x).
 
 ### Golden fixtures and benchmarks
 
-- [ ] Task A0 in the queue generates these; you only need to choose the
-      configurations. Defaults proposed there are the smoke config on CPU and
-      the reference multi-site config on GPU.
+- [ ] Task A0 generates these; you only choose the configurations. The defaults
+      in its spec are the smoke config on CPU and the reference multi-site config
+      on GPU.
 
 ### CI and repository settings
 
 - [ ] GitHub Actions runs `pytest -q` on every PR (CPU). Branch protection on
       `main`: PR required, CI green required, no force push.
-- [ ] Optional but valuable: a nightly sbatch on Isambard that runs the GPU
-      parity tests and posts the result to the PROGRESS file or a GitHub issue.
+- [ ] Optional: the nightly GPU parity job from task B8, posting results to a
+      pinned issue.
 
 ### Reference runs that need a person
 
@@ -100,43 +111,72 @@ PR or is something only you can do. The queue assumes all of it.
       on the current physics. They are the critical path for Tier 2.
 - [ ] Obtain ETEX release and station data; confirm ERA5 1994 download.
 - [ ] Locate the NAME footprints, EDGAR maps and radon data on the group
-      archive; note paths in PROGRESS.md (restricted, never in the repo).
+      archive, and set their variables in `env.local.sh`. They are restricted
+      and never enter the repository.
 
 ### GATES
 
-- [ ] Merge the GATES code review PR. Copy `dev/agent/INSTRUCTIONS.md` into the
-      GATES repo with paths adjusted; its queue is §5 of the review document.
+- [ ] Merge the GATES code review PR. Copy `dev/agent/` into the GATES repo with
+      paths adjusted; its queue is §5 of the review document.
 
 ---
 
 ## 3. Running sessions on Isambard AI
 
 Queue times are long, the login node is policed, and you have GPU hours. So the
-agent runs **inside a long GPU allocation**, and the login node holds only ssh
-and tmux.
+agent runs **inside a long GPU allocation**, and the login node only submits
+the job and holds your ssh and tmux.
 
-1. Submit `dev/agent/isambard/agent_driver.slurm` with the longest wall time
-   the partition allows. It starts a tmux session on the compute node and runs
-   the driver loop.
-2. The driver loop (`dev/agent/isambard/run_task.sh`) takes the next unclaimed
-   task from the chosen queue, launches a fresh Claude Code session for it in
-   headless mode with the task ID as the prompt, waits for it to finish, and
-   moves to the next. Each task gets a clean context.
-3. Attach when you want to watch or redirect: `ssh <node>` from the login
-   node, then `tmux attach -t glide-agent-<queue>`. Ctrl-C in the pane stops
-   the current session; the driver moves on or exits depending on the flag you
-   set.
-4. When the allocation ends, resubmit. The queue and PROGRESS file are the only
-   state. Test this cold-restart once deliberately before relying on it.
-5. Run Queue A and Queue B as two separate allocations with different models if
-   you want them to overlap.
+**Submitting.** From the login node:
 
-The idle-GPU cost while the agent thinks is accepted; it is far cheaper than a
-queue wait before every test. The agent runs GPU tests directly on the node (no
-inner sbatch) because the allocation already holds the GPU.
+```bash
+dev/agent/isambard/submit.sh A
+```
 
-Before the first real task, run the three checks in §2 "Environment" from
-inside an allocation: API egress, arm64 binary, git push.
+An optional second argument sets the walltime. The script reads the account,
+partition and paths from `env.local.sh` and submits
+`agent_driver.slurm`. The job loads modules, runs pre-flight checks, and starts
+the driver loop in a dedicated tmux server on the compute node.
+
+**The driver loop.** Each iteration checks that the working tree has no
+uncommitted changes (it stops rather than discard anything), syncs `main`, and
+starts a fresh session. The session does one of three things:
+
+- delivers one piece of work as a PR, and the loop continues;
+- prints `WAITING`, because the next task depends on a PR you have not merged.
+  The loop sleeps (`GLIDE_AGENT_WAIT_SECONDS`, default 30 minutes) and tries
+  again. Each check is a short session, so raise the wait or stop the loop
+  before a long absence;
+- prints `NO_TASK`, because every task in the queue is merged. The loop exits.
+
+Queue A is sequential, so in practice it delivers a task and then waits for you
+to merge it. Queue B tasks are mostly independent, so it keeps going.
+
+**Attaching.** The job log prints the node and the tmux socket name. Then:
+
+```bash
+ssh <node>
+tmux -L glide-<jobid> attach
+```
+
+`touch dev/agent/STOP_AFTER_TASK` ends the loop after the current session.
+Ctrl-C in the pane aborts at once.
+
+**Restarting.** When the allocation ends, resubmit. The repository is the only
+state. Test a cold restart once deliberately before relying on it.
+
+**First runs: supervised.**
+
+1. Submit Queue A and stay attached while it does A00. Review and merge the PR
+   yourself. This shows whether the instructions, the claim, the progress file
+   and the PR template work in practice, on a small task.
+2. Do the same for A0, since every later task is checked against its fixtures.
+3. Then leave Queue A unattended. Start Queue B in a second allocation once
+   Queue A runs smoothly.
+
+**Releasing a stuck claim.** If you close a PR without merging and want the
+task redone from scratch, delete its `agent/<ID>-*` branch. The task becomes
+available again.
 
 ---
 
@@ -150,16 +190,16 @@ The rule: match model cost to the cost of an undetected error.
 | B | Met cache, sparse output, batching, packaging, docs, figure tooling | Sonnet (`claude-sonnet-5`) | well-specified, cheap to check |
 | either | Column and satellite releases, composite met source | Opus or Fable | design-heavy but not physics-changing |
 
-Set the model in `run_task.sh` per queue. If in doubt, use the stronger model;
-the marginal cost is small against a bad merge.
+Set `GLIDE_AGENT_MODEL_A` and `GLIDE_AGENT_MODEL_B` in `env.local.sh`. If in
+doubt, use the stronger model; the marginal cost is small against a bad merge.
 
 ---
 
 ## 5. Reviewing and merging
 
-1. When a PR appears, the driver (or you) starts a **fresh** session with
-   `/code-review` on the PR number, with the strongest model. The author
-   session is blind to its own errors; a cold reviewer is not.
+1. When a PR appears, start a **fresh** session with `/code-review` on the PR
+   number, using the strongest model. The author session is blind to its own
+   errors; a cold reviewer is not.
 2. For numerics PRs (Queue A), check in person, in this order:
    - the golden comparison output in the PR description: which fixtures,
      which tolerance, whether it passed;
@@ -170,35 +210,48 @@ the marginal cost is small against a bad merge.
    - the benchmark number moved in the direction claimed.
 3. For infrastructure PRs, check the acceptance criteria from the task spec
    and the storage or throughput numbers reported.
-4. Merge with squash, keeping the task ID in the title. Delete the branch.
-5. If a PR is not mergeable, comment with what to change and mark the task
-   `REWORK` in PROGRESS.md; the next session on that queue picks it up.
+4. Merge with squash, keeping the task ID in the title, and delete the branch.
+   The task's progress file arrives on `main` with the merge, which is what
+   marks it merged. Update "Current state" in PROGRESS.md from its hand-off
+   notes if needed.
+5. To ask for changes, comment on the PR **and** add a resume request to
+   PROGRESS.md on `main`, for example `R4 — A2: address the review comments on
+   the bandwidth default`. The next session on that queue acts on it before
+   starting any new task. Sessions do not see PR comments until a resume
+   request points them there.
 
 ---
 
 ## 6. Escalations and interventions
 
-The agent signals by writing a `BLOCKED` entry in PROGRESS.md with the question
-and, if a PR exists, a comment on it. It then stops that task and, if the
-driver allows, moves to the next unblocked task.
+**BLOCKED.** When an agent hits a stop condition it sets its progress file to
+`BLOCKED`, pushes the branch, and opens a draft PR titled
+`<ID>: BLOCKED — <question>`, or comments on the existing PR. Draft PRs titled
+BLOCKED are your inbox (`gh pr list --draft`). Answer by adding a resume
+request with the answer, for example
+`R5 — A9: FLEXPART source is now at $GLIDE_FLEXPART_SRC; use the f2py route`.
+The agent resumes on the next session, completes the task and marks the PR
+ready.
 
-You respond by editing the task in QUEUE.md (clarify scope, add a decision) or
-by writing the answer under the BLOCKED entry and clearing the flag. Keep
-answers in the files, not in chat, so the next session sees them.
+**HANDOFF.** When a session runs low on context mid-task it writes hand-off
+notes, sets status `HANDOFF` and stops. The next session continues
+automatically; you need do nothing.
 
-Intervene directly (attach to tmux) when a session is looping, when a GPU job
-it launched has run far past its expected time, or when you see it heading into
-a stop-condition area without stopping.
+**Intervene directly** (attach to tmux) when a session is looping, when a GPU
+run it launched has gone far past its stated estimate, or when you see it
+heading into a stop-condition area without stopping.
 
 ---
 
 ## 7. Cadence
 
-- **Daily, 20 minutes:** read new PROGRESS entries, review and merge PRs,
-  answer BLOCKED items.
-- **Weekly:** reprioritise QUEUE.md, update `dev/roadmap.md` if scope moved,
-  check the benchmark and storage numbers against the roadmap targets, confirm
-  the reference-run pipeline (FLEXPART, ETEX) is progressing.
+- **Daily, 20 minutes:** review and merge PRs; answer BLOCKED drafts with
+  resume requests; update "Current state".
+- **Weekly:** harvest `proposed follow-ups` from the week's merged progress
+  files into QUEUE.md; reprioritise; update `dev/roadmap.md` if scope moved;
+  check the benchmark and storage numbers against the roadmap targets; confirm
+  the FLEXPART and ETEX reference work is progressing; delete resume requests
+  for merged tasks.
 - **At the freeze:** you and the external reviewer sign the physics audit;
   tag; update STATUS.
 
@@ -212,13 +265,18 @@ a stop-condition area without stopping.
 - **Scope creep.** A task that "while it was there" refactored something else.
   Defence: the task's "out of scope" list, and reviews that reject unrelated
   diffs.
-- **Context exhaustion mid-task.** The session forgets its own plan. Defence:
-  PROGRESS entries written early and updated, tasks sized to hours, and the
-  instruction to split rather than push on.
+- **Duplicate work.** Two sessions on one task. Defence: the claim is a pushed
+  branch, checked before any session starts work.
+- **Stale claims.** A branch left behind after an abandoned PR keeps its task
+  in flight forever. Defence: delete the branch to release it.
+- **Context exhaustion mid-task.** Defence: progress files written early, tasks
+  sized to hours, and the HANDOFF status.
 - **Test suite drift.** Skipped or xfailed tests accumulating. Defence: CI
   reports the skip count; reviews check it.
 - **Runaway compute.** A convergence sweep launched at ten times the intended
   size. Defence: task specs state expected runtimes; the agent must stop and
   report if a run exceeds twice the estimate.
+- **Leaked environment details.** Account codes or paths committed. Defence:
+  `env.local.sh` is gitignored and agents refer to variable names only.
 - **Documentation lag.** Code merged without docs and STATUS updates. Defence:
   it is in the acceptance criteria of every task, and reviews check it.

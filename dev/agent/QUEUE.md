@@ -2,8 +2,8 @@
 
 _Task specifications for coding-agent sessions. Read
 [INSTRUCTIONS.md](INSTRUCTIONS.md) first. Roadmap IDs refer to
-[dev/roadmap.md](../roadmap.md). Status of each task lives in
-[PROGRESS.md](PROGRESS.md), not here. Written 2026-09-16; the human operator
+[dev/roadmap.md](../roadmap.md). Task status is derived from the repository (see INSTRUCTIONS.md §1);
+per-task records live in [progress/](progress/). Written 2026-09-16; the human operator
 reorders and edits this file weekly._
 
 Two queues. **Queue A** is sequential: numerics-touching work before the
@@ -90,8 +90,8 @@ Model: Fable, high effort. Run strictly in order unless a task is BLOCKED.
 - **Acceptance.** Fixtures exist and are documented in `docs/VALIDATION.md`
   (new subsection "Golden fixtures"); `compare_golden.py` on the same rev passes
   bit-identically on CPU and within the existing parity tolerance on CUDA;
-  `benchmark.py` output for the reference config is recorded in PROGRESS.md as
-  the baseline.
+  `benchmark.py` output for the reference config is recorded as the baseline
+  in the new `docs/VALIDATION.md` subsection and in the task's progress file.
 - **Runtime.** Reference config on GH200: ~25 min.
 
 ### A1 — Sub-time the residual phase (6a)
@@ -115,8 +115,8 @@ Model: Fable, high effort. Run strictly in order unless a task is BLOCKED.
   forced to saturate (small `max_substeps`), and zero on the smoke config; phase
   table for the reference config with no "residual"
   bucket above 5% of wall; convection re-profiled; the two largest consumers
-  named in STATUS.md "Performance" with numbers. Propose follow-up
-  optimisation tasks in PROGRESS.md "Proposed tasks".
+  named in STATUS.md "Performance" with numbers. List follow-up optimisation tasks under `proposed follow-ups` in the
+  task's progress file.
 - **Verification.** Golden bit-identical on CPU (timers must not change
   numerics); graph capture intact.
 
@@ -185,8 +185,7 @@ Model: Fable, high effort. Run strictly in order unless a task is BLOCKED.
   trilinear gather, with fp32 accumulation. Off by default.
 - **Acceptance.** (i) Golden differences at fp32 rounding level on CPU and
   documented; all tests pass. (ii) A/B on the reference config: parity
-  difference reported; benchmark before/after; recommendation recorded in
-  PROGRESS.md whether to enable by default (decision record required if yes).
+  difference reported; benchmark before/after; recommendation recorded in the task's progress file whether to enable by default (decision record required if yes).
 - **Verification.** Capture intact in both modes.
 - **Runtime.** ~1 h.
 
@@ -266,8 +265,8 @@ Model: Fable, high effort. Run strictly in order unless a task is BLOCKED.
   position and $w'$ (`gpu_engine.py`); per-particle sub-stepping with fixed
   outer-step coefficients (`turbulence/hanna.py`); spherical displacement
   factors (`gpu_engine.py`); particle weights of $1/N$ (`release_generator.py`).
-- **Acceptance.** Every equation has a row; every gap has a proposed test in
-  PROGRESS.md "Proposed tasks". The human and the external reviewer sign the
+- **Acceptance.** Every equation has a row; every gap has a proposed test under `proposed follow-ups` in the task's
+  progress file. The human and the external reviewer sign the
   table by merging.
 
 ### A9 — Tier 1 component parity (validation)
@@ -277,8 +276,8 @@ Model: Fable, high effort. Run strictly in order unless a task is BLOCKED.
   Hanna and convection routines (via f2py or a transcribed reference marked as
   such) and GLIDE's on identical columns; figures per the plan; tolerances
   from the pre-registration record.
-- **Stop condition specific to this task:** if the FLEXPART source is not
-  present at the path in PROGRESS.md, stop.
+- **Stop condition specific to this task:** if `$GLIDE_FLEXPART_SRC` is unset
+  or does not contain the FLEXPART v11 source, stop.
 
 ### A10 — Tier 2 twin analysis tooling (validation)
 
@@ -397,8 +396,8 @@ dependency is listed; run in the listed order by default.
   early.
 - **Scope.** CLI polish; `pip install glide-lpdm` (name to be confirmed by the
   human); an Apptainer definition for Isambard and a Dockerfile; a pinned lock
-  file; a nightly GPU test sbatch that runs the parity tests and appends the
-  result to PROGRESS.md; documentation site configuration; DOI metadata
+  file; a nightly GPU test sbatch that runs the parity tests and posts the result as a comment on a pinned
+  GitHub issue; documentation site configuration; DOI metadata
   (`CITATION.cff`, Zenodo).
 - **Acceptance.** A clean machine can install and run the smoke test from the
   published instructions; the container runs the smoke test on Isambard.

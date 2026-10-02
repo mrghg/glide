@@ -1,45 +1,45 @@
-# Progress
+# Shared state
 
-_The durable state shared between agent sessions and the human operator.
-Sessions read it first and write to it last. Entries follow the template in
-[INSTRUCTIONS.md](INSTRUCTIONS.md) §8. Keep it current; prune MERGED entries
-into the "History" section monthly._
+_Maintained by the human operator. Agents read this file and never edit it, so
+pull requests never conflict on it. Per-task records are in
+[progress/](progress/), one file per task; how task status is derived is in
+[INSTRUCTIONS.md](INSTRUCTIONS.md) §1._
 
 ## Current state
 
 - Physics tag: none yet (pre-freeze).
 - Golden fixtures: none yet (task A0).
 - Benchmark baseline: none yet (task A0).
-- Active allocations: none.
+- Notes: none.
 
-## Data inventory
+## Resume requests
 
-_Filled by the human operator. Every cube the tasks may use, with its path.
-Agents do not download data._
-
-| Path | Domain | Period | Levels | Cadence | Size | Notes |
-| --- | --- | --- | --- | --- | --- | --- |
-| `<<PLACEHOLDER>>` | | | | | | smoke |
-| `<<PLACEHOLDER>>` | | | | | | reference multi-site |
-
-Restricted reference data (never in the repo): FLEXPART outputs
-`<<PLACEHOLDER>>`; NAME footprints `<<PLACEHOLDER>>`; EDGAR `<<PLACEHOLDER>>`;
-ETEX `<<PLACEHOLDER>>`; FLEXPART v11 source `<<PLACEHOLDER>>`.
-
-## Open BLOCKED items
+_Numbered and never reused. Format: `R<n> — <ID>: <instruction, or the answer
+to a BLOCKED question>`. The next session on that task's queue acts on it and
+records the entry ID under `handled:` in the task's progress file. Delete
+entries once the task is merged._
 
 _None._
 
-## Task log
+## Data inventory
 
-_One entry per task, newest first. Status: CLAIMED | PR OPEN #n | BLOCKED |
-REWORK | MERGED._
+_Paths are relative to `$GLIDE_DATA`. Agents use only what is listed here and
+never download data._
 
-## Proposed tasks
+| Path | Domain | Period | Levels | Cadence | Size | Use |
+| --- | --- | --- | --- | --- | --- | --- |
+| _to fill_ | | | | | | smoke tests |
+| _to fill_ | | | | | | reference multi-site benchmark |
 
-_Agents append proposals here (follow-ups discovered during a task). The human
-moves accepted ones into QUEUE.md._
+## Restricted reference data
 
-## History
+_Located by environment variables set in `env.local.sh`. Never copied into the
+repository or the tests._
 
-_MERGED entries moved here monthly._
+| Variable | Contents | Needed by |
+| --- | --- | --- |
+| `GLIDE_FLEXPART_SRC` | FLEXPART v11 source | A9 |
+| `GLIDE_FLEXPART_OUTPUTS` | FLEXPART v11 on ERA5 particle and gridded output for the case library | A10 |
+| `GLIDE_NAME_FOOTPRINTS` | NAME footprints for the same sites and dates | A10 (secondary) |
+| `GLIDE_EDGAR` | EDGAR flux maps | A10 |
+| `GLIDE_ETEX` | ETEX release and station data | A11 |

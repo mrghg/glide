@@ -19,8 +19,10 @@ This file is the agent-agnostic contributor guide (the `AGENTS.md` convention;
   Validation ladder and figure set: [docs/validation-plan.md](docs/validation-plan.md).
 - Agent sessions: read [dev/agent/INSTRUCTIONS.md](dev/agent/INSTRUCTIONS.md)
   (session protocol, verification standard, stop conditions), take tasks from
-  [dev/agent/QUEUE.md](dev/agent/QUEUE.md), record state in
-  [dev/agent/PROGRESS.md](dev/agent/PROGRESS.md). Operator guide:
+  [dev/agent/QUEUE.md](dev/agent/QUEUE.md), record per-task state in
+  [dev/agent/progress/](dev/agent/progress/); shared state and the data
+  inventory are in [dev/agent/PROGRESS.md](dev/agent/PROGRESS.md), which agents
+  never edit. Operator guide:
   [dev/agent-operations.md](dev/agent-operations.md).
 - Historical dated work-orders (physics/test reviews) were retired; their durable
   content lives in STATUS / decisions / docs, and full history is in git.

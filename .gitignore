@@ -68,3 +68,7 @@ data/**/*.tar.gz
 
 # Machine-generated run config (regenerate with scripts/make_multisite_config.py)
 configs/multisite_validation_48h.yaml
+
+# Agent operations: local environment and control files
+dev/agent/isambard/env.local.sh
+dev/agent/STOP_AFTER_TASK

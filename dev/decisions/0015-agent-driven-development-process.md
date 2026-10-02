@@ -5,8 +5,14 @@ inside long GPU allocations on Isambard AI. The failure modes are silent
 physics changes, scope creep, context exhaustion and drift between code and
 documentation.
 
-**Decision.** Work is organised as task queues (dev/agent/QUEUE.md) with
-durable state in dev/agent/PROGRESS.md. Each session delivers one task on its
+**Decision.** Work is organised as task queues (dev/agent/QUEUE.md). Durable state
+lives in the repository itself: each task has a progress file under
+dev/agent/progress/, created and pushed on the task branch as the claim, so a
+file on main means the task is merged and an open PR or `agent/<ID>-*` branch
+means it is in flight. dev/agent/PROGRESS.md is maintained by the human only
+(current state, data inventory, resume requests), so PRs never conflict on it.
+Environment-specific values (SLURM account, paths) live in an untracked
+`env.local.sh` and are referred to by variable name. Each session delivers one task on its
 own branch as a pull request and stops. Agents never commit to main. A fresh
 session reviews every PR before the human merges. Numerics-touching tasks use
 the strongest model and are verified against golden fixtures, static/dynamic
@@ -25,5 +31,5 @@ loses context). Agent on the login node submitting GPU jobs (queue wait before
 every test; login-node policy). Per-command permission prompts (not
 long-running).
 
-**Status.** Adopted 2026-09-16. Docs: dev/agent-operations.md,
+**Status.** Adopted 2026-09-16; claim and state mechanics revised 2026-10-02. Docs: dev/agent-operations.md,
 dev/agent/INSTRUCTIONS.md.

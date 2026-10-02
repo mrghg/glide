@@ -2,14 +2,15 @@
 # =============================================================================
 # Long-running agent allocation for GLIDE development on Isambard AI.
 #
-# TEMPLATE. Fill the >>> EDIT lines, then test with a short --time before
-# relying on it. Submit from the repo root:
-#     sbatch --time=24:00:00 dev/agent/isambard/agent_driver.slurm A
-#     sbatch --time=24:00:00 dev/agent/isambard/agent_driver.slurm B
-# The positional argument is the queue letter (A or B). The driver loop runs
-# inside a tmux session on the compute node so you can attach:
-#     ssh <node>; tmux attach -t glide-agent-<queue>
-# Resubmit when the allocation ends; PROGRESS.md and QUEUE.md are the state.
+# Submit with dev/agent/isambard/submit.sh <A|B> [walltime], which supplies the
+# account, partition and walltime from env.local.sh. UNTESTED TEMPLATE: run it
+# once with a short walltime before relying on it.
+#
+# The driver loop runs in a dedicated tmux server on the compute node, so it
+# inherits the modules and variables set here. To watch or intervene:
+#     ssh <node>
+#     tmux -L glide-<jobid> attach
+# Resubmit when the allocation ends; the repository is the only state.
 # =============================================================================
 #SBATCH --job-name=glide-agent
 #SBATCH --output=slurm_logs/%x-%j.out
@@ -19,39 +20,44 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=256G
-# #SBATCH --account=<<PLACEHOLDER>>      # >>> EDIT
-# #SBATCH --partition=<<PLACEHOLDER>>    # >>> EDIT
 
 set -euo pipefail
 cd "${SLURM_SUBMIT_DIR:-$PWD}"
+ENV_FILE="dev/agent/isambard/env.local.sh"
+[[ -f "${ENV_FILE}" ]] || { echo "missing ${ENV_FILE}" >&2; exit 1; }
+# shellcheck source=/dev/null
+source "${ENV_FILE}"
+for v in GLIDE_REPO GLIDE_DATA GLIDE_AGENT_OUTPUTS GLIDE_SCRATCH; do
+  [[ -n "${!v:-}" ]] || { echo "${v} is not set in ${ENV_FILE}" >&2; exit 1; }
+done
+cd "${GLIDE_REPO}"
 QUEUE="${1:-A}"
 
 module load cudatoolkit/24.11_12.6
 module load gcc-native/14.2
 export CC=gcc CXX=g++
-export UV_CACHE_DIR="<<PLACEHOLDER: scratch>>/uv"          # >>> EDIT
-export TRITON_CACHE_DIR="<<PLACEHOLDER: scratch>>/triton"  # >>> EDIT
-export GLIDE_DATA="<<PLACEHOLDER: cubes root>>"            # >>> EDIT
-export GLIDE_AGENT_OUTPUTS="<<PLACEHOLDER: outputs root>>" # >>> EDIT
+export UV_CACHE_DIR="${GLIDE_SCRATCH}/uv"
+export TRITON_CACHE_DIR="${GLIDE_SCRATCH}/triton"
+mkdir -p "${UV_CACHE_DIR}" "${TRITON_CACHE_DIR}" "${GLIDE_AGENT_OUTPUTS}" slurm_logs
 
-# Model per queue. IDs: claude-fable-5-1, claude-opus-5, claude-sonnet-5.
 case "${QUEUE}" in
-  A) export GLIDE_AGENT_MODEL="claude-fable-5-1" ;;
-  B) export GLIDE_AGENT_MODEL="claude-sonnet-5" ;;
+  A) export GLIDE_AGENT_MODEL="${GLIDE_AGENT_MODEL_A:-claude-fable-5-1}" ;;
+  B) export GLIDE_AGENT_MODEL="${GLIDE_AGENT_MODEL_B:-claude-sonnet-5}" ;;
   *) echo "unknown queue ${QUEUE}" >&2; exit 1 ;;
 esac
 
-echo "node: $(hostname)  queue: ${QUEUE}  model: ${GLIDE_AGENT_MODEL}  job: ${SLURM_JOB_ID}"
+SOCKET="glide-${SLURM_JOB_ID:-local}"
+echo "node: $(hostname)  queue: ${QUEUE}  model: ${GLIDE_AGENT_MODEL}  job: ${SLURM_JOB_ID:-none}"
+echo "attach with: ssh $(hostname) then tmux -L ${SOCKET} attach"
 
-# Pre-flight: GPU, API egress, git.
+# Pre-flight: GPU, API egress, GitHub.
 .venv/bin/python -c "import torch, sys; sys.exit(0 if torch.cuda.is_available() else 1)"
 claude -p "Reply with the single word OK." --model "${GLIDE_AGENT_MODEL}" >/dev/null
 gh auth status >/dev/null
 
-# Run the driver loop inside tmux so a human can attach; keep the job alive
-# until the loop exits.
-SESSION="glide-agent-${QUEUE}"
-tmux new-session -d -s "${SESSION}" \
-  "bash dev/agent/isambard/run_task.sh ${QUEUE} 2>&1 | tee -a slurm_logs/agent-${QUEUE}-${SLURM_JOB_ID}.log"
-while tmux has-session -t "${SESSION}" 2>/dev/null; do sleep 60; done
+# A dedicated tmux server (-L) is started fresh by this job, so it inherits this
+# shell's environment: the loaded modules and everything from env.local.sh.
+tmux -L "${SOCKET}" new-session -d -s "agent-${QUEUE}" \
+  "bash dev/agent/isambard/run_task.sh ${QUEUE} 2>&1 | tee -a slurm_logs/agent-${QUEUE}-${SLURM_JOB_ID:-local}.log"
+while tmux -L "${SOCKET}" has-session -t "agent-${QUEUE}" 2>/dev/null; do sleep 60; done
 echo "driver loop finished"
