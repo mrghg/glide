@@ -44,6 +44,7 @@ htmlcov/
 # Ignore the data itself but keep the folder structure, README, and placeholders.
 data/**
 !data/README.md
+!data/tracer-experiments.md
 !data/*/
 !data/**/.gitkeep
 # ...but never track data payloads themselves. `!data/*/` above re-includes every

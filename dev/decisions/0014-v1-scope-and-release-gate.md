@@ -20,7 +20,7 @@ rather than a slow one that is rewritten afterwards is the only order that
 does the validation once.
 
 **Rejected alternatives.** Shipping calibrated defaults in v1 (not comparable,
-and calibration depends on ETEX which is late in the schedule). Validating
+and calibration depends on the tracer experiments, which are late in the schedule). Validating
 first and optimising after (two validations).
 
 **Status.** Adopted 2026-09-16. Docs: dev/roadmap.md.

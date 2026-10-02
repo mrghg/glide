@@ -64,7 +64,7 @@ the physics freeze or after it with a decision record.
 | 1b | Forward–backward reciprocity test; convergence studies in dt, sub-steps, particles, ladder | S | none | sets defaults | v1 |
 | 1c | Physics audit table (equation → source → code → test) with external human sign-off | S | none | — | v1 |
 | 1d | FLEXPART v11 twins on ERA5, particle level then footprint level | M | FLEXPART runs (human) | — | v1 |
-| 1e | ETEX and radon, pre-registered protocol | M | 1d | — | v1 |
+| 1e | Tracer experiments (ETEX, CAPTEX, ANATEX) and radon, pre-registered protocol | M | 1d | — | v1 |
 | 1f | Parameter sensitivity screen and Bayesian calibration; parameter card | M | 1e, 2a | yes | v2 |
 | 1g | UK CH₄ inversion against NAME-based results | M | 1a (v1) or 1f (v2) | — | v1 paper |
 | 1h | Model paper, public benchmark, reproducibility package | M | 1b–1e | — | v1 |
@@ -172,8 +172,9 @@ reproduced by someone outside the group. No uncertainty quantification.
   reciprocity, well-mixed and convergence tests.
 - Physics audit table complete and signed by an external reviewer.
 - Validation report in `docs/` with pre-registered metrics met: FLEXPART twin
-  agreement at particle and footprint level; ETEX figure-of-merit within the
-  published FLEXPART and NAME range.
+  agreement at particle and footprint level; DATEM ranking scores for ETEX,
+  CAPTEX and ANATEX, and the ETEX ATMES-II statistics, within the range
+  published for the comparison models (NAME, FLEXPART, HYSPLIT, STILT).
 - Performance table published: footprints per second on GH200 and on CPU for
   the reference configuration, with a phase profile.
 - Reproducibility: pinned environment, container, seeds, archived inputs for
@@ -197,13 +198,14 @@ that will actually be run at scale.
 | **1. Efficiency before the freeze** | time-bin fix (A00) → 6a → 2b → 7a → 7f, 7e → 1b, 7b → 2a | agent, strongest model, sequential | A |
 | **1′. Infrastructure, in parallel** | 3a + 7d, 7g, 7h, 4e, 4, 4a, 4b, validation figure tooling, packaging groundwork | agent, cheaper model | B |
 | **2. Freeze** | 1a; physics audit table (1c) prepared for the external reviewer; tag `v0-physics` | agent prepares, human signs | A |
-| **3. Validate** | Tier 0 additions (reciprocity, convergence figures) → Tier 1 parity → Tier 2 twins → Tier 3 ETEX and radon | agent analysis, human reference runs | A |
+| **3. Validate** | Tier 0 additions (reciprocity, convergence figures) → Tier 1 parity → Tier 2 twins → Tier 3 tracer experiments and radon | agent analysis, human reference runs | A |
 | **4. Release v1** | Packaging, reproducibility bundle, docs, gate checklist | agent | B |
 | **5. Paper** | 1g and 1h | human with agent support | — |
 
 Hard dependencies to start early because they are on the critical path and
-need a person: the FLEXPART v11 reference runs on ERA5 (1d) and the ETEX data
-and 1994 meteorology (1e). Start the FLEXPART runs on the current physics; the
+need a person: the FLEXPART v11 reference runs on ERA5 (1d), and the
+tracer-experiment data and their ERA5 cubes (1e). The download recipe is in
+[data/tracer-experiments.md](../data/tracer-experiments.md). Start the FLEXPART runs on the current physics; the
 final comparison is repeated on the frozen version.
 
 The GATES queue (`docs/code_review_2026-09-16.md` in the GATES repository) is
@@ -232,7 +234,7 @@ Assuming one person directing agents, plus someone able to run FLEXPART:
 | --- | --- |
 | Efficiency and convergence, before the freeze | 4–6 weeks |
 | Freeze, audit, reciprocity | 2 weeks |
-| FLEXPART twins and ETEX | 8–12 weeks, dominated by the reference runs |
+| FLEXPART twins and tracer experiments | 8–12 weeks, dominated by the reference runs |
 | Releases, nested output, packaging, in parallel | absorbed |
 | **v1** | **roughly 4–5 months from 2026-09-16** |
 

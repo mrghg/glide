@@ -44,7 +44,7 @@ explained afterwards is not.
 | 0 | Does the engine solve the equations it claims to? | closed-form solutions, PDE references, invariants | largely done; reciprocity and convergence figures missing |
 | 1 | Are the parameterisations the same numbers as the reference implementation? | FLEXPART v11 routines on the same column | not started |
 | 2 | Does the assembled model transport particles like the incumbents on identical meteorology? | FLEXPART v11 on ERA5; NAME secondary | tooling exists, not run on frozen physics |
-| 3 | Does it reproduce a real tracer with a known source? | ETEX, radon-222 | not started |
+| 3 | Does it reproduce a real tracer with a known source? | ETEX, CAPTEX, ANATEX, radon-222 | data located; not started |
 | 4 | Does an inversion the group trusts give the same answer with GLIDE footprints? | UK CH₄ with NAME footprints | not started; paper application |
 
 ### Tier 0 — analytic and internal
@@ -95,16 +95,47 @@ becomes possible and is the clean NAME comparison.
 
 ### Tier 3 — observations with a known source
 
-- **ETEX** (1994). Two releases, ERA5 covers the period, and the published
-  ATMES-II figure-of-merit scores for FLEXPART and NAME give a scale. GLIDE is a
-  backward model, so ETEX is run receptor-oriented: one backward release per
-  station per sampling interval, concentration = footprint × source strength.
-  This also exercises reciprocity on a real case.
+Three controlled tracer releases, all covered by ERA5. Where to get the data,
+the file formats and the scoring are in
+[data/tracer-experiments.md](../data/tracer-experiments.md).
+
+- **ETEX** (Europe, 1994). Two 12-hour releases, about 168 stations, 3-hour
+  samples. The ATMES-II exercise (Mosca et al., 1998) gives published scores for
+  the models of the time, including FLEXPART and NAME.
+- **CAPTEX** (eastern North America, 1983). Six short releases, 84 sites at
+  300–800 km, 3- and 6-hour samples. From NOAA's DATEM archive.
+- **ANATEX** (North America, 1987). 66 releases from two sites over three
+  months, 75 sites, 24-hour samples, up to thousands of kilometres. From DATEM.
 - **Radon-222** at a few European sites, as a continuous check on
   boundary-layer mixing, with the flux-map uncertainty acknowledged.
 
-Release one of ETEX is the calibration set (v2); release two and radon are
-held out for testing.
+CAPTEX and ANATEX matter because the same score has been published for four
+incumbent models on them: NAME (Selvaratnam, Thomson and Webster, 2023,
+doi:10.1175/JAMC-D-23-0021.1), and HYSPLIT, STILT and FLEXPART (Hegarty et al.,
+2013). That places GLIDE among four models rather than against a single
+exercise. Selvaratnam et al. also tuned NAME's parameterisation of unresolved
+mesoscale motions, the process GLIDE's meander term represents; their result is
+the prior for that parameter in the v2 calibration.
+
+**Primary metric:** the DATEM ranking score, the sum of four terms each scaled
+from 0 to 1 (squared correlation, fractional bias, figure of merit in space,
+Kolmogorov–Smirnov parameter), best score 4. For ETEX, the ATMES-II statistics
+are reported as well. GLIDE's scoring code must reproduce DATEM's own statistics
+on DATEM's HYSPLIT example output before any GLIDE result is scored.
+
+**How GLIDE is run:** receptor-oriented. One backward release per measured
+sample, released over the sampling period at sampler height; the predicted
+concentration is the emission rate times the sensitivity at the source. About
+3,100 samples for ETEX, 2,281 for CAPTEX and 5,500 per tracer for ANATEX. The
+two ANATEX tracers are sampled at the same sites and times, so one footprint per
+sample scores both sources. The published scores come from forward runs, so
+"backward against forward" is a declared expected difference, and the agreement
+is a real-case test of the backward formulation.
+
+**Data split (v2 calibration):** fit on ETEX-1 and CAPTEX; test on ANATEX and
+radon. ETEX-2 is scored and reported but not used as the held-out test, because
+it is widely reported as poorly reproduced by most models, which makes it a weak
+test of a calibration.
 
 ### Tier 4 — inversion
 
@@ -121,10 +152,13 @@ Before any Tier 1–3 run is made, a decision record in
 
 - the frozen physics tag the runs use;
 - the case library (§4) and the full release sets;
-- the metrics, exactly as implemented in `scripts/validation/`;
+- the metrics, exactly as implemented in `scripts/validation/`, including the
+  DATEM scoring options: the zero-measurement threshold, whether zero–zero pairs
+  count, and unaveraged versus averaged analysis (these move scores a long way);
 - the tolerances and the published scores they are judged against;
 - the expected-difference list for the twins;
-- the data splits (ETEX-1 fit, ETEX-2 and radon test).
+- the data splits (ETEX-1 and CAPTEX fit; ANATEX and radon test; ETEX-2
+  reported).
 
 Any change after that point is logged as a further decision record with its
 reason. Results are reported against the pre-registered numbers whether or not
@@ -195,6 +229,9 @@ bootstrapped particle subsets); the case library is used throughout.
 - ETEX concentration maps at sampling times with station observations as points
   on the same scale; arrival-time map; station time series; figure-of-merit bar
   beside the published FLEXPART and NAME values.
+- CAPTEX and ANATEX: per-release maps of measured and modelled concentration;
+  scatter of paired samples; DATEM ranking score and its four terms as bars
+  beside the published NAME, HYSPLIT, STILT and FLEXPART values.
 - Radon time series and diurnal composites per site.
 
 **Tier 4**
@@ -241,18 +278,19 @@ because Tier 3 is designed around it.
 2. **Screen** with in-batch parameter ensembles (roadmap 2a): a Morris or Sobol
    design over the physical parameters with footprint and mole-fraction
    metrics as outputs, to find the few that matter.
-3. **Calibrate** the influential few against ETEX release one, Bayesian rather
+3. **Calibrate** the influential few against ETEX-1 and CAPTEX, Bayesian rather
    than point estimation, using forward-mode tangents (roadmap 2c) where the
-   chaos test allows and an ensemble emulator where it does not. Test on ETEX
-   release two and radon.
+   chaos test allows and an ensemble emulator where it does not. Test on ANATEX
+   and radon. Use Selvaratnam et al. (2023) as the prior for the meander
+   parameters.
 4. **Ship** the posterior mean as the v2 default, a parameter card in the docs
    (prior, posterior, sensitivity index per parameter), and the covariance as
    the linearised transport-error term (roadmap 2e).
 5. **Keep structural uncertainty separate.** Scheme swaps are a structural
    ensemble, reported distinctly from the parametric posterior.
 
-Identifiability is the risk with tower data alone; ETEX removes the flux
-unknown, which is why it anchors the calibration.
+Identifiability is the risk with tower data alone; the tracer experiments
+remove the flux unknown, which is why they anchor the calibration.
 
 ---
 
@@ -264,11 +302,14 @@ unknown, which is why it anchors the calibration.
 | FLEXPART v11 built with ERA5 via flex_extract; particle and gridded output for the release sets | 1, 2 | human | start on current physics; repeat on the frozen tag |
 | FLEXPART v11 source for the parity scripts | 1 | human | licence permitting |
 | NAME footprints for the same sites and dates | 2 | group archive (restricted) | secondary comparison |
-| ETEX release data and station concentrations; ERA5 for Oct–Nov 1994 | 3 | human (public data), download tooling | |
+| ETEX observations (JRC) | 3 | human; scripted download | recipe in [data/tracer-experiments.md](../data/tracer-experiments.md) |
+| CAPTEX and ANATEX observations, DATEM statistics code and HYSPLIT reference output (NOAA DATEM) | 3 | human; browser download | same page |
+| ERA5 for ETEX (Oct–Nov 1994, Europe), CAPTEX (Sep–Oct 1983) and ANATEX (Jan–Mar 1987, North America) | 3 | human, existing download tooling | ANATEX is the largest cube; size it first |
 | Radon-222 concentrations and a flux map | 3 | human | |
 | EDGAR or equivalent flux maps for the mole-fraction level | 2 | group archive (restricted) | |
 | UK DECC network data and the group's inversion setup | 4 | group | paper stage |
 
 Restricted data never enters the repository or the tests
 ([data/README.md](../data/README.md)); the public benchmark (roadmap 1h) uses
-only the ERA5 subsets, the FLEXPART reference outputs and ETEX.
+only the ERA5 subsets, the FLEXPART reference outputs and the tracer
+experiments, fetched from their original archives rather than redistributed.

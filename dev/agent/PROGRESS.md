@@ -31,10 +31,11 @@ never download data._
 | _to fill_ | | | | | | smoke tests |
 | _to fill_ | | | | | | reference multi-site benchmark |
 
-## Restricted reference data
+## Reference data outside the repository
 
 _Located by environment variables set in `env.local.sh`. Never copied into the
-repository or the tests._
+repository or the tests. Download recipes for the tracer data are in
+`data/tracer-experiments.md`._
 
 | Variable | Contents | Needed by |
 | --- | --- | --- |
@@ -42,4 +43,5 @@ repository or the tests._
 | `GLIDE_FLEXPART_OUTPUTS` | FLEXPART v11 on ERA5 particle and gridded output for the case library | A10 |
 | `GLIDE_NAME_FOOTPRINTS` | NAME footprints for the same sites and dates | A10 (secondary) |
 | `GLIDE_EDGAR` | EDGAR flux maps | A10 |
-| `GLIDE_ETEX` | ETEX release and station data | A11 |
+| `GLIDE_ETEX` | ETEX observations from JRC | B10, A11 |
+| `GLIDE_DATEM` | CAPTEX and ANATEX observations, DATEM statistics code and HYSPLIT reference output | B10, A11 |

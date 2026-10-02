@@ -89,8 +89,9 @@ Work through this once. The queue assumes all of it.
       cube that exists.
 - [ ] A small cube for smoke tests and a medium cube for benchmarks, both local.
 - [ ] Decide which additional cubes you will download before the tasks that
-      need them: a model-level cube (existing item 1), an ETEX Oct–Nov 1994
-      European cube (Tier 3), a UK cube (v1.x).
+      need them: a model-level cube (existing item 1); the Tier 3 cubes for
+      ETEX (Oct–Nov 1994, Europe), CAPTEX (Sep–Oct 1983) and ANATEX (Jan–Mar
+      1987, North America); a UK cube (v1.x).
 
 ### Golden fixtures and benchmarks
 
@@ -109,7 +110,9 @@ Work through this once. The queue assumes all of it.
 
 - [ ] Start the FLEXPART v11 on ERA5 reference runs for the case library now,
       on the current physics. They are the critical path for Tier 2.
-- [ ] Obtain ETEX release and station data; confirm ERA5 1994 download.
+- [ ] Download the ETEX and DATEM tracer data per `data/tracer-experiments.md`
+      and set `GLIDE_ETEX` and `GLIDE_DATEM`. ETEX downloads by script; DATEM
+      needs a browser.
 - [ ] Locate the NAME footprints, EDGAR maps and radon data on the group
       archive, and set their variables in `env.local.sh`. They are restricted
       and never enter the repository.
@@ -250,7 +253,7 @@ heading into a stop-condition area without stopping.
 - **Weekly:** harvest `proposed follow-ups` from the week's merged progress
   files into QUEUE.md; reprioritise; update `dev/roadmap.md` if scope moved;
   check the benchmark and storage numbers against the roadmap targets; confirm
-  the FLEXPART and ETEX reference work is progressing; delete resume requests
+  the FLEXPART runs and the tracer data are progressing; delete resume requests
   for merged tasks.
 - **At the freeze:** you and the external reviewer sign the physics audit;
   tag; update STATUS.
