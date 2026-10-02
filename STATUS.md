@@ -93,6 +93,12 @@ and returns only once the architecture settles.
 
 ## What is next, roughly in order
 
+> The maintained plan is now [dev/roadmap.md](dev/roadmap.md) (2026-09-16):
+> efficiency changes that alter numerics land first, then a physics freeze, then
+> the validation ladder in [docs/validation-plan.md](docs/validation-plan.md),
+> then the v1 release. The list below is the pre-roadmap ordering and is kept
+> until the first roadmap tasks merge.
+
 1. **Validate the model-level meteorology path.** The reader, the hydrostatic
    pressure reconstruction and the download are all implemented. What remains is
    a GH200 run on a model-level cube (~3.7× the vertical data — stream only the

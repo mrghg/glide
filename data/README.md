@@ -14,6 +14,7 @@ supply the files locally.
 | `FLEXPART/FLEXPART_*.nc` | FLEXPART footprint fixture used by the comparison notebook. | FLEXPART model output. |
 | `EDGAR_CH4_2024_MHD_grid.nc` | EDGAR v2025 CH₄ 2024 total flux, regridded to the footprint grid. | EDGAR (CC-BY); https://edgar.jrc.ec.europa.eu/dataset_ghg2025 |
 | `sample_met.zarr` | Small cropped ERA5 cube for the local smoke test. | Download with `scripts/download_sample_cube.py` (public ARCO ERA5). |
+| `$GLIDE_ETEX`, `$GLIDE_DATEM` (outside the repository) | Tracer-experiment observations: ETEX, CAPTEX and ANATEX. | JRC and NOAA ARL; see [tracer-experiments.md](tracer-experiments.md). |
 
 ## How to obtain the data
 
@@ -22,6 +23,9 @@ supply the files locally.
   buckets).
 - **EDGAR emissions** — public (CC-BY) from the EDGAR portal linked above;
   regrid to the footprint grid as in the validation script.
+- **Tracer experiments (ETEX, CAPTEX, ANATEX)** — public, but both archives
+  are awkward to download from. The full recipe, file formats and scoring are in
+  [tracer-experiments.md](tracer-experiments.md).
 - **NAME / FLEXPART validation timeseries and footprints** — **not public.**
   Please contact **Matt Rigby (matt.rigby@bristol.ac.uk)** for access.
 

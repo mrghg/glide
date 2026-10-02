@@ -313,6 +313,9 @@ Notes:
 
 ## Roadmap
 
+The full plan, with item IDs, the v1 scope and release gate, and the sequence,
+is in [dev/roadmap.md](dev/roadmap.md). In brief:
+
 - **Physics validation** against NAME, FLEXPART and observations. The comparison
   machinery exists (`src/lpdm/comparison.py`, the validation notebooks) but a
   systematic evaluation has not been completed. This gates everything else.
