@@ -15,6 +15,10 @@ runtimes are for a single GH200 unless stated.
 Every spec inherits the verification standard in INSTRUCTIONS.md §3; the
 "Verification" lines below are the task-specific additions.
 
+Findings from the 2026-08-22 physics specification review are folded into the
+tasks below and tagged **[PR-F1]** to **[PR-F8]**. The review itself is not in
+the repository; each spec states the finding it addresses in full.
+
 **Contents**
 
 - [Queue A: numerics and validation](#queue-a-numerics-and-validation)
@@ -28,9 +32,44 @@ Every spec inherits the verification standard in INSTRUCTIONS.md §3; the
 
 Model: Fable, high effort. Run strictly in order unless a task is BLOCKED.
 
+### A00 — Consistent time-ago bin width [PR-F1]
+
+- **Roadmap:** prerequisite for A0. **Size:** S. **Depends on:** nothing.
+  **Decision record:** required (0016).
+- **Finding.** Per-particle time-ago bins are indexed hourly
+  (`floor(elapsed_s / 3600)` in `src/lpdm/main.py`, both the eager and the
+  static paths, and `_footprint_time_bin_index`), but the output metadata
+  labels each bin as `simulation.length_seconds / 3600 / n_time_bins` hours
+  wide (`time_ago_start_hours` / `time_ago_end_hours`). When
+  `1 < n_time_bins < length_hours` the labels are wrong and residence older
+  than `n_time_bins` hours is dropped by the gridder. Single-bin runs are
+  special-cased (all ages clamped into bin 0) and are correct; the shipped
+  multi-bin configs use one bin per hour and are unaffected. The defect is
+  latent but will be hit as soon as coarser bins are used (e.g. daily bins on a
+  30-day run), which the storage items invite.
+- **Scope.** Add `output_grid.time_bin_seconds` (default 3600). Index bins as
+  `floor(elapsed_s / time_bin_seconds)` on both runtime paths and in
+  `_footprint_time_bin_index`, and derive the metadata from the same value.
+  Keep the single-bin special case (time-integrated). Validate at config load:
+  if `n_time_bins > 1` and `n_time_bins * time_bin_seconds < length_seconds`,
+  raise unless a new `output_grid.drop_older_ages: true` is set, so dropping
+  old residence is always an explicit choice. The value must reach the
+  compiled step as a tensor or a construction-time constant, never a
+  per-step Python scalar (decision 0004).
+- **Output contract.** The change to `time_ago_*_hours` values and the new
+  config fields are authorised by this spec; document them in README "Outputs"
+  and in `docs/physics.md` footprint section.
+- **Acceptance.** Tests: labels match indexing for (bins, width, length)
+  combinations including 1 bin, bins = hours, and daily bins on a multi-day
+  run; residence conservation when bins cover the run; the validation error
+  when they do not. Existing `test_footprint_time_bin_index_advances_each_hour`
+  still passes unchanged. Decision record 0016 states the choice.
+- **Verification.** All shipped configs produce bit-identical footprints on CPU
+  (they use 1 bin, or bins = hours with the 1 h default); graph capture intact.
+
 ### A0 — Golden fixtures, comparison and benchmark harness
 
-- **Roadmap:** enabler for everything. **Size:** S. **Depends on:** nothing.
+- **Roadmap:** enabler for everything. **Size:** S. **Depends on:** A00.
 - **Scope.** Create `scripts/agent/make_golden.py`, `scripts/agent/compare_golden.py`
   and `scripts/agent/benchmark.py`.
   - `make_golden.py` runs a named config with a fixed seed and stores the
@@ -63,7 +102,18 @@ Model: Fable, high effort. Run strictly in order unless a task is BLOCKED.
   writes, Python loop overhead, convection) so the phase table attributes all
   wall time. Re-profile convection after the vectorised parcel lift. Do not
   optimise anything in this task; measure.
-- **Acceptance.** Phase table for the reference config with no "residual"
+- **Also [PR-F2]: sub-step saturation on the graph path.** The once-per-run
+  warning when particles hit `max_substeps` fires only on the dynamic path
+  (`HannaScheme`, around the `hit max_substeps` log); the static/graph path
+  skips it, yet saturation is exactly where the drift and reflection accuracy
+  target is violated. Add a device-side counter of saturated particle-steps,
+  accumulated inside the captured step with no host sync, read once per met
+  window, logged with the same wording as the dynamic path, and recorded in
+  `run_metadata.json` (additive). Update the `docs/physics.md` sub-stepping
+  section to say the warning now covers both paths.
+- **Acceptance.** Saturation count reported on both paths for a config
+  forced to saturate (small `max_substeps`), and zero on the smoke config; phase
+  table for the reference config with no "residual"
   bucket above 5% of wall; convection re-profiled; the two largest consumers
   named in STATUS.md "Performance" with numbers. Propose follow-up
   optimisation tasks in PROGRESS.md "Proposed tasks".
@@ -81,11 +131,21 @@ Model: Fable, high effort. Run strictly in order unless a task is BLOCKED.
   a fixed size so shapes stay static. Mass is conserved exactly (weights
   normalised over the in-grid stencil). Works with the release axis and the
   nested grid (B6) later.
+- **Also [PR-F4]: deposition position.** Residence is currently deposited at
+  the particle's position after advection, turbulence and convection, i.e.
+  endpoint quadrature: a particle crossing cell or vertical-bin boundaries
+  during a step contributes nothing to the cells it traversed. Add
+  `output_grid.deposition.position: endpoint | midpoint` (default `endpoint`,
+  bit-identical). `midpoint` deposits at the RK2 midpoint position already
+  computed for advection, which is consistent with the second-order scheme.
+  List endpoint quadrature under known approximations in `docs/physics.md`
+  regardless of the default.
 - **Acceptance.** New tests: conservation with the kernel; convergence to the
   delta result as bandwidth → 0; the analytic plume test passes with the
   kernel at a stated bandwidth with equal or lower error; a noise test showing
-  variance reduction at fixed particle count. Figure: plume footprint delta vs
-  kernel vs analytic (Tier 0 set). `docs/physics.md` footprint section updated.
+  variance reduction at fixed particle count; the analytic plume error with
+  `midpoint` no worse than `endpoint` at the reference Δt and better at 4Δt.
+  Figure: plume footprint delta vs kernel vs analytic (Tier 0 set). `docs/physics.md` footprint section updated.
 - **Verification.** With `kind: delta` golden bit-identical on CPU. Graph
   capture intact with `kind: gaussian` on CUDA.
 - **Runtime.** Tests only; GPU smoke run.
@@ -98,7 +158,9 @@ Model: Fable, high effort. Run strictly in order unless a task is BLOCKED.
   and a CFL-type bound on the met grid), re-evaluated once per met window. The
   loop keeps a fixed trip count: a particle advances only on the iterations
   that are multiples of its rate, gated by multiply, never by index. Residence
-  accumulation uses the particle's own Δt_i. Reflection, the OU sub-stepping and
+  accumulation uses the particle's own Δt_i and the `midpoint` deposition
+  position from A2 [PR-F4], because a long far-field step makes endpoint
+  quadrature coarser in proportion to the step. Reflection, the OU sub-stepping and
   the drift are integrated over Δt_i. Time interpolation of the met remains
   correct across the window.
 - **Out of scope.** Particle aggregation; changes to the turbulence
@@ -133,7 +195,9 @@ Model: Fable, high effort. Run strictly in order unless a task is BLOCKED.
 - **Size:** M. **Depends on:** A2, A3, A4.
 - **Scope.** Sweeps on the analytic plume and on one real-met case from the
   case library: Δt and Δt_max (multi-rate), sub-step accuracy target, particle
-  count, vertical ladder, kernel bandwidth. Produce error-against-parameter
+  count, vertical ladder, kernel bandwidth, and deposition position (endpoint
+  vs midpoint) [PR-F4]. Report sub-step saturation counts from A1 [PR-F2] for
+  every sweep point. Produce error-against-parameter
   figures with expected slopes (Tier 0 figure set) and a table. Propose the v1
   defaults with the converged values.
 - **Acceptance.** Figures and table in `docs/validation/`; a decision record
@@ -175,6 +239,33 @@ Model: Fable, high effort. Run strictly in order unless a task is BLOCKED.
   in `docs/physics.md`, `turbulence.md`, `convection.md`, giving the literature
   source, the code location and the test that exercises it, with gaps marked.
   Prepare the tag `v0-physics` (the human creates it). Update STATUS.md.
+- **Also, specification precision [PR-F5 to PR-F8]**, to be fixed in
+  `docs/physics.md` before the external reviewer reads it:
+  - **F5.** The OU step is written with forward-time indexing ($u'_{n+1}$, "one
+    step later") while backward advection uses $x_n \to x_{n-1}$ and the
+    displacement uses $z_{n+1} = z_n - w'\Delta t$. Use neutral old/new
+    notation, or define a positive simulation-age coordinate $\tau = t_r - t$
+    and use it throughout.
+  - **F6.** The Taylor-dispersion curve is given for $\sigma_z^2$ but its
+    asymptotes are stated as $\sigma_w t$ and $\sqrt{2Kt}$, which are
+    statements about $\sigma_z$. Write $\sigma_z^2 \sim \sigma_w^2 t^2$ and
+    $\sigma_z^2 \sim 2Kt$, or switch to standard deviation explicitly.
+  - **F7.** Flooring $\lvert\cos\phi\rvert$ at 0.05 (about 87.1°) caps zonal
+    angular displacement poleward of that latitude; label it a numerical
+    approximation and state the supported latitude range.
+  - **F8.** Qualify claims stronger than the scheme supports: "GLIDE
+    accumulates exactly that", "conversion exact" (true only for the
+    arithmetic conversion when bins align), and "the state … is the position at
+    step $n-1$". The accumulator uses endpoint (or midpoint) quadrature, split
+    operators, finite cells, interpolated meteorology and coefficients frozen
+    over sub-steps.
+  The review confirmed these elements of the formulation against code, which
+  the audit table should record as evidence: the exact homogeneous OU update
+  with Euler inhomogeneous drift (`gpu_engine.py`); the forward well-mixed drift
+  and backward sign reversal (`turbulence/hanna.py`); joint reflection of
+  position and $w'$ (`gpu_engine.py`); per-particle sub-stepping with fixed
+  outer-step coefficients (`turbulence/hanna.py`); spherical displacement
+  factors (`gpu_engine.py`); particle weights of $1/N$ (`release_generator.py`).
 - **Acceptance.** Every equation has a row; every gap has a proposed test in
   PROGRESS.md "Proposed tasks". The human and the external reviewer sign the
   table by merging.
@@ -277,6 +368,14 @@ dependency is listed; run in the listed order by default.
   coarse cell edges enforced by validation; per-release inner grid with origin
   tensors; second store `footprints_nested.zarr` with per-release coordinate
   arrays; works with delta and kernel deposition.
+- **Also [PR-F3]: spatial meaning of footprint cells.** State in
+  `docs/physics.md`, the README "Outputs" section and the `comparison.py`
+  STILT-conversion docstring that each cell value is a **cell-integrated**
+  horizontal sensitivity: multiplying it by a flux that is uniform over the
+  cell gives the concentration enhancement, it is not a density per square
+  metre, and conservative regridding must preserve the cell integral. The
+  fine-sums-to-coarse property below depends on exactly this, and so does the
+  GATES training target.
 - **Acceptance.** Test that the coarse value over the covered area equals the
   sum of the fine cells; documented in physics and README.
 

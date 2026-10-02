@@ -120,6 +120,16 @@ the physics freeze or after it with a decision record.
 | 6b | Particle aggregation in the far field | M | 7a first | yes | v1.x |
 | 6c | Convection refinements | M | 1d | yes | v1.x |
 
+### Physics specification review (2026-08-22)
+
+| ID | Item | Size | Depends on | Numerics | Version |
+| --- | --- | --- | --- | --- | --- |
+| 8a | Consistent time-ago bin width in indexing and metadata (task A00) | S | none | output metadata | v1, first |
+| 8b | Sub-step saturation diagnostic on the graph path (in task A1) | S | none | no | v1 |
+| 8c | Midpoint deposition option; disclose endpoint quadrature (in tasks A2, A3, A5) | S | none | yes | v1 |
+| 8d | State that footprint cells are cell-integrated sensitivities (in task B6) | S | none | no | v1 |
+| 8e | Notation, asymptotes, polar cap, and "exact" claims in physics.md (in task A8) | S | none | no | v1, before audit |
+
 ### Compute and storage efficiency
 
 | ID | Item | Size | Depends on | Numerics | Version |
@@ -184,7 +194,7 @@ that will actually be run at scale.
 | Phase | What | Who | Queue |
 | --- | --- | --- | --- |
 | **0. Prepare** | Background material, environment, data inventory, golden fixtures, credentials (see [agent-operations.md](agent-operations.md) §2) | human | — |
-| **1. Efficiency before the freeze** | 6a → 2b → 7a → 7f, 7e → 1b, 7b → 2a | agent, strongest model, sequential | A |
+| **1. Efficiency before the freeze** | time-bin fix (A00) → 6a → 2b → 7a → 7f, 7e → 1b, 7b → 2a | agent, strongest model, sequential | A |
 | **1′. Infrastructure, in parallel** | 3a + 7d, 7g, 7h, 4e, 4, 4a, 4b, validation figure tooling, packaging groundwork | agent, cheaper model | B |
 | **2. Freeze** | 1a; physics audit table (1c) prepared for the external reviewer; tag `v0-physics` | agent prepares, human signs | A |
 | **3. Validate** | Tier 0 additions (reciprocity, convergence figures) → Tier 1 parity → Tier 2 twins → Tier 3 ETEX and radon | agent analysis, human reference runs | A |
