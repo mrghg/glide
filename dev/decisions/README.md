@@ -20,3 +20,8 @@ alternatives → Status**, with a pointer to the relevant `docs/` page.
 | [0008](0008-multi-site-shared-met-batching.md) | Multi-site shared-met batching + per-hour/per-window met caches |
 | [0009](0009-ruff-gitleaks-pre-commit.md) | Ruff + gitleaks pre-commit hooks; standardise on PEP 8 spaces |
 | [0010](0010-model-level-met-reader.md) | Model-level met: reconstruct pressure hydrostatically, not from a/b coefficients |
+| [0011](0011-multi-rate-time-stepping.md) | Multi-rate time stepping: a per-particle outer step (proposed) |
+| [0012](0012-kernel-deposition.md) | Optional kernel deposition in the footprint gridder (proposed) |
+| [0013](0013-composite-met-source.md) | A composite met source, not a nesting feature (proposed, v1.x) |
+| [0014](0014-v1-scope-and-release-gate.md) | v1 scope: validated, fast footprint model without UQ |
+| [0015](0015-agent-driven-development-process.md) | Agent-driven development: one task per session, PR per task, human merges |

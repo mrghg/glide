@@ -34,11 +34,16 @@ engineering.
    Read this to prepare meteorology from a source that is not ARCO ERA5.
 6. **[VALIDATION.md](VALIDATION.md)** — what has been verified and against what,
    what has **not**, and how to run a comparison against FLEXPART or NAME.
+7. **[validation-plan.md](validation-plan.md)** — the validation ladder still to
+   be climbed: tiers, pre-registration protocol, case library, figure set, and
+   the v2 parameter-calibration plan.
 
 ## Related
 
 - **[../STATUS.md](../STATUS.md)** — current state: what works, what is not yet
   validated, what is next.
+- **[../dev/roadmap.md](../dev/roadmap.md)** — the development plan, every
+  proposed item with an ID, the v1 scope and gate, and the sequence.
 - **[../dev/decisions/](../dev/decisions/)** — the major design and physics
   decisions, each with its rationale and the alternatives that were rejected.
   These record *why*; the pages above record *how*.

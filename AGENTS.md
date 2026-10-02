@@ -15,6 +15,13 @@ This file is the agent-agnostic contributor guide (the `AGENTS.md` convention;
   [docs/README.md](docs/README.md).
 - Major design/physics decisions (why, with rejected alternatives):
   [dev/decisions/](dev/decisions/).
+- Development plan and v1 release gate: [dev/roadmap.md](dev/roadmap.md).
+  Validation ladder and figure set: [docs/validation-plan.md](docs/validation-plan.md).
+- Agent sessions: read [dev/agent/INSTRUCTIONS.md](dev/agent/INSTRUCTIONS.md)
+  (session protocol, verification standard, stop conditions), take tasks from
+  [dev/agent/QUEUE.md](dev/agent/QUEUE.md), record state in
+  [dev/agent/PROGRESS.md](dev/agent/PROGRESS.md). Operator guide:
+  [dev/agent-operations.md](dev/agent-operations.md).
 - Historical dated work-orders (physics/test reviews) were retired; their durable
   content lives in STATUS / decisions / docs, and full history is in git.
 
