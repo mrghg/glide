@@ -81,7 +81,10 @@ That runs a 3-hour backward integration from a release near San Francisco. The
 meteorology cube is not checked in (`*.zarr` is git-ignored), so the download
 step is needed once; it needs network access but no credentials, and the bounds
 and window match the smoke-test config. See [Meteorology](#meteorology) for
-other domains. `uv` is recommended (and required ≥ 0.4.0 for the
+other domains. Output lands in `outputs/demo-run-local/`; with the `[viz]` extra
+installed, open
+[`notebooks/footprint_explorer.ipynb`](notebooks/footprint_explorer.ipynb) to map
+the footprint (it reads that directory by default). `uv` is recommended (and required ≥ 0.4.0 for the
 torch wheel pin used on GPU hosts); plain `venv` + `pip install -e .` works for
 CPU-only use.
 
