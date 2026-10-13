@@ -311,26 +311,35 @@ mkdir -p slurm_logs
 sbatch scripts/run_periodic_cuda.slurm configs/example_multisite_january.yaml
 ```
 
-**Interactive GPU session** — the SLURM script sets up the environment for you;
-by hand, the order matters:
+**Interactive GPU session** — the SLURM script sets up the environment for you.
+By hand, the order matters. From the repo root, get a GPU shell (add
+`--account=<project>` if you have more than one SLURM account):
 
 ```bash
-srun --gres=gpu:1 --cpus-per-task=16 --time=01:00:00 --pty bash   # plus --account/--partition
-cd /path/to/glide
-
-# 1. CUDA: the only CUDA module (provides the runtime + nvcc/ptxas for Triton)
-module load cudatoolkit/24.11_12.6
-
-# 2. GCC 14 for torch.compile's C++ codegen (skip if running with GLIDE_COMPILE=0)
-module load gcc-native/14.2
-export CC=gcc CXX=g++
-
-# 3. LAST, after every module load: put PyTorch's bundled NCCL ahead of cudatoolkit's
-export LD_LIBRARY_PATH="$(.venv/bin/python -c 'import os, torch; print(os.path.dirname(torch.__file__))')/lib:${LD_LIBRARY_PATH:-}"
-
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True   # as the SLURM script sets
-.venv/bin/python -m lpdm.main --config configs/smoke_mhd_single_release.yaml --device cuda
+srun --gres=gpu:1 --cpus-per-task=16 --time=01:00:00 --pty bash
 ```
+
+Then paste this whole block into that shell. It is safe to re-run:
+
+```bash
+module load cudatoolkit/24.11_12.6     # the ONLY CUDA module: runtime + nvcc/ptxas
+module load gcc-native/14.2            # C++20 compiler for torch.compile
+export CC=gcc CXX=g++
+source .venv/bin/activate
+# After every module load: PyTorch's bundled NCCL ahead of cudatoolkit's older one
+export LD_LIBRARY_PATH="$(python -c 'import os, torch; print(os.path.dirname(torch.__file__))')/lib:${LD_LIBRARY_PATH:-}"
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+python -c "import torch; print('CUDA available:', torch.cuda.is_available(), torch.version.cuda)"
+```
+
+The last line must print `CUDA available: True 12.6`. Then run as usual, e.g.:
+
+```bash
+python -m lpdm.main --config configs/smoke_mhd_single_release.yaml --device cuda
+```
+
+If you `module load` anything else later in the session, re-run the
+`LD_LIBRARY_PATH` line afterwards.
 
 Notes:
 
