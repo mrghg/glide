@@ -86,7 +86,9 @@ Work through this once. The queue assumes all of it.
       type, cadence and size.
 - [ ] The reference multi-site configuration
       (`configs/example_multisite_january.yaml` or its successor) points at a
-      cube that exists.
+      cube that exists. The shipped configs read `data/era5/EUROPE_*.zarr`
+      (model levels: `data/era5-model/`), so symlink those directories in the
+      checkout to the cubes under `$GLIDE_DATA`.
 - [ ] A small cube for smoke tests and a medium cube for benchmarks, both local.
 - [ ] Decide which additional cubes you will download before the tasks that
       need them: a model-level cube (existing item 1); the Tier 3 cubes for

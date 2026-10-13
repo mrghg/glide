@@ -33,9 +33,12 @@ done
 cd "${GLIDE_REPO}"
 QUEUE="${1:-A}"
 
-module load cudatoolkit/24.11_12.6
-module load gcc-native/14.2
-export CC=gcc CXX=g++
+# Modules, CC/CXX, torch's NCCL first on LD_LIBRARY_PATH and the allocator
+# config: shared with run_periodic_cuda.slurm. gpu_env.sh exports
+# GLIDE_COMPILE=1; unset it so tests and runs keep the code's eager default,
+# and a task that wants compilation sets it explicitly. GCC 14 stays loaded.
+source scripts/gpu_env.sh
+unset GLIDE_COMPILE
 export UV_CACHE_DIR="${GLIDE_SCRATCH}/uv"
 export TRITON_CACHE_DIR="${GLIDE_SCRATCH}/triton"
 mkdir -p "${UV_CACHE_DIR}" "${TRITON_CACHE_DIR}" "${GLIDE_AGENT_OUTPUTS}" slurm_logs

@@ -240,9 +240,10 @@ Fixed facts:
 - **Machine:** Isambard AI, NVIDIA GH200 nodes (aarch64). You are running
   inside a SLURM allocation that already holds one GPU. Run GPU tests directly;
   do not submit inner jobs.
-- **Modules:** already loaded by the driver: `cudatoolkit/24.11_12.6` (never
-  `cuda/12.6`) and `gcc-native/14.2` with `CC=gcc CXX=g++`. See
-  `scripts/run_periodic_cuda.slurm` for the full environment logic.
+- **Modules:** already loaded by the driver via `scripts/gpu_env.sh`:
+  `cudatoolkit/24.11_12.6` (never `cuda/12.6`) and `gcc-native/14.2` with
+  `CC=gcc CXX=g++`. `GLIDE_COMPILE` is unset, so runs are eager unless you set
+  `GLIDE_COMPILE=1` for a run that needs graph capture.
 - **Python:** `.venv/bin/python` in the repo checkout. Tests:
   `.venv/bin/python -m pytest -q`. Install:
   `uv pip install --python .venv/bin/python -e ".[dev]"`.
