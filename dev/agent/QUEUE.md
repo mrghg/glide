@@ -30,7 +30,7 @@ the repository; each spec states the finding it addresses in full.
 
 ## Queue A: numerics and validation
 
-Model: Fable, high effort. Run strictly in order unless a task is BLOCKED.
+Model: Opus 5.5, high effort. Run strictly in order unless a task is BLOCKED.
 
 ### A00 — Consistent time-ago bin width [PR-F1]
 
@@ -310,7 +310,7 @@ Model: Fable, high effort. Run strictly in order unless a task is BLOCKED.
 
 ## Queue B: infrastructure
 
-Model: Sonnet unless a task says otherwise. Tasks are independent unless a
+Model: Sonnet 5.5 unless a task says otherwise. Tasks are independent unless a
 dependency is listed; run in the listed order by default.
 
 ### B1 — Met inventory and GLIDE-ready met cache (7d, 3a)
@@ -356,7 +356,7 @@ dependency is listed; run in the listed order by default.
   subsets in a pilot batch).
 - **Acceptance.** Fixed rule bit-identical to today; documented.
 
-### B5 — Column and satellite releases (4, 4a, 7c) — model: Opus or Fable
+### B5 — Column and satellite releases (4, 4a, 7c) — model: Opus 5.5
 
 - **Size:** M. **Depends on:** nothing for column; A2 recommended for satellite.
 - **Scope.** Column releases by importance sampling over a pressure-weighted
@@ -414,7 +414,7 @@ dependency is listed; run in the listed order by default.
 
 - **Size:** S–M. **Depends on:** nothing in the queue; `$GLIDE_ETEX` and
   `$GLIDE_DATEM` populated per `data/tracer-experiments.md`. No model runs and no
-  physics, so it can run before the freeze. Model: Sonnet, or Opus.
+  physics, so it can run before the freeze. Model: Sonnet 5.5, or Opus 5.5.
 - **Scope.** Under `scripts/validation/tracers/`: readers for the ETEX files and
   the DATEM `emit`/`meas` files into common release and sample tables with SI
   units; a writer for DATEM-format predictions; the DATEM statistics and ranking
@@ -439,7 +439,7 @@ dependency is listed; run in the listed order by default.
 
 ## Final task: v1 release gate
 
-Model: Fable. Runs when every v1 item is MERGED. Checks each line of the gate
+Model: Opus 5.5. Runs when every v1 item is MERGED. Checks each line of the gate
 in `dev/roadmap.md` §3 against the repository, writes `docs/validation/v1-report.md`
 summarising the evidence for each line with links, and lists anything unmet.
 The human decides the release.

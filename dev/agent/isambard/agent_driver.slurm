@@ -44,8 +44,8 @@ export TRITON_CACHE_DIR="${GLIDE_SCRATCH}/triton"
 mkdir -p "${UV_CACHE_DIR}" "${TRITON_CACHE_DIR}" "${GLIDE_AGENT_OUTPUTS}" slurm_logs
 
 case "${QUEUE}" in
-  A) export GLIDE_AGENT_MODEL="${GLIDE_AGENT_MODEL_A:-claude-fable-5-1}" ;;
-  B) export GLIDE_AGENT_MODEL="${GLIDE_AGENT_MODEL_B:-claude-sonnet-5}" ;;
+  A) export GLIDE_AGENT_MODEL="${GLIDE_AGENT_MODEL_A:-claude-opus-5-5}" ;;
+  B) export GLIDE_AGENT_MODEL="${GLIDE_AGENT_MODEL_B:-claude-sonnet-5-5}" ;;
   *) echo "unknown queue ${QUEUE}" >&2; exit 1 ;;
 esac
 

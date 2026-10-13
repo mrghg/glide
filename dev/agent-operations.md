@@ -191,9 +191,9 @@ The rule: match model cost to the cost of an undetected error.
 
 | Queue | Tasks | Model | Why |
 | --- | --- | --- | --- |
-| A | Everything before the physics freeze; validation analysis; all PR reviews | Fable (`claude-fable-5-1`), high effort | failure modes are silent: the code runs, tests pass, the physics has changed |
-| B | Met cache, sparse output, batching, packaging, docs, figure tooling | Sonnet (`claude-sonnet-5`) | well-specified, cheap to check |
-| either | Column and satellite releases, composite met source | Opus or Fable | design-heavy but not physics-changing |
+| A | Everything before the physics freeze; validation analysis; all PR reviews | Opus 5.5 (`claude-opus-5-5`), high effort | failure modes are silent: the code runs, tests pass, the physics has changed |
+| B | Met cache, sparse output, batching, packaging, docs, figure tooling | Sonnet 5.5 (`claude-sonnet-5-5`) | well-specified, cheap to check |
+| either | Column and satellite releases, composite met source | Opus 5.5 | design-heavy but not physics-changing |
 
 Set `GLIDE_AGENT_MODEL_A` and `GLIDE_AGENT_MODEL_B` in `env.local.sh`. If in
 doubt, use the stronger model; the marginal cost is small against a bad merge.
