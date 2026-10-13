@@ -1,8 +1,9 @@
 # Example GLIDE run config: Mace Head (MHD, Ireland), 1 Jan 2024, 24 h backward.
 #
-# This config is intentionally aligned with the bundled FLEXPART reference fixture
+# This config is intentionally aligned with the FLEXPART reference fixture
 # data/FLEXPART/FLEXPART_MHD_test_202401.nc so footprints can be compared cell-for-cell
-# without regridding. See docs/VALIDATION.md for the comparison workflow.
+# without regridding. The fixture is not redistributed with the repo (see
+# data/README.md for access). See docs/VALIDATION.md for the comparison workflow.
 #
 # All paths are relative to the repo root unless otherwise noted.
 
@@ -13,7 +14,7 @@ io:
   #   zarr_store:
   #     - gs://bucket/EUROPE_202312.zarr
   #     - gs://bucket/EUROPE_202401.zarr
-  zarr_store: ~/data/arco-era5/EUROPE_*.zarr
+  zarr_store: data/era5/EUROPE_*.zarr
   output_uri: outputs/comparison-mhd-202401-day01
 
 simulation:

@@ -70,7 +70,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument(
         "--zarr-store",
-        default="~/data/arco-era5/EUROPE_*.zarr",
+        default="data/era5/EUROPE_*.zarr",
         help="store or glob (default: the icos-202401 run's io.zarr_store)",
     )
     p.add_argument("--time", default="2024-01-15T12:00", help="timestep to extract (UTC)")

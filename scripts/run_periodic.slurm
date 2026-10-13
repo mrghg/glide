@@ -18,7 +18,7 @@
 #   - account / partition (cluster-specific; delete if your cluster has defaults)
 #   - module load / venv activation for your cluster's Python
 #   - confirm the met data is readable at the path in the YAML `io.zarr_store`
-#     (default ~/data/arco-era5/EUROPE_*.zarr) from the compute node's filesystem
+#     (default data/era5/EUROPE_*.zarr) from the compute node's filesystem
 # =============================================================================
 
 #SBATCH --job-name=glide-periodic

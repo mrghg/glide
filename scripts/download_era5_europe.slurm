@@ -16,8 +16,8 @@
 #     sbatch scripts/download_era5_europe.slurm             # pressure levels (default)
 #     sbatch scripts/download_era5_europe.slurm model        # native model levels
 #
-# Pressure-level cubes land in ${HOME}/data/arco-era5/; model-level cubes in
-# ${HOME}/data/arco-era5-model/ (kept separate so the two met types are never
+# Pressure-level cubes land in data/era5/; model-level cubes in
+# data/era5-model/ (kept separate so the two met types are never
 # confused on disk, on top of the _ml filename suffix download_sample_cube.py
 # already adds).
 #
@@ -44,8 +44,8 @@ cd "${SLURM_SUBMIT_DIR:-$PWD}"
 # --- Vertical coordinate (first sbatch argument) ----------------------------
 LEVELS="${1:-pressure}"
 case "${LEVELS}" in
-	pressure) OUT_DIR="${HOME}/data/arco-era5" ;;
-	model) OUT_DIR="${HOME}/data/arco-era5-model" ;;
+	pressure) OUT_DIR="data/era5" ;;
+	model) OUT_DIR="data/era5-model" ;;
 	*)
 		echo "ERROR: unknown levels '${LEVELS}' (expected 'pressure' or 'model')." >&2
 		exit 1

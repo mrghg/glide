@@ -298,7 +298,7 @@ class ArcoEra5ZarrReader(MetReader):
         Args:
             zarr_store: One of:
                 * A single store URI (`gs://bucket/path.zarr` or a local path).
-                * A local glob pattern (e.g. `~/data/arco-era5/EUROPE_*.zarr`) that
+                * A local glob pattern (e.g. `data/era5/EUROPE_*.zarr`) that
                   expands to one or more local Zarr directories. Glob expansion is
                   local-filesystem only; remote URIs are passed through verbatim.
                 * A sequence of store URIs to stitch along the time dimension. All

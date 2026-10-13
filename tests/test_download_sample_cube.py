@@ -200,8 +200,9 @@ def test_three_d_and_surface_vars_partition_required_vars() -> None:
 def test_dispatch_model_levels_tags_filename_and_resolves_model_store(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """--levels model: '_ml' filename suffix, model-level 3D store, and the
-    surface store passed through for the merge."""
+    """--levels model: '_ml' filename suffix, its own default out-dir (so a
+    pressure-level `EUROPE_*.zarr` glob can't match it), model-level 3D store,
+    and the surface store passed through for the merge."""
 
     from argparse import Namespace
 
@@ -218,7 +219,7 @@ def test_dispatch_model_levels_tags_filename_and_resolves_model_store(
         chunk_levels=None,
         domain="EUROPE",
         year_month="202401",
-        out_dir="data/era5",
+        out_dir=None,  # resolve from --levels
         out_path=None,
         time_start=None,
         time_end=None,
@@ -229,10 +230,45 @@ def test_dispatch_model_levels_tags_filename_and_resolves_model_store(
     )
     module._dispatch(args)
 
-    assert captured["out_path"] == "data/era5/EUROPE_202401_ml.zarr"
+    assert captured["out_path"] == "data/era5-model/EUROPE_202401_ml.zarr"
     assert captured["store_uri"] == module.MODEL_LEVEL_STORE
     assert captured["surface_store_uri"] == module.PRESSURE_LEVEL_STORE
     assert captured["levels"] == "model"
+
+
+def test_dispatch_pressure_levels_default_out_dir(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--levels pressure with no --out-dir lands in data/era5, where the
+    shipped configs' `data/era5/EUROPE_*.zarr` glob looks."""
+
+    from argparse import Namespace
+
+    module = _load_download_sample_cube_module()
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(module, "download_sample_cube", lambda **kw: captured.update(kw))
+
+    args = Namespace(
+        store_uri=None,
+        surface_store_uri=module.PRESSURE_LEVEL_STORE,
+        levels="pressure",
+        zarr_version=2,
+        chunk_tile=module.DEFAULT_CHUNK_TILE,
+        chunk_levels=None,
+        domain="EUROPE",
+        year_month="202401",
+        out_dir=None,
+        out_path=None,
+        time_start=None,
+        time_end=None,
+        lon_min=None,
+        lon_max=None,
+        lat_min=None,
+        lat_max=None,
+    )
+    module._dispatch(args)
+
+    assert captured["out_path"] == "data/era5/EUROPE_202401.zarr"
 
 
 def test_dispatch_requires_both_domain_and_year_month_together() -> None:

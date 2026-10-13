@@ -58,19 +58,12 @@ set -euo pipefail
 cd "${SLURM_SUBMIT_DIR:-$PWD}"
 
 # --- CUDA + Python environment ---------------------------------------------
-# cudatoolkit/24.11_12.6 provides the full CUDA 12.6 stack (runtime, nvcc,
-# ptxas) and supersedes the older cuda/12.6 module — the two conflict on
-# Isambard AI.  Loading cudatoolkit unconditionally avoids the conflict when it
-# is already inherited from the login shell, and means a single module load
-# covers both eager and torch.compile paths.
-module load cudatoolkit/24.11_12.6
-
-PYTHON=".venv/bin/python"
-if [[ ! -x "${PYTHON}" ]]; then
-	echo "ERROR: ${PYTHON} not found. Create the venv and editable-install first:" >&2
-	echo "  uv venv .venv && uv pip install --python .venv/bin/python -e ." >&2
-	exit 1
-fi
+# Module loads (cudatoolkit, gcc-native for torch.compile), CC/CXX, torch's NCCL
+# ahead of cudatoolkit's on LD_LIBRARY_PATH, and the allocator config all live in
+# scripts/gpu_env.sh, shared with the README's interactive recipe. It defaults
+# GLIDE_COMPILE=1 (see below); submit with GLIDE_COMPILE=0 to skip compilation.
+source scripts/gpu_env.sh
+PYTHON="${GLIDE_PYTHON}"
 
 # CPU threads still matter for the host-side ops (met decode, numpy). The GPU
 # carries the per-step physics, so a modest pool is plenty; match the CPU-script
@@ -80,12 +73,6 @@ export OMP_NUM_THREADS="${GLIDE_NUM_THREADS}"
 export MKL_NUM_THREADS="${GLIDE_NUM_THREADS}"
 export OPENBLAS_NUM_THREADS="${GLIDE_NUM_THREADS}"
 
-# CUDA caching-allocator: expandable segments cut reserved-but-unused HBM from the
-# per-batch alloc/free churn of the big particle + footprint tensors (observed
-# dev_reserved ~83 GiB vs dev_alloc ~20 GiB). This lowers fragmentation and the risk
-# of a spurious CUDA OOM as batches recycle. Harmless on older drivers (ignored).
-export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
-
 # torch.compile / CUDA-graph capture of the per-step physics. On CUDA the runtime
 # uses the static-shape per-step path (full particle buffer, mask-gated, no per-step
 # host sync — docs/architecture.md §5), and GLIDE_COMPILE wraps the whole fixed-count
@@ -94,13 +81,9 @@ export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:T
 # orchestration-bound regime (low GPU sm% in the telemetry below): it collapses the
 # per-step kernel-launch overhead, not just per-kernel cost.
 #
-# Inductor/Triton codegen on Isambard AI needs TWO toolchain pieces; loading only
-# one makes compilation silently fall back to eager (no graph capture):
-#   - cudatoolkit/24.11_12.6 : nvcc/ptxas for the Triton GPU backend
-#   - gcc-native/14.2        : a C++20 host compiler for Inductor's C++ codegen.
-#     The system GCC (8.x) rejects `-std=c++20` (only knows `-std=c++2a`), so the
-#     precompiled-header build fails and compilation never happens. Inductor
-#     honours $CC/$CXX, so we point them at the freshly-loaded GCC 14.
+# Inductor/Triton codegen needs both cudatoolkit (nvcc/ptxas) and gcc-native/14.2
+# (C++20 host compiler); scripts/gpu_env.sh loads both. Missing either makes
+# compilation silently fall back to eager (no graph capture).
 #
 # It can't hard-fail a run (eager fallback is on); the FIRST step pays a one-time
 # compile cost (seconds–tens of seconds). Set GLIDE_COMPILE=0 at submit to skip it.
@@ -113,23 +96,6 @@ export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:T
 # TUNE: on the graph path `turbulence.max_substeps` is the FIXED per-step iteration
 # count (the loop is unrolled to it), so set it to the smallest physically-converged
 # value (≈15–25), not the default 50 — it is now a direct per-step cost.
-export GLIDE_COMPILE="${GLIDE_COMPILE:-1}"
-if [[ "${GLIDE_COMPILE}" != "0" ]]; then
-	module load gcc-native/14.2
-	export CC=gcc
-	export CXX=g++
-	echo "compile:  ON   CC=$(command -v gcc)  CXX=$(command -v g++)"
-else
-	echo "compile:  OFF  (GLIDE_COMPILE=0)"
-fi
-
-# Prefer PyTorch's bundled NCCL over the system one loaded by cudatoolkit.
-# MUST appear after ALL module loads: modules prepend their lib paths, so if
-# this is applied earlier a subsequent module load re-seats the older NCCL.
-# cudatoolkit ships a libnccl.so that predates ncclCommResume (added in 2.19);
-# torch's bundled copy has it and must win the dynamic-linker search.
-TORCH_LIB="$("${PYTHON}" -c 'import os, torch; print(os.path.dirname(torch.__file__))')/lib"
-export LD_LIBRARY_PATH="${TORCH_LIB}:${LD_LIBRARY_PATH:-}"
 
 # Fail fast before the long preflight if the venv torch can't see the GPU.
 if ! "${PYTHON}" -c "import torch, sys; sys.exit(0 if torch.cuda.is_available() else 1)"; then
