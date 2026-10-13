@@ -67,11 +67,21 @@ The equations are all written out in **[docs/physics.md](docs/physics.md)**.
 uv venv --python 3.11 .venv
 source .venv/bin/activate
 uv pip install -e .                  # core (simulation only)
+
+# Fetch the small ERA5 cube the smoke test reads (public ARCO bucket, anonymous)
+.venv/bin/python scripts/download_sample_cube.py \
+    --out-path data/sample_met.zarr \
+    --time-start 2023-12-29T18:00:00 --time-end 2024-01-01T06:00:00 \
+    --lon-min -127.0 --lon-max -117.0 --lat-min 33.0 --lat-max 43.0
+
 .venv/bin/python -m lpdm.main --config configs/local_smoke_test.yaml
 ```
 
-That runs a 3-hour backward integration against the small bundled meteorology
-cube — no remote data needed. `uv` is recommended (and required ≥ 0.4.0 for the
+That runs a 3-hour backward integration from a release near San Francisco. The
+meteorology cube is not checked in (`*.zarr` is git-ignored), so the download
+step is needed once; it needs network access but no credentials, and the bounds
+and window match the smoke-test config. See [Meteorology](#meteorology) for
+other domains. `uv` is recommended (and required ≥ 0.4.0 for the
 torch wheel pin used on GPU hosts); plain `venv` + `pip install -e .` works for
 CPU-only use.
 
@@ -105,11 +115,11 @@ Everything else lives in the YAML.
     --device cuda --output-uri outputs/run-A --start-time 2024-01-10T00:00:00Z
 ```
 
-The shipped configs form a ladder from "no external data" to "full network":
+The shipped configs form a ladder from "one small cube" to "full network":
 
 | Config | What it runs |
 | --- | --- |
-| `local_smoke_test.yaml` | 3 h backward against the bundled `data/sample_met.zarr`. No remote data. |
+| `local_smoke_test.yaml` | 3 h backward against `data/sample_met.zarr` (download it first — see [Quick start](#quick-start)). |
 | `smoke_mhd_single_release.yaml` | One Mace Head release, 1 day backward, full physics — a quick GPU-path check before a big run. |
 | `example_mhd_january.yaml` | Single `point` release on the FLEXPART-aligned grid, 24 h backward with 24 hourly time-ago bins. |
 | `example_mhd_january_periodic.yaml` | 720 hourly Mace Head releases (January 2024), 5 days backward each, in one process → one 5-D `footprints.zarr`. |
