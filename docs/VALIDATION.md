@@ -220,12 +220,14 @@ Align these fields:
 | `output_grid.lon_bounds` / `lat_bounds` | the reference grid's **outer cell edges**. References usually label cell *centres*, so add half a cell at each edge. |
 | `output_grid.n_x` / `n_y` | equal cells filling that interval |
 | `output_grid.z_edges_m` | make the bottom pair match the reference's surface layer (0–40 m for FLEXPART / NAME). Direct accumulation into that bin makes the unit conversion exact rather than depth-weighted. |
-| `release.point.*`, `release.duration_seconds` | the reference release |
+| `release.lon` / `lat` / `alt_agl_m`, `release.duration_seconds` | the reference release |
 | `simulation.length_seconds` | the reference backward window |
 
 `configs/example_mhd_january.yaml` (single release) and
 `configs/example_mhd_january_periodic.yaml` (hourly releases) are both already
-aligned with the bundled FLEXPART fixture.
+aligned with the FLEXPART reference fixture
+`data/FLEXPART/FLEXPART_MHD_test_202401.nc`. The fixture is not redistributed
+with the repository; see [data/README.md](../data/README.md) for access.
 
 ### Step 2 — convert to STILT units
 
