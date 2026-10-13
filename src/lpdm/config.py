@@ -45,7 +45,7 @@ class IOConfig(_Frozen):
         ...,
         description=(
             "ERA5 ARCO Zarr store. Accepts a single URI, a local glob pattern "
-            "(e.g. ~/data/arco-era5/EUROPE_*.zarr), or a list of URIs that "
+            "(e.g. data/era5/EUROPE_*.zarr), or a list of URIs that "
             "share lat/lon/level coordinates and will be stitched along time."
         ),
     )

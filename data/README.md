@@ -14,6 +14,8 @@ supply the files locally.
 | `FLEXPART/FLEXPART_*.nc` | FLEXPART footprint fixture used by the comparison notebook. | FLEXPART model output. |
 | `EDGAR_CH4_2024_MHD_grid.nc` | EDGAR v2025 CH₄ 2024 total flux, regridded to the footprint grid. | EDGAR (CC-BY); https://edgar.jrc.ec.europa.eu/dataset_ghg2025 |
 | `sample_met.zarr` | Small cropped ERA5 cube for the local smoke test. | Download with `scripts/download_sample_cube.py` (public ARCO ERA5). |
+| `era5/<DOMAIN>_<YYYYMM>.zarr` | Monthly ERA5 pressure-level cubes read by the EUROPE configs (`data/era5/EUROPE_*.zarr`). Tens of GB each; symlink `era5/` to bulk storage. | `scripts/download_sample_cube.py --domain EUROPE --year-month YYYYMM` |
+| `era5-model/<DOMAIN>_<YYYYMM>_ml.zarr` | The same on ERA5's 137 model levels. Kept apart from `era5/` so the configs' glob never mixes the two. | As above, plus `--levels model` |
 | `$GLIDE_ETEX`, `$GLIDE_DATEM` (outside the repository) | Tracer-experiment observations: ETEX, CAPTEX and ANATEX. | JRC and NOAA ARL; see [tracer-experiments.md](tracer-experiments.md). |
 
 ## How to obtain the data

@@ -67,11 +67,24 @@ The equations are all written out in **[docs/physics.md](docs/physics.md)**.
 uv venv --python 3.11 .venv
 source .venv/bin/activate
 uv pip install -e .                  # core (simulation only)
+
+# Fetch the small ERA5 cube the smoke test reads (public ARCO bucket, anonymous)
+.venv/bin/python scripts/download_sample_cube.py \
+    --out-path data/sample_met.zarr \
+    --time-start 2023-12-29T18:00:00 --time-end 2024-01-01T06:00:00 \
+    --lon-min -127.0 --lon-max -117.0 --lat-min 33.0 --lat-max 43.0
+
 .venv/bin/python -m lpdm.main --config configs/local_smoke_test.yaml
 ```
 
-That runs a 3-hour backward integration against the small bundled meteorology
-cube — no remote data needed. `uv` is recommended (and required ≥ 0.4.0 for the
+That runs a 3-hour backward integration from a release near San Francisco. The
+meteorology cube is not checked in (`*.zarr` is git-ignored), so the download
+step is needed once; it needs network access but no credentials, and the bounds
+and window match the smoke-test config. See [Meteorology](#meteorology) for
+other domains. Output lands in `outputs/demo-run-local/`; with the `[viz]` extra
+installed, open
+[`notebooks/footprint_explorer.ipynb`](notebooks/footprint_explorer.ipynb) to map
+the footprint (it reads that directory by default). `uv` is recommended (and required ≥ 0.4.0 for the
 torch wheel pin used on GPU hosts); plain `venv` + `pip install -e .` works for
 CPU-only use.
 
@@ -82,6 +95,14 @@ Two optional extras:
   C-extension heavy; if no binary wheel exists for your cpython/OS/arch you will
   need `python3-dev` and `libgeos-dev`. Skip it on headless compute nodes.
 - `[dev]` — `pytest`, `pre-commit`, `ruff`.
+
+Install them on top of (or instead of) the core install; quote the brackets so
+the shell doesn't glob them:
+
+```bash
+uv pip install -e ".[dev]"           # core + test tooling
+uv pip install -e ".[viz,dev]"       # core + notebooks/plotting + test tooling
+```
 
 `scripts/setup.sh` wraps all of this:
 
@@ -105,11 +126,11 @@ Everything else lives in the YAML.
     --device cuda --output-uri outputs/run-A --start-time 2024-01-10T00:00:00Z
 ```
 
-The shipped configs form a ladder from "no external data" to "full network":
+The shipped configs form a ladder from "one small cube" to "full network":
 
 | Config | What it runs |
 | --- | --- |
-| `local_smoke_test.yaml` | 3 h backward against the bundled `data/sample_met.zarr`. No remote data. |
+| `local_smoke_test.yaml` | 3 h backward against `data/sample_met.zarr` (download it first — see [Quick start](#quick-start)). |
 | `smoke_mhd_single_release.yaml` | One Mace Head release, 1 day backward, full physics — a quick GPU-path check before a big run. |
 | `example_mhd_january.yaml` | Single `point` release on the FLEXPART-aligned grid, 24 h backward with 24 hourly time-ago bins. |
 | `example_mhd_january_periodic.yaml` | 720 hourly Mace Head releases (January 2024), 5 days backward each, in one process → one 5-D `footprints.zarr`. |
@@ -206,6 +227,18 @@ buckets open anonymously — no credentials needed.
 EUROPE at 37 pressure levels is ~80 GB/month uncompressed (~25–30 GB on disk).
 Each month is a separate, resumable store.
 
+By default these land in `data/era5/` (pressure levels) or `data/era5-model/`
+(`--levels model`, with an `_ml` suffix), which is where the shipped configs'
+`data/era5/EUROPE_*.zarr` glob looks. The two are kept apart so that glob never
+mixes vertical coordinates. Paths are relative to the repo root, so run from
+there. If the checkout is on a small filesystem, symlink the directories to bulk
+storage first:
+
+```bash
+ln -s /path/to/bulk/era5 data/era5
+ln -s /path/to/bulk/era5-model data/era5-model
+```
+
 **Ad-hoc subset** — explicit path, time window and bounds:
 
 ```bash
@@ -278,18 +311,49 @@ mkdir -p slurm_logs
 sbatch scripts/run_periodic_cuda.slurm configs/example_multisite_january.yaml
 ```
 
+**Interactive GPU session** — from the repo root, get a GPU shell (add
+`--account=<project>` if you have more than one SLURM account):
+
+```bash
+srun --gres=gpu:1 --cpus-per-task=16 --time=01:00:00 --pty bash
+```
+
+Then, in that shell:
+
+```bash
+source scripts/gpu_env.sh
+source .venv/bin/activate
+python -c "import torch; print('CUDA available:', torch.cuda.is_available(), torch.version.cuda)"
+python -m lpdm.main --config configs/smoke_mhd_single_release.yaml --device cuda
+```
+
+The check must print `CUDA available: True 12.6`.
+[`scripts/gpu_env.sh`](scripts/gpu_env.sh) is the same environment setup the
+SLURM script sources, so the two can't drift apart. It is safe to re-source,
+and does so if you `module load` anything else later in the session.
+
 Notes:
 
 - `pyproject.toml`'s `[tool.uv.index]` + `[tool.uv.sources]` pin `torch` to the
   cu126 index on aarch64 via a platform marker; on x86 it falls back to PyPI.
   These tables are read only by `uv` — setuptools and pip ignore them. If the
   cluster moves to CUDA 12.8, update the `url`/`name` there and the module name in
-  the SLURM script.
-- `cudatoolkit/24.11_12.6` must be the **only** CUDA module loaded; it supersedes
-  the older `cuda/12.6` and the two conflict. The SLURM script handles this.
-- The script prepends PyTorch's bundled NCCL to `LD_LIBRARY_PATH` *after* all
-  module loads, so the older system NCCL is not resolved first. Do not move that
-  line above the module block.
+  `scripts/gpu_env.sh`.
+- What `gpu_env.sh` does, in this order (the order matters):
+  1. Loads `cudatoolkit/24.11_12.6`, which must be the **only** CUDA module; it
+     supersedes the older `cuda/12.6` and the two conflict.
+  2. Sets `GLIDE_COMPILE=1` unless already set. The code itself defaults to
+     eager, so without this `torch.compile` is off.
+  3. Loads `gcc-native/14.2` and sets `CC`/`CXX`, unless `GLIDE_COMPILE=0`.
+     `torch.compile` needs a C++20 host compiler and the system GCC 8 lacks
+     `-std=c++20`; without GCC 14, compilation **silently falls back to eager**.
+     The run still works, but without CUDA-graph capture, so it is much slower.
+     Check the log for `torch.compile(mode='reduce-overhead') enabled` and no
+     `WON'T CONVERT` warnings.
+  4. Puts PyTorch's bundled NCCL first on `LD_LIBRARY_PATH`, *after* all module
+     loads. Modules prepend their own library paths, so a later `module load`
+     puts cudatoolkit's older NCCL (which lacks `ncclCommResume`) back in front.
+  5. Sets `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` unless already set.
 - `GLIDE_PHASE_TIMERS=1` prints per-phase wall breakdowns; `GLIDE_COMPILE=0`
   skips `torch.compile` (slower, but no Triton compile cost — handy for
   debugging). See

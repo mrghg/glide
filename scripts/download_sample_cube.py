@@ -6,7 +6,8 @@ Two invocation modes:
 
        python scripts/download_sample_cube.py --domain EUROPE --year-month 202401
 
-   Writes to ``data/era5/<DOMAIN>_<YYYYMM>.zarr``. Bounding box and full pressure
+   Writes to ``data/era5/<DOMAIN>_<YYYYMM>.zarr`` (model levels:
+   ``data/era5-model/<DOMAIN>_<YYYYMM>_ml.zarr``). Bounding box and full pressure
    level set are looked up from :data:`DOMAINS`. Each month is its own Zarr store
    so multi-month archives are resumable and self-documenting on disk. Pass
    ``--out-path`` to write to an exact location instead (the bbox/time window
@@ -56,6 +57,13 @@ import xarray as xr
 #   (no hybrid a/b coefficients or hydrostatic integration needed).
 PRESSURE_LEVEL_STORE = "gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3"
 MODEL_LEVEL_STORE = "gs://gcp-public-data-arco-era5/ar/model-level-1h-0p25deg.zarr-v1"
+
+# Default --out-dir per vertical coordinate, relative to the repo root (symlink
+# `data/era5` to bulk storage if the checkout lives on a small filesystem).
+# Kept as separate directories so a config's `data/era5/EUROPE_*.zarr` glob can
+# never pick up a model-level `EUROPE_YYYYMM_ml.zarr` cube.
+PRESSURE_LEVEL_OUT_DIR = "data/era5"
+MODEL_LEVEL_OUT_DIR = "data/era5-model"
 
 # 3D fields, carried on whichever vertical coordinate the chosen store uses
 # (`level` for pressure levels, `hybrid` for model levels).
@@ -549,10 +557,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     named.add_argument("--year-month", help="YYYYMM, e.g. 202401")
     named.add_argument(
         "--out-dir",
-        default="data/era5",
+        default=None,
         help=(
-            "Parent directory for named-domain stores. Filename is auto-generated as "
-            "<DOMAIN>_<YYYYMM>.zarr inside this directory unless --out-path is set — "
+            "Parent directory for named-domain stores. Default: "
+            f"{PRESSURE_LEVEL_OUT_DIR} for --levels pressure, {MODEL_LEVEL_OUT_DIR} "
+            "for --levels model. Filename is auto-generated as "
+            "<DOMAIN>_<YYYYMM>[_ml].zarr inside this directory unless --out-path is set — "
             "point it at an external drive or mounted volume to write elsewhere "
             "(e.g. --out-dir /Volumes/external/met)."
         ),
@@ -609,8 +619,11 @@ def _dispatch(args: argparse.Namespace) -> None:
             raise SystemExit("--domain and --year-month must be given together.")
         bbox = _resolve_domain_bbox(args.domain)
         t_start, t_end = _resolve_year_month_window(args.year_month)
+        out_dir = args.out_dir or (
+            MODEL_LEVEL_OUT_DIR if args.levels == "model" else PRESSURE_LEVEL_OUT_DIR
+        )
         out_path = args.out_path or os.path.join(
-            args.out_dir, f"{args.domain}_{args.year_month}{level_suffix}.zarr"
+            out_dir, f"{args.domain}_{args.year_month}{level_suffix}.zarr"
         )
         archive_attrs = {
             "glide_domain": args.domain,

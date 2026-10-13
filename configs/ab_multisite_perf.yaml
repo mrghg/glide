@@ -22,7 +22,7 @@
 #   GLIDE_PHASE_TIMERS=1 sbatch --time=00:40:00 scripts/run_periodic_cuda.slurm configs/ab_multisite_perf.yaml
 
 io:
-  zarr_store: ~/data/arco-era5/EUROPE_*.zarr
+  zarr_store: data/era5/EUROPE_*.zarr
   output_uri: outputs/ab-multisite-perf
 
 simulation:
