@@ -311,6 +311,27 @@ mkdir -p slurm_logs
 sbatch scripts/run_periodic_cuda.slurm configs/example_multisite_january.yaml
 ```
 
+**Interactive GPU session** — the SLURM script sets up the environment for you;
+by hand, the order matters:
+
+```bash
+srun --gres=gpu:1 --cpus-per-task=16 --time=01:00:00 --pty bash   # plus --account/--partition
+cd /path/to/glide
+
+# 1. CUDA: the only CUDA module (provides the runtime + nvcc/ptxas for Triton)
+module load cudatoolkit/24.11_12.6
+
+# 2. GCC 14 for torch.compile's C++ codegen (skip if running with GLIDE_COMPILE=0)
+module load gcc-native/14.2
+export CC=gcc CXX=g++
+
+# 3. LAST, after every module load: put PyTorch's bundled NCCL ahead of cudatoolkit's
+export LD_LIBRARY_PATH="$(.venv/bin/python -c 'import os, torch; print(os.path.dirname(torch.__file__))')/lib:${LD_LIBRARY_PATH:-}"
+
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True   # as the SLURM script sets
+.venv/bin/python -m lpdm.main --config configs/smoke_mhd_single_release.yaml --device cuda
+```
+
 Notes:
 
 - `pyproject.toml`'s `[tool.uv.index]` + `[tool.uv.sources]` pin `torch` to the
@@ -319,10 +340,16 @@ Notes:
   cluster moves to CUDA 12.8, update the `url`/`name` there and the module name in
   the SLURM script.
 - `cudatoolkit/24.11_12.6` must be the **only** CUDA module loaded; it supersedes
-  the older `cuda/12.6` and the two conflict. The SLURM script handles this.
-- The script prepends PyTorch's bundled NCCL to `LD_LIBRARY_PATH` *after* all
-  module loads, so the older system NCCL is not resolved first. Do not move that
-  line above the module block.
+  the older `cuda/12.6` and the two conflict.
+- `torch.compile` (on by default, `GLIDE_COMPILE=1`) needs a C++20 host compiler.
+  The system GCC 8 doesn't support `-std=c++20`, so without `gcc-native/14.2` and
+  `CC`/`CXX` set, compilation **silently falls back to eager**. The run still works,
+  but without CUDA-graph capture, so it is much slower. Check the log for
+  `torch.compile(mode='reduce-overhead') enabled` and no `WON'T CONVERT` warnings.
+- PyTorch's NCCL must be prepended to `LD_LIBRARY_PATH` *after* all module loads.
+  Modules prepend their own library paths, so a later `module load` puts
+  cudatoolkit's older NCCL (which lacks `ncclCommResume`) back in front.
+  The SLURM script does this in the same order as above.
 - `GLIDE_PHASE_TIMERS=1` prints per-phase wall breakdowns; `GLIDE_COMPILE=0`
   skips `torch.compile` (slower, but no Triton compile cost — handy for
   debugging). See
