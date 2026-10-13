@@ -93,6 +93,14 @@ Two optional extras:
   need `python3-dev` and `libgeos-dev`. Skip it on headless compute nodes.
 - `[dev]` — `pytest`, `pre-commit`, `ruff`.
 
+Install them on top of (or instead of) the core install; quote the brackets so
+the shell doesn't glob them:
+
+```bash
+uv pip install -e ".[dev]"           # core + test tooling
+uv pip install -e ".[viz,dev]"       # core + notebooks/plotting + test tooling
+```
+
 `scripts/setup.sh` wraps all of this:
 
 ```bash
