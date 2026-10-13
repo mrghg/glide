@@ -14,7 +14,7 @@ io:
   #   zarr_store:
   #     - gs://bucket/EUROPE_202312.zarr
   #     - gs://bucket/EUROPE_202401.zarr
-  zarr_store: ~/data/arco-era5/EUROPE_*.zarr
+  zarr_store: data/era5/EUROPE_*.zarr
   output_uri: outputs/comparison-mhd-202401-day01
 
 simulation:

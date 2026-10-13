@@ -29,7 +29,7 @@
 io:
   # 30-day backward integration starting 2024-01-01 needs both Dec 2023 and Jan
   # 2024 met. Download with scripts/download_sample_cube.py --domain EUROPE.
-  zarr_store: ~/data/arco-era5/EUROPE_*.zarr
+  zarr_store: data/era5/EUROPE_*.zarr
   output_uri: outputs/mhd-202401-hourly
 
 simulation:

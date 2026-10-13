@@ -16,7 +16,7 @@
 #       --output-uri outputs/smoke-gpu
 
 io:
-  zarr_store: ~/data/arco-era5/EUROPE_*.zarr
+  zarr_store: data/era5/EUROPE_*.zarr
   output_uri: outputs/smoke-mhd-single
 
 simulation:

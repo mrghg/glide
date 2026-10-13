@@ -231,7 +231,7 @@ def main() -> None:
         "cross-batch met re-fetch) and a warning is printed. Omit to size for the geometry "
         "and just print the host RAM required.",
     )
-    ap.add_argument("--zarr-store", default="~/data/arco-era5/EUROPE_*.zarr")
+    ap.add_argument("--zarr-store", default="data/era5/EUROPE_*.zarr")
     ap.add_argument(
         "--vertical-levels",
         type=int,

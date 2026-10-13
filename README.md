@@ -227,6 +227,18 @@ buckets open anonymously — no credentials needed.
 EUROPE at 37 pressure levels is ~80 GB/month uncompressed (~25–30 GB on disk).
 Each month is a separate, resumable store.
 
+By default these land in `data/era5/` (pressure levels) or `data/era5-model/`
+(`--levels model`, with an `_ml` suffix), which is where the shipped configs'
+`data/era5/EUROPE_*.zarr` glob looks. The two are kept apart so that glob never
+mixes vertical coordinates. Paths are relative to the repo root, so run from
+there. If the checkout is on a small filesystem, symlink the directories to bulk
+storage first:
+
+```bash
+ln -s /path/to/bulk/era5 data/era5
+ln -s /path/to/bulk/era5-model data/era5-model
+```
+
 **Ad-hoc subset** — explicit path, time window and bounds:
 
 ```bash
