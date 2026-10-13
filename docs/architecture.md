@@ -463,4 +463,5 @@ uncompiled: `cudatoolkit/24.11_12.6` supplies the GPU compiler, and
 `gcc-native/14.2` supplies a C++20-capable host compiler (a small amount of C++
 is generated even for GPU work, and the system's default GCC 8.x is too old to
 accept it). Set `CC=gcc` and `CXX=g++` so the newer one is picked up.
-`scripts/run_periodic_cuda.slurm` arranges all of this.
+`scripts/gpu_env.sh` arranges all of this; source it in an interactive GPU shell
+(the SLURM script `scripts/run_periodic_cuda.slurm` already does).

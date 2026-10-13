@@ -311,35 +311,26 @@ mkdir -p slurm_logs
 sbatch scripts/run_periodic_cuda.slurm configs/example_multisite_january.yaml
 ```
 
-**Interactive GPU session** — the SLURM script sets up the environment for you.
-By hand, the order matters. From the repo root, get a GPU shell (add
+**Interactive GPU session** — from the repo root, get a GPU shell (add
 `--account=<project>` if you have more than one SLURM account):
 
 ```bash
 srun --gres=gpu:1 --cpus-per-task=16 --time=01:00:00 --pty bash
 ```
 
-Then paste this whole block into that shell. It is safe to re-run:
+Then, in that shell:
 
 ```bash
-module load cudatoolkit/24.11_12.6     # the ONLY CUDA module: runtime + nvcc/ptxas
-module load gcc-native/14.2            # C++20 compiler for torch.compile
-export CC=gcc CXX=g++
+source scripts/gpu_env.sh
 source .venv/bin/activate
-# After every module load: PyTorch's bundled NCCL ahead of cudatoolkit's older one
-export LD_LIBRARY_PATH="$(python -c 'import os, torch; print(os.path.dirname(torch.__file__))')/lib:${LD_LIBRARY_PATH:-}"
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 python -c "import torch; print('CUDA available:', torch.cuda.is_available(), torch.version.cuda)"
-```
-
-The last line must print `CUDA available: True 12.6`. Then run as usual, e.g.:
-
-```bash
 python -m lpdm.main --config configs/smoke_mhd_single_release.yaml --device cuda
 ```
 
-If you `module load` anything else later in the session, re-run the
-`LD_LIBRARY_PATH` line afterwards.
+The check must print `CUDA available: True 12.6`.
+[`scripts/gpu_env.sh`](scripts/gpu_env.sh) is the same environment setup the
+SLURM script sources, so the two can't drift apart. It is safe to re-source,
+and does so if you `module load` anything else later in the session.
 
 Notes:
 
@@ -347,18 +338,22 @@ Notes:
   cu126 index on aarch64 via a platform marker; on x86 it falls back to PyPI.
   These tables are read only by `uv` — setuptools and pip ignore them. If the
   cluster moves to CUDA 12.8, update the `url`/`name` there and the module name in
-  the SLURM script.
-- `cudatoolkit/24.11_12.6` must be the **only** CUDA module loaded; it supersedes
-  the older `cuda/12.6` and the two conflict.
-- `torch.compile` (on by default, `GLIDE_COMPILE=1`) needs a C++20 host compiler.
-  The system GCC 8 doesn't support `-std=c++20`, so without `gcc-native/14.2` and
-  `CC`/`CXX` set, compilation **silently falls back to eager**. The run still works,
-  but without CUDA-graph capture, so it is much slower. Check the log for
-  `torch.compile(mode='reduce-overhead') enabled` and no `WON'T CONVERT` warnings.
-- PyTorch's NCCL must be prepended to `LD_LIBRARY_PATH` *after* all module loads.
-  Modules prepend their own library paths, so a later `module load` puts
-  cudatoolkit's older NCCL (which lacks `ncclCommResume`) back in front.
-  The SLURM script does this in the same order as above.
+  `scripts/gpu_env.sh`.
+- What `gpu_env.sh` does, in this order (the order matters):
+  1. Loads `cudatoolkit/24.11_12.6`, which must be the **only** CUDA module; it
+     supersedes the older `cuda/12.6` and the two conflict.
+  2. Sets `GLIDE_COMPILE=1` unless already set. The code itself defaults to
+     eager, so without this `torch.compile` is off.
+  3. Loads `gcc-native/14.2` and sets `CC`/`CXX`, unless `GLIDE_COMPILE=0`.
+     `torch.compile` needs a C++20 host compiler and the system GCC 8 lacks
+     `-std=c++20`; without GCC 14, compilation **silently falls back to eager**.
+     The run still works, but without CUDA-graph capture, so it is much slower.
+     Check the log for `torch.compile(mode='reduce-overhead') enabled` and no
+     `WON'T CONVERT` warnings.
+  4. Puts PyTorch's bundled NCCL first on `LD_LIBRARY_PATH`, *after* all module
+     loads. Modules prepend their own library paths, so a later `module load`
+     puts cudatoolkit's older NCCL (which lacks `ncclCommResume`) back in front.
+  5. Sets `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` unless already set.
 - `GLIDE_PHASE_TIMERS=1` prints per-phase wall breakdowns; `GLIDE_COMPILE=0`
   skips `torch.compile` (slower, but no Triton compile cost — handy for
   debugging). See
