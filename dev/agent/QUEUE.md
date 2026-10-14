@@ -123,14 +123,29 @@ Model: Opus 5.5, high effort. Run strictly in order unless a task is BLOCKED.
 ### A2 — Kernel deposition in the gridder (2b)
 
 - **Size:** S–M. **Depends on:** A0. **Decision record:** 0012.
-- **Scope.** Add `output_grid.deposition` with `kind: delta | gaussian`
-  (default `delta`, so behaviour is unchanged by default), `bandwidth_mode:
-  fixed | time_since_release` and parameters. Gaussian deposition spreads each
-  particle's residence weight over a compact stencil (3×3 or 5×5 cells)
-  computed from the particle's sub-cell position and bandwidth; the stencil is
-  a fixed size so shapes stay static. Mass is conserved exactly (weights
-  normalised over the in-grid stencil). Works with the release axis and the
-  nested grid (B6) later.
+- **Scope.** Read decision 0012 first: the kernel is a numerical parameter,
+  converged and never tuned, and delta deposition stays the reference. Add
+  `output_grid.deposition` with `kind: delta | gaussian` (default `delta`, so
+  behaviour is unchanged by default). Gaussian deposition spreads each
+  particle's residence weight over a fixed 5×5-cell horizontal stencil computed
+  from its sub-cell position; the stencil is a fixed size so shapes stay static.
+  Mass is conserved exactly (weights normalised over the in-grid stencil).
+  Vertical bins keep delta deposition.
+- **Bandwidth.** `bandwidth_fraction` (initial value 0.2; A5 sets the converged
+  value) times the local cloud spread: the horizontal standard deviation, in
+  metres, of the active particles of each release within each age band,
+  computed every step with sync-free scatter reductions (sum, sum of squares,
+  count per release and band). Capped at `bandwidth_max_cells` (default 1.0)
+  cell widths, so the stencil holds at least ±2 bandwidths. Optional fallback
+  `bandwidth_mode: time_since_release` for comparison only. Works with the
+  release axis and the nested grid (B6) later.
+- **Metadata.** Record the deposition kind, position, fraction, cap and mode in
+  `run_metadata.json` and the footprint store attributes. This additive change
+  to the output contract is authorised by this spec.
+- **Docs.** Add kernel smoothing to the known-approximations table in
+  `docs/physics.md` with the bias formula from decision 0012: total smoothing
+  variance h² plus Δ²/12, so a plume of width σ appears with width
+  √(σ² + h² + Δ²/12).
 - **Also [PR-F4]: deposition position.** Residence is currently deposited at
   the particle's position after advection, turbulence and convection, i.e.
   endpoint quadrature: a particle crossing cell or vertical-bin boundaries
@@ -140,11 +155,19 @@ Model: Opus 5.5, high effort. Run strictly in order unless a task is BLOCKED.
   computed for advection, which is consistent with the second-order scheme.
   List endpoint quadrature under known approximations in `docs/physics.md`
   regardless of the default.
-- **Acceptance.** New tests: conservation with the kernel; convergence to the
-  delta result as bandwidth → 0; the analytic plume test passes with the
-  kernel at a stated bandwidth with equal or lower error; a noise test showing
-  variance reduction at fixed particle count; the analytic plume error with
-  `midpoint` no worse than `endpoint` at the reference Δt and better at 4Δt.
+- **Acceptance.** New tests:
+  - conservation with the kernel, including at the domain edge;
+  - convergence to the delta result as `bandwidth_fraction` → 0;
+  - **exact bias**: on the analytic plume, the kernel footprint matches the
+    analytic footprint smoothed by the predicted variance h² + Δ²/12, to the
+    same tolerance the existing plume test uses;
+  - a noise test showing variance reduction at fixed particle count;
+  - **split plume**: on synthetic met with strong horizontal shear that splits
+    one release into two branches, the kernel footprint stays within particle
+    noise of the delta footprint at the initial fraction. A bimodal cloud
+    overstates local spread, so this is the case most likely to over-smooth;
+  - the analytic plume error with `midpoint` no worse than `endpoint` at the
+    reference Δt and better at 4Δt.
   Figure: plume footprint delta vs kernel vs analytic (Tier 0 set). `docs/physics.md` footprint section updated.
 - **Verification.** With `kind: delta` golden bit-identical on CPU. Graph
   capture intact with `kind: gaussian` on CUDA.
@@ -199,9 +222,22 @@ Model: Opus 5.5, high effort. Run strictly in order unless a task is BLOCKED.
   every sweep point. Produce error-against-parameter
   figures with expected slopes (Tier 0 figure set) and a table. Propose the v1
   defaults with the converged values.
+- **Kernel bandwidth** (decision 0012). Sweep `bandwidth_fraction` over
+  0, 0.05, 0.1, 0.2, 0.3 and 0.5 on the analytic plume, the real-met case and
+  the A2 split-plume case. Take a delta-deposition run with a large particle
+  count as the reference for each case. The **converged fraction** is the
+  largest for which the kernel footprint, at the standard particle count, stays
+  within the particle noise of that reference, in every case. Report the noise
+  reduction at the converged fraction, expressed as the particle count delta
+  deposition would need for the same noise. Record the rule from decision 0012
+  in the proposed-defaults record: validation and calibration use delta
+  deposition, and the kernel is allowed in production only at or below the
+  converged fraction.
 - **Acceptance.** Figures and table in `docs/validation/`; a decision record
   proposing the new defaults (the human accepts by merging it); no default is
-  changed in this task.
+  changed in this task. For the kernel: a figure of footprint difference from
+  the reference against bandwidth fraction for each case, with the particle
+  noise band, and the converged fraction marked.
 - **Runtime.** Sweeps: budget 6 GPU-hours; stop and report if exceeded.
 
 ### A6 — Forward–backward reciprocity test (1b)
