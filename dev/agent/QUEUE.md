@@ -334,6 +334,11 @@ Model: Opus 5.5, high effort. Run strictly in order unless a task is BLOCKED.
   1 and 2 (one footprint per sample serves both ANATEX tracers). Predicted
   concentrations written in DATEM format; scored with the B10 code using the
   pre-registered options; the Tier 3 figure set.
+- **Deposition.** All runs use delta deposition (`output_grid.deposition.kind:
+  delta`), as decision 0012 and the pre-registration require. Kernel deposition
+  would widen plumes and confound the comparison with the published scores and
+  with the meander term. Confirm the setting from each run's metadata before
+  scoring, and stop if any run used the kernel.
 - **Acceptance.** DATEM ranking scores and their four terms for every
   experiment, and ATMES-II statistics for ETEX, reported against the published
   values for NAME, FLEXPART, HYSPLIT and STILT; pass or fail against the

@@ -156,6 +156,10 @@ Before any Tier 1–3 run is made, a decision record in
   DATEM scoring options: the zero-measurement threshold, whether zero–zero pairs
   count, and unaveraged versus averaged analysis (these move scores a long way);
 - the tolerances and the published scores they are judged against;
+- the deposition setting: Tier 1 to 3 runs, model comparisons and the v2
+  calibration use delta deposition, because kernel smoothing widens plumes and
+  would confound with the meander term
+  ([decision 0012](../dev/decisions/0012-kernel-deposition.md));
 - the expected-difference list for the twins;
 - the data splits (ETEX-1 and CAPTEX fit; ANATEX and radon test; ETEX-2
   reported).
