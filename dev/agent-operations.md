@@ -45,8 +45,11 @@ before, during and after their sessions. Written 2026-09-16, revised
   and asks on physics changes outside scope, output-contract changes,
   validation-threshold changes, data deletion, met downloads, and unexpected
   GPU parity failures. Everything else it decides alone.
-- **Environment-specific values stay out of the repository.** The SLURM account,
-  data paths and scratch paths live in an untracked
+- **Agents never submit jobs.** Isambard AI asks that agents do not submit
+  jobs. You submit every allocation; the agent works only on the node it was
+  given, and the driver disables the SLURM job-control commands inside it.
+- **Environment-specific values stay out of the repository.** Data paths,
+  scratch paths and the default walltime live in an untracked
   `dev/agent/isambard/env.local.sh`. Agents refer to them by variable name.
 
 ---
@@ -133,24 +136,78 @@ Work through this once. The queue assumes all of it.
 
 ## 3. Running sessions on Isambard AI
 
-Queue times are long, the login node is policed, and you have GPU hours. So the
-agent runs **inside a long GPU allocation**, and the login node only submits
-the job and holds your ssh and tmux.
+Queue times are long, the login node is policed, and you have GPU hours. So
+each agent works **inside a long allocation that you submit**: one GPU and 16
+CPU cores of a GH200 node (every Isambard AI compute node has both). The
+allocation is the only queue wait. Everything the agent does, from CPU tests
+to GPU runs, happens directly on that node.
+
+**Agents never submit jobs.** Isambard AI asks that agents do not submit jobs,
+so:
+- only you run `submit.sh` or any other `sbatch`, from the login node;
+- inside the allocation, the driver puts refusing stand-ins for `sbatch`,
+  `srun`, `salloc`, `scancel` and `scontrol` first on `PATH`. Read-only
+  `squeue` and `sinfo` still work;
+- the instructions forbid job control outright, and a task that needs a job
+  (more GPUs, a longer run than the walltime left, a scheduled job) stops and
+  asks you;
+- the driver loop refuses to start outside an allocation, and a session that
+  finds no `SLURM_JOB_ID` stops at once.
+
+The guard catches mistakes; it is not a sandbox. The instructions are the rule.
 
 **Submitting.** From the login node:
 
 ```bash
-dev/agent/isambard/submit.sh A
+dev/agent/isambard/submit.sh A shell      # queue A, watched
+dev/agent/isambard/submit.sh B            # queue B, unattended loop
+dev/agent/isambard/submit.sh A loop 12:00:00
 ```
 
-An optional second argument sets the walltime. The script reads the account,
-partition and paths from `env.local.sh` and submits
-`agent_driver.slurm`. The job loads modules, runs pre-flight checks, and starts
-the driver loop in a dedicated tmux server on the compute node.
+The arguments are the queue, the mode (`loop`, the default, or `shell`) and
+an optional walltime. The scheduler chooses the account and partition. The job
+loads modules, runs pre-flight checks (GPU, Claude API, GitHub) and starts a
+dedicated tmux server on the compute node. The job log prints the node and the
+tmux socket. To attach:
 
-**The driver loop.** Each iteration checks that the working tree has no
-uncommitted changes (it stops rather than discard anything), syncs `main`, and
-starts a fresh session. The session does one of three things:
+```bash
+ssh <node>
+tmux -L glide-<jobid> attach
+```
+
+Detaching (Ctrl-b d) leaves everything running. The allocation lives entirely
+on the compute node, so it survives your connection dropping. Nothing
+long-lived runs on the login node.
+
+### Which mode, when
+
+| Phase | Mode | Why |
+| --- | --- | --- |
+| Phase 1, Queue A (A00 to A8) | **shell**, watched | These tasks change results and are the riskiest. Queue A waits for your merge after every task anyway, so an unattended loop would mostly sit idle. Watching lets you answer questions at once instead of through a BLOCKED draft and a resume request. |
+| Queue B, throughout | **loop**, unattended, in a second allocation | Independent, lower-risk infrastructure tasks; the loop keeps going without you. |
+| Pre-registration (A8b) | shell or loop | A drafting task; you edit the PR anyway. |
+| Validation, A9 to A11 | **loop**, unattended | Deliberately. Steering an agent during a registered validation run is itself a choice made after seeing results. With the loop, every intervention goes through a resume request in PROGRESS.md and is logged. The work is mostly long compute bound by fixed rules. |
+
+**A watched session.** Attach, then start Claude in the tmux shell. The shell
+already has the modules, the environment and the guard:
+
+```bash
+claude --model "$GLIDE_AGENT_MODEL"
+```
+
+Give it the same instruction the loop uses: follow
+`dev/agent/INSTRUCTIONS.md`, your queue is A, select work with §1 and deliver
+one piece of work per §2. When it opens the PR, review and merge, then start a
+fresh session for the next task (`/clear` or a new `claude`), so each task
+starts cold as it would in the loop. If you redirect it or answer a question
+mid-task, it records your instruction in its progress file
+(INSTRUCTIONS.md §1). Long runs, such as A5's sweeps, can be left running
+while you detach. Log your watching time in the paper repository's
+`metrics/human_time.csv`.
+
+**The unattended loop.** Each iteration checks that the working tree has no
+uncommitted changes (it stops rather than discard anything), syncs `main`,
+and starts a fresh session. The session does one of three things:
 
 - delivers one piece of work as a PR, and the loop continues;
 - prints `WAITING`, because the next task depends on a PR you have not merged.
@@ -159,31 +216,18 @@ starts a fresh session. The session does one of three things:
   before a long absence;
 - prints `NO_TASK`, because every task in the queue is merged. The loop exits.
 
-Queue A is sequential, so in practice it delivers a task and then waits for you
-to merge it. Queue B tasks are mostly independent, so it keeps going.
-
-**Attaching.** The job log prints the node and the tmux socket name. Then:
-
-```bash
-ssh <node>
-tmux -L glide-<jobid> attach
-```
-
 `touch dev/agent/STOP_AFTER_TASK` ends the loop after the current session.
 Ctrl-C in the pane aborts at once.
 
-**Restarting.** When the allocation ends, resubmit. The repository is the only
-state. Test a cold restart once deliberately before relying on it.
+**Walltime.** Sessions check the time left before long runs and hand off if a
+run will not fit. When the allocation ends, resubmit. The repository is the
+only state. Test a cold restart once deliberately before relying on it.
 
-**First runs: supervised.**
-
-1. Submit Queue A and stay attached while it does A00. Review and merge the PR
-   yourself. This shows whether the instructions, the claim, the progress file
-   and the PR template work in practice, on a small task.
-2. Do the same for A01 and A0. A01 switches the default meteorology to model
-   levels, and every later task is checked against A0's fixtures.
-3. Then leave Queue A unattended. Start Queue B in a second allocation once
-   Queue A runs smoothly.
+**First runs.** Do A00, A01 and A0 in shell mode and watch closely. They show
+whether the instructions, the claim, the progress file and the PR template
+work in practice, A01 switches the default meteorology, and every later task
+is checked against A0's fixtures. Start the Queue B loop in a second
+allocation once Queue A runs smoothly.
 
 **Releasing a stuck claim.** If you close a PR without merging and want the
 task redone from scratch, delete its `agent/<ID>-*` branch. The task becomes

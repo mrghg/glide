@@ -307,12 +307,11 @@ uv pip install --python .venv/bin/python -e ".[dev]"
 
 ```bash
 mkdir -p slurm_logs
-# fill in --account and --partition in the script header first
+# no --account or --partition needed: the scheduler chooses them
 sbatch scripts/run_periodic_cuda.slurm configs/example_multisite_january.yaml
 ```
 
-**Interactive GPU session** — from the repo root, get a GPU shell (add
-`--account=<project>` if you have more than one SLURM account):
+**Interactive GPU session** — from the repo root, get a GPU shell:
 
 ```bash
 srun --gres=gpu:1 --cpus-per-task=16 --time=01:00:00 --pty bash

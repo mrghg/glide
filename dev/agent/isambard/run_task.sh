@@ -18,6 +18,8 @@
 # GLIDE_AGENT_WAIT_SECONDS, or stop the loop, before a long absence.
 # =============================================================================
 set -uo pipefail
+# Only inside a job allocation: never on a login node.
+[[ -n "${SLURM_JOB_ID:-}" ]] || { echo "SLURM_JOB_ID is unset: this is not a compute-node allocation; refusing to run" >&2; exit 1; }
 QUEUE="${1:?queue letter required}"
 MODEL="${GLIDE_AGENT_MODEL:?GLIDE_AGENT_MODEL not set}"
 MAX_TASKS="${GLIDE_AGENT_MAX_TASKS:-20}"

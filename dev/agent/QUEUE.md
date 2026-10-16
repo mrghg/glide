@@ -8,7 +8,9 @@ reorders and edits this file weekly._
 
 Two queues. **Queue A** is sequential: numerics-touching work before the
 physics freeze, then the freeze, then validation. **Queue B** is infrastructure
-and can run in parallel in a second allocation. Each task states its model
+and can run in parallel in a second allocation, which the human submits.
+Agents never submit jobs; all work runs on the node of the allocation they are
+in. Each task states its model
 class, size, dependencies, scope, acceptance criteria and verification. Expected
 runtimes are for a single GH200 unless stated.
 
@@ -555,8 +557,10 @@ dependency is listed; run in the listed order by default.
   early.
 - **Scope.** CLI polish; `pip install glide-lpdm` (name to be confirmed by the
   human); an Apptainer definition for Isambard and a Dockerfile; a pinned lock
-  file; a nightly GPU test sbatch that runs the parity tests and posts the result as a comment on a pinned
-  GitHub issue; documentation site configuration; DOI metadata
+  file; a GPU test job script that runs the parity tests and posts the result
+  as a comment on a pinned GitHub issue, for the human to submit (for example
+  nightly, if Isambard allows scheduled jobs). Test the script's body by
+  running it directly on your node; never submit it (INSTRUCTIONS.md §5); documentation site configuration; DOI metadata
   (`CITATION.cff`, Zenodo).
 - **Acceptance.** A clean machine can install and run the smoke test from the
   published instructions; the container runs the smoke test on Isambard.

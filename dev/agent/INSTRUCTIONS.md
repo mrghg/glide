@@ -31,6 +31,15 @@ The plan behind the queue is [dev/roadmap.md](../roadmap.md). The physics is in
 [dev/decisions/](../decisions/). Read the decision records referenced by your
 task before designing anything.
 
+**Watched and unattended sessions.** The human may start you by hand and watch
+(a watched session), or the driver loop may start you with no one present.
+The protocol is the same either way: same selection, branch, progress file, PR
+and stop conditions. In a watched session the human may answer a question or
+redirect you directly. Record each such instruction in your progress file
+under `handled:` as `in-session: <date> <instruction>`, so the record is the
+same as if it had come through a resume request. For Tier 1–3 validation tasks
+this is required by the pre-registration rules.
+
 You work on the model that a sceptical community will judge. Correctness and
 traceability matter more than speed of delivery. A task delivered late with
 every check passed is a success; a task delivered on time with a silent change
@@ -177,6 +186,9 @@ Stop when any of these arises:
   scratch directory, or `$GLIDE_AGENT_OUTPUTS`.
 - The task needs credentials, licences or data you do not have, or an
   environment variable from §6 that is unset.
+- The task needs a job submitted: more GPUs or memory than this node gives
+  you, a run longer than the walltime left, or a scheduled job. Write the job
+  script if the task asks for one, but the human submits it.
 
 How to stop:
 
@@ -206,8 +218,14 @@ session continues automatically; no human action is needed.
 - Commit `dev/agent/isambard/env.local.sh`, or write the values of the
   `GLIDE_*` environment variables (paths, account codes) into any tracked file.
   Refer to the variable name instead.
-- Run anything heavier than `git`, `tmux` or an editor on a login node. All
-  compute happens inside the allocation.
+- Submit, alter or cancel a SLURM job: no `sbatch`, `srun`, `salloc`,
+  `scancel` or `scontrol`, and no other route to the scheduler. Isambard AI
+  asks that agents do not submit jobs. You already hold a compute node; run
+  every test, benchmark and model run directly on it. The driver disables
+  these commands, and getting round that is itself forbidden. Read-only
+  queries (`squeue`, `sinfo`) are allowed.
+- Work outside a job allocation. If `SLURM_JOB_ID` is unset you are on a login
+  node: stop at once and run nothing.
 - Download meteorology, or any dataset, without a task that authorises it.
 - Loosen a test tolerance, skip a test, or mark one xfail to make a run pass.
 - Change default configuration values silently. Defaults change only through a
@@ -240,13 +258,18 @@ a stop condition.
 | `GLIDE_AGENT_OUTPUTS` | run outputs, figures and long logs |
 | `GLIDE_SCRATCH` | scratch space; `UV_CACHE_DIR` and `TRITON_CACHE_DIR` are under it |
 | `GLIDE_FLEXPART_SRC`, `GLIDE_FLEXPART_OUTPUTS`, `GLIDE_NAME_FOOTPRINTS`, `GLIDE_EDGAR`, `GLIDE_ETEX`, `GLIDE_DATEM` | reference data held outside the repository, never copied into it |
-| `GLIDE_SLURM_ACCOUNT`, `GLIDE_SLURM_PARTITION` | only for an sbatch a task explicitly asks for |
 
 Fixed facts:
 
-- **Machine:** Isambard AI, NVIDIA GH200 nodes (aarch64). You are running
-  inside a SLURM allocation that already holds one GPU. Run GPU tests directly;
-  do not submit inner jobs.
+- **Machine:** Isambard AI. Every compute node is a GH200 node: Grace CPUs
+  (aarch64) and Hopper GPUs together, with no CPU-only nodes. You are running
+  inside a SLURM job the human submitted, which holds one GPU and 16 CPU cores
+  of one node. Run CPU tests and GPU runs directly on this node, one after the
+  other; "on CPU" in a task means the Grace CPU here, not another machine.
+- **Walltime:** check what is left with `squeue -j "$SLURM_JOB_ID" -h -o %L`
+  before any run longer than a few minutes. If the run will not fit, write
+  hand-off notes and stop (status `HANDOFF`); the next allocation continues.
+  Never try to extend the job.
 - **Modules:** already loaded by the driver via `scripts/gpu_env.sh`:
   `cudatoolkit/24.11_12.6` (never `cuda/12.6`) and `gcc-native/14.2` with
   `CC=gcc CXX=g++`. `GLIDE_COMPILE` is unset, so runs are eager unless you set

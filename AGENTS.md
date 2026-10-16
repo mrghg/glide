@@ -40,6 +40,11 @@ This file is the agent-agnostic contributor guide (the `AGENTS.md` convention;
 - Primary entrypoint: `python -m lpdm.main --config <yaml>`.
 - This is a device-agnostic codebase (CUDA / MPS / CPU). GPU-specific work must be
   device-gated; the local dev box is CPU-only (GPU runs happen on Isambard AI).
+- **On Isambard AI, agents never submit, alter or cancel SLURM jobs** (`sbatch`,
+  `srun`, `salloc`, `scancel`, `scontrol`); Isambard AI asks that agents do not
+  submit jobs. A human submits the allocation, and the agent runs everything
+  directly on that node. Never run compute on a login node. Details:
+  [dev/agent/INSTRUCTIONS.md](dev/agent/INSTRUCTIONS.md) §5.
 
 ## Runtime memory safeguards (required for run-related changes)
 Memory controls live in the `memory:` section of the run config (not CLI flags):

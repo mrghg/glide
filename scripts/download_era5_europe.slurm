@@ -21,7 +21,8 @@
 # confused on disk, on top of the _ml filename suffix download_sample_cube.py
 # already adds).
 #
-# BEFORE FIRST USE, fill in the lines marked  # >>> EDIT (account / partition).
+# No account or partition is needed on Isambard AI: the scheduler chooses them.
+# Check the lines marked  # >>> EDIT  before first use.
 # =============================================================================
 
 #SBATCH --job-name=glide-era5-download
@@ -33,8 +34,6 @@
 #SBATCH --cpus-per-task=4                   # xarray/dask decompression threads
 #SBATCH --mem=32G                           # headroom for in-memory subset before write (bump for model levels)
 #SBATCH --gres=gpu:1                        # required — Isambard AI has no pure CPU nodes
-# #SBATCH --account=CHEM007981                # >>> EDIT: set to your Isambard AI project code
-# #SBATCH --partition=workq                   # >>> EDIT: set to the Isambard AI GPU partition
 
 set -euo pipefail
 
