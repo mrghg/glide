@@ -402,6 +402,8 @@ same checklist is the final task in [dev/agent/QUEUE.md](agent/QUEUE.md).
 - The physics audit table is complete and signed by an external reviewer.
 - The validation was pre-registered on OSF before any Tier 1–3 run, and the
   validation report cites the registration's DOI and any later updates to it.
+  The run logs show every Tier 1–3 run, each one is in the report, and every
+  repeated run has a logged reason.
 - A validation report in `docs/` shows that the pre-registered criteria are
   met:
   - agreement with FLEXPART at the particle and footprint levels;

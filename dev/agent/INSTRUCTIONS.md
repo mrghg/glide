@@ -218,6 +218,10 @@ session continues automatically; no human action is needed.
   diagnostic metadata described in AGENTS.md.
 - Launch a GPU run without an estimate of its runtime and memory.
 - Report a result you did not observe. If a step was skipped, say so.
+- Run a Tier 1–3 validation case without adding it to the run log, repeat one
+  for any reason other than those in `docs/validation-plan.md` §3 ("Rules for
+  running and reporting"), or leave a run out of the report. Do not decide
+  pass or fail yourself; the registered scripts compute it.
 
 ---
 
@@ -280,7 +284,7 @@ merged.
 # <ID> — <title>
 
 - status: CLAIMED | PR OPEN #<n> | BLOCKED | HANDOFF
-- queue: <A|B>   model: <model>   branch: agent/<ID>-<slug>
+- queue: <A|B>   model: <exact model ID, one per session>   branch: agent/<ID>-<slug>
 - started: YYYY-MM-DD   updated: YYYY-MM-DD
 - plan: <files, tests, figures, expected GPU runtime and memory>
 - done: <what changed, one line per item>

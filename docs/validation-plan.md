@@ -292,13 +292,35 @@ A decision record in [dev/decisions/](../dev/decisions/) fixes the following:
   comparison (§1).
 - **The fitting and test sets:** fit on ETEX-1 and CAPTEX; test on ANATEX and
   radon; report ETEX-2.
-- **Comparisons already made.** GLIDE was compared with FLEXPART before the
-  freeze, for example the Mace Head case in
-  [VALIDATION.md §7](VALIDATION.md), and more comparisons will be run on the
-  pre-freeze physics while the reference runs are being set up. The record
-  lists every such comparison, with what it showed, and labels them
-  exploratory. Without this list, a reviewer could reasonably ask whether the
-  tolerances were chosen after seeing the agreement.
+- **The development history.** Listing earlier comparisons is not enough. The
+  record must also say where earlier results shaped the model. It has three
+  parts:
+  - *Comparisons already made.* GLIDE was compared with FLEXPART and NAME
+    before the freeze, for example the Mace Head case in
+    [VALIDATION.md §7](VALIDATION.md). More comparisons will be run on the
+    pre-freeze physics while the reference runs are being set up. Each is
+    listed with its date and what it showed, and labelled exploratory.
+  - *Changes made because of results.* Some physics changes were made after
+    seeing results. For example, GLIDE's modelled CH₄ enhancements at polluted
+    low-inlet sites came out about twice those from NAME and FLEXPART (about
+    120 ppb against under 60). The cause was near-surface mixing 3–8 times
+    weaker than FLEXPART's. FLEXPART's minimum turbulence timescales were then
+    switched on, and a GLIDE-only surface-layer scheme switched off (commit
+    2808a76; [turbulence.md §5](turbulence.md#5-the-lagrangian-timescale-floors)).
+    Each such change is listed with its commit and the result that prompted
+    it. Changes that came from code review against the literature or
+    FLEXPART's source, such as adopting FLEXPART v11's Hanna coefficients
+    (commit 01610bd), are listed separately, because no result prompted them.
+  - *Data that are therefore not independent.* The UK sites and periods used
+    in those development comparisons, which matters for Tier 4, and the
+    FLEXPART and NAME output already compared. The tracer experiments and the
+    radon data have not been used, which is why Tier 3 is the independent
+    test.
+
+  Without this section, a reviewer could reasonably ask whether the model or
+  the tolerances were adjusted after seeing the agreement.
+- **The rules for running and reporting** (below), so that they are part of
+  what is registered.
 
 ### The steps
 
@@ -324,6 +346,40 @@ the commit, and history can be rewritten. The decision record stays in the
 repository because the agents read their settings from it. The OSF
 registration is the evidence of when those settings were fixed, and the paper
 cites its DOI.
+
+### Rules for running and reporting
+
+GPU runs are cheap and the agents have a large allocation. That makes it easy
+to try many variants and report only the ones that work, and hard for anyone
+to see that it happened. Vaccaro (2026, arXiv:2606.11217) makes this argument
+for experiments with AI agents. These rules are registered with the record.
+
+1. **Every run is logged and reported.** Each Tier 1–3 task keeps a run log in
+   `docs/validation/runs/<tier>.csv`. Each row gives the date, the
+   configuration file and its hash, the physics tag, the output location, the
+   outcome, and the agent model that launched it. A run may be repeated only
+   for a documented failure: a crash, corrupt or missing input data, or a
+   configuration that differs from the registered one. The reason goes in
+   the log. Both the failed run and the repeat stay in the log, and the
+   report includes every run.
+2. **What happens when a test fails** is decided now, not after the failure:
+   - If the cause is a bug in GLIDE, the bug is fixed under a new physics tag,
+     the fix gets a decision record, and the change is filed as an OSF update.
+     **Every** tier that the fix could affect is then rerun, not only the
+     case that failed. The report gives the results before and after the fix.
+   - If the cause is a bug in the scoring code, the same applies, with the
+     scoring-code commit in place of the physics tag.
+   - If no bug is found, the failure is reported as a finding. Nothing is
+     changed to make the test pass.
+3. **Pass or fail is computed, not judged.** The registered scripts compute
+   every metric and compare it with its tolerance. The agent running the task
+   does not decide whether a result passes. It may add interpretation, which
+   is labelled as such and kept separate from the computed results.
+4. **The agent is recorded.** Each validation task's progress file gives the
+   exact model identifier of every agent session that worked on it, and the
+   run log gives the model for each run. The agents write and run the
+   validation code, so they are part of the measurement process and are
+   reported like any other instrument.
 
 ### After registration
 
