@@ -118,6 +118,8 @@ Work through this once. The queue assumes all of it.
 - [ ] Download the ETEX and DATEM tracer data per `data/tracer-experiments.md`
       and set `GLIDE_ETEX` and `GLIDE_DATEM`. ETEX downloads by script; DATEM
       needs a browser.
+- [ ] Create an OSF account for the pre-registration (needed after the freeze;
+      see §7).
 - [ ] Locate the NAME footprints, EDGAR maps and radon data on the group
       archive, and set their variables in `env.local.sh`. They are restricted
       and never enter the repository.
@@ -263,6 +265,15 @@ heading into a stop-condition area without stopping.
   for merged tasks.
 - **At the freeze:** you and the external reviewer sign the physics audit;
   tag; update STATUS.
+- **Before validation runs:** when the A8b PR arrives, set the final
+  tolerances and merge it. Register the record on
+  [OSF Registries](https://osf.io/registries) (open-ended template; attach the
+  record, the release lists in `docs/validation/preregistration/` and the two
+  commit hashes; embargo if wanted). Then replace `**Registration.** pending`
+  in the record with the URL, DOI and date, commit to main, and add the DOI to
+  "Current state" in PROGRESS.md. Tasks A9 to A11 stop until you do. Any later
+  change to the registered settings needs a new decision record and an OSF
+  update.
 
 ---
 

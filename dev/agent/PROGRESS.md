@@ -8,6 +8,7 @@ pull requests never conflict on it. Per-task records are in
 ## Current state
 
 - Physics tag: none yet (pre-freeze).
+- Pre-registration: not yet registered (task A8b, then OSF).
 - Golden fixtures: none yet (task A0).
 - Benchmark baseline: none yet (task A0).
 - Notes: none.

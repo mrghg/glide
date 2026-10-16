@@ -351,9 +351,41 @@ Model: Opus 5.5, high effort. Run strictly in order unless a task is BLOCKED.
   progress file. The human and the external reviewer sign the
   table by merging.
 
+### A8b — Pre-registration record (1e)
+
+- **Size:** S. **Depends on:** A8 merged and the `v0-physics` tag created; B10
+  merged (the scoring code reproduces DATEM's statistics). Model: Opus 5.5.
+- **Scope.** Draft the pre-registration decision record (next free number) with
+  every item listed in `docs/validation-plan.md` §3, "What is fixed":
+  - the physics tag and its commit hash;
+  - the scoring-code commit hash;
+  - the six standard cases with exact dates, and the full release lists for
+    Tiers 1–3;
+  - the metrics and the DATEM scoring options;
+  - proposed tolerances, each with its reasoning, and the published scores
+    they are judged against, with sources;
+  - the deposition setting;
+  - the expected differences;
+  - the fitting and test sets;
+  - a list of every comparison of GLIDE with FLEXPART, NAME or tracer data made
+    so far, found from `docs/VALIDATION.md`, STATUS.md, the progress files and
+    git history, with its date, configuration and result, labelled
+    exploratory.
+
+  End the record with a line `**Registration.** pending`, which the human
+  replaces with the OSF URL, DOI and date after registering. Also write the
+  release lists as files under `docs/validation/preregistration/`, so the
+  human can attach them to the OSF submission.
+- **Out of scope.** Running GLIDE on any Tier 1–3 case. Registering on OSF,
+  which the human does.
+- **Acceptance.** Every §3 item is present; every tolerance has a stated
+  reason; the list of earlier comparisons cites its sources. The human sets
+  the final tolerances by editing the PR before merging.
+
 ### A9 — Tier 1 component parity (validation)
 
-- **Size:** M. **Depends on:** A8; FLEXPART v11 source available.
+- **Size:** M. **Depends on:** A8b merged and its Registration line filled in;
+  FLEXPART v11 source available.
 - **Scope.** Scripts under `scripts/validation/tier1/` that call the FLEXPART
   Hanna and convection routines (via f2py or a transcribed reference marked as
   such) and GLIDE's on identical columns; figures per the plan; tolerances
@@ -363,7 +395,8 @@ Model: Opus 5.5, high effort. Run strictly in order unless a task is BLOCKED.
 
 ### A10 — Tier 2 twin analysis tooling (validation)
 
-- **Size:** M. **Depends on:** A8; FLEXPART reference outputs available.
+- **Size:** M. **Depends on:** A8b merged and its Registration line filled in;
+  FLEXPART reference outputs available.
 - **Scope.** Readers for FLEXPART particle and gridded output; particle
   statistics against time; footprint metrics; systematic-difference maps;
   mole-fraction convolution; the Tier 2 figure set including the cloud
@@ -373,7 +406,7 @@ Model: Opus 5.5, high effort. Run strictly in order unless a task is BLOCKED.
 
 ### A11 — Tier 3 tracer-experiment runs (validation)
 
-- **Size:** M. **Depends on:** A10, B10; the ERA5 cubes for ETEX, CAPTEX and
+- **Size:** M. **Depends on:** A8b (registered), A10, B10; the ERA5 cubes for ETEX, CAPTEX and
   ANATEX listed in the data inventory.
 - **Scope.** Receptor-oriented backward runs, one per measured sample, as set out
   in `data/tracer-experiments.md` §5: ETEX-1, ETEX-2, CAPTEX, and ANATEX tracers
@@ -529,6 +562,8 @@ dependency is listed; run in the listed order by default.
 Model: Opus 5.5. Runs when every v1 item is MERGED. Checks each line of the gate
 in `dev/roadmap.md` §3 against the repository, writes `docs/validation/v1-report.md`
 summarising the evidence for each line with links, and lists anything unmet.
+The report cites the OSF registration and every later update to it, and
+checks that every Tier 1–3 run postdates the registration.
 The human decides the release.
 
 ---

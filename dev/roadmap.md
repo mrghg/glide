@@ -117,8 +117,9 @@ Explanations of each item follow each table.
 - **1d.** GLIDE and FLEXPART v11 are both run on ERA5, and the particle clouds
   and footprints are compared (Tiers 1 and 2 of the validation plan).
 - **1e.** GLIDE is compared with observations from controlled tracer releases
-  (ETEX, CAPTEX, ANATEX) and with radon-222, using metrics fixed in advance
-  (Tier 3).
+  (ETEX, CAPTEX, ANATEX) and with radon-222 (Tier 3). The metrics, tolerances
+  and cases for Tiers 1–3 are fixed in advance and registered on OSF, which
+  gives the registration an independent timestamp and a DOI.
 - **1f.** Find which physical parameters matter most, then calibrate those
   against the tracer experiments with Bayesian methods. The result is
   published as a table of each parameter's prior and fitted values (a
@@ -399,6 +400,8 @@ same checklist is the final task in [dev/agent/QUEUE.md](agent/QUEUE.md).
   Isambard AI. This includes the reciprocity, well-mixed and convergence
   tests.
 - The physics audit table is complete and signed by an external reviewer.
+- The validation was pre-registered on OSF before any Tier 1–3 run, and the
+  validation report cites the registration's DOI and any later updates to it.
 - A validation report in `docs/` shows that the pre-registered criteria are
   met:
   - agreement with FLEXPART at the particle and footprint levels;
@@ -443,6 +446,7 @@ A human reviews and merges every task.
 | **1. Model levels, then efficiency, before the freeze** | Fix time-bin labels (A00) → model levels as default (6d, A01) → 6a → 2b → 7a → 7f, 7e → 1b, 7b → 2a | Agent, most capable model, one task at a time | A |
 | **1′. Infrastructure, in parallel** | 3a and 7d, 7g, 7h, 4e, 4, 4a, 4b, tools for validation figures, early packaging | Agent, cheaper model | B |
 | **2. Freeze** | 1a; the physics audit table (1c) prepared for the external reviewer; tag `v0-physics` | Agent prepares, human signs off | A |
+| **2′. Pre-register** | A8b drafts the pre-registration record; the human sets the tolerances, merges, registers it on OSF and records the DOI ([validation plan §3](../docs/validation-plan.md#3-pre-registration-protocol)) | Agent drafts, human registers | A |
 | **3. Validate** | New Tier 0 tests (reciprocity, convergence figures) → Tier 1 component comparison → Tier 2 whole-model comparison → Tier 3 tracer experiments and radon | Agent does the analysis; human produces the FLEXPART reference runs | A |
 | **4. Release v1** | Packaging, reproducibility bundle, documentation, release-gate checklist | Agent | B |
 | **5. Paper** | 1g and 1h | Human, with agent support | — |
@@ -493,7 +497,7 @@ FLEXPART.
 | Phase | Effort |
 | --- | --- |
 | Efficiency and convergence, before the freeze | 4–6 weeks |
-| Freeze, audit, reciprocity | 2 weeks |
+| Freeze, audit, reciprocity, pre-registration | 2–3 weeks |
 | FLEXPART comparison and tracer experiments | 8–12 weeks, mostly waiting for the reference runs |
 | Releases, high-resolution output and packaging, in parallel | no extra time |
 | **v1** | **roughly 4–5 months from 2026-09-16** |

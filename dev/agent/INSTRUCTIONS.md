@@ -166,6 +166,9 @@ Stop when any of these arises:
   `run_metadata.json`) in a way the spec did not authorise.
 - A validation threshold, tolerance or pre-registered metric would need to
   change.
+- The task would run or score GLIDE on a Tier 1–3 case while the
+  pre-registration record's Registration line still reads `pending`, or before
+  that record exists.
 - GPU parity, a well-mixed gate or the golden comparison fails in a way the
   task did not predict, and you cannot explain it within an hour of
   investigation.

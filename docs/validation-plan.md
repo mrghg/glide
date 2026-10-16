@@ -258,13 +258,23 @@ application section of the paper, not a requirement for release.
 
 ## 3. Pre-registration protocol
 
-Before any Tier 1, 2 or 3 run, a decision record in
-[dev/decisions/](../dev/decisions/) fixes the following:
+Pre-registration means fixing, in public and with an independent timestamp,
+what will be run and how it will be judged, before any results are seen. It
+happens once, after the physics freeze and after the scoring code has been
+verified (task B10), and before any Tier 1, 2 or 3 run with GLIDE.
 
-- **The model version:** the physics tag that all runs will use.
-- **The cases:** the standard cases (§4) and the full list of releases.
-- **The metrics**, exactly as coded in `scripts/validation/`. This includes
-  three options in the DATEM scoring that can change scores a lot:
+### What is fixed
+
+A decision record in [dev/decisions/](../dev/decisions/) fixes the following:
+
+- **The model version:** the physics tag that all runs will use, and its
+  commit hash.
+- **The scoring code:** the commit hash of the verified scoring code in
+  `scripts/validation/`.
+- **The cases:** the standard cases (§4) with their dates, and the full list
+  of releases.
+- **The metrics**, exactly as coded. This includes three options in the DATEM
+  scoring that can change scores a lot:
   - the concentration below which a measurement is treated as zero;
   - whether pairs where both measurement and model are zero are counted;
   - whether samples are compared one by one, or averaged over time or space
@@ -282,11 +292,46 @@ Before any Tier 1, 2 or 3 run, a decision record in
   comparison (§1).
 - **The fitting and test sets:** fit on ETEX-1 and CAPTEX; test on ANATEX and
   radon; report ETEX-2.
+- **Comparisons already made.** GLIDE was compared with FLEXPART before the
+  freeze, for example the Mace Head case in
+  [VALIDATION.md §7](VALIDATION.md), and more comparisons will be run on the
+  pre-freeze physics while the reference runs are being set up. The record
+  lists every such comparison, with what it showed, and labels them
+  exploratory. Without this list, a reviewer could reasonably ask whether the
+  tolerances were chosen after seeing the agreement.
 
-Any change after this point is recorded in a new decision record that gives
-the reason. Results are reported against the pre-registered numbers whether or
-not they pass. Tolerances are never loosened to make a test pass; a failed
-tolerance is reported as a finding.
+### The steps
+
+1. **Draft.** Agent task A8b drafts the record from this plan, with proposed
+   tolerances and the list of comparisons already made.
+2. **Review.** The human checks the record, sets the final tolerances and
+   merges it.
+3. **Register.** The human submits the merged record on
+   [OSF Registries](https://osf.io/registries), using the open-ended
+   registration template. The submission includes the record itself, the two
+   commit hashes, and the release lists. OSF timestamps the registration,
+   makes it unchangeable and gives it a DOI. It can be embargoed (kept private
+   for up to four years) if the tolerances should not be public before the
+   paper.
+4. **Record.** The human adds the registration's URL, DOI and date to the
+   record's "Registration" line, and to "Current state" in
+   `dev/agent/PROGRESS.md`.
+5. **Run.** Only then do the Tier 1–3 tasks (A9, A10, A11) start. Each one
+   stops if the Registration line is empty.
+
+Git history alone is not enough evidence. Commit dates are set by whoever makes
+the commit, and history can be rewritten. The decision record stays in the
+repository because the agents read their settings from it. The OSF
+registration is the evidence of when those settings were fixed, and the paper
+cites its DOI.
+
+### After registration
+
+Any change is recorded in a new decision record that gives the reason, and is
+filed as an update to the OSF registration, linked to the original. Results are
+reported against the registered numbers whether or not they pass. Tolerances
+are never loosened to make a test pass; a failed tolerance is reported as a
+finding.
 
 ---
 
