@@ -380,6 +380,12 @@ Model: Opus 5.5, high effort. Run strictly in order unless a task is BLOCKED.
   - the rules for running and reporting from §3, copied in full, with the run
     log format.
 
+  Also confirm that Tier 1 is feasible before it is registered: compile
+  FLEXPART's `hanna` and convection routines with a minimal Fortran driver
+  and call each once on a synthetic input. Do not run GLIDE's equivalents or
+  compare anything. Say in the record whether this worked, so the human can
+  decide before registering if it did not.
+
   End the record with a line `**Registration.** pending`, which the human
   replaces with the OSF URL, DOI and date after registering. Also write the
   release lists as files under `docs/validation/preregistration/`, so the
@@ -395,12 +401,30 @@ Model: Opus 5.5, high effort. Run strictly in order unless a task is BLOCKED.
 
 - **Size:** M. **Depends on:** A8b merged and its Registration line filled in;
   FLEXPART v11 source available.
-- **Scope.** Scripts under `scripts/validation/tier1/` that call the FLEXPART
-  Hanna and convection routines (via f2py or a transcribed reference marked as
-  such) and GLIDE's on identical columns; figures per the plan; tolerances
-  from the pre-registration record.
+- **Scope.** Scripts under `scripts/validation/tier1/` that call FLEXPART v11's
+  compiled `hanna` routine (`turbulence_mod.f90`) and its convection routines,
+  and GLIDE's equivalents, on identical inputs: ERA5 columns from the case
+  library and synthetic stable, neutral and convective profiles. FLEXPART's
+  routines read their inputs from module variables, so the expected route is
+  a small Fortran driver program, kept under `scripts/validation/tier1/`,
+  that `use`s the FLEXPART modules, sets those variables, calls the routine
+  and writes the outputs to a file; f2py is acceptable if it works. Compile
+  against `$GLIDE_FLEXPART_SRC` into `$GLIDE_SCRATCH`; never copy FLEXPART
+  source into the repository. Figures per the plan; tolerances from the
+  pre-registration record.
+- **Only compiled FLEXPART counts.** Do not re-type FLEXPART's equations in
+  Python or anywhere else as a stand-in. GLIDE's Hanna code was itself
+  transcribed from FLEXPART (commit 01610bd), so a second transcription is
+  not an independent reference. If the routines cannot be compiled and
+  called, stop (BLOCKED) with the compiler errors and what you tried.
+- **Classify every difference beyond tolerance** as a GLIDE bug (registered
+  failure rule: stop), a declared design difference (cite the
+  expected-difference list), or a suspected FLEXPART problem. For the last,
+  see INSTRUCTIONS.md §3, "Reference code can be wrong": write it up, never
+  change either code to agree.
 - **Stop condition specific to this task:** if `$GLIDE_FLEXPART_SRC` is unset
-  or does not contain the FLEXPART v11 source, stop.
+  or does not contain the FLEXPART v11 source, or `gfortran` is not available
+  on the node, stop.
 - **Running and reporting.** Follow the registered rules
   (`docs/validation-plan.md` §3): log every run in
   `docs/validation/runs/<tier>.csv`, repeat a run only for a documented

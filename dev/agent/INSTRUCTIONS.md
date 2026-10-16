@@ -163,6 +163,17 @@ any change to `src/lpdm/`:
   `scripts/validation/`, commit the script, and attach the images to the PR.
   Do not commit large binaries; put them under `$GLIDE_AGENT_OUTPUTS` and link.
 
+**Reference code can be wrong.** FLEXPART, NAME, DATEM's scoring software and
+published scores are references, not truth. If something in one of them looks
+wrong (code that disagrees with its own documentation or with the published
+equation, a statistic that cannot be reproduced, a units slip), do not change
+GLIDE or the scoring to agree with it, and do not quietly work around it.
+Record it under `reference issues:` in your progress file and in the PR: the
+file and line (or table and value), what you expected and from which source,
+the evidence, and how much it affects the comparison. Say whether GLIDE copied
+the same behaviour. The human decides what to do, including whether to report
+it upstream. If the issue blocks the task, it is a stop condition.
+
 Expected runtimes are stated in each spec. If a run exceeds twice its estimate,
 stop it, record why in your progress file, and continue only if the cause is
 understood.
@@ -320,6 +331,7 @@ merged.
 - docs: <pages updated; decision record if any>
 - handoff: <for the next session and the human, including suggested updates to PROGRESS.md "Current state">
 - proposed follow-ups: <new tasks discovered, one line each>
+- reference issues: <suspected problems in FLEXPART, NAME, DATEM or published values (§3); "none" if none>
 - question: <if BLOCKED: the question, and what you would do under each answer>
 - handled: <resume entry IDs, one per line, with a note>
 ```

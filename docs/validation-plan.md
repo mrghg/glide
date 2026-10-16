@@ -116,7 +116,18 @@ These tests are already in the test suite (see
 ### Tier 1: component-by-component comparison with FLEXPART
 
 The same vertical profile of meteorological inputs is fed to FLEXPART v11's
-own subroutines and to GLIDE's equivalents, and the outputs are compared.
+own subroutines and to GLIDE's equivalents, and the outputs are compared. No
+FLEXPART model run is involved. The agent compiles the two FLEXPART routines
+from source, calls them through a small Fortran driver program, and feeds both
+codes the same inputs: ERA5 columns from the standard cases (§4) and synthetic
+stable, neutral and convective profiles. **The human's role** is to provide
+the FLEXPART v11 source on Isambard (`GLIDE_FLEXPART_SRC`) and to set the
+tolerances in the pre-registration record.
+
+The FLEXPART outputs must come from FLEXPART's compiled code. A re-typed
+("transcribed") version of FLEXPART's equations is not acceptable: GLIDE's own
+Hanna code was itself transcribed from FLEXPART, so comparing two
+transcriptions would only show that they agree with each other.
 
 - **Boundary-layer turbulence** (the Hanna, 1982, scheme). This gives profiles
   of the velocity standard deviations σ_u, σ_v and σ_w and the Lagrangian
@@ -130,8 +141,19 @@ own subroutines and to GLIDE's equivalents, and the outputs are compared.
   lost.
 
 The tolerance is a maximum relative difference, in percent, at every level.
-The number is fixed in advance. Any remaining difference must be explained by
-a documented design difference.
+The number is fixed in advance. Every difference beyond it is classified as one
+of three things:
+
+- **a GLIDE bug**, handled by the registered failure rule (§3);
+- **a declared design difference**, already on the expected-difference list;
+- **a suspected problem in FLEXPART.** FLEXPART is a reference, not truth.
+  Where FLEXPART's code appears to disagree with its own documentation or with
+  the published scheme (Hanna, 1982; Ryall and Maryon, 1998; Emanuel and
+  Živković-Rothman, 1999), the finding is written up with the file and line,
+  the published equation, and the size of the effect. GLIDE is not changed to
+  match FLEXPART, nor FLEXPART's behaviour adopted, without a decision record.
+  Where GLIDE copied the questionable behaviour, that is stated too.
+  Confirmed problems are reported to the FLEXPART developers.
 
 ### Tier 2: the whole model against FLEXPART on the same meteorology
 
@@ -593,7 +615,7 @@ calibration.
 | --- | --- | --- | --- |
 | ERA5 data downloaded locally for the standard cases, on model levels (the default); pressure levels only for comparison | 0–2 | Human, with the existing download scripts | Listed in `dev/agent/PROGRESS.md` |
 | FLEXPART v11 set up with ERA5 via flex_extract, with particle-position and gridded output for each release | 1, 2 | Human | Start on the current physics; repeat once the physics is frozen |
-| FLEXPART v11 source code, for the Tier 1 component comparison | 1 | Human | If the licence permits |
+| FLEXPART v11 source code on Isambard, for the Tier 1 component comparison (no FLEXPART run is needed for Tier 1) | 1 | Human; set `GLIDE_FLEXPART_SRC` | GPL: use locally, never copy into the repository; `gfortran` on the compute node |
 | NAME footprints for the same sites and dates | 2 | Group archive (restricted) | Secondary comparison |
 | ETEX observations (JRC) | 3 | Human, using a download script | Instructions in [data/tracer-experiments.md](../data/tracer-experiments.md) |
 | CAPTEX and ANATEX observations, DATEM's scoring software and its HYSPLIT example output (NOAA DATEM) | 3 | Human, downloaded through a web browser | Same page |

@@ -116,6 +116,10 @@ Work through this once. The queue assumes all of it.
 
 ### Reference runs that need a person
 
+- [ ] Clone the FLEXPART v11 source onto Isambard and set `GLIDE_FLEXPART_SRC`
+      (Tier 1 compiles two of its routines; no FLEXPART run is needed for
+      Tier 1). Check `gfortran` works on a compute node. Never copy the source
+      into the repository.
 - [ ] Start the FLEXPART v11 on ERA5 reference runs for the case library now,
       on the current physics. They are the critical path for Tier 2.
 - [ ] Download the ETEX and DATEM tracer data per `data/tracer-experiments.md`
@@ -305,7 +309,7 @@ doubt, use the stronger model; the marginal cost is small against a bad merge.
 `<ID>: BLOCKED — <question>`, or comments on the existing PR. Draft PRs titled
 BLOCKED are your inbox (`gh pr list --draft`). Answer by adding a resume
 request with the answer, for example
-`R5 — A9: FLEXPART source is now at $GLIDE_FLEXPART_SRC; use the f2py route`.
+`R5 — A9: FLEXPART source is now at $GLIDE_FLEXPART_SRC; resume`.
 The agent resumes on the next session, completes the task and marks the PR
 ready.
 
