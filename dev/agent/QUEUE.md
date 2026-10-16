@@ -353,10 +353,56 @@ Model: Opus 5.5, high effort. Run strictly in order unless a task is BLOCKED.
   progress file. The human and the external reviewer sign the
   table by merging.
 
+### A8a — Tolerances from reference data (1e)
+
+- **Size:** M. **Depends on:** A8 merged and the `v0-physics` tag created; B10
+  merged. Also needs, listed in the data inventory or set in the environment:
+  the FLEXPART reference outputs including the repeat-seed runs
+  (`$GLIDE_FLEXPART_OUTPUTS`), the NAME footprints (`$GLIDE_NAME_FOOTPRINTS`),
+  the ERA5 ensemble (EDA) columns for the standard cases, the FLEXPART source
+  (`$GLIDE_FLEXPART_SRC`), and the inversion's model-error values per site.
+  Stop if any is missing. Model: Opus 5.5.
+- **Isolation. This task must not see any GLIDE result.** Do not open any
+  GLIDE output: no `footprints.zarr`, `run_metadata.json` or endpoint files,
+  nothing under `outputs/`, nothing under `$GLIDE_AGENT_OUTPUTS` except this
+  task's own files, and no gallery figures. Do not read the comparison results
+  in `docs/VALIDATION.md` §7, in STATUS.md, or in other tasks' progress files.
+  Read only: `docs/validation-plan.md`, the physics and convection docs (for
+  the declared design differences), the reference data above, and the
+  published scores in `data/tracer-experiments.md` and the cited papers. List
+  every input you used in your progress file. If you open a GLIDE result by
+  mistake, say so in the progress file and stop; the human reruns the task in
+  a fresh session.
+- **Scope.** Apply the rules in `docs/validation-plan.md` §3, "How tolerances
+  are set", exactly as written:
+  - build the Fortran driver for FLEXPART's `hanna` and convection routines
+    under `scripts/validation/tier1/` (A9 reuses it), compiled against
+    `$GLIDE_FLEXPART_SRC` into `$GLIDE_SCRATCH`, and run it on every EDA
+    member of each standard-case column to get FLEXPART's spread;
+  - compute the analytic predictions for the declared Tier 1 differences;
+  - compute the Tier 2 noise floors by bootstrap from FLEXPART's particle
+    output, and check them against the repeat-seed runs;
+  - compute the Tier 2 ceilings from NAME against FLEXPART, with the same
+    metric code A10 will use (write it here if A10 has not, under
+    `scripts/validation/`);
+  - collect the Tier 3 thresholds and the scoring options of each published
+    study.
+
+  One script, `scripts/validation/tolerances.py`, computes everything from
+  the inputs. It writes `docs/validation/preregistration/tolerances.csv`
+  (read by the A9 to A11 grading code) and `tolerances.md` (each tolerance,
+  its rule, its inputs and its value).
+- **Do not adjust.** If a rule gives a value that looks unreasonable, report
+  it with the reason in the progress file and the PR. Do not change the value
+  or the rule; the human decides.
+- **Acceptance.** Every rule in §3 has a computed value; rerunning the script
+  reproduces the files exactly; the list of inputs used shows no GLIDE output.
+  The human checks the calculation and merges.
+
 ### A8b — Pre-registration record (1e)
 
-- **Size:** S. **Depends on:** A8 merged and the `v0-physics` tag created; B10
-  merged (the scoring code reproduces DATEM's statistics). Model: Opus 5.5.
+- **Size:** S. **Depends on:** A8a merged (which in turn needs A8, the tag and
+  B10). Model: Opus 5.5.
 - **Scope.** Draft the pre-registration decision record (next free number) with
   every item listed in `docs/validation-plan.md` §3, "What is fixed":
   - the physics tag and its commit hash;
@@ -364,8 +410,8 @@ Model: Opus 5.5, high effort. Run strictly in order unless a task is BLOCKED.
   - the six standard cases with exact dates, and the full release lists for
     Tiers 1–3;
   - the metrics and the DATEM scoring options;
-  - proposed tolerances, each with its reasoning, and the published scores
-    they are judged against, with sources;
+  - the tolerances from A8a's `tolerances.md`, copied unchanged, with the
+    published scores they are judged against and their sources;
   - the deposition setting;
   - the expected differences;
   - the fitting and test sets;
@@ -380,22 +426,16 @@ Model: Opus 5.5, high effort. Run strictly in order unless a task is BLOCKED.
   - the rules for running and reporting from §3, copied in full, with the run
     log format.
 
-  Also confirm that Tier 1 is feasible before it is registered: compile
-  FLEXPART's `hanna` and convection routines with a minimal Fortran driver
-  and call each once on a synthetic input. Do not run GLIDE's equivalents or
-  compare anything. Say in the record whether this worked, so the human can
-  decide before registering if it did not.
-
   End the record with a line `**Registration.** pending`, which the human
   replaces with the OSF URL, DOI and date after registering. Also write the
   release lists as files under `docs/validation/preregistration/`, so the
   human can attach them to the OSF submission.
 - **Out of scope.** Running GLIDE on any Tier 1–3 case. Registering on OSF,
   which the human does.
-- **Acceptance.** Every §3 item is present; every tolerance has a stated
-  reason; every entry in the development history cites its source (a commit,
-  a doc section or a progress file). The human sets
-  the final tolerances by editing the PR before merging.
+- **Acceptance.** Every §3 item is present; the tolerances match A8a's files
+  exactly; every entry in the development history cites its source (a commit,
+  a doc section or a progress file). The human checks and merges; the
+  tolerances are not edited here.
 
 ### A9 — Tier 1 component parity (validation)
 
@@ -406,9 +446,9 @@ Model: Opus 5.5, high effort. Run strictly in order unless a task is BLOCKED.
   and GLIDE's equivalents, on identical inputs: ERA5 columns from the case
   library and synthetic stable, neutral and convective profiles. FLEXPART's
   routines read their inputs from module variables, so the expected route is
-  a small Fortran driver program, kept under `scripts/validation/tier1/`,
-  that `use`s the FLEXPART modules, sets those variables, calls the routine
-  and writes the outputs to a file; f2py is acceptable if it works. Compile
+  the Fortran driver program A8a built under `scripts/validation/tier1/`,
+  which `use`s the FLEXPART modules, sets those variables, calls the routine
+  and writes the outputs to a file. Compile
   against `$GLIDE_FLEXPART_SRC` into `$GLIDE_SCRATCH`; never copy FLEXPART
   source into the repository. Figures per the plan; tolerances from the
   pre-registration record.

@@ -120,8 +120,15 @@ Work through this once. The queue assumes all of it.
       (Tier 1 compiles two of its routines; no FLEXPART run is needed for
       Tier 1). Check `gfortran` works on a compute node. Never copy the source
       into the repository.
-- [ ] Start the FLEXPART v11 on ERA5 reference runs for the case library now,
-      on the current physics. They are the critical path for Tier 2.
+- [ ] For the tolerance rules (validation-plan §3): download the ERA5 ensemble
+      (EDA) members for the columns of the six standard cases, list them in
+      the data inventory, and put the model-error value the UK inversion
+      assumes at each site in a small CSV under `$GLIDE_DATA`, also listed.
+- [ ] Start the FLEXPART v11 on ERA5 reference runs for the case library now.
+      They do not depend on GLIDE, so they are done once, and they are the
+      critical path for Tier 2 and for the tolerances. Write particle-position
+      output as well as gridded output, and run two or three cases a second
+      time with a different random seed.
 - [ ] Download the ETEX and DATEM tracer data per `data/tracer-experiments.md`
       and set `GLIDE_ETEX` and `GLIDE_DATEM`. ETEX downloads by script; DATEM
       needs a browser.
@@ -189,7 +196,8 @@ long-lived runs on the login node.
 | --- | --- | --- |
 | Phase 1, Queue A (A00 to A8) | **shell**, watched | These tasks change results and are the riskiest. Queue A waits for your merge after every task anyway, so an unattended loop would mostly sit idle. Watching lets you answer questions at once instead of through a BLOCKED draft and a resume request. |
 | Queue B, throughout | **loop**, unattended, in a second allocation | Independent, lower-risk infrastructure tasks; the loop keeps going without you. |
-| Pre-registration (A8b) | shell or loop | A drafting task; you edit the PR anyway. |
+| Tolerances (A8a) | **loop**, unattended | The task must not see any GLIDE result. A fresh unattended session is the cleanest way to keep it isolated; in a watched session, avoid mentioning any GLIDE result. |
+| Pre-registration record (A8b) | shell or loop | A drafting task; you check the PR anyway. |
 | Validation, A9 to A11 | **loop**, unattended | Deliberately. Steering an agent during a registered validation run is itself a choice made after seeing results. With the loop, every intervention goes through a resume request in PROGRESS.md and is logged. The work is mostly long compute bound by fixed rules. |
 
 **A watched session.** Attach, then start Claude in the tmux shell. The shell
@@ -334,8 +342,11 @@ heading into a stop-condition area without stopping.
   for merged tasks.
 - **At the freeze:** you and the external reviewer sign the physics audit;
   tag; update STATUS.
-- **Before validation runs:** when the A8b PR arrives, set the final
-  tolerances and merge it. Register the record on
+- **Before validation runs:** when the A8a PR arrives, check that the
+  tolerance rules in validation-plan §3 were applied correctly and that its
+  list of inputs contains no GLIDE output, then merge. Do not adjust the
+  numbers; if a rule gives a nonsensical value, change the rule, record why,
+  and rerun A8a. When the A8b PR arrives, check the record and merge it. Register the record on
   [OSF Registries](https://osf.io/registries) (open-ended template; attach the
   record, the release lists in `docs/validation/preregistration/` and the two
   commit hashes; embargo if wanted). Then replace `**Registration.** pending`

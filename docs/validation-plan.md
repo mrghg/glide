@@ -140,9 +140,10 @@ transcriptions would only show that they agree with each other.
   Each column of the matrix should sum to one, so that no mass is created or
   lost.
 
-The tolerance is a maximum relative difference, in percent, at every level.
-The number is fixed in advance. Every difference beyond it is classified as one
-of three things:
+The tolerances follow the Tier 1 rules in §3: rounding level where the
+formulas are the same, and the spread of FLEXPART's own output across the ERA5
+ensemble where they are not. Every difference beyond tolerance is classified
+as one of three things:
 
 - **a GLIDE bug**, handled by the registered failure rule (§3);
 - **a declared design difference**, already on the expected-difference list;
@@ -301,8 +302,8 @@ A decision record in [dev/decisions/](../dev/decisions/) fixes the following:
   - whether pairs where both measurement and model are zero are counted;
   - whether samples are compared one by one, or averaged over time or space
     first.
-- **The pass/fail tolerances,** and the published scores of other models that
-  GLIDE will be judged against.
+- **The tolerances,** computed by the rules below, and the published scores
+  of other models that GLIDE will be judged against.
 - **How particles are counted onto the grid.** In normal use, each particle's
   contribution goes entirely into the grid cell that contains it ("delta"
   deposition). An optional alternative spreads it over neighbouring cells to
@@ -344,12 +345,115 @@ A decision record in [dev/decisions/](../dev/decisions/) fixes the following:
 - **The rules for running and reporting** (below), so that they are part of
   what is registered.
 
+### How tolerances are set
+
+The tolerances are not chosen by judgement just before registration. By then,
+everyone involved will have seen GLIDE's earlier comparisons with FLEXPART,
+and numbers chosen then could be shaped by them, even unintentionally.
+Instead:
+
+- **The rules are fixed here, now,** before any run on the frozen physics.
+- **The numbers are computed later by a script** (task A8a), following these
+  rules, from **reference data only**: FLEXPART's output, NAME's output,
+  published scores, the ERA5 ensemble, and analytic calculations. No GLIDE
+  output of any kind is used.
+- **The human checks the calculation, not the numbers.** If a rule turns out
+  to give a number that makes no sense, the rule is changed, the reason is
+  recorded, and the change is part of what is registered.
+
+**Three outcomes, not pass or fail.** Each comparison is graded:
+
+| Outcome | Meaning |
+| --- | --- |
+| **Indistinguishable** | The difference from the reference is within the reference's own noise. |
+| **Consistent** | Larger than that, but within the spread among established models or within the meteorological uncertainty. |
+| **Outside** | Beyond that spread. |
+
+v1 requires "consistent" for every graded metric. "Indistinguishable" is
+reported wherever it holds.
+
+**Many comparisons mean some chance failures.** Tier 2 has thousands of
+footprints and several metrics. With a 95% noise band, about 5% would fall
+outside it even if GLIDE matched FLEXPART exactly. So the criteria apply to
+distributions, not to single cases: a metric is graded by the fraction of
+cases that meet it, and any failures must show no pattern by region, site or
+standard case.
+
+**The rules, tier by tier.** The constants in **bold** are proposals for the
+human to confirm or change before this plan is merged.
+
+- **Tier 0.** The existing test tolerances ([VALIDATION.md](VALIDATION.md))
+  stand. For the new tests:
+  - *Reciprocity:* forward and backward results agree within the combined
+    95% particle-noise band (from bootstrap resamples of both runs) in at
+    least **95%** of the grid cells that carry non-negligible sensitivity.
+  - *Convergence:* the fitted rate at which the error falls is within **25%**
+    of the theoretical rate, over the range where the error is above the
+    particle noise.
+- **Tier 1.** The routines are deterministic, so the tolerances can be tight.
+  - Where GLIDE and FLEXPART use the same formula: agreement to within
+    single-precision rounding, a relative difference of at most **10⁻⁵**.
+  - Where a declared design difference applies and its effect can be
+    calculated: GLIDE must match FLEXPART's output with that calculated
+    difference applied, to the same rounding level.
+  - Where the effect cannot be calculated exactly (mainly GLIDE's reduced
+    convection scheme, whose departures from the full scheme are listed in
+    [convection.md §7](convection.md)): the difference must be smaller than
+    the spread of FLEXPART's own output when it is run on the members of the
+    ERA5 ensemble (the EDA) for the same column. In plain terms, GLIDE may
+    differ from FLEXPART by no more than FLEXPART differs from itself under
+    realistic uncertainty in the meteorology. For convection, the compared
+    quantities are the fraction of boundary-layer air moved above 5 km, the
+    level of maximum outflow and the column-sum conservation (rounding
+    level).
+- **Tier 2.** Two levels, both computed from reference data:
+  - *Noise floor* (for "indistinguishable"): the 95% band of each metric
+    across bootstrap resamples of FLEXPART's own particle output. Two or three
+    cases are also run a second time in FLEXPART with a different random seed,
+    to check that the bootstrap captures FLEXPART's real run-to-run variation.
+  - *Ceiling* (for "consistent"): the same metric computed between NAME and
+    FLEXPART for the same sites and dates. NAME runs on different
+    meteorology, so this is the disagreement between established models as
+    they are actually used.
+  - *Footprints:* for each metric, at least **90%** of footprints within the
+    ceiling, and the median within the ceiling for every site and every
+    standard case.
+  - *Concentrations at sites:* the root-mean-square difference between GLIDE
+    and FLEXPART at each site is at most **half** the model-error term the
+    group's UK inversion already assumes for that site, and no larger than
+    the NAME–FLEXPART difference.
+  - *Particle statistics* are diagnostic, graded only against the noise
+    floor. They show where differences arise, rather than deciding the
+    outcome.
+  - *Declared expected differences* (§1) may fall outside the noise floor,
+    but must stay within the ceiling, and should have the predicted sign.
+- **Tier 3.**
+  - *CAPTEX and ANATEX:* "consistent" means GLIDE's DATEM ranking score is at
+    least the lowest score published for NAME, HYSPLIT, STILT and FLEXPART on
+    that experiment. Scores are computed with the same scoring options as
+    each published study. If the studies used different options, GLIDE is
+    scored separately with each study's options and compared with that
+    study's values.
+  - *ETEX-1:* "consistent" means each ATMES-II statistic lies within the
+    range of the models published by Mosca et al. (1998).
+  - Each score is reported with its particle-noise interval, from bootstrap
+    resamples, and with FLEXPART's published score alongside.
+  - ETEX-2 is reported without a grade.
+- **Radon and Tier 4: reported, not graded.** The uncertainty in the radon
+  emission map is too large to support a threshold, so radon results are
+  compared descriptively with published radon evaluations. Tier 4 differences
+  are expressed relative to the posterior uncertainty (for example, whether
+  national totals agree within one standard deviation), and Tier 4 is not a
+  release condition.
+
 ### The steps
 
-1. **Draft.** Agent task A8b drafts the record from this plan, with proposed
-   tolerances and the list of comparisons already made.
-2. **Review.** The human checks the record, sets the final tolerances and
-   merges it.
+1. **Compute the tolerances.** Agent task A8a applies the rules above to the
+   reference data, in a session that is not allowed to open any GLIDE output.
+   The human checks that the rules were applied correctly and merges it.
+2. **Draft and review.** Agent task A8b drafts the record from this plan, with
+   A8a's tolerances unchanged and the development history. The human checks
+   it and merges it.
 3. **Register.** The human submits the merged record on
    [OSF Registries](https://osf.io/registries), using the open-ended
    registration template. The submission includes the record itself, the two
@@ -614,9 +718,11 @@ calibration.
 | Need | Tier | Who provides it | Notes |
 | --- | --- | --- | --- |
 | ERA5 data downloaded locally for the standard cases, on model levels (the default); pressure levels only for comparison | 0–2 | Human, with the existing download scripts | Listed in `dev/agent/PROGRESS.md` |
-| FLEXPART v11 set up with ERA5 via flex_extract, with particle-position and gridded output for each release | 1, 2 | Human | Start on the current physics; repeat once the physics is frozen |
+| FLEXPART v11 set up with ERA5 via flex_extract, with particle-position and gridded output for each release | 2 | Human | FLEXPART's output does not depend on GLIDE, so these runs can be done once, early. Repeat two or three cases with a different random seed, for the tolerance rules (§3) |
+| ERA5 ensemble (EDA) members for the columns of the standard cases | 1 | Human, existing download tooling | Small: single columns. For the Tier 1 tolerance rule (§3) |
+| The model-error term the group's UK inversion assumes at each site | 2 | Group | For the Tier 2 concentration rule (§3) |
 | FLEXPART v11 source code on Isambard, for the Tier 1 component comparison (no FLEXPART run is needed for Tier 1) | 1 | Human; set `GLIDE_FLEXPART_SRC` | GPL: use locally, never copy into the repository; `gfortran` on the compute node |
-| NAME footprints for the same sites and dates | 2 | Group archive (restricted) | Secondary comparison |
+| NAME footprints for the same sites and dates | 2 | Group archive (restricted) | Secondary comparison, and the ceiling in the Tier 2 tolerance rules (§3) |
 | ETEX observations (JRC) | 3 | Human, using a download script | Instructions in [data/tracer-experiments.md](../data/tracer-experiments.md) |
 | CAPTEX and ANATEX observations, DATEM's scoring software and its HYSPLIT example output (NOAA DATEM) | 3 | Human, downloaded through a web browser | Same page |
 | ERA5 for ETEX (Oct–Nov 1994, Europe), CAPTEX (Sep–Oct 1983) and ANATEX (Jan–Mar 1987), both North America | 3 | Human, with the existing download scripts | On model levels. ANATEX is the largest download; estimate its size first |

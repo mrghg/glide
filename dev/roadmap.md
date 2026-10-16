@@ -448,7 +448,7 @@ A human reviews and merges every task.
 | **1. Model levels, then efficiency, before the freeze** | Fix time-bin labels (A00) → model levels as default (6d, A01) → 6a → 2b → 7a → 7f, 7e → 1b, 7b → 2a | Agent, most capable model, one task at a time | A |
 | **1′. Infrastructure, in parallel** | 3a and 7d, 7g, 7h, 4e, 4, 4a, 4b, tools for validation figures, early packaging | Agent, cheaper model | B |
 | **2. Freeze** | 1a; the physics audit table (1c) prepared for the external reviewer; tag `v0-physics` | Agent prepares, human signs off | A |
-| **2′. Pre-register** | A8b drafts the pre-registration record; the human sets the tolerances, merges, registers it on OSF and records the DOI ([validation plan §3](../docs/validation-plan.md#3-pre-registration-protocol)) | Agent drafts, human registers | A |
+| **2′. Pre-register** | A8a computes the tolerances from reference data by the rules in the validation plan, without seeing any GLIDE result; A8b drafts the pre-registration record; the human checks both, merges, registers on OSF and records the DOI ([validation plan §3](../docs/validation-plan.md#3-pre-registration-protocol)) | Agent computes and drafts, human checks and registers | A |
 | **3. Validate** | New Tier 0 tests (reciprocity, convergence figures) → Tier 1 component comparison → Tier 2 whole-model comparison → Tier 3 tracer experiments and radon | Agent does the analysis; human produces the FLEXPART reference runs | A |
 | **4. Release v1** | Packaging, reproducibility bundle, documentation, release-gate checklist | Agent | B |
 | **5. Paper** | 1g and 1h | Human, with agent support | — |
