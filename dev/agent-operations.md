@@ -219,6 +219,27 @@ and starts a fresh session. The session does one of three things:
 `touch dev/agent/STOP_AFTER_TASK` ends the loop after the current session.
 Ctrl-C in the pane aborts at once.
 
+**When a session fails mid-task**, typically because the subscription's usage
+limit is reached, the loop:
+1. commits whatever the session left uncommitted as a `wip(<ID>)` commit on
+   the task branch (pre-commit checks still run), sets the task's status to
+   HANDOFF with an `interrupted:` note, and pushes. The next session then
+   resumes the task automatically and reviews the WIP commit first;
+2. sends one tiny test prompt. If the API does not answer, the loop exits and
+   the allocation is released, rather than sitting idle until the limit
+   resets. If it does answer, the failure was something else and the loop
+   carries on, but two failed sessions in a row also end it.
+
+Resubmit when the limit has reset. If the work could not be saved (the commit
+checks failed, or the changes were not on a task branch), the loop stops
+without touching them; attach, look, and commit or discard by hand.
+
+**Session log.** Each session adds one line to
+`$GLIDE_AGENT_OUTPUTS/session_log.jsonl`: job, queue, model, start and end
+times, exit code, outcome (`delivered`, `waiting`, `no_task` or `failed`) and
+the branch it ended on. The paper's metrics scripts read it. Watched sessions
+are not logged automatically; note them in `human_time.csv`.
+
 **Walltime.** Sessions check the time left before long runs and hand off if a
 run will not fit. When the allocation ends, resubmit. The repository is the
 only state. Test a cold restart once deliberately before relying on it.
@@ -335,6 +356,11 @@ heading into a stop-condition area without stopping.
   in flight forever. Defence: delete the branch to release it.
 - **Context exhaustion mid-task.** Defence: progress files written early, tasks
   sized to hours, and the HANDOFF status.
+- **Usage limit mid-task.** A session stops abruptly with work uncommitted.
+  Defence: the loop saves it as a WIP commit, marks the task HANDOFF and
+  releases the node (§3). Without that, the task would stay CLAIMED and block
+  Queue A. If you find a task stuck at CLAIMED with no session running, add a
+  resume request for it, or delete its branch to start it afresh.
 - **Test suite drift.** Skipped or xfailed tests accumulating. Defence: CI
   reports the skip count; reviews check it.
 - **Runaway compute.** A convergence sweep launched at ten times the intended

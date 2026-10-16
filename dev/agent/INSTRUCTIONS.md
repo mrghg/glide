@@ -119,7 +119,12 @@ Never start work on an IN FLIGHT task unless a pending resume request or a
 1. Check out the task branch and merge `origin/main` into it. Never rebase or
    force-push a pushed branch. Resolve conflicts.
 2. Read the resume entry (or the hand-off notes), the PR and its review
-   comments (`gh pr view <n> --comments`).
+   comments (`gh pr view <n> --comments`). If the progress file has an
+   `interrupted:` line, the previous session ended abruptly (for example at a
+   usage limit) and the driver, not an agent, wrote the last commit. A
+   `wip(<ID>)` commit holds whatever was uncommitted at that moment: review it
+   line by line, keep what is sound, and rerun the tests before building on
+   it. Then remove the `interrupted:` line.
 3. Do the work asked for, verify per §3, commit and push.
 4. Add the entry ID under `handled:` in the progress file with a one-line note,
    and update its status. If the PR is a draft opened for a BLOCKED stop and the
