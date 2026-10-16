@@ -67,9 +67,55 @@ Model: Opus 5.5, high effort. Run strictly in order unless a task is BLOCKED.
 - **Verification.** All shipped configs produce bit-identical footprints on CPU
   (they use 1 bin, or bins = hours with the 1 h default); graph capture intact.
 
+### A01 — Model levels as the default meteorology (6d)
+
+- **Size:** S–M. **Depends on:** A00; a model-level cube for the reference
+  configuration's domain and period listed in the data inventory (stop if
+  none is listed). **Decision record:** 0017 (proposed; set its status to
+  adopted in this PR).
+- **Why.** The model-level reader exists (decision 0010) but has never been
+  run end to end on a GH200, and everything (downloads, shipped configs, the
+  built-in vertical grid) still defaults to pressure levels. Decision 0017
+  makes model levels the default. This changes footprints everywhere, so it
+  must land before the golden fixtures (A0) and the freeze.
+- **Scope.**
+  - **Validate the path.** Run the reference multi-site config on the
+    model-level cube and on the matching pressure-level cube, same releases
+    and seed. Report the differences in integrated sensitivity per release,
+    the log-ratio map and the near-surface residence, and say whether their
+    direction is what denser near-surface levels would predict. Check the
+    hydrostatically reconstructed pressure against pressures from ECMWF's
+    published L137 a/b table (commit a copy as test data, with its source), as
+    a test only (decision 0010 keeps a/b out of production). Report whether the
+    difference is small enough for the convection trigger and the omega-to-w
+    conversion.
+  - **Change the defaults.** `scripts/download_sample_cube.py` and
+    `scripts/download_era5_europe.slurm` download model levels by default,
+    with an option to fetch only the levels below a given height (default:
+    enough to cover `alt_max_m` of the shipped configs). Shipped configs read
+    `data/era5-model/`. The built-in ladder used when
+    `met_domain.vertical_levels` is unset becomes 40 stretched levels from
+    `first_layer_m` (interim; A5 sets the converged value). Update
+    `make_multisite_config.py` and the shipped SLURM memory requests for the
+    larger cache.
+  - **Docs.** `docs/met_schema.md` (default level type, ladder default, cache
+    sizes), the README quick start, the ladder description in
+    `docs/physics.md`, `dev/agent-operations.md` data inventory, and STATUS.md
+    item 1 (done).
+- **Out of scope.** Removing pressure-level support; any physics change.
+- **Acceptance.** The comparison above reported in the task's progress file
+  with a figure; a test that the default ladder has 40 levels and spans
+  `alt_max_m`; existing tests pass (tests that rely on the old 23-level default
+  pin it explicitly rather than being loosened); a GH200 run on the
+  model-level cube completes with graph capture intact; benchmark of both runs
+  (footprints per second, met-fetch time, host memory).
+- **Verification.** Pressure-level runs with an explicit 23-level ladder are
+  bit-identical to before on CPU.
+- **Runtime.** Two reference runs on GH200: about 1 h.
+
 ### A0 — Golden fixtures, comparison and benchmark harness
 
-- **Roadmap:** enabler for everything. **Size:** S. **Depends on:** A00.
+- **Roadmap:** enabler for everything. **Size:** S. **Depends on:** A01.
 - **Scope.** Create `scripts/agent/make_golden.py`, `scripts/agent/compare_golden.py`
   and `scripts/agent/benchmark.py`.
   - `make_golden.py` runs a named config with a fixed seed and stores the
@@ -268,8 +314,8 @@ Model: Opus 5.5, high effort. Run strictly in order unless a task is BLOCKED.
 
 ### A8 — Physics freeze preparation and audit table (1a, 1c)
 
-- **Size:** S. **Depends on:** A0–A7 merged; model-level met path validated
-  (existing item 1).
+- **Size:** S. **Depends on:** A00–A7 merged (A01 validates the model-level
+  met path).
 - **Scope.** Write `docs/physics-audit.md`: a table with one row per equation
   in `docs/physics.md`, `turbulence.md`, `convection.md`, giving the literature
   source, the code location and the test that exercises it, with gaps marked.

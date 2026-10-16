@@ -104,7 +104,9 @@ and returns only once the architecture settles.
    a GH200 run on a model-level cube (~3.7× the vertical data — stream only the
    lowest ~60–90 levels) and a check on whether the hydrostatic pressure
    approximation is tight enough for convection. This lands *before* item 2,
-   because it shifts footprint magnitudes everywhere.
+   because it shifts footprint magnitudes everywhere. Now queue task A01, which
+   also makes model levels the default
+   ([decision 0017](dev/decisions/0017-model-levels-default.md)).
 
 2. **Physics validation against NAME and FLEXPART** on identical release setups,
    with the current defaults. Everything downstream depends on this.

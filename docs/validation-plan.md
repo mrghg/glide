@@ -62,7 +62,11 @@ differ from FLEXPART's on purpose, and they will produce differences in the
 comparisons. Examples include:
 
 - how the vertical grid is built: metres above ground on a fixed set of
-  terrain-following levels, interpolated once from ERA5's pressure levels;
+  terrain-following levels, interpolated once from ERA5's native model levels
+  (the default; ERA5 pressure levels are also supported);
+- the vertical velocity: GLIDE converts ERA5's pressure vertical velocity,
+  while FLEXPART uses a vertical velocity that flex_extract derives for its
+  own coordinate;
 - a more accurate time-stepping scheme for the resolved wind;
 - an exact, rather than approximate, update for the random turbulent velocity;
 - where the minimum turbulence timescales are applied.
@@ -131,9 +135,11 @@ a documented design difference.
 
 ### Tier 2: the whole model against FLEXPART on the same meteorology
 
-The main reference is **FLEXPART v11 driven by ERA5**. FLEXPART's ERA5
-preparation tool, flex_extract, is used so that both models read the same
-fields. Any differences then come from the transport, not the meteorology. The
+The main reference is **FLEXPART v11 driven by ERA5**. Both models use ERA5 on
+its native model levels: FLEXPART through its preparation tool, flex_extract,
+and GLIDE from the same fields in the ARCO ERA5 archive. Differences then come
+from the transport, not the meteorology, apart from the declared differences
+in how each model derives its vertical velocity (§1). The
 comparison works in the order below. Each level is stricter than the one after
 it, because each later level averages over more detail.
 
@@ -484,13 +490,13 @@ calibration.
 
 | Need | Tier | Who provides it | Notes |
 | --- | --- | --- | --- |
-| ERA5 data downloaded locally for the standard cases, on pressure and model levels | 0–2 | Human, with the existing download scripts | Listed in `dev/agent/PROGRESS.md` |
+| ERA5 data downloaded locally for the standard cases, on model levels (the default); pressure levels only for comparison | 0–2 | Human, with the existing download scripts | Listed in `dev/agent/PROGRESS.md` |
 | FLEXPART v11 set up with ERA5 via flex_extract, with particle-position and gridded output for each release | 1, 2 | Human | Start on the current physics; repeat once the physics is frozen |
 | FLEXPART v11 source code, for the Tier 1 component comparison | 1 | Human | If the licence permits |
 | NAME footprints for the same sites and dates | 2 | Group archive (restricted) | Secondary comparison |
 | ETEX observations (JRC) | 3 | Human, using a download script | Instructions in [data/tracer-experiments.md](../data/tracer-experiments.md) |
 | CAPTEX and ANATEX observations, DATEM's scoring software and its HYSPLIT example output (NOAA DATEM) | 3 | Human, downloaded through a web browser | Same page |
-| ERA5 for ETEX (Oct–Nov 1994, Europe), CAPTEX (Sep–Oct 1983) and ANATEX (Jan–Mar 1987), both North America | 3 | Human, with the existing download scripts | ANATEX is the largest download; estimate its size first |
+| ERA5 for ETEX (Oct–Nov 1994, Europe), CAPTEX (Sep–Oct 1983) and ANATEX (Jan–Mar 1987), both North America | 3 | Human, with the existing download scripts | On model levels. ANATEX is the largest download; estimate its size first |
 | Radon-222 concentrations and an emission map | 3 | Human | |
 | EDGAR or a similar emissions map, for the concentration comparison | 2 | Group archive (restricted) | |
 | UK DECC network data and the group's inversion setup | 4 | Group | Needed at the paper stage |

@@ -25,3 +25,4 @@ alternatives → Status**, with a pointer to the relevant `docs/` page.
 | [0013](0013-composite-met-source.md) | A composite met source, not a nesting feature (proposed, v1.x) |
 | [0014](0014-v1-scope-and-release-gate.md) | v1 scope: validated, fast footprint model without UQ |
 | [0015](0015-agent-driven-development-process.md) | Agent-driven development: one task per session, PR per task, human merges |
+| [0017](0017-model-levels-default.md) | ERA5 model levels as the default meteorology (proposed) |

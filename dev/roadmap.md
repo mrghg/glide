@@ -92,7 +92,7 @@ Explanations of each item follow each table.
 
 | ID | Item | Size | Needs | Changes output? | Release |
 | --- | --- | --- | --- | --- | --- |
-| 1a | Freeze the physics | S | model-level meteorology validated | — | v1 |
+| 1a | Freeze the physics | S | 6d | — | v1 |
 | 1b | Reciprocity test and convergence studies | S | none | sets defaults | v1 |
 | 1c | Physics audit table, signed off externally | S | none | — | v1 |
 | 1d | Comparison with FLEXPART on the same meteorology | M | FLEXPART runs (human) | — | v1 |
@@ -102,9 +102,8 @@ Explanations of each item follow each table.
 | 1h | Model paper, public benchmark, reproducibility package | M | 1b–1e | — | v1 |
 
 - **1a.** Fix the model physics and give it a version label (`v0-physics`) in
-  git, so that all validation refers to one version. This waits until GLIDE's
-  reader for ERA5 model levels (the native vertical levels, rather than
-  pressure levels) has been validated, because switching to it changes
+  git, so that all validation refers to one version. This waits until ERA5
+  model levels are validated and made the default (6d), because that changes
   footprint magnitudes everywhere.
 - **1b.** Two checks on the numerics:
   - *Reciprocity:* a backward footprint should equal the result of a forward
@@ -270,6 +269,7 @@ Explanations of each item follow each table.
 | 6a | Measure and reduce unexplained run time | S | none | no | v1 |
 | 6b | Merge particles far from the receptor | M | 7a first | yes | v1.x |
 | 6c | Improvements to the convection scheme | M | 1d | yes | v1.x |
+| 6d | Validate ERA5 model levels and make them the default (task A01) | S | none | yes | v1, second |
 
 - **6a.** GLIDE's timing breaks each time step into named phases (meteorology,
   turbulence, convection, and so on). A large share of the time is not yet
@@ -281,6 +281,14 @@ Explanations of each item follow each table.
   more simply.
 - **6c.** Fuller versions of parts of the Emanuel convection scheme, if
   validation shows that GLIDE under-represents convective transport.
+- **6d.** ERA5 is available on 37 pressure levels or on its 137 native model
+  levels. Model levels follow the terrain and are about four times denser in
+  the boundary layer, and FLEXPART uses them too. GLIDE can already read them,
+  but the reader has not been tested end to end, and downloads, example
+  configurations and GLIDE's internal vertical grid all still default to
+  pressure levels. This item validates the model-level path and makes it the
+  default for all runs, including validation
+  ([decision 0017](decisions/0017-model-levels-default.md)).
 
 ### Physics specification review (2026-08-22)
 
@@ -372,12 +380,13 @@ v1 does not include uncertainty quantification.
 
 | In v1 | Not in v1 |
 | --- | --- |
-| Efficiency changes that alter numerical results (6a, 2b, 7a, 7e, 7f, 1b, 7b) | Footprint derivatives, transport-error estimates and derivative-based calibration (2c–2f) |
-| Physics frozen with published default parameter values matching FLEXPART v11 (1a) | Calibrated parameters and the parameter card (1f) |
-| Validation Tiers 0–3 (1b–1e) | The UK inversion (1g), which is the paper's application, not a release condition |
-| Point, tower, column and satellite releases, with particle end positions saved (4, 4a) | Combining meteorological sources, and nesting (3b, 3c) |
-| High-resolution footprint near the receptor (4b) | Machine-learned compression and the other research items |
-| Meteorology cache and compressed stores (3a, 7d), smaller footprint files (7g), releases grouped by start time (7h), particle count per release (4e) | Inversions without stored footprints, machine-learning weather input, simulation-based inference |
+| ERA5 model levels as the default meteorology (6d) | Footprint derivatives, transport-error estimates and derivative-based calibration (2c–2f) |
+| Efficiency changes that alter numerical results (6a, 2b, 7a, 7e, 7f, 1b, 7b) | Calibrated parameters and the parameter card (1f) |
+| Physics frozen with published default parameter values matching FLEXPART v11 (1a) | The UK inversion (1g), which is the paper's application, not a release condition |
+| Validation Tiers 0–3 (1b–1e) | Combining meteorological sources, and nesting (3b, 3c) |
+| Point, tower, column and satellite releases, with particle end positions saved (4, 4a) | Machine-learned compression and the other research items |
+| High-resolution footprint near the receptor (4b) | Inversions without stored footprints, machine-learning weather input, simulation-based inference |
+| Meteorology cache and compressed stores (3a, 7d), smaller footprint files (7g), releases grouped by start time (7h), particle count per release (4e) | |
 | Parameter ensembles, as infrastructure only (2a) | |
 | Packaging: installable with pip, a container, a command-line interface, a tutorial, a stable output format and a DOI | |
 
@@ -430,8 +439,8 @@ A human reviews and merges every task.
 
 | Phase | What | Who | Queue |
 | --- | --- | --- | --- |
-| **0. Prepare** | Background material, computing environment, list of available data, reference outputs for regression checks, access credentials (see [agent-operations.md](agent-operations.md) §2) | Human | — |
-| **1. Efficiency before the freeze** | Fix time-bin labels (A00) → 6a → 2b → 7a → 7f, 7e → 1b, 7b → 2a | Agent, most capable model, one task at a time | A |
+| **0. Prepare** | Background material, computing environment, list of available data (including a model-level ERA5 cube for A01), reference outputs for regression checks, access credentials (see [agent-operations.md](agent-operations.md) §2) | Human | — |
+| **1. Model levels, then efficiency, before the freeze** | Fix time-bin labels (A00) → model levels as default (6d, A01) → 6a → 2b → 7a → 7f, 7e → 1b, 7b → 2a | Agent, most capable model, one task at a time | A |
 | **1′. Infrastructure, in parallel** | 3a and 7d, 7g, 7h, 4e, 4, 4a, 4b, tools for validation figures, early packaging | Agent, cheaper model | B |
 | **2. Freeze** | 1a; the physics audit table (1c) prepared for the external reviewer; tag `v0-physics` | Agent prepares, human signs off | A |
 | **3. Validate** | New Tier 0 tests (reciprocity, convergence figures) → Tier 1 component comparison → Tier 2 whole-model comparison → Tier 3 tracer experiments and radon | Agent does the analysis; human produces the FLEXPART reference runs | A |

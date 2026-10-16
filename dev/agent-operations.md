@@ -83,7 +83,9 @@ Work through this once. The queue assumes all of it.
 ### Data inventory
 
 - [ ] Every local ERA5 cube listed in PROGRESS.md, with domain, period, level
-      type, cadence and size.
+      type, cadence and size. Model levels are the default from task A01 on
+      ([decision 0017](decisions/0017-model-levels-default.md)), so download
+      new cubes on model levels.
 - [ ] The reference multi-site configuration
       (`configs/example_multisite_january.yaml` or its successor) points at a
       cube that exists. The shipped configs read `data/era5/EUROPE_*.zarr`
@@ -91,9 +93,10 @@ Work through this once. The queue assumes all of it.
       checkout to the cubes under `$GLIDE_DATA`.
 - [ ] A small cube for smoke tests and a medium cube for benchmarks, both local.
 - [ ] Decide which additional cubes you will download before the tasks that
-      need them: a model-level cube (existing item 1); the Tier 3 cubes for
-      ETEX (Oct–Nov 1994, Europe), CAPTEX (Sep–Oct 1983) and ANATEX (Jan–Mar
-      1987, North America); a UK cube (v1.x).
+      need them: a model-level cube matching the reference configuration's
+      pressure-level cube (needed by A01, the second task); the Tier 3 cubes
+      for ETEX (Oct–Nov 1994, Europe), CAPTEX (Sep–Oct 1983) and ANATEX
+      (Jan–Mar 1987, North America), on model levels; a UK cube (v1.x).
 
 ### Golden fixtures and benchmarks
 
@@ -175,7 +178,8 @@ state. Test a cold restart once deliberately before relying on it.
 1. Submit Queue A and stay attached while it does A00. Review and merge the PR
    yourself. This shows whether the instructions, the claim, the progress file
    and the PR template work in practice, on a small task.
-2. Do the same for A0, since every later task is checked against its fixtures.
+2. Do the same for A01 and A0. A01 switches the default meteorology to model
+   levels, and every later task is checked against A0's fixtures.
 3. Then leave Queue A unattended. Start Queue B in a second allocation once
    Queue A runs smoothly.
 
