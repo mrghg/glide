@@ -121,14 +121,18 @@ Work through this once. The queue assumes all of it.
       Tier 1). Check `gfortran` works on a compute node. Never copy the source
       into the repository.
 - [ ] For the tolerance rules (validation-plan §3): download the ERA5 ensemble
-      (EDA) members for the columns of the six standard cases, list them in
+      (EDA) members for the columns of the six standard cases from the
+      Copernicus Climate Data Store (not in the Google Cloud ERA5 copy), list them in
       the data inventory, and put the model-error value the UK inversion
       assumes at each site in a small CSV under `$GLIDE_DATA`, also listed.
 - [ ] Start the FLEXPART v11 on ERA5 reference runs for the case library now.
       They do not depend on GLIDE, so they are done once, and they are the
-      critical path for Tier 2 and for the tolerances. Write particle-position
-      output as well as gridded output, and run two or three cases a second
-      time with a different random seed.
+      critical path for Tier 2 and for the tolerances. Besides gridded output
+      for every release: particle-position snapshots at 6, 24, 72 and 120 h
+      for the six standard cases, and five runs differing only in random seed
+      for one week of hourly releases at three sites (the Tier 2 noise floor).
+      The existing FLEXPART footprints on file use other meteorology and are
+      not a substitute.
 - [ ] Download the ETEX and DATEM tracer data per `data/tracer-experiments.md`
       and set `GLIDE_ETEX` and `GLIDE_DATEM`. ETEX downloads by script; DATEM
       needs a browser.

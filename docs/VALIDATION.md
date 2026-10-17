@@ -227,7 +227,10 @@ Align these fields:
 `configs/example_mhd_january_periodic.yaml` (hourly releases) are both already
 aligned with the FLEXPART reference fixture
 `data/FLEXPART/FLEXPART_MHD_test_202401.nc`. The fixture is not redistributed
-with the repository; see [data/README.md](../data/README.md) for access.
+with the repository; see [data/README.md](../data/README.md) for access. It was
+driven by different meteorology from ERA5, so differences against it mix
+meteorology and model; the ERA5-driven FLEXPART runs of the validation plan
+(Tier 2) are the reference for model comparisons.
 
 ### Step 2 — convert to STILT units
 

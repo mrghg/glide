@@ -166,8 +166,9 @@ in how each model derives its vertical velocity (§1). The
 comparison works in the order below. Each level is stricter than the one after
 it, because each later level averages over more detail.
 
-1. **The particle clouds themselves,** from FLEXPART's particle-position
-   output. Plotted against time:
+1. **The particle clouds themselves,** from snapshots of FLEXPART's particle
+   positions at 6, 24, 72 and 120 hours for the standard cases. Plotted
+   against time:
    - the movement of the cloud's centre;
    - its horizontal spread;
    - the heights below which 10%, 50% and 90% of the particles lie;
@@ -320,9 +321,12 @@ A decision record in [dev/decisions/](../dev/decisions/) fixes the following:
   parts:
   - *Comparisons already made.* GLIDE was compared with FLEXPART and NAME
     before the freeze, for example the Mace Head case in
-    [VALIDATION.md §7](VALIDATION.md). More comparisons will be run on the
-    pre-freeze physics while the reference runs are being set up. Each is
-    listed with its date and what it showed, and labelled exploratory.
+    [VALIDATION.md §7](VALIDATION.md). Those existing FLEXPART footprints were
+    driven by different meteorology from ERA5, so they mix meteorology and
+    model differences; they are not used as a reference in Tier 2 or for the
+    tolerances. More comparisons will be run on the pre-freeze physics while
+    the reference runs are being set up. Each is listed with its date and
+    what it showed, and labelled exploratory.
   - *Changes made because of results.* Some physics changes were made after
     seeing results. For example, GLIDE's modelled CH₄ enhancements at polluted
     low-inlet sites came out about twice those from NAME and FLEXPART (about
@@ -402,15 +406,18 @@ human to confirm or change before this plan is merged.
     the spread of FLEXPART's own output when it is run on the members of the
     ERA5 ensemble (the EDA) for the same column. In plain terms, GLIDE may
     differ from FLEXPART by no more than FLEXPART differs from itself under
-    realistic uncertainty in the meteorology. For convection, the compared
+    realistic uncertainty in the meteorology. The EDA is coarser than the main
+    ERA5 product and is known to underestimate the true uncertainty, so this
+    tolerance errs on the strict side. For convection, the compared
     quantities are the fraction of boundary-layer air moved above 5 km, the
     level of maximum outflow and the column-sum conservation (rounding
     level).
 - **Tier 2.** Two levels, both computed from reference data:
   - *Noise floor* (for "indistinguishable"): the 95% band of each metric
-    across bootstrap resamples of FLEXPART's own particle output. Two or three
-    cases are also run a second time in FLEXPART with a different random seed,
-    to check that the bootstrap captures FLEXPART's real run-to-run variation.
+    across repeated FLEXPART runs that differ only in their random seed. A
+    subset of cases is run five times: one week of hourly releases at three
+    sites. The resulting noise, expressed against particle count and footprint
+    size, is applied to the full set.
   - *Ceiling* (for "consistent"): the same metric computed between NAME and
     FLEXPART for the same sites and dates. NAME runs on different
     meteorology, so this is the disagreement between established models as
@@ -718,8 +725,8 @@ calibration.
 | Need | Tier | Who provides it | Notes |
 | --- | --- | --- | --- |
 | ERA5 data downloaded locally for the standard cases, on model levels (the default); pressure levels only for comparison | 0–2 | Human, with the existing download scripts | Listed in `dev/agent/PROGRESS.md` |
-| FLEXPART v11 set up with ERA5 via flex_extract, with particle-position and gridded output for each release | 2 | Human | FLEXPART's output does not depend on GLIDE, so these runs can be done once, early. Repeat two or three cases with a different random seed, for the tolerance rules (§3) |
-| ERA5 ensemble (EDA) members for the columns of the standard cases | 1 | Human, existing download tooling | Small: single columns. For the Tier 1 tolerance rule (§3) |
+| FLEXPART v11 on ERA5 via flex_extract: gridded output for each release; particle-position snapshots at 6, 24, 72 and 120 h for the six standard cases; five repeat-seed runs of one week of hourly releases at three sites | 2 | Human | FLEXPART's output does not depend on GLIDE, so these runs can be done once, early. The repeat-seed runs give the Tier 2 noise floor (§3). The group's existing FLEXPART footprints use other meteorology and are not a substitute |
+| ERA5 ensemble (EDA) members for the columns of the standard cases | 1 | Human, from the Copernicus Climate Data Store ("ensemble members" product type; not in the Google Cloud ERA5 copy) | Small: single columns, pressure levels. For the Tier 1 tolerance rule (§3) |
 | The model-error term the group's UK inversion assumes at each site | 2 | Group | For the Tier 2 concentration rule (§3) |
 | FLEXPART v11 source code on Isambard, for the Tier 1 component comparison (no FLEXPART run is needed for Tier 1) | 1 | Human; set `GLIDE_FLEXPART_SRC` | GPL: use locally, never copy into the repository; `gfortran` on the compute node |
 | NAME footprints for the same sites and dates | 2 | Group archive (restricted) | Secondary comparison, and the ceiling in the Tier 2 tolerance rules (§3) |

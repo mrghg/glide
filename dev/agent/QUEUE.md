@@ -380,8 +380,8 @@ Model: Opus 5.5, high effort. Run strictly in order unless a task is BLOCKED.
     `$GLIDE_FLEXPART_SRC` into `$GLIDE_SCRATCH`, and run it on every EDA
     member of each standard-case column to get FLEXPART's spread;
   - compute the analytic predictions for the declared Tier 1 differences;
-  - compute the Tier 2 noise floors by bootstrap from FLEXPART's particle
-    output, and check them against the repeat-seed runs;
+  - compute the Tier 2 noise floors from the spread across FLEXPART's
+    repeat-seed runs;
   - compute the Tier 2 ceilings from NAME against FLEXPART, with the same
     metric code A10 will use (write it here if A10 has not, under
     `scripts/validation/`);
