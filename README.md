@@ -307,12 +307,11 @@ uv pip install --python .venv/bin/python -e ".[dev]"
 
 ```bash
 mkdir -p slurm_logs
-# fill in --account and --partition in the script header first
+# no --account or --partition needed: the scheduler chooses them
 sbatch scripts/run_periodic_cuda.slurm configs/example_multisite_january.yaml
 ```
 
-**Interactive GPU session** — from the repo root, get a GPU shell (add
-`--account=<project>` if you have more than one SLURM account):
+**Interactive GPU session** — from the repo root, get a GPU shell:
 
 ```bash
 srun --gres=gpu:1 --cpus-per-task=16 --time=01:00:00 --pty bash
@@ -376,6 +375,9 @@ Notes:
 - **[AGENTS.md](AGENTS.md)** — contributor and coding-agent guide.
 
 ## Roadmap
+
+The full plan, with item IDs, the v1 scope and release gate, and the sequence,
+is in [dev/roadmap.md](dev/roadmap.md). In brief:
 
 - **Physics validation** against NAME, FLEXPART and observations. The comparison
   machinery exists (`src/lpdm/comparison.py`, the validation notebooks) but a

@@ -1,0 +1,675 @@
+# Task queues
+
+_Task specifications for coding-agent sessions. Read
+[INSTRUCTIONS.md](INSTRUCTIONS.md) first. Roadmap IDs refer to
+[dev/roadmap.md](../roadmap.md). Task status is derived from the repository (see INSTRUCTIONS.md §1);
+per-task records live in [progress/](progress/). Written 2026-09-16; the human operator
+reorders and edits this file weekly._
+
+Two queues. **Queue A** is sequential: numerics-touching work before the
+physics freeze, then the freeze, then validation. **Queue B** is infrastructure
+and can run in parallel in a second allocation, which the human submits.
+Agents never submit jobs; all work runs on the node of the allocation they are
+in. Each task states its model
+class, size, dependencies, scope, acceptance criteria and verification. Expected
+runtimes are for a single GH200 unless stated.
+
+Every spec inherits the verification standard in INSTRUCTIONS.md §3; the
+"Verification" lines below are the task-specific additions.
+
+Findings from the 2026-08-22 physics specification review are folded into the
+tasks below and tagged **[PR-F1]** to **[PR-F8]**. The review itself is not in
+the repository; each spec states the finding it addresses in full.
+
+**Contents**
+
+- [Queue A: numerics and validation](#queue-a-numerics-and-validation)
+- [Queue B: infrastructure](#queue-b-infrastructure)
+- [Final task: v1 release gate](#final-task-v1-release-gate)
+- [Later queues (not yet specified)](#later-queues-not-yet-specified)
+
+---
+
+## Queue A: numerics and validation
+
+Model: Opus 5.5, high effort. Run strictly in order unless a task is BLOCKED.
+
+### A00 — Consistent time-ago bin width [PR-F1]
+
+- **Roadmap:** prerequisite for A0. **Size:** S. **Depends on:** nothing.
+  **Decision record:** required (0016).
+- **Finding.** Per-particle time-ago bins are indexed hourly
+  (`floor(elapsed_s / 3600)` in `src/lpdm/main.py`, both the eager and the
+  static paths, and `_footprint_time_bin_index`), but the output metadata
+  labels each bin as `simulation.length_seconds / 3600 / n_time_bins` hours
+  wide (`time_ago_start_hours` / `time_ago_end_hours`). When
+  `1 < n_time_bins < length_hours` the labels are wrong and residence older
+  than `n_time_bins` hours is dropped by the gridder. Single-bin runs are
+  special-cased (all ages clamped into bin 0) and are correct; the shipped
+  multi-bin configs use one bin per hour and are unaffected. The defect is
+  latent but will be hit as soon as coarser bins are used (e.g. daily bins on a
+  30-day run), which the storage items invite.
+- **Scope.** Add `output_grid.time_bin_seconds` (default 3600). Index bins as
+  `floor(elapsed_s / time_bin_seconds)` on both runtime paths and in
+  `_footprint_time_bin_index`, and derive the metadata from the same value.
+  Keep the single-bin special case (time-integrated). Validate at config load:
+  if `n_time_bins > 1` and `n_time_bins * time_bin_seconds < length_seconds`,
+  raise unless a new `output_grid.drop_older_ages: true` is set, so dropping
+  old residence is always an explicit choice. The value must reach the
+  compiled step as a tensor or a construction-time constant, never a
+  per-step Python scalar (decision 0004).
+- **Output contract.** The change to `time_ago_*_hours` values and the new
+  config fields are authorised by this spec; document them in README "Outputs"
+  and in `docs/physics.md` footprint section.
+- **Acceptance.** Tests: labels match indexing for (bins, width, length)
+  combinations including 1 bin, bins = hours, and daily bins on a multi-day
+  run; residence conservation when bins cover the run; the validation error
+  when they do not. Existing `test_footprint_time_bin_index_advances_each_hour`
+  still passes unchanged. Decision record 0016 states the choice.
+- **Verification.** All shipped configs produce bit-identical footprints on CPU
+  (they use 1 bin, or bins = hours with the 1 h default); graph capture intact.
+
+### A01 — Model levels as the default meteorology (6d)
+
+- **Size:** S–M. **Depends on:** A00; a model-level cube for the reference
+  configuration's domain and period listed in the data inventory (stop if
+  none is listed). **Decision record:** 0017 (proposed; set its status to
+  adopted in this PR).
+- **Why.** The model-level reader exists (decision 0010) but has never been
+  run end to end on a GH200, and everything (downloads, shipped configs, the
+  built-in vertical grid) still defaults to pressure levels. Decision 0017
+  makes model levels the default. This changes footprints everywhere, so it
+  must land before the golden fixtures (A0) and the freeze.
+- **Scope.**
+  - **Validate the path.** Run the reference multi-site config on the
+    model-level cube and on the matching pressure-level cube, same releases
+    and seed. Report the differences in integrated sensitivity per release,
+    the log-ratio map and the near-surface residence, and say whether their
+    direction is what denser near-surface levels would predict. Check the
+    hydrostatically reconstructed pressure against pressures from ECMWF's
+    published L137 a/b table (commit a copy as test data, with its source), as
+    a test only (decision 0010 keeps a/b out of production). Report whether the
+    difference is small enough for the convection trigger and the omega-to-w
+    conversion.
+  - **Change the defaults.** `scripts/download_sample_cube.py` and
+    `scripts/download_era5_europe.slurm` download model levels by default,
+    with an option to fetch only the levels below a given height (default:
+    enough to cover `alt_max_m` of the shipped configs). Shipped configs read
+    `data/era5-model/`. The built-in ladder used when
+    `met_domain.vertical_levels` is unset becomes 40 stretched levels from
+    `first_layer_m` (interim; A5 sets the converged value). Update
+    `make_multisite_config.py` and the shipped SLURM memory requests for the
+    larger cache.
+  - **Docs.** `docs/met_schema.md` (default level type, ladder default, cache
+    sizes), the README quick start, the ladder description in
+    `docs/physics.md`, `dev/agent-operations.md` data inventory, and STATUS.md
+    item 1 (done).
+- **Out of scope.** Removing pressure-level support; any physics change.
+- **Acceptance.** The comparison above reported in the task's progress file
+  with a figure; a test that the default ladder has 40 levels and spans
+  `alt_max_m`; existing tests pass (tests that rely on the old 23-level default
+  pin it explicitly rather than being loosened); a GH200 run on the
+  model-level cube completes with graph capture intact; benchmark of both runs
+  (footprints per second, met-fetch time, host memory).
+- **Verification.** Pressure-level runs with an explicit 23-level ladder are
+  bit-identical to before on CPU.
+- **Runtime.** Two reference runs on GH200: about 1 h.
+
+### A0 — Golden fixtures, comparison and benchmark harness
+
+- **Roadmap:** enabler for everything. **Size:** S. **Depends on:** A01.
+- **Scope.** Create `scripts/agent/make_golden.py`, `scripts/agent/compare_golden.py`
+  and `scripts/agent/benchmark.py`.
+  - `make_golden.py` runs a named config with a fixed seed and stores the
+    footprint tensor, endpoint particles and run metadata under
+    `tests/golden/<config-name>/` (small configs) or under the outputs
+    directory (large), with a JSON manifest (git rev, config hash, device,
+    seed, torch version).
+  - `compare_golden.py` compares a fresh run to a stored fixture and prints
+    max absolute, max relative and integrated-sensitivity differences per
+    release, plus pass/fail at a tolerance given on the command line.
+  - `benchmark.py` runs a config with `GLIDE_PHASE_TIMERS=1`, parses the phase
+    breakdown, and prints footprints per second and the phase table in
+    Markdown.
+- **Fixtures to generate:** smoke config on CPU eager (committed, small);
+  smoke config on CUDA static path; reference multi-site config on CUDA (kept
+  in outputs, manifest committed).
+- **Out of scope.** Any change to `src/lpdm/`.
+- **Acceptance.** Fixtures exist and are documented in `docs/VALIDATION.md`
+  (new subsection "Golden fixtures"); `compare_golden.py` on the same rev passes
+  bit-identically on CPU and within the existing parity tolerance on CUDA;
+  `benchmark.py` output for the reference config is recorded as the baseline
+  in the new `docs/VALIDATION.md` subsection and in the task's progress file.
+- **Runtime.** Reference config on GH200: ~25 min.
+
+### A1 — Sub-time the residual phase (6a)
+
+- **Size:** S. **Depends on:** A0.
+- **Scope.** Add named timers inside the per-step residual (wind-mean
+  diagnostic, mask and liveness bookkeeping, particle generation, output
+  writes, Python loop overhead, convection) so the phase table attributes all
+  wall time. Re-profile convection after the vectorised parcel lift. Do not
+  optimise anything in this task; measure.
+- **Also [PR-F2]: sub-step saturation on the graph path.** The once-per-run
+  warning when particles hit `max_substeps` fires only on the dynamic path
+  (`HannaScheme`, around the `hit max_substeps` log); the static/graph path
+  skips it, yet saturation is exactly where the drift and reflection accuracy
+  target is violated. Add a device-side counter of saturated particle-steps,
+  accumulated inside the captured step with no host sync, read once per met
+  window, logged with the same wording as the dynamic path, and recorded in
+  `run_metadata.json` (additive). Update the `docs/physics.md` sub-stepping
+  section to say the warning now covers both paths.
+- **Acceptance.** Saturation count reported on both paths for a config
+  forced to saturate (small `max_substeps`), and zero on the smoke config; phase
+  table for the reference config with no "residual"
+  bucket above 5% of wall; convection re-profiled; the two largest consumers
+  named in STATUS.md "Performance" with numbers. List follow-up optimisation tasks under `proposed follow-ups` in the
+  task's progress file.
+- **Verification.** Golden bit-identical on CPU (timers must not change
+  numerics); graph capture intact.
+
+### A2 — Kernel deposition in the gridder (2b)
+
+- **Size:** S–M. **Depends on:** A0. **Decision record:** 0012.
+- **Scope.** Read decision 0012 first: the kernel is a numerical parameter,
+  converged and never tuned, and delta deposition stays the reference. Add
+  `output_grid.deposition` with `kind: delta | gaussian` (default `delta`, so
+  behaviour is unchanged by default). Gaussian deposition spreads each
+  particle's residence weight over a fixed 5×5-cell horizontal stencil computed
+  from its sub-cell position; the stencil is a fixed size so shapes stay static.
+  Mass is conserved exactly (weights normalised over the in-grid stencil).
+  Vertical bins keep delta deposition.
+- **Bandwidth.** `bandwidth_fraction` (initial value 0.2; A5 sets the converged
+  value) times the local cloud spread: the horizontal standard deviation, in
+  metres, of the active particles of each release within each age band,
+  computed every step with sync-free scatter reductions (sum, sum of squares,
+  count per release and band). Capped at `bandwidth_max_cells` (default 1.0)
+  cell widths, so the stencil holds at least ±2 bandwidths. Optional fallback
+  `bandwidth_mode: time_since_release` for comparison only. Works with the
+  release axis and the nested grid (B6) later.
+- **Metadata.** Record the deposition kind, position, fraction, cap and mode in
+  `run_metadata.json` and the footprint store attributes. This additive change
+  to the output contract is authorised by this spec.
+- **Docs.** Add kernel smoothing to the known-approximations table in
+  `docs/physics.md` with the bias formula from decision 0012: total smoothing
+  variance h² plus Δ²/12, so a plume of width σ appears with width
+  √(σ² + h² + Δ²/12).
+- **Also [PR-F4]: deposition position.** Residence is currently deposited at
+  the particle's position after advection, turbulence and convection, i.e.
+  endpoint quadrature: a particle crossing cell or vertical-bin boundaries
+  during a step contributes nothing to the cells it traversed. Add
+  `output_grid.deposition.position: endpoint | midpoint` (default `endpoint`,
+  bit-identical). `midpoint` deposits at the RK2 midpoint position already
+  computed for advection, which is consistent with the second-order scheme.
+  List endpoint quadrature under known approximations in `docs/physics.md`
+  regardless of the default.
+- **Acceptance.** New tests:
+  - conservation with the kernel, including at the domain edge;
+  - convergence to the delta result as `bandwidth_fraction` → 0;
+  - **exact bias**: on the analytic plume, the kernel footprint matches the
+    analytic footprint smoothed by the predicted variance h² + Δ²/12, to the
+    same tolerance the existing plume test uses;
+  - a noise test showing variance reduction at fixed particle count;
+  - **split plume**: on synthetic met with strong horizontal shear that splits
+    one release into two branches, the kernel footprint stays within particle
+    noise of the delta footprint at the initial fraction. A bimodal cloud
+    overstates local spread, so this is the case most likely to over-smooth;
+  - the analytic plume error with `midpoint` no worse than `endpoint` at the
+    reference Δt and better at 4Δt.
+  Figure: plume footprint delta vs kernel vs analytic (Tier 0 set). `docs/physics.md` footprint section updated.
+- **Verification.** With `kind: delta` golden bit-identical on CPU. Graph
+  capture intact with `kind: gaussian` on CUDA.
+- **Runtime.** Tests only; GPU smoke run.
+
+### A3 — Multi-rate time stepping (7a)
+
+- **Size:** M. **Depends on:** A1, A2. **Decision record:** 0011.
+- **Scope.** Give each particle its own outer step Δt_i ∈ {Δt, 2Δt, 4Δt, …, Δt_max}
+  chosen from local criteria (height above the boundary layer, |w|, σ_w, T_L,
+  and a CFL-type bound on the met grid), re-evaluated once per met window. The
+  loop keeps a fixed trip count: a particle advances only on the iterations
+  that are multiples of its rate, gated by multiply, never by index. Residence
+  accumulation uses the particle's own Δt_i and the `midpoint` deposition
+  position from A2 [PR-F4], because a long far-field step makes endpoint
+  quadrature coarser in proportion to the step. Reflection, the OU sub-stepping and
+  the drift are integrated over Δt_i. Time interpolation of the met remains
+  correct across the window.
+- **Out of scope.** Particle aggregation; changes to the turbulence
+  parameterisation.
+- **Acceptance.** Well-mixed gates pass; analytic plume and Taylor tests pass
+  (they run in the boundary layer, so Δt_i = Δt there); a new test on a
+  two-layer synthetic met shows far-field particles taking the long step and
+  the footprint agreeing with the single-rate run within a declared tolerance;
+  reference-config golden difference within the tolerance declared in the PR
+  (numerics task); benchmark before/after showing the step count and wall-time
+  reduction. Default remains single-rate until A5 sets defaults.
+- **Verification.** Parity static/dynamic; capture intact; benchmark.
+- **Runtime.** Reference config twice: ~50 min.
+
+### A4 — Local metric coordinates and half-precision met (7f, 7e)
+
+- **Size:** S. **Depends on:** A3.
+- **Scope.** (i) Store particle positions in metres relative to the met-domain
+  origin (local equal-area or equirectangular with cos(lat) scaling), converting
+  to degrees only at the reader and gridder boundaries. Exact to fp32 rounding.
+  (ii) Behind a flag, hold the per-window met channel tensor in bf16 for the
+  trilinear gather, with fp32 accumulation. Off by default.
+- **Acceptance.** (i) Golden differences at fp32 rounding level on CPU and
+  documented; all tests pass. (ii) A/B on the reference config: parity
+  difference reported; benchmark before/after; recommendation recorded in the task's progress file whether to enable by default (decision record required if yes).
+- **Verification.** Capture intact in both modes.
+- **Runtime.** ~1 h.
+
+### A5 — Convergence studies and defaults (1b, 7b)
+
+- **Size:** M. **Depends on:** A2, A3, A4.
+- **Scope.** Sweeps on the analytic plume and on one real-met case from the
+  case library: Δt and Δt_max (multi-rate), sub-step accuracy target, particle
+  count, vertical ladder, kernel bandwidth, and deposition position (endpoint
+  vs midpoint) [PR-F4]. Report sub-step saturation counts from A1 [PR-F2] for
+  every sweep point. Produce error-against-parameter
+  figures with expected slopes (Tier 0 figure set) and a table. Propose the v1
+  defaults with the converged values.
+- **Kernel bandwidth** (decision 0012). Sweep `bandwidth_fraction` over
+  0, 0.05, 0.1, 0.2, 0.3 and 0.5 on the analytic plume, the real-met case and
+  the A2 split-plume case. Take a delta-deposition run with a large particle
+  count as the reference for each case. The **converged fraction** is the
+  largest for which the kernel footprint, at the standard particle count, stays
+  within the particle noise of that reference, in every case. Report the noise
+  reduction at the converged fraction, expressed as the particle count delta
+  deposition would need for the same noise. Record the rule from decision 0012
+  in the proposed-defaults record: validation and calibration use delta
+  deposition, and the kernel is allowed in production only at or below the
+  converged fraction.
+- **Acceptance.** Figures and table in `docs/validation/`; a decision record
+  proposing the new defaults (the human accepts by merging it); no default is
+  changed in this task. For the kernel: a figure of footprint difference from
+  the reference against bandwidth fraction for each case, with the particle
+  noise band, and the converged fraction marked.
+- **Runtime.** Sweeps: budget 6 GPU-hours; stop and report if exceeded.
+
+### A6 — Forward–backward reciprocity test (1b)
+
+- **Size:** S–M. **Depends on:** A5.
+- **Scope.** A forward integration mode usable only from tests (release a unit
+  source, accumulate concentration at the receptor cell), and a test that the
+  backward footprint from the receptor equals the forward concentration field
+  at every cell, on synthetic met with turbulence and reflection on. Figure:
+  forward field beside backward footprint, 1:1 scatter.
+- **Acceptance.** Test passes at a stated tolerance with a stated particle
+  count; a "teeth" companion shows the test fails when the backward sign flip
+  of the drift is removed. `docs/physics.md` backward-construction section
+  cites the test.
+
+### A7 — In-batch parameter ensembles (2a, plumbing)
+
+- **Size:** S. **Depends on:** A5.
+- **Scope.** Allow the turbulence and convection schemes to take per-particle
+  parameter tensors (broadcast from a per-group table) instead of scalars, and
+  the release generator to assign particles to groups with drawn parameters.
+  Also the particle-subset bootstrap: tag particles with a subset index and
+  write per-subset footprints when requested. All off by default.
+- **Acceptance.** With one group at the default parameters the golden
+  comparison is bit-identical on CPU; capture intact with groups on CUDA; a
+  test that two groups with different σ floors produce different footprints;
+  output contract extended additively (documented).
+
+### A8 — Physics freeze preparation and audit table (1a, 1c)
+
+- **Size:** S. **Depends on:** A00–A7 merged (A01 validates the model-level
+  met path).
+- **Scope.** Write `docs/physics-audit.md`: a table with one row per equation
+  in `docs/physics.md`, `turbulence.md`, `convection.md`, giving the literature
+  source, the code location and the test that exercises it, with gaps marked.
+  Prepare the tag `v0-physics` (the human creates it). Update STATUS.md.
+- **Also, specification precision [PR-F5 to PR-F8]**, to be fixed in
+  `docs/physics.md` before the external reviewer reads it:
+  - **F5.** The OU step is written with forward-time indexing ($u'_{n+1}$, "one
+    step later") while backward advection uses $x_n \to x_{n-1}$ and the
+    displacement uses $z_{n+1} = z_n - w'\Delta t$. Use neutral old/new
+    notation, or define a positive simulation-age coordinate $\tau = t_r - t$
+    and use it throughout.
+  - **F6.** The Taylor-dispersion curve is given for $\sigma_z^2$ but its
+    asymptotes are stated as $\sigma_w t$ and $\sqrt{2Kt}$, which are
+    statements about $\sigma_z$. Write $\sigma_z^2 \sim \sigma_w^2 t^2$ and
+    $\sigma_z^2 \sim 2Kt$, or switch to standard deviation explicitly.
+  - **F7.** Flooring $\lvert\cos\phi\rvert$ at 0.05 (about 87.1°) caps zonal
+    angular displacement poleward of that latitude; label it a numerical
+    approximation and state the supported latitude range.
+  - **F8.** Qualify claims stronger than the scheme supports: "GLIDE
+    accumulates exactly that", "conversion exact" (true only for the
+    arithmetic conversion when bins align), and "the state … is the position at
+    step $n-1$". The accumulator uses endpoint (or midpoint) quadrature, split
+    operators, finite cells, interpolated meteorology and coefficients frozen
+    over sub-steps.
+  The review confirmed these elements of the formulation against code, which
+  the audit table should record as evidence: the exact homogeneous OU update
+  with Euler inhomogeneous drift (`gpu_engine.py`); the forward well-mixed drift
+  and backward sign reversal (`turbulence/hanna.py`); joint reflection of
+  position and $w'$ (`gpu_engine.py`); per-particle sub-stepping with fixed
+  outer-step coefficients (`turbulence/hanna.py`); spherical displacement
+  factors (`gpu_engine.py`); particle weights of $1/N$ (`release_generator.py`).
+- **Acceptance.** Every equation has a row; every gap has a proposed test under `proposed follow-ups` in the task's
+  progress file. The human and the external reviewer sign the
+  table by merging.
+
+### A8a — Tolerances from reference data (1e)
+
+- **Size:** M. **Depends on:** A8 merged and the `v0-physics` tag created; B10
+  merged. Also needs, listed in the data inventory or set in the environment:
+  the FLEXPART reference outputs including the repeat-seed runs
+  (`$GLIDE_FLEXPART_OUTPUTS`), the NAME footprints (`$GLIDE_NAME_FOOTPRINTS`),
+  the ERA5 ensemble (EDA) columns for the standard cases, the FLEXPART source
+  (`$GLIDE_FLEXPART_SRC`), and the inversion's model-error values per site.
+  Stop if any is missing. Model: Opus 5.5.
+- **Isolation. This task must not see any GLIDE result.** Do not open any
+  GLIDE output: no `footprints.zarr`, `run_metadata.json` or endpoint files,
+  nothing under `outputs/`, nothing under `$GLIDE_AGENT_OUTPUTS` except this
+  task's own files, and no gallery figures. Do not read the comparison results
+  in `docs/VALIDATION.md` §7, in STATUS.md, or in other tasks' progress files.
+  Read only: `docs/validation-plan.md`, the physics and convection docs (for
+  the declared design differences), the reference data above, and the
+  published scores in `data/tracer-experiments.md` and the cited papers. List
+  every input you used in your progress file. If you open a GLIDE result by
+  mistake, say so in the progress file and stop; the human reruns the task in
+  a fresh session.
+- **Scope.** Apply the rules in `docs/validation-plan.md` §3, "How tolerances
+  are set", exactly as written:
+  - build the Fortran driver for FLEXPART's `hanna` and convection routines
+    under `scripts/validation/tier1/` (A9 reuses it), compiled against
+    `$GLIDE_FLEXPART_SRC` into `$GLIDE_SCRATCH`, and run it on every EDA
+    member of each standard-case column to get FLEXPART's spread;
+  - compute the analytic predictions for the declared Tier 1 differences;
+  - compute the Tier 2 noise floors from the spread across FLEXPART's
+    repeat-seed runs;
+  - compute the Tier 2 ceilings from NAME against FLEXPART, with the same
+    metric code A10 will use (write it here if A10 has not, under
+    `scripts/validation/`);
+  - collect the Tier 3 thresholds and the scoring options of each published
+    study.
+
+  One script, `scripts/validation/tolerances.py`, computes everything from
+  the inputs. It writes `docs/validation/preregistration/tolerances.csv`
+  (read by the A9 to A11 grading code) and `tolerances.md` (each tolerance,
+  its rule, its inputs and its value).
+- **Do not adjust.** If a rule gives a value that looks unreasonable, report
+  it with the reason in the progress file and the PR. Do not change the value
+  or the rule; the human decides.
+- **Acceptance.** Every rule in §3 has a computed value; rerunning the script
+  reproduces the files exactly; the list of inputs used shows no GLIDE output.
+  The human checks the calculation and merges.
+
+### A8b — Pre-registration record (1e)
+
+- **Size:** S. **Depends on:** A8a merged (which in turn needs A8, the tag and
+  B10). Model: Opus 5.5.
+- **Scope.** Draft the pre-registration decision record (next free number) with
+  every item listed in `docs/validation-plan.md` §3, "What is fixed":
+  - the physics tag and its commit hash;
+  - the scoring-code commit hash;
+  - the six standard cases with exact dates, and the full release lists for
+    Tiers 1–3;
+  - the metrics and the DATEM scoring options;
+  - the tolerances from A8a's `tolerances.md`, copied unchanged, with the
+    published scores they are judged against and their sources;
+  - the deposition setting;
+  - the expected differences;
+  - the fitting and test sets;
+  - the development history, in the three parts §3 describes: every earlier
+    comparison of GLIDE with FLEXPART, NAME or observations (date,
+    configuration, result; labelled exploratory); every physics change made
+    after seeing a result (commit and the result that prompted it), listed
+    apart from changes that came from code review; and the data that are
+    therefore not independent. Sources: `docs/VALIDATION.md`, STATUS.md, the
+    physics docs, the progress files and the full git history, including
+    commit messages such as 2808a76;
+  - the rules for running and reporting from §3, copied in full, with the run
+    log format.
+
+  End the record with a line `**Registration.** pending`, which the human
+  replaces with the OSF URL, DOI and date after registering. Also write the
+  release lists as files under `docs/validation/preregistration/`, so the
+  human can attach them to the OSF submission.
+- **Out of scope.** Running GLIDE on any Tier 1–3 case. Registering on OSF,
+  which the human does.
+- **Acceptance.** Every §3 item is present; the tolerances match A8a's files
+  exactly; every entry in the development history cites its source (a commit,
+  a doc section or a progress file). The human checks and merges; the
+  tolerances are not edited here.
+
+### A9 — Tier 1 component parity (validation)
+
+- **Size:** M. **Depends on:** A8b merged and its Registration line filled in;
+  FLEXPART v11 source available.
+- **Scope.** Scripts under `scripts/validation/tier1/` that call FLEXPART v11's
+  compiled `hanna` routine (`turbulence_mod.f90`) and its convection routines,
+  and GLIDE's equivalents, on identical inputs: ERA5 columns from the case
+  library and synthetic stable, neutral and convective profiles. FLEXPART's
+  routines read their inputs from module variables, so the expected route is
+  the Fortran driver program A8a built under `scripts/validation/tier1/`,
+  which `use`s the FLEXPART modules, sets those variables, calls the routine
+  and writes the outputs to a file. Compile
+  against `$GLIDE_FLEXPART_SRC` into `$GLIDE_SCRATCH`; never copy FLEXPART
+  source into the repository. Figures per the plan; tolerances from the
+  pre-registration record.
+- **Only compiled FLEXPART counts.** Do not re-type FLEXPART's equations in
+  Python or anywhere else as a stand-in. GLIDE's Hanna code was itself
+  transcribed from FLEXPART (commit 01610bd), so a second transcription is
+  not an independent reference. If the routines cannot be compiled and
+  called, stop (BLOCKED) with the compiler errors and what you tried.
+- **Classify every difference beyond tolerance** as a GLIDE bug (registered
+  failure rule: stop), a declared design difference (cite the
+  expected-difference list), or a suspected FLEXPART problem. For the last,
+  see INSTRUCTIONS.md §3, "Reference code can be wrong": write it up, never
+  change either code to agree.
+- **Stop condition specific to this task:** if `$GLIDE_FLEXPART_SRC` is unset
+  or does not contain the FLEXPART v11 source, or `gfortran` is not available
+  on the node, stop.
+- **Running and reporting.** Follow the registered rules
+  (`docs/validation-plan.md` §3): log every run in
+  `docs/validation/runs/<tier>.csv`, repeat a run only for a documented
+  failure, compute pass or fail with the registered scripts only, and record
+  the exact model ID of each session. If a test fails, apply the registered
+  failure rule; if the cause looks like a bug in GLIDE or in the scoring code,
+  stop (BLOCKED) with the evidence, because the fix needs a new tag or commit,
+  a decision record and an OSF update.
+
+### A10 — Tier 2 twin analysis tooling (validation)
+
+- **Size:** M. **Depends on:** A8b merged and its Registration line filled in;
+  FLEXPART reference outputs available.
+- **Scope.** Readers for FLEXPART particle and gridded output; particle
+  statistics against time; footprint metrics; systematic-difference maps;
+  mole-fraction convolution; the Tier 2 figure set including the cloud
+  animation; a report page in `docs/validation/`.
+- **Acceptance.** All Tier 2 figures for the case library, generated by
+  scripts, with pre-registered metrics reported pass or fail.
+- **Running and reporting.** Follow the registered rules
+  (`docs/validation-plan.md` §3): log every run in
+  `docs/validation/runs/<tier>.csv`, repeat a run only for a documented
+  failure, compute pass or fail with the registered scripts only, and record
+  the exact model ID of each session. If a test fails, apply the registered
+  failure rule; if the cause looks like a bug in GLIDE or in the scoring code,
+  stop (BLOCKED) with the evidence, because the fix needs a new tag or commit,
+  a decision record and an OSF update.
+
+### A11 — Tier 3 tracer-experiment runs (validation)
+
+- **Size:** M. **Depends on:** A8b (registered), A10, B10; the ERA5 cubes for ETEX, CAPTEX and
+  ANATEX listed in the data inventory.
+- **Scope.** Receptor-oriented backward runs, one per measured sample, as set out
+  in `data/tracer-experiments.md` §5: ETEX-1, ETEX-2, CAPTEX, and ANATEX tracers
+  1 and 2 (one footprint per sample serves both ANATEX tracers). Predicted
+  concentrations written in DATEM format; scored with the B10 code using the
+  pre-registered options; the Tier 3 figure set.
+- **Running and reporting.** Follow the registered rules
+  (`docs/validation-plan.md` §3): log every run in
+  `docs/validation/runs/<tier>.csv`, repeat a run only for a documented
+  failure, compute pass or fail with the registered scripts only, and record
+  the exact model ID of each session. If a test fails, apply the registered
+  failure rule; if the cause looks like a bug in GLIDE or in the scoring code,
+  stop (BLOCKED) with the evidence, because the fix needs a new tag or commit,
+  a decision record and an OSF update.
+- **Deposition.** All runs use delta deposition (`output_grid.deposition.kind:
+  delta`), as decision 0012 and the pre-registration require. Kernel deposition
+  would widen plumes and confound the comparison with the published scores and
+  with the meander term. Confirm the setting from each run's metadata before
+  scoring, and stop if any run used the kernel.
+- **Acceptance.** DATEM ranking scores and their four terms for every
+  experiment, and ATMES-II statistics for ETEX, reported against the published
+  values for NAME, FLEXPART, HYSPLIT and STILT; pass or fail against the
+  pre-registered thresholds; figures in the gallery; `data/tracer-experiments.md`
+  §5 updated with what was run.
+- **Runtime.** About 16,000 backward releases; estimate from the A0 benchmark
+  before launching and stop if a batch exceeds twice the estimate.
+
+---
+
+## Queue B: infrastructure
+
+Model: Sonnet 5.5 unless a task says otherwise. Tasks are independent unless a
+dependency is listed; run in the listed order by default.
+
+### B1 — Met inventory and GLIDE-ready met cache (7d, 3a)
+
+- **Size:** M. **Depends on:** nothing.
+- **Scope.** `scripts/build_met_cache.py`: from local cubes, subset to the
+  required variables and the levels below `alt_max_m`, optionally pre-resample
+  onto the AGL ladder, store as float16 or bit-rounded float32 with zstd, in a
+  Zarr layout the reader can open through the existing met contract (add a
+  `glide_cache` attribute set). A reader path that uses the cache when present.
+  Report storage before/after and met-fetch time before/after on the reference
+  config.
+- **Acceptance.** Golden comparison on the reference config within a declared
+  tolerance for the float16 variant and bit-identical for the lossless
+  variant; `docs/met_schema.md` documents the cache; benchmark shows the
+  met-fetch phase reduced.
+
+### B2 — Sparse and bit-rounded footprint output (7g)
+
+- **Size:** S. **Depends on:** nothing.
+- **Scope.** Zarr codec configuration for the footprint store (bit-rounding
+  keeping a configurable number of mantissa bits, zstd), and an optional sparse
+  (COO per release) writer with a loader helper in `comparison.py`. Additive
+  to the output contract, documented.
+- **Acceptance.** Storage numbers on the reference output; round-trip test;
+  loader test.
+
+### B3 — Release-time batching (7h)
+
+- **Size:** S. **Depends on:** nothing.
+- **Scope.** Batch expansion groups releases so that the sweep length per
+  batch is minimised (cluster by release time); report the live-particle
+  fraction per batch in run metadata.
+- **Acceptance.** Golden bit-identical per release on CPU; live fraction
+  reported; benchmark on a staggered-release config.
+
+### B4 — Adaptive particle count per release (4e)
+
+- **Size:** S. **Depends on:** A7 (bootstrap subsets) for the convergence
+  criterion; can be built first with a fixed rule.
+- **Scope.** Config option to set particles per release from a rule (fixed,
+  by region class, or by a target relative noise estimated from bootstrap
+  subsets in a pilot batch).
+- **Acceptance.** Fixed rule bit-identical to today; documented.
+
+### B5 — Column and satellite releases (4, 4a, 7c) — model: Opus 5.5
+
+- **Size:** M. **Depends on:** nothing for column; A2 recommended for satellite.
+- **Scope.** Column releases by importance sampling over a pressure-weighted
+  vertical PDF; satellite releases as many irregular soundings per overpass,
+  each with its own averaging kernel and pressure weighting, with endpoint
+  particles written per sounding; a short-integration-plus-endpoints mode
+  documented as the satellite recommendation (7c). Flat release axis unchanged.
+- **Acceptance.** Tests for weighting and kernel application; a GOSAT-style
+  example config; docs in README "Release geometries"; output contract
+  extended additively.
+
+### B6 — Nested footprint output (4b)
+
+- **Size:** S. **Depends on:** A2 recommended.
+- **Scope.** `output_grid.nested` with half-width, resolution, and alignment to
+  coarse cell edges enforced by validation; per-release inner grid with origin
+  tensors; second store `footprints_nested.zarr` with per-release coordinate
+  arrays; works with delta and kernel deposition.
+- **Also [PR-F3]: spatial meaning of footprint cells.** State in
+  `docs/physics.md`, the README "Outputs" section and the `comparison.py`
+  STILT-conversion docstring that each cell value is a **cell-integrated**
+  horizontal sensitivity: multiplying it by a flux that is uniform over the
+  cell gives the concentration enhancement, it is not a density per square
+  metre, and conservative regridding must preserve the cell integral. The
+  fine-sums-to-coarse property below depends on exactly this, and so does the
+  GATES training target.
+- **Acceptance.** Test that the coarse value over the covered area equals the
+  sum of the fine cells; documented in physics and README.
+
+### B7 — Validation figure infrastructure (Tier 0 set)
+
+- **Size:** M. **Depends on:** nothing.
+- **Scope.** `scripts/validation/` with a small figure library implementing the
+  design rules in `docs/validation-plan.md` §6, the Tier 0 figures generated
+  from the existing test quantities, a gallery page generator writing
+  `docs/validation/gallery.md` keyed by physics tag, and an exportable static
+  version of the footprint explorer. Follow the project's visualisation
+  guidance.
+- **Acceptance.** Gallery page renders on GitHub with all Tier 0 figures;
+  regeneration is one command.
+
+### B8 — Packaging and reproducibility
+
+- **Size:** M. **Depends on:** A8 (freeze) for the final version, but start
+  early.
+- **Scope.** CLI polish; `pip install glide-lpdm` (name to be confirmed by the
+  human); an Apptainer definition for Isambard and a Dockerfile; a pinned lock
+  file; a GPU test job script that runs the parity tests and posts the result
+  as a comment on a pinned GitHub issue, for the human to submit (for example
+  nightly, if Isambard allows scheduled jobs). Test the script's body by
+  running it directly on your node; never submit it (INSTRUCTIONS.md §5); documentation site configuration; DOI metadata
+  (`CITATION.cff`, Zenodo).
+- **Acceptance.** A clean machine can install and run the smoke test from the
+  published instructions; the container runs the smoke test on Isambard.
+
+### B10 — Tracer-experiment readers and scoring (1e)
+
+- **Size:** S–M. **Depends on:** nothing in the queue; `$GLIDE_ETEX` and
+  `$GLIDE_DATEM` populated per `data/tracer-experiments.md`. No model runs and no
+  physics, so it can run before the freeze. Model: Sonnet 5.5, or Opus 5.5.
+- **Scope.** Under `scripts/validation/tracers/`: readers for the ETEX files and
+  the DATEM `emit`/`meas` files into common release and sample tables with SI
+  units; a writer for DATEM-format predictions; the DATEM statistics and ranking
+  score; the ATMES-II statistics for ETEX. All options of DATEM's `statmain`
+  that the pre-registration must fix (zero threshold, zero–zero pairs,
+  averaging) exposed as arguments.
+- **Acceptance.** Running the scoring on DATEM's HYSPLIT predictions
+  (`mdl_data/<exp>/ct?_001.txt`) reproduces DATEM's `mdl_stat` files for CAPTEX
+  and both ANATEX tracers to their printed precision, as a test that skips
+  cleanly when `$GLIDE_DATEM` is unset. Reader tests on small synthetic files in
+  the repository. `data/tracer-experiments.md` §5 updated. No data files
+  committed.
+
+### B9 — Documentation upkeep (continuous)
+
+- **Size:** S per pass. Run whenever the human asks, or after every four
+  merged tasks.
+- **Scope.** Reconcile README, STATUS, docs pages and decision records with
+  what is merged; fix drift; keep `docs/README.md` index current.
+
+---
+
+## Final task: v1 release gate
+
+Model: Opus 5.5. Runs when every v1 item is MERGED. Checks each line of the gate
+in `dev/roadmap.md` §3 against the repository, writes `docs/validation/v1-report.md`
+summarising the evidence for each line with links, and lists anything unmet.
+The report cites the OSF registration and every later update to it. It checks
+the run logs: every Tier 1–3 run postdates the registration, used the
+registered physics tag and scoring commit (or a later one with its OSF
+update), and appears in the report; every repeat has a logged reason.
+The human decides the release.
+
+---
+
+## Later queues (not yet specified)
+
+To be written when v1 is tagged. Roadmap IDs: v1.x — 3b, 3c, 6b, 6c; v2 — 2c,
+2d, 2e, 1f, 4c, 4d, 5a, 5b; research — 2f, 3d, 3e, 3f, 5c, 5d, 5e.

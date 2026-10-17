@@ -15,6 +15,15 @@ This file is the agent-agnostic contributor guide (the `AGENTS.md` convention;
   [docs/README.md](docs/README.md).
 - Major design/physics decisions (why, with rejected alternatives):
   [dev/decisions/](dev/decisions/).
+- Development plan and v1 release gate: [dev/roadmap.md](dev/roadmap.md).
+  Validation ladder and figure set: [docs/validation-plan.md](docs/validation-plan.md).
+- Agent sessions: read [dev/agent/INSTRUCTIONS.md](dev/agent/INSTRUCTIONS.md)
+  (session protocol, verification standard, stop conditions), take tasks from
+  [dev/agent/QUEUE.md](dev/agent/QUEUE.md), record per-task state in
+  [dev/agent/progress/](dev/agent/progress/); shared state and the data
+  inventory are in [dev/agent/PROGRESS.md](dev/agent/PROGRESS.md), which agents
+  never edit. Operator guide:
+  [dev/agent-operations.md](dev/agent-operations.md).
 - Historical dated work-orders (physics/test reviews) were retired; their durable
   content lives in STATUS / decisions / docs, and full history is in git.
 
@@ -31,6 +40,11 @@ This file is the agent-agnostic contributor guide (the `AGENTS.md` convention;
 - Primary entrypoint: `python -m lpdm.main --config <yaml>`.
 - This is a device-agnostic codebase (CUDA / MPS / CPU). GPU-specific work must be
   device-gated; the local dev box is CPU-only (GPU runs happen on Isambard AI).
+- **On Isambard AI, agents never submit, alter or cancel SLURM jobs** (`sbatch`,
+  `srun`, `salloc`, `scancel`, `scontrol`); Isambard AI asks that agents do not
+  submit jobs. A human submits the allocation, and the agent runs everything
+  directly on that node. Never run compute on a login node. Details:
+  [dev/agent/INSTRUCTIONS.md](dev/agent/INSTRUCTIONS.md) §5.
 
 ## Runtime memory safeguards (required for run-related changes)
 Memory controls live in the `memory:` section of the run config (not CLI flags):

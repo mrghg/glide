@@ -93,12 +93,20 @@ and returns only once the architecture settles.
 
 ## What is next, roughly in order
 
+> The maintained plan is now [dev/roadmap.md](dev/roadmap.md) (2026-09-16):
+> efficiency changes that alter numerics land first, then a physics freeze, then
+> the validation ladder in [docs/validation-plan.md](docs/validation-plan.md),
+> then the v1 release. The list below is the pre-roadmap ordering and is kept
+> until the first roadmap tasks merge.
+
 1. **Validate the model-level meteorology path.** The reader, the hydrostatic
    pressure reconstruction and the download are all implemented. What remains is
    a GH200 run on a model-level cube (~3.7× the vertical data — stream only the
    lowest ~60–90 levels) and a check on whether the hydrostatic pressure
    approximation is tight enough for convection. This lands *before* item 2,
-   because it shifts footprint magnitudes everywhere.
+   because it shifts footprint magnitudes everywhere. Now queue task A01, which
+   also makes model levels the default
+   ([decision 0017](dev/decisions/0017-model-levels-default.md)).
 
 2. **Physics validation against NAME and FLEXPART** on identical release setups,
    with the current defaults. Everything downstream depends on this.
