@@ -69,7 +69,13 @@ comparisons. Examples include:
   own coordinate;
 - a more accurate time-stepping scheme for the resolved wind;
 - an exact, rather than approximate, update for the random turbulent velocity;
-- where the minimum turbulence timescales are applied.
+- where the minimum turbulence timescales are applied;
+- the boundary-layer inputs to the turbulence scheme: GLIDE takes the friction
+  velocity and boundary-layer depth directly from ERA5's fields, while
+  FLEXPART computes its own, the friction velocity from the surface stress and
+  the boundary-layer depth by a critical Richardson-number method
+  (Vogelezang and Holtslag, 1996). This is likely to be one of the larger
+  sources of near-surface differences in Tier 2.
 
 If a difference was predicted before the comparison was run, it counts as
 evidence that the model is understood. If it is explained only after it is
@@ -320,13 +326,10 @@ A decision record in [dev/decisions/](../dev/decisions/) fixes the following:
   record must also say where earlier results shaped the model. It has three
   parts:
   - *Comparisons already made.* GLIDE was compared with FLEXPART and NAME
-    before the freeze, for example the Mace Head case in
-    [VALIDATION.md §7](VALIDATION.md). Those existing FLEXPART footprints were
-    driven by different meteorology from ERA5, so they mix meteorology and
-    model differences; they are not used as a reference in Tier 2 or for the
-    tolerances. More comparisons will be run on the pre-freeze physics while
-    the reference runs are being set up. Each is listed with its date and
-    what it showed, and labelled exploratory.
+    before the freeze, and more comparisons will be run on the pre-freeze
+    physics while the reference runs are being set up. Each is listed with
+    its date, the reference it used and what it showed, and labelled
+    exploratory.
   - *Changes made because of results.* Some physics changes were made after
     seeing results. For example, GLIDE's modelled CH₄ enhancements at polluted
     low-inlet sites came out about twice those from NAME and FLEXPART (about
@@ -725,7 +728,7 @@ calibration.
 | Need | Tier | Who provides it | Notes |
 | --- | --- | --- | --- |
 | ERA5 data downloaded locally for the standard cases, on model levels (the default); pressure levels only for comparison | 0–2 | Human, with the existing download scripts | Listed in `dev/agent/PROGRESS.md` |
-| FLEXPART v11 on ERA5 via flex_extract: gridded output for each release; particle-position snapshots at 6, 24, 72 and 120 h for the six standard cases; five repeat-seed runs of one week of hourly releases at three sites | 2 | Human | FLEXPART's output does not depend on GLIDE, so these runs can be done once, early. The repeat-seed runs give the Tier 2 noise floor (§3). The group's existing FLEXPART footprints use other meteorology and are not a substitute |
+| FLEXPART v11 on ERA5 via flex_extract: gridded output for each release; particle-position snapshots at 6, 24, 72 and 120 h for the six standard cases; five repeat-seed runs of one week of hourly releases at three sites | 2 | Human | FLEXPART's output does not depend on GLIDE, so these runs can be done once, early. The repeat-seed runs give the Tier 2 noise floor (§3). Run each standard case as its own FLEXPART run with a single release: FLEXPART's particle-position files do not record which release a particle came from |
 | ERA5 ensemble (EDA) members for the columns of the standard cases | 1 | Human, from the Copernicus Climate Data Store ("ensemble members" product type; not in the Google Cloud ERA5 copy) | Small: single columns, pressure levels. For the Tier 1 tolerance rule (§3) |
 | The model-error term the group's UK inversion assumes at each site | 2 | Group | For the Tier 2 concentration rule (§3) |
 | FLEXPART v11 source code on Isambard, for the Tier 1 component comparison (no FLEXPART run is needed for Tier 1) | 1 | Human; set `GLIDE_FLEXPART_SRC` | GPL: use locally, never copy into the repository; `gfortran` on the compute node |

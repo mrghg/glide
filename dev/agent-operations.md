@@ -131,8 +131,8 @@ Work through this once. The queue assumes all of it.
       for every release: particle-position snapshots at 6, 24, 72 and 120 h
       for the six standard cases, and five runs differing only in random seed
       for one week of hourly releases at three sites (the Tier 2 noise floor).
-      The existing FLEXPART footprints on file use other meteorology and are
-      not a substitute.
+      Run each standard case as its own single-release run, because the
+      particle-position files do not record the release.
 - [ ] Download the ETEX and DATEM tracer data per `data/tracer-experiments.md`
       and set `GLIDE_ETEX` and `GLIDE_DATEM`. ETEX downloads by script; DATEM
       needs a browser.
