@@ -108,7 +108,8 @@ scope and release gate, and the sequence. The tasks themselves are in
    (A00); validate model-level meteorology and make it the default (A01); golden
    fixtures and benchmarks (A0); sub-time the residual phase (A1); optional
    kernel deposition (A2); per-particle time steps (A3); local coordinates and
-   half-precision meteorology (A4); convergence studies that set the defaults
+   half-precision meteorology (A4); sorting particles for memory locality
+   (A4b); convergence studies that set the defaults
    (A5); the reciprocity test (A6); in-batch parameter ensembles (A7).
    In parallel: meteorology from [met-bazarr](https://github.com/mrghg/met-bazarr)
    (B1, [decision 0018](dev/decisions/0018-met-bazarr.md)), smaller outputs,

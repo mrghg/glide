@@ -135,11 +135,14 @@ Explanations of each item follow each table.
   application.
 - **1h.** The model description paper (for GMD), a public benchmark that
   others can run, and everything needed to reproduce the results. The paper
-  compares GLIDE's speed directly with FLEXPART v11 and with EASLEE (Brioude
-  et al., 2026), a recent FLEXPART-family model in Julia with a partial GPU
-  path, on the same backward cases (task B11). GPU execution as such is not
-  new (MPTRAC, Hoffmann et al., 2022), so the comparison is about footprint
-  throughput for inversions.
+  sets GLIDE's speed against FLEXPART v11, timed during the reference runs
+  on the same backward cases, and against the published figures for EASLEE
+  (Brioude et al., 2026), a recent FLEXPART-family model in Julia with a
+  partial GPU path, and MPTRAC (Hoffmann et al., 2022), a GPU trajectory
+  model for the free troposphere and stratosphere (task B11). No model other
+  than GLIDE and FLEXPART is run. GPU execution as such is not new, so the
+  comparison is about footprint throughput for inversions, reported in
+  particle-steps per second as well as footprints per hour.
 
 ### Transport uncertainty (Track A)
 
@@ -354,6 +357,7 @@ All are addressed in v1, and 8e before the physics audit (1c).
 | 7f | Particle positions in metres, not degrees | S | none | only at rounding level | v1 |
 | 7g | Smaller footprint files | S | none | no | v1 |
 | 7h | Group releases by start time | S | none | no | v1 |
+| 7i | Sort particles so neighbours in space are neighbours in memory | S | 6a, 7f | only at rounding level | v1 |
 
 - **7a.** At present every particle uses the same 60-second time step. That is
   needed in the boundary layer but wasteful in the free troposphere, where most
@@ -381,6 +385,14 @@ All are addressed in v1, and 8e before the physics audit (1c).
 - **7h.** When releases start at different times, a batch of releases runs
   until the latest has finished, and particles from early releases sit idle.
   Grouping releases by start time reduces this idle time.
+- **7i.** Interpolating the meteorology to each particle is limited by memory
+  access: particles that are close in space but far apart in memory make the
+  GPU fetch the same meteorology repeatedly. Periodically re-ordering the
+  particles by position, as MPTRAC does (Hoffmann et al., 2022), keeps those
+  reads together. It changes no physics; results change only at rounding
+  level, because sums are taken in a different order. Tried after the
+  profiling in 6a shows whether interpolation is a large enough share of the
+  time to be worth it.
 
 ---
 
@@ -399,7 +411,7 @@ v1 does not include uncertainty quantification.
 | In v1 | Not in v1 |
 | --- | --- |
 | ERA5 model levels as the default meteorology (6d) | Footprint derivatives, transport-error estimates and derivative-based calibration (2c–2f) |
-| Efficiency changes that alter numerical results (6a, 2b, 7a, 7e, 7f, 1b, 7b) | Calibrated parameters and the parameter card (1f) |
+| Efficiency changes that alter numerical results (6a, 2b, 7a, 7e, 7f, 7i, 1b, 7b) | Calibrated parameters and the parameter card (1f) |
 | Physics frozen with published default parameter values matching FLEXPART v11 (1a) | The UK inversion (1g), which is the paper's application, not a release condition |
 | Validation Tiers 0–3 (1b–1e) | Combining meteorological sources, and nesting (3b, 3c) |
 | Point, tower, column and satellite releases, with particle end positions saved (4, 4a) | Machine-learned compression and the other research items |
@@ -428,9 +440,10 @@ same checklist is the final task in [dev/agent/QUEUE.md](agent/QUEUE.md).
     statistics, within the range published for NAME, FLEXPART, HYSPLIT and
     STILT.
 - A performance table is published: footprints per second on a GH200 GPU and
-  on CPU for a standard configuration, with the time spent in each phase, and
-  the same backward cases timed in FLEXPART v11 and EASLEE on stated hardware
-  (task B11).
+  on CPU for a standard configuration, with the time spent in each phase;
+  particle-steps per second; and the comparison with FLEXPART v11 on the same
+  backward cases and with the published figures for EASLEE and MPTRAC (task
+  B11).
 - The results are reproducible: fixed software versions, a container, fixed
   random seeds, archived inputs for the validation cases, and a DOI. The
   met-bazarr version that prepared those inputs is pinned and archived too.
@@ -465,7 +478,7 @@ A human reviews and merges every task.
 | Phase | What | Who | Queue |
 | --- | --- | --- | --- |
 | **0. Prepare** | Background material, computing environment, list of available data (including a model-level ERA5 cube for A01), reference outputs for regression checks, access credentials (see [agent-operations.md](agent-operations.md) §2) | Human | — |
-| **1. Model levels, then efficiency, before the freeze** | Fix time-bin labels (A00) → model levels as default (6d, A01) → 6a → 2b → 7a → 7f, 7e → 1b, 7b → 2a | Agent, most capable model, one task at a time | A |
+| **1. Model levels, then efficiency, before the freeze** | Fix time-bin labels (A00) → model levels as default (6d, A01) → 6a → 2b → 7a → 7f, 7e → 7i → 1b, 7b → 2a | Agent, most capable model, one task at a time | A |
 | **1′. Infrastructure, in parallel** | 3a and 7d, 7g, 7h, 4e, 4, 4a, 4b, tools for validation figures, early packaging | Agent, cheaper model | B |
 | **2. Freeze** | 1a; the physics audit table (1c) prepared for the external reviewer; tag `v0-physics` | Agent prepares, human signs off | A |
 | **2′. Pre-register** | A8a computes the tolerances from reference data by the rules in the validation plan, without seeing any GLIDE result; A8b drafts the pre-registration record; the human checks both, merges, registers on OSF and records the DOI ([validation plan §3](../docs/validation-plan.md#3-pre-registration-protocol)) | Agent computes and drafts, human checks and registers | A |

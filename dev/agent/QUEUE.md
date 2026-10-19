@@ -263,9 +263,35 @@ Model: Opus 5.5, high effort. Run strictly in order unless a task is BLOCKED.
 - **Verification.** Capture intact in both modes.
 - **Runtime.** ~1 h.
 
+### A4b — Sort particles for memory locality (7i)
+
+- **Size:** S. **Depends on:** A4.
+- **Why.** Interpolating the meteorology to particle positions is limited by
+  memory access. MPTRAC (Hoffmann et al., 2022, doi:10.5194/gmd-15-2731-2022)
+  periodically re-orders particles by position so that neighbouring threads
+  read neighbouring meteorology. Whether this pays off for GLIDE depends on
+  the share of time in the trilinear gather, which A1 measures.
+- **Scope.** Every N steps (configurable, default off), compute a sort key
+  from each particle's grid cell (for example a space-filling-curve index of
+  its horizontal cell and level), and permute every per-particle state tensor
+  by it, including the release index, the time-ago bookkeeping, the RNG state
+  and any per-particle parameters, so the per-release accounting is
+  unchanged. Use a static-shape `argsort` and `index_select`, so the step
+  stays inside the captured CUDA graph (decision 0004), and keep it out of
+  the eager CPU reference path unless enabled.
+- **Out of scope.** Changing how particles are batched by release (7h).
+- **Acceptance.** On the reference config: benchmark before and after at two
+  or three sort intervals; footprints agree with the unsorted run within
+  floating-point rounding (sums are taken in a different order, so not
+  bit-identical) and per-release totals are unchanged; graph capture intact.
+  If the best interval saves less than 5% of wall time, record the result in
+  the progress file and leave it off by default.
+- **Verification.** Golden comparison at rounding tolerance; parity
+  static/dynamic with sorting on.
+
 ### A5 — Convergence studies and defaults (1b, 7b)
 
-- **Size:** M. **Depends on:** A2, A3, A4.
+- **Size:** M. **Depends on:** A2, A3, A4, A4b.
 - **Scope.** Sweeps on the analytic plume and on one real-met case from the
   case library: Δt and Δt_max (multi-rate), sub-step accuracy target, particle
   count, vertical ladder, kernel bandwidth, and deposition position (endpoint
@@ -682,41 +708,47 @@ dependency is listed; run in the listed order by default.
   the repository. `data/tracer-experiments.md` §5 updated. No data files
   committed.
 
-### B11 — Performance comparison with FLEXPART and EASLEE (1h)
+### B11 — Performance comparison (1h)
 
-- **Size:** S–M. **Depends on:** A8 merged (so the numbers describe the frozen
-  model) and B1; the ETEX-1 ERA5 store in the data inventory; EASLEE
-  installed by the human at `$GLIDE_EASLEE`, with the ERA5 input files its
-  ETEX-1 reference case uses; the FLEXPART reference runs' wall-clock times in
+- **Size:** S. **Depends on:** A8 merged (so the numbers describe the frozen
+  model) and B1; the ETEX-1 ERA5 store in the data inventory; the FLEXPART
+  reference runs' wall-clock times, thread counts and hardware in
   `$GLIDE_FLEXPART_OUTPUTS`. Stop if any is missing. Model: Sonnet 5.5.
-- **Why.** GPU execution is not new in itself (MPTRAC, Hoffmann et al., 2022),
-  and EASLEE (Brioude et al., 2026, doi:10.5194/egusphere-2026-5993) has a
-  partial GPU path. The paper's claim is footprint throughput for inversions,
-  so it needs like-for-like numbers.
+- **Why.** GPU execution is not new in itself, so the paper needs GLIDE's
+  speed set against other models in comparable units. **Only GLIDE is run.**
+  FLEXPART's numbers come from the human's reference runs, and the other
+  models' numbers from their papers; no other model is installed or run.
 - **Scope.**
-  - **The shared case:** backward runs from a fixed set of ETEX-1 samples
-    (for example 100), with the same particle count per release, the same
-    backward duration and the same output grid in each model. ETEX-1 is used
-    because EASLEE's published configuration and ERA5 inputs for it are public.
-  - **GLIDE:** on one GH200 GPU, and on the node's Grace CPU cores, with the
-    phase breakdown from the A0 benchmark script.
-  - **EASLEE:** run directly on the node, with no job submission; first on
-    its CPU backend at 1, 16 and all available threads, then with its GPU
-    backend (`EASLEE_ADVANCE=ka_gpu`) if it runs on the GH200. If the GPU
-    backend does not work on this hardware, report that rather than
-    patching EASLEE. Also reproduce EASLEE's published forward ETEX-1 timing
-    configuration once, to check the installation against the paper.
-  - **FLEXPART v11:** use the wall-clock times the human recorded for the
-    reference runs, scaled to footprints per hour, with their thread counts
-    and hardware stated. Do not run FLEXPART.
-  - Report footprints per hour, wall-clock time, hardware, thread counts,
-    particle counts and model versions in one table, and say which
-    differences between the setups could not be removed.
-- **Out of scope.** Tuning either reference model for speed beyond its
-  documented options; comparing accuracy (that is Tiers 2 and 3).
+  - **Against FLEXPART v11:** time GLIDE on the same backward releases as a
+    subset of the human's Tier 2 FLEXPART runs (same particle count per
+    release, same backward duration, same output grid), on one GH200 GPU and
+    on the node's Grace CPU cores. Express both models in footprints per hour,
+    with FLEXPART's thread count and hardware as recorded.
+  - **Against EASLEE's published figures** (Brioude et al., 2026,
+    doi:10.5194/egusphere-2026-5993, Sect. 5 and Table 4): their ETEX-1
+    reference case is 10⁶ particles for 2 days on ERA5, in 12.2 min on 16
+    threads of an AMD Threadripper 3970X and 4.9 min on an NVIDIA RTX 4080.
+    Run GLIDE's closest equivalent (10⁶ particles, 2 days, the ETEX-1 period
+    and domain on ERA5, backward), and compare in particle-steps per second,
+    noting what differs: direction, time step, turbulence scheme, output.
+  - **Against MPTRAC's published figures** (Hoffmann et al., 2022,
+    doi:10.5194/gmd-15-2731-2022): 10⁸ particles for 24 hours in 409 s on an
+    NVIDIA A100, about 16× faster than 12 CPU cores. MPTRAC computes
+    trajectories for the free troposphere and stratosphere without
+    boundary-layer turbulence, so run GLIDE twice: once as normal, and once
+    with turbulence and convection switched off, as the closest like-for-like
+    case. Use the largest particle count that fits on one GH200. Compare in
+    particle-steps per second.
+  - **One table** with, for each comparison: model, version, hardware,
+    particle count, duration, time step, wall-clock time, particle-steps per
+    second and, where meaningful, footprints per hour. State which
+    differences between the setups could not be removed and whether each
+    favours GLIDE or the other model.
+- **Out of scope.** Installing or running any model other than GLIDE;
+  comparing accuracy (that is Tiers 2 and 3).
 - **Acceptance.** The table and a short write-up in `docs/validation/`, the
-  scripts that produced them, and the EASLEE configuration files committed
-  (configuration only; no EASLEE source in the repository).
+  scripts and GLIDE configs that produced them, and the exact published
+  values quoted with their table or section numbers.
 
 ### B9 — Documentation upkeep (continuous)
 

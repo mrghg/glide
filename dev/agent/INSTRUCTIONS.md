@@ -278,7 +278,7 @@ a stop condition.
 | `GLIDE_DATA` | root of the local met cubes; the inventory in PROGRESS.md gives paths relative to it |
 | `GLIDE_AGENT_OUTPUTS` | run outputs, figures and long logs |
 | `GLIDE_SCRATCH` | scratch space; `UV_CACHE_DIR` and `TRITON_CACHE_DIR` are under it |
-| `GLIDE_FLEXPART_SRC`, `GLIDE_FLEXPART_OUTPUTS`, `GLIDE_NAME_FOOTPRINTS`, `GLIDE_EDGAR`, `GLIDE_ETEX`, `GLIDE_DATEM`, `GLIDE_EASLEE` | reference data and reference models held outside the repository, never copied into it |
+| `GLIDE_FLEXPART_SRC`, `GLIDE_FLEXPART_OUTPUTS`, `GLIDE_NAME_FOOTPRINTS`, `GLIDE_EDGAR`, `GLIDE_ETEX`, `GLIDE_DATEM` | reference data held outside the repository, never copied into it |
 
 Fixed facts:
 

@@ -45,7 +45,11 @@ maintainer. The boundary:
 - **Lossless by default.** Bit-rounding or other lossy compression is off by
   default. It is enabled for GLIDE only after a comparison against the golden
   fixtures shows its effect is negligible, with a decision record, because it
-  changes the model's inputs.
+  changes the model's inputs. MPTRAC is prior art here: its current release
+  (v3.2) reads meteorology compressed with ZFP, ZSTD, SZ3, LZ4, a multiscale
+  scheme and netCDF quantisation, with precision set per variable (see
+  `met_type` and the `met_*_prec` settings in its `src/mptrac.h`). Per-variable
+  precision is the model for what met-bazarr records.
 - **Pinning.** The pre-registration record and the v1 release pin the
   met-bazarr version used for the validation inputs, alongside the physics
   tag, and the release archives it.

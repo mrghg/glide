@@ -143,9 +143,6 @@ Work through this once. The queue assumes all of it.
       Run each standard case as its own single-release run, because the
       particle-position files do not record the release. Record every run's
       wall-clock time, thread count and hardware (task B11 uses them).
-- [ ] Before task B11: install EASLEE (github.com/jbrioude/easlee, GPL-3) and
-      the ERA5 inputs of its ETEX-1 case (Zenodo, doi:10.5281/zenodo.22951136)
-      outside the repository, and set `GLIDE_EASLEE`.
 - [ ] Download the ETEX and DATEM tracer data per `data/tracer-experiments.md`
       and set `GLIDE_ETEX` and `GLIDE_DATEM`. ETEX downloads by script; DATEM
       needs a browser.
