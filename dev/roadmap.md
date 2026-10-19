@@ -477,10 +477,16 @@ comparison is repeated once the physics is frozen.
 The GATES task list (`docs/code_review_2026-09-16.md` in the GATES repository)
 is independent and can be worked on at any time, as a third queue.
 
-met-bazarr has its own repository, instructions and tasks. GLIDE needs one
-thing from it before the pre-registration: stores in the `glide` format for
-the validation cases, which task B1 adopts. Until then GLIDE's existing
-download scripts stay in use.
+met-bazarr has its own repository, instructions and task list
+([`docs/roadmap.md`](https://github.com/mrghg/met-bazarr/blob/main/docs/roadmap.md)
+there). GLIDE needs from it, in order:
+- the `glide` format and ERA5 from the ARCO store (its tasks M1 and M2), for
+  task B1;
+- ERA5 ensemble columns for the standard cases (M3), for task A8a;
+- ERA5 for the tracer experiments (M5) and a released, citable version (M6),
+  for the pre-registration (A8b).
+
+Until B1, GLIDE's existing download scripts stay in use.
 
 ---
 
