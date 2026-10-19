@@ -31,7 +31,10 @@ engineering.
 
 5. **[met_schema.md](met_schema.md)** — the meteorology input contract. Variable
    names, units, sign conventions, vertical modes, chunking, storage precision.
-   Read this to prepare meteorology from a source that is not ARCO ERA5.
+   It is also the definition of the `glide` format written by
+   [met-bazarr](https://github.com/mrghg/met-bazarr), the separate repository
+   that prepares meteorology. Read this to prepare meteorology from a source
+   that is not ARCO ERA5.
 6. **[VALIDATION.md](VALIDATION.md)** — what has been verified and against what,
    what has **not**, and how to run a comparison against FLEXPART or NAME.
 7. **[validation-plan.md](validation-plan.md)** — the validation ladder still to

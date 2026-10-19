@@ -17,12 +17,14 @@ supply the files locally.
 | `era5/<DOMAIN>_<YYYYMM>.zarr` | Monthly ERA5 pressure-level cubes read by the EUROPE configs (`data/era5/EUROPE_*.zarr`). Tens of GB each; symlink `era5/` to bulk storage. | `scripts/download_sample_cube.py --domain EUROPE --year-month YYYYMM` |
 | `era5-model/<DOMAIN>_<YYYYMM>_ml.zarr` | The same on ERA5's 137 model levels. Kept apart from `era5/` so the configs' glob never mixes the two. | As above, plus `--levels model` |
 | `$GLIDE_ETEX`, `$GLIDE_DATEM` (outside the repository) | Tracer-experiment observations: ETEX, CAPTEX and ANATEX. | JRC and NOAA ARL; see [tracer-experiments.md](tracer-experiments.md). |
+| `$GLIDE_FLEXPART_SRC`, `$GLIDE_FLEXPART_OUTPUTS` and the other reference data for validation (outside the repository) | FLEXPART v11 source and its ERA5 reference runs, the ERA5 ensemble columns, and the other inputs the validation needs. | Listed in [docs/validation-plan.md](../docs/validation-plan.md) §8, with who provides each. |
 
 ## How to obtain the data
 
 - **ERA5 met** — public; fetch a local subset with
   `scripts/download_sample_cube.py` (no credentials needed for the public ARCO
-  buckets).
+  buckets). This moves to [met-bazarr](https://github.com/mrghg/met-bazarr) in
+  queue task B1.
 - **EDGAR emissions** — public (CC-BY) from the EDGAR portal linked above;
   regrid to the footprint grid as in the validation script.
 - **Tracer experiments (ETEX, CAPTEX, ANATEX)** — public, but both archives

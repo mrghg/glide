@@ -25,5 +25,6 @@ alternatives → Status**, with a pointer to the relevant `docs/` page.
 | [0013](0013-composite-met-source.md) | A composite met source, not a nesting feature (proposed, v1.x) |
 | [0014](0014-v1-scope-and-release-gate.md) | v1 scope: validated, fast footprint model without UQ |
 | [0015](0015-agent-driven-development-process.md) | Agent-driven development: one task per session, PR per task, human merges |
+| 0016 | _Reserved for queue task A00 (time-bin width in the footprint output)_ |
 | [0017](0017-model-levels-default.md) | ERA5 model levels as the default meteorology (proposed) |
-| [0018](0018-met-bazarr.md) | Meteorology preparation lives in met-bazarr, shared with GATES (proposed) |
+| [0018](0018-met-bazarr.md) | Meteorology preparation lives in met-bazarr (proposed; GATES may join) |

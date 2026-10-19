@@ -79,13 +79,22 @@ After runtime-impacting edits: run diagnostics on edited files, run at least the
 targeted tests for changed modules, and update [README.md](README.md) (and the
 relevant `docs/` page) for new flags or behaviour changes.
 
+## Physics changes and the freeze
+- Changes that alter model output are planned to land before the physics freeze
+  (roadmap 1a, tag `v0-physics`). Once that tag exists, any physics change
+  needs a decision record and a new physics version, and Tier 1–3 validation
+  runs follow the pre-registered protocol
+  ([docs/validation-plan.md](docs/validation-plan.md) §3). Never change GLIDE
+  just to make it agree with a reference model or to pass a tolerance.
+
 ## Keeping the docs current
 - Record a **major** design or physics decision as a short record in
   [dev/decisions/](dev/decisions/) (see its README for the format). Reflect the
   resulting behaviour in the relevant `docs/` page — decisions capture *why*,
   `docs/` capture *how*.
 - Keep [STATUS.md](STATUS.md) honest: update it when a milestone lands, a
-  validation number changes, or the "what's next" priorities shift.
+  validation number changes, or the "What is next" outline drifts from
+  [dev/roadmap.md](dev/roadmap.md).
 - Don't reopen a bloated chronological journal; use git history for narrative.
 
 ## Non-goals
@@ -95,5 +104,6 @@ relevant `docs/` page) for new flags or behaviour changes.
   [met-bazarr](https://github.com/mrghg/met-bazarr) repository, which writes
   stores in GLIDE's format; GLIDE reads them and does not import it
   ([dev/decisions/0018](dev/decisions/0018-met-bazarr.md)).
-- Don't reintroduce deployment infra (containers/cloud) until the architecture
-  has settled (see the Next Steps in the README).
+- Don't add deployment infrastructure (containers, cloud) outside the planned
+  packaging work: the container and installer for v1 come through queue task
+  B8 ([dev/agent/QUEUE.md](dev/agent/QUEUE.md)).

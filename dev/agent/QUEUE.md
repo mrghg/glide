@@ -105,8 +105,8 @@ Model: Opus 5.5, high effort. Run strictly in order unless a task is BLOCKED.
     larger cache.
   - **Docs.** `docs/met_schema.md` (default level type, ladder default, cache
     sizes), the README quick start, the ladder description in
-    `docs/physics.md`, `dev/agent-operations.md` data inventory, and STATUS.md
-    item 1 (done).
+    `docs/physics.md`, `dev/agent-operations.md` data inventory, and the
+    STATUS.md "Model-level meteorology" row (validated, now the default).
 - **Out of scope.** Removing pressure-level support; any physics change.
 - **Acceptance.** The comparison above reported in the task's progress file
   with a figure; a test that the default ladder has 40 levels and spans

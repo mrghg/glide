@@ -7,7 +7,7 @@ terrain-following levels, 13 below 1.5 km) were all set up for pressure levels.
 Pressure levels have only about 5 levels below 1.5 km, and they cut through
 terrain, so the lowest levels over high ground are ERA5's below-ground
 extrapolation. The model-level reader is implemented but not yet validated
-(STATUS.md, "what's next" item 1).
+(STATUS.md, "Model-level meteorology").
 
 **Decision.** Model levels become the default for all production and
 validation runs, before the physics freeze:
