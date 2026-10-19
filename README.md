@@ -295,7 +295,9 @@ production scheme and CPU-runnable guards for the CUDA-graph capture. See
 The hot path runs unmodified on CUDA. The SLURM scripts in `scripts/` are tuned
 for Isambard AI's Grace-Hopper nodes (aarch64, 4 × GH200 per node).
 
-**One-time setup**, in an interactive session on a login node:
+**One-time setup**, on a login node. The login nodes are Grace CPU nodes with no
+GPU, so this installs the CUDA build of PyTorch but cannot test it; the GPU check
+is in the interactive session below.
 
 ```bash
 module load cudatoolkit/24.11_12.6   # provides CUDA 12.6 runtime + nvcc/ptxas
@@ -303,8 +305,8 @@ module load cudatoolkit/24.11_12.6   # provides CUDA 12.6 runtime + nvcc/ptxas
 uv venv --python 3.11 .venv
 uv pip install --python .venv/bin/python -e ".[dev]"
 
-.venv/bin/python -c "import torch; print(torch.cuda.is_available(), torch.version.cuda)"
-# must print: True 12.6
+.venv/bin/python -c "import torch; print(torch.version.cuda)"
+# must print: 12.6  (the CUDA build is installed; no GPU is needed for this check)
 ```
 
 **Submitting:**
@@ -330,7 +332,8 @@ python -c "import torch; print('CUDA available:', torch.cuda.is_available(), tor
 python -m lpdm.main --config configs/smoke_mhd_single_release.yaml --device cuda
 ```
 
-The check must print `CUDA available: True 12.6`.
+The check must print `CUDA available: True 12.6`. This is the first point at
+which the GPU is visible, so run it once after the one-time setup.
 [`scripts/gpu_env.sh`](scripts/gpu_env.sh) is the same environment setup the
 SLURM script sources, so the two can't drift apart. It is safe to re-source,
 and does so if you `module load` anything else later in the session.
