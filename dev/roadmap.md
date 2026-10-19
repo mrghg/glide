@@ -526,7 +526,7 @@ FLEXPART.
 | Freeze, audit, reciprocity, pre-registration | 2–3 weeks |
 | FLEXPART comparison and tracer experiments | 8–12 weeks, mostly waiting for the reference runs |
 | Releases, high-resolution output and packaging, in parallel | no extra time |
-| **v1** | **roughly 4–5 months from 2026-09-16** |
+| **v1** | **roughly 4–5 months** |
 
 The estimate is the least reliable thing on this page. Use it to notice when
 work is slipping, not as a commitment.
