@@ -100,8 +100,9 @@ and returns only once the architecture settles.
 > until the first roadmap tasks merge.
 >
 > Meteorology download and preparation are moving to the separate
-> [met-bazarr](https://github.com/mrghg/met-bazarr) repository, shared with
-> GATES ([decision 0018](dev/decisions/0018-met-bazarr.md)).
+> [met-bazarr](https://github.com/mrghg/met-bazarr) repository
+> ([decision 0018](dev/decisions/0018-met-bazarr.md)), which may also take on
+> GATES's meteorology processing.
 
 1. **Validate the model-level meteorology path.** The reader, the hydrostatic
    pressure reconstruction and the download are all implemented. What remains is

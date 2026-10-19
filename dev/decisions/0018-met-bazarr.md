@@ -10,8 +10,11 @@ dependencies that neither model needs at run time. FLEXPART keeps its
 preparation tool, flex_extract, separate for the same reason.
 
 **Decision.** Meteorology preparation moves to a separate repository,
-[met-bazarr](https://github.com/mrghg/met-bazarr) (package `metbazarr`), shared
-by GLIDE and GATES. The boundary:
+[met-bazarr](https://github.com/mrghg/met-bazarr) (package `metbazarr`), built
+for GLIDE first. GATES's meteorology processing (currently
+[extract_UM_met](https://github.com/elenafillo/extract_UM_met)) may also be
+incorporated; that is still to be discussed with the team and the GATES
+maintainer. The boundary:
 
 - **met-bazarr does data preparation:**
   - download, by wrapping the existing clients, never by writing new ones;
@@ -31,10 +34,11 @@ by GLIDE and GATES. The boundary:
 
   These are covered by the physics freeze and the audit table, so they stay
   where the freeze applies.
-- **Named output formats, not arbitrary ones,** to begin with: a `glide` format
-  and a `gates` format. GLIDE's `docs/met_schema.md` remains the authoritative
-  definition of the `glide` format; met-bazarr implements it and records which
-  version it implements. Generalise once a third consumer exists.
+- **Named output formats, not arbitrary ones,** to begin with: a `glide`
+  format, and a `gates` format if GATES's processing is incorporated. GLIDE's
+  `docs/met_schema.md` remains the authoritative definition of the `glide`
+  format; met-bazarr implements it and records which version it implements.
+  Generalise once a third consumer exists.
 - **Provenance.** Every store records the met-bazarr version and commit, the
   source dataset, the output format and its version, and the compression
   settings. GLIDE copies these into each run's `run_metadata.json`.
@@ -49,14 +53,13 @@ by GLIDE and GATES. The boundary:
   existing reader and does not import `metbazarr`.
 
 **Rationale.** The download clients are the strongest reason: they are large,
-change often and have nothing to do with transport. One preparation tool also
-gives GLIDE and GATES identical inputs, which the GATES training campaign
-(roadmap 5a) needs, and one place to test the conversions where errors are
-silent (signs, units, accumulations).
+change often and have nothing to do with transport. It also gives one place to
+test the conversions where errors are silent (signs, units, accumulations). If
+GATES's processing is incorporated, the two models would get identical inputs
+from one tool, which would help the GATES training campaign (roadmap 5a).
 
 **Rejected alternatives.**
-- Keep preparation in GLIDE and GATES separately: duplicated, bloated, and the
-  two models' inputs could drift apart.
+- Keep preparation in GLIDE: GLIDE would carry every download client.
 - Move GLIDE's vertical resampling and other transforms into met-bazarr as
   well: part of the frozen physics would then live outside the freeze and the
   audit.

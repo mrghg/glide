@@ -51,8 +51,9 @@ Three lines of work ("tracks") lead there.
 - **Track B: how meteorology is stored and supplied.**
   - compressed copies of the meteorology, prepared by
     [met-bazarr](https://github.com/mrghg/met-bazarr), a separate repository
-    shared with GATES that wraps each centre's download client and writes
-    Zarr stores in each model's format
+    that wraps each centre's download client and writes Zarr stores in
+    GLIDE's format (GATES's meteorology processing may also move there, to be
+    agreed with the team and the GATES maintainer)
     ([decision 0018](decisions/0018-met-bazarr.md));
   - a cache prepared specifically for GLIDE;
   - the ability to combine several meteorological sources: a high-resolution

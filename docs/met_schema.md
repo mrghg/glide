@@ -7,7 +7,7 @@ reanalyses, NWP output and regional models can be used.
 
 This page is the authoritative definition of the `glide` output format of
 [met-bazarr](https://github.com/mrghg/met-bazarr), the separate repository that
-downloads and prepares meteorology for GLIDE and GATES
+downloads and prepares meteorology for GLIDE
 ([dev/decisions/0018](../dev/decisions/0018-met-bazarr.md)). A change here is a
 change to that format: note it in the decision records and tell met-bazarr.
 
