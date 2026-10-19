@@ -90,5 +90,10 @@ relevant `docs/` page) for new flags or behaviour changes.
 
 ## Non-goals
 - Don't add unrelated dependencies without strong justification.
+- Don't add meteorology download clients or source-format converters. Meteorology
+  preparation lives in the separate
+  [met-bazarr](https://github.com/mrghg/met-bazarr) repository, which writes
+  stores in GLIDE's format; GLIDE reads them and does not import it
+  ([dev/decisions/0018](dev/decisions/0018-met-bazarr.md)).
 - Don't reintroduce deployment infra (containers/cloud) until the architecture
   has settled (see the Next Steps in the README).

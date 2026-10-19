@@ -169,9 +169,10 @@ scored against.
 | CAPTEX | 1983-09-18 to 1983-10-30 | eastern US and SE Canada, including Dayton and Sudbury |
 | ANATEX | 1987-01-05 to 1987-03-29 | most of the US and southern Canada, including Glasgow MT |
 
-Download these on ERA5 model levels, the default
-([decision 0017](../dev/decisions/0017-model-levels-default.md)), fetching only
-the levels below the domain top.
+Prepare these with [met-bazarr](https://github.com/mrghg/met-bazarr)
+([decision 0018](../dev/decisions/0018-met-bazarr.md)) on ERA5 model levels,
+the default ([decision 0017](../dev/decisions/0017-model-levels-default.md)),
+fetching only the levels below the domain top.
 
 ANATEX covers about 2,000 hours over most of a continent, so it is the largest
 cube. Size it before downloading; the compressed met cache (queue task B1) helps.

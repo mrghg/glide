@@ -98,6 +98,10 @@ and returns only once the architecture settles.
 > the validation ladder in [docs/validation-plan.md](docs/validation-plan.md),
 > then the v1 release. The list below is the pre-roadmap ordering and is kept
 > until the first roadmap tasks merge.
+>
+> Meteorology download and preparation are moving to the separate
+> [met-bazarr](https://github.com/mrghg/met-bazarr) repository, shared with
+> GATES ([decision 0018](dev/decisions/0018-met-bazarr.md)).
 
 1. **Validate the model-level meteorology path.** The reader, the hydrostatic
    pressure reconstruction and the download are all implemented. What remains is

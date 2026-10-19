@@ -243,6 +243,11 @@ session continues automatically; no human action is needed.
 - Work outside a job allocation. If `SLURM_JOB_ID` is unset you are on a login
   node: stop at once and run nothing.
 - Download meteorology, or any dataset, without a task that authorises it.
+- Add a meteorology download client or source-format converter to GLIDE
+  (`cdsapi`, earthkit, `iris` and the like). Meteorology preparation lives in
+  the separate met-bazarr repository
+  ([decision 0018](../decisions/0018-met-bazarr.md)). If a task seems to need
+  one, describe what met-bazarr should provide in your progress file and stop.
 - Loosen a test tolerance, skip a test, or mark one xfail to make a run pass.
 - Change default configuration values silently. Defaults change only through a
   task that says so, with a decision record.

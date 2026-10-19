@@ -26,3 +26,4 @@ alternatives → Status**, with a pointer to the relevant `docs/` page.
 | [0014](0014-v1-scope-and-release-gate.md) | v1 scope: validated, fast footprint model without UQ |
 | [0015](0015-agent-driven-development-process.md) | Agent-driven development: one task per session, PR per task, human merges |
 | [0017](0017-model-levels-default.md) | ERA5 model levels as the default meteorology (proposed) |
+| [0018](0018-met-bazarr.md) | Meteorology preparation lives in met-bazarr, shared with GATES (proposed) |

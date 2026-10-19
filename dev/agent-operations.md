@@ -88,7 +88,12 @@ Work through this once. The queue assumes all of it.
 - [ ] Every local ERA5 cube listed in PROGRESS.md, with domain, period, level
       type, cadence and size. Model levels are the default from task A01 on
       ([decision 0017](decisions/0017-model-levels-default.md)), so download
-      new cubes on model levels.
+      new cubes on model levels. Prepare them with
+      [met-bazarr](https://github.com/mrghg/met-bazarr) once it writes the
+      `glide` format ([decision 0018](decisions/0018-met-bazarr.md)); until
+      then, with GLIDE's existing download scripts. Task B1 needs met-bazarr
+      stores for the reference configuration on both level types, and the
+      pre-registration (A8b) needs the validation inputs prepared with it.
 - [ ] The reference multi-site configuration
       (`configs/example_multisite_january.yaml` or its successor) points at a
       cube that exists. The shipped configs read `data/era5/EUROPE_*.zarr`

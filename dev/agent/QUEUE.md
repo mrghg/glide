@@ -91,7 +91,10 @@ Model: Opus 5.5, high effort. Run strictly in order unless a task is BLOCKED.
     a test only (decision 0010 keeps a/b out of production). Report whether the
     difference is small enough for the convection trigger and the omega-to-w
     conversion.
-  - **Change the defaults.** `scripts/download_sample_cube.py` and
+  - **Change the defaults.** (If met-bazarr already writes model-level stores
+    in the `glide` format when this task starts, use those for the
+    validation runs below and make only the config and ladder changes here;
+    the download scripts are retired in B1.) `scripts/download_sample_cube.py` and
     `scripts/download_era5_europe.slurm` download model levels by default,
     with an option to fetch only the levels below a given height (default:
     enough to cover `alt_max_m` of the shipped configs). Shipped configs read
@@ -401,12 +404,14 @@ Model: Opus 5.5, high effort. Run strictly in order unless a task is BLOCKED.
 
 ### A8b — Pre-registration record (1e)
 
-- **Size:** S. **Depends on:** A8a merged (which in turn needs A8, the tag and
-  B10). Model: Opus 5.5.
+- **Size:** S. **Depends on:** A8a and B1 merged (A8a in turn needs A8, the
+  tag and B10). Model: Opus 5.5.
 - **Scope.** Draft the pre-registration decision record (next free number) with
   every item listed in `docs/validation-plan.md` §3, "What is fixed":
   - the physics tag and its commit hash;
   - the scoring-code commit hash;
+  - the met-bazarr version and commit that prepared every validation input
+    store, read from the stores' provenance attributes;
   - the six standard cases with exact dates, and the full release lists for
     Tiers 1–3;
   - the metrics and the DATEM scoring options;
@@ -530,20 +535,50 @@ Model: Opus 5.5, high effort. Run strictly in order unless a task is BLOCKED.
 Model: Sonnet 5.5 unless a task says otherwise. Tasks are independent unless a
 dependency is listed; run in the listed order by default.
 
-### B1 — Met inventory and GLIDE-ready met cache (7d, 3a)
+### B1 — Adopt met-bazarr stores; GLIDE-ready met cache (3a, 7d)
 
-- **Size:** M. **Depends on:** nothing.
-- **Scope.** `scripts/build_met_cache.py`: from local cubes, subset to the
-  required variables and the levels below `alt_max_m`, optionally pre-resample
-  onto the AGL ladder, store as float16 or bit-rounded float32 with zstd, in a
-  Zarr layout the reader can open through the existing met contract (add a
-  `glide_cache` attribute set). A reader path that uses the cache when present.
-  Report storage before/after and met-fetch time before/after on the reference
-  config.
-- **Acceptance.** Golden comparison on the reference config within a declared
-  tolerance for the float16 variant and bit-identical for the lossless
-  variant; `docs/met_schema.md` documents the cache; benchmark shows the
-  met-fetch phase reduced.
+- **Size:** M. **Depends on:** a met-bazarr release that writes the `glide`
+  format, with stores for the reference configuration on pressure and model
+  levels listed in the data inventory (the human confirms both in
+  PROGRESS.md). Stop if either is missing. **Decision record:** 0018.
+- **Why.** Meteorology preparation now lives in met-bazarr
+  ([decision 0018](../decisions/0018-met-bazarr.md)), which wraps the
+  download clients GLIDE should not carry. GLIDE keeps its reader, its
+  physics transforms and a cache built for its own vertical grid.
+- **Scope.**
+  - **Read met-bazarr stores.** Confirm GLIDE's reader opens them through the
+    existing contract with no special casing; where it cannot, the store or
+    `docs/met_schema.md` is wrong, so report which rather than adding a
+    workaround. Copy each store's provenance attributes (met-bazarr version
+    and commit, source, format and version, compression) into
+    `run_metadata.json` (additive; authorised by this spec).
+  - **Equivalence.** On the reference config, footprints from the met-bazarr
+    lossless store are bit-identical on CPU to those from the cube GLIDE's
+    current download produces, on both pressure and model levels. If not,
+    find the cause before going further.
+  - **The GLIDE-ready cache (7d).** `scripts/build_met_cache.py` builds, from
+    a met-bazarr store, a cache with only the variables and levels GLIDE
+    uses, optionally pre-resampled onto the AGL ladder, in float32 or
+    float16; a reader path uses it when present (add a `glide_cache`
+    attribute set). This stays in GLIDE because it depends on GLIDE's
+    vertical grid.
+  - **Lossy options.** Compare bit-rounded met-bazarr stores and the float16
+    cache against the golden fixtures, and recommend in the progress file
+    whether either should be enabled. Neither is enabled by default in this
+    task; enabling one needs a decision record.
+  - **Retire GLIDE's download path.** Replace `scripts/download_sample_cube.py`
+    and `scripts/download_era5_europe.slurm` with pointers to met-bazarr,
+    keeping whatever the smoke tests and the README quick start need to make
+    the small sample cube (or point them at a met-bazarr command).
+  - **Docs.** `docs/met_schema.md` (met-bazarr produces the `glide` format;
+    the cache), README "Running on GPU" and quick start, `dev/agent-operations.md`
+    data inventory.
+- **Out of scope.** Changes to met-bazarr itself (report what it needs in the
+  progress file); any physics change.
+- **Acceptance.** The equivalence result on both level types; storage and
+  met-fetch time before and after; the golden comparison for each lossy
+  option with its recommendation; provenance in `run_metadata.json` with a
+  test; docs updated.
 
 ### B2 — Sparse and bit-rounded footprint output (7g)
 

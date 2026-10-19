@@ -301,6 +301,9 @@ A decision record in [dev/decisions/](../dev/decisions/) fixes the following:
   commit hash.
 - **The scoring code:** the commit hash of the verified scoring code in
   `scripts/validation/`.
+- **The meteorology:** the met-bazarr version and commit that prepared every
+  input store, and each store's compression settings, read from the stores'
+  provenance attributes ([decision 0018](../dev/decisions/0018-met-bazarr.md)).
 - **The cases:** the standard cases (§4) with their dates, and the full list
   of releases.
 - **The metrics**, exactly as coded. This includes three options in the DATEM
@@ -727,7 +730,7 @@ calibration.
 
 | Need | Tier | Who provides it | Notes |
 | --- | --- | --- | --- |
-| ERA5 data downloaded locally for the standard cases, on model levels (the default); pressure levels only for comparison | 0–2 | Human, with the existing download scripts | Listed in `dev/agent/PROGRESS.md` |
+| ERA5 stores for the standard cases, on model levels (the default); pressure levels only for comparison | 0–2 | Human, with met-bazarr (GLIDE's existing download scripts until task B1) | Listed in `dev/agent/PROGRESS.md` |
 | FLEXPART v11 on ERA5 via flex_extract: gridded output for each release; particle-position snapshots at 6, 24, 72 and 120 h for the six standard cases; five repeat-seed runs of one week of hourly releases at three sites | 2 | Human | FLEXPART's output does not depend on GLIDE, so these runs can be done once, early. The repeat-seed runs give the Tier 2 noise floor (§3). Run each standard case as its own FLEXPART run with a single release: FLEXPART's particle-position files do not record which release a particle came from |
 | ERA5 ensemble (EDA) members for the columns of the standard cases | 1 | Human, from the Copernicus Climate Data Store ("ensemble members" product type; not in the Google Cloud ERA5 copy) | Small: single columns, pressure levels. For the Tier 1 tolerance rule (§3) |
 | The model-error term the group's UK inversion assumes at each site | 2 | Group | For the Tier 2 concentration rule (§3) |
@@ -735,7 +738,7 @@ calibration.
 | NAME footprints for the same sites and dates | 2 | Group archive (restricted) | Secondary comparison, and the ceiling in the Tier 2 tolerance rules (§3) |
 | ETEX observations (JRC) | 3 | Human, using a download script | Instructions in [data/tracer-experiments.md](../data/tracer-experiments.md) |
 | CAPTEX and ANATEX observations, DATEM's scoring software and its HYSPLIT example output (NOAA DATEM) | 3 | Human, downloaded through a web browser | Same page |
-| ERA5 for ETEX (Oct–Nov 1994, Europe), CAPTEX (Sep–Oct 1983) and ANATEX (Jan–Mar 1987), both North America | 3 | Human, with the existing download scripts | On model levels. ANATEX is the largest download; estimate its size first |
+| ERA5 for ETEX (Oct–Nov 1994, Europe), CAPTEX (Sep–Oct 1983) and ANATEX (Jan–Mar 1987), both North America | 3 | Human, with met-bazarr | On model levels. ANATEX is the largest download; estimate its size first |
 | Radon-222 concentrations and an emission map | 3 | Human | |
 | EDGAR or a similar emissions map, for the concentration comparison | 2 | Group archive (restricted) | |
 | UK DECC network data and the group's inversion setup | 4 | Group | Needed at the paper stage |

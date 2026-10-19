@@ -49,7 +49,12 @@ Three lines of work ("tracks") lead there.
   estimate of transport error that an inversion can use. Finally, the
   parameters are calibrated against observations.
 - **Track B: how meteorology is stored and supplied.**
-  - compressed, cached copies of the meteorology;
+  - compressed copies of the meteorology, prepared by
+    [met-bazarr](https://github.com/mrghg/met-bazarr), a separate repository
+    shared with GATES that wraps each centre's download client and writes
+    Zarr stores in each model's format
+    ([decision 0018](decisions/0018-met-bazarr.md));
+  - a cache prepared specifically for GLIDE;
   - the ability to combine several meteorological sources: a high-resolution
     regional model inside a global one, ensemble members, or the output of
     machine-learning weather models;
@@ -173,31 +178,37 @@ Explanations of each item follow each table.
 
 | ID | Item | Size | Needs | Changes output? | Release |
 | --- | --- | --- | --- | --- | --- |
-| 3a | Compressed meteorology stores; a store for the ERA5 ensemble | S | none | no | v1 |
+| 3a | Compressed meteorology stores; a store for the ERA5 ensemble (in met-bazarr) | S | none | no | v1 |
 | 3b | Combining several meteorological sources | L | none | yes | v1.x |
-| 3c | Met Office UKV nested inside the global model | M | 3b | yes | v1.x |
+| 3c | Met Office UKV nested inside the global model (converter in met-bazarr) | M | 3b | yes | v1.x |
 | 3d | Machine-learned compression of meteorology | L | 2c, 3b | — | research |
 | 3e | Generated meteorological perturbations | L | 3d | — | research |
 | 3f | Meteorology stored as a neural network | L | 3d | — | research |
 
-- **3a.** Store the meteorology with its precision reduced to what is
-  physically meaningful ("bit rounding"), then compressed losslessly with
-  zstd, so files are much smaller with no meaningful loss. Also a store for
-  the ERA5 Ensemble of Data Assimilations (EDA), a 10-member ensemble that
-  samples uncertainty in the meteorology.
+- **3a.** Built in met-bazarr: compressed Zarr stores of the meteorology, in
+  GLIDE's format, with provenance recorded in each store. Lossless
+  compression by default; reducing precision to what is physically meaningful
+  ("bit rounding") makes files much smaller, but it changes GLIDE's inputs, so
+  it is enabled only after a comparison shows the effect is negligible
+  ([decision 0018](decisions/0018-met-bazarr.md)). Also a store for the ERA5
+  Ensemble of Data Assimilations (EDA), a 10-member ensemble that samples
+  uncertainty in the meteorology. GLIDE adopts these stores in task B1.
 - **3b.** Lets GLIDE read several meteorological sources at once, each with
   its own area, time resolution and vertical levels. For each particle, GLIDE
   uses the finest source that covers it. The same mechanism handles nested
   regional models, ensemble members and machine-learning weather models
   ([decision 0013](decisions/0013-composite-met-source.md)).
 - **3c.** The first use of 3b: the Met Office's 1.5 km UK model (UKV) nested
-  inside its global model (UMG). This needs a converter for Met Office files,
-  and physics settings that can differ between the two domains. It also
+  inside its global model (UMG). The converter for Met Office files belongs in
+  met-bazarr; the nesting, and physics settings that can differ between the
+  two domains, belong in GLIDE. It also
   allows a direct comparison with NAME on the same meteorology.
 - **3d.** A neural network (for example a variational autoencoder) that
   compresses meteorology much further than 3a. It is trained so that
   footprints computed from the compressed fields match those from the
-  originals, not just so that the fields look similar.
+  originals, not just so that the fields look similar. The training needs
+  GLIDE's footprint derivatives, so it lives with GLIDE; storing and serving
+  the compressed form would be a met-bazarr output format.
 - **3e.** A generative model, trained on the spread of the ERA5 ensemble, that
   produces realistic perturbations to the meteorology. This would sample
   meteorological uncertainty more cheaply than running a full ensemble.
@@ -349,8 +360,8 @@ All are addressed in v1, and 8e before the physics audit (1c).
 - **7c.** For satellite footprints, run particles backward for a shorter
   period and hand over to a global model's concentrations at the end (see
   4a), instead of running for many days.
-- **7d.** A local copy of the meteorology with only the variables and levels
-  GLIDE uses. It is already interpolated onto GLIDE's terrain-following
+- **7d.** Built in GLIDE from met-bazarr's stores: a local copy of the
+  meteorology with only the variables and levels GLIDE uses. It is already interpolated onto GLIDE's terrain-following
   vertical levels and stored at reduced precision, so it is faster to read.
 - **7e.** Interpolating the meteorology to each particle position is a large
   part of the run time. Holding the fields in 16-bit rather than 32-bit
@@ -387,7 +398,7 @@ v1 does not include uncertainty quantification.
 | Validation Tiers 0–3 (1b–1e) | Combining meteorological sources, and nesting (3b, 3c) |
 | Point, tower, column and satellite releases, with particle end positions saved (4, 4a) | Machine-learned compression and the other research items |
 | High-resolution footprint near the receptor (4b) | Inversions without stored footprints, machine-learning weather input, simulation-based inference |
-| Meteorology cache and compressed stores (3a, 7d), smaller footprint files (7g), releases grouped by start time (7h), particle count per release (4e) | |
+| Meteorology from met-bazarr stores (3a) and the GLIDE-ready cache (7d), smaller footprint files (7g), releases grouped by start time (7h), particle count per release (4e) | |
 | Parameter ensembles, as infrastructure only (2a) | |
 | Packaging: installable with pip, a container, a command-line interface, a tutorial, a stable output format and a DOI | |
 
@@ -413,7 +424,8 @@ same checklist is the final task in [dev/agent/QUEUE.md](agent/QUEUE.md).
 - A performance table is published: footprints per second on a GH200 GPU and
   on CPU for a standard configuration, with the time spent in each phase.
 - The results are reproducible: fixed software versions, a container, fixed
-  random seeds, archived inputs for the validation cases, and a DOI.
+  random seeds, archived inputs for the validation cases, and a DOI. The
+  met-bazarr version that prepared those inputs is pinned and archived too.
 - The documentation covers:
   - installation and a quick start;
   - the required meteorology format and the output format;
@@ -464,6 +476,11 @@ comparison is repeated once the physics is frozen.
 
 The GATES task list (`docs/code_review_2026-09-16.md` in the GATES repository)
 is independent and can be worked on at any time, as a third queue.
+
+met-bazarr has its own repository, instructions and tasks. GLIDE needs one
+thing from it before the pre-registration: stores in the `glide` format for
+the validation cases, which task B1 adopts. Until then GLIDE's existing
+download scripts stay in use.
 
 ---
 
