@@ -15,7 +15,8 @@
 #     GLIDE_DEVICE=cuda sbatch scripts/run_periodic.slurm   # see GPU block below
 #
 # BEFORE FIRST USE, fill in the lines marked  # >>> EDIT:
-#   - account / partition (cluster-specific; delete if your cluster has defaults)
+#   - account / partition: none needed on Isambard AI (the scheduler chooses
+#     them); add #SBATCH lines only if another cluster requires them
 #   - module load / venv activation for your cluster's Python
 #   - confirm the met data is readable at the path in the YAML `io.zarr_store`
 #     (default data/era5/EUROPE_*.zarr) from the compute node's filesystem
@@ -30,17 +31,15 @@
 #SBATCH --cpus-per-task=16                  # see threading note below: ~16 is the
                                             # sweet spot; 48 is ~25% SLOWER here.
 #SBATCH --mem=32G                           # >>> EDIT: steady-state RSS ~3-8 GB; headroom for met cache
-#SBATCH --account=CHEM007981                # >>> EDIT: uncomment + set if your cluster requires it
-#SBATCH --partition=compute
 
 # --- GPU alternative -------------------------------------------------------
 # The model is device-agnostic (cuda -> mps -> cpu). A single GPU is much faster
-# for the interpolation-heavy step. To run on GPU instead of CPU:
-#   1. comment out the CPU --partition above,
-#   2. uncomment the two lines below (set the GPU partition),
-#   3. submit with  GLIDE_DEVICE=cuda sbatch scripts/run_periodic.slurm
+# for the interpolation-heavy step. On Isambard AI, where every node has GPUs,
+# use scripts/run_periodic_cuda.slurm instead. Elsewhere, to run on GPU:
+#   1. uncomment the --gres line below (and add a GPU partition if your
+#      cluster needs one),
+#   2. submit with  GLIDE_DEVICE=cuda sbatch scripts/run_periodic.slurm
 #      (and make sure the venv's torch is a CUDA build).
-##SBATCH --partition=CHANGE_ME_GPU
 ##SBATCH --gres=gpu:1
 # ---------------------------------------------------------------------------
 

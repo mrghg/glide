@@ -5,7 +5,7 @@ what GLIDE is, see [README.md](README.md); for the physics and engineering, see
 [docs/](docs/); for why the major choices were made, see
 [dev/decisions/](dev/decisions/). Narrative history lives in git.
 
-_Last updated: 2026-08-14._
+_Last updated: 2026-10-19._
 
 > **Research code under active development. The physics has not been validated
 > against other models or observations. Not for production use.**
@@ -20,20 +20,23 @@ _Last updated: 2026-08-14._
 | **Turbulence** | Hanna (1982) in three regimes, aligned to FLEXPART v11; gradient-Richardson free-troposphere closure; Maryon meander. Behind a swappable `TurbulenceScheme` interface. ([docs/turbulence.md](docs/turbulence.md)) |
 | **Convection** | Reduced Emanuel mass-flux scheme, non-divergent matrix, once per meteorology window. ([docs/convection.md](docs/convection.md)) |
 | **Terrain-following vertical coordinate** | Meteorology resampled onto a fixed AGL grid per window, with slope-corrected vertical velocity. Fixed the zero-surface-footprint problem over high terrain. |
-| **Model-level meteorology** | Reader auto-detects hybrid model levels and reconstructs per-level pressure hydrostatically. Download path implemented (`--levels model`). **Plumbing complete; not yet validated.** |
+| **Model-level meteorology** | Reader auto-detects hybrid model levels and reconstructs per-level pressure hydrostatically. Download path implemented (`--levels model`). **Plumbing complete; not yet validated.** Becomes the default in task A01 ([decision 0017](dev/decisions/0017-model-levels-default.md)). |
 | **Multi-site releases** | `multi_point_periodic` — sites share meteorology windows, so per-window costs amortise across the whole network. |
 | **Streaming output** | `footprints.zarr` (5-D), `endpoint_particles.parquet`, `trajectory_diagnostics.parquet`, `run_metadata.json`, written per batch. |
 | **GPU execution** | Whole per-step body captured as one CUDA graph, device-gated; the eager CPU path is the numerical reference. ([docs/architecture.md](docs/architecture.md)) |
-| **Tests** | 298 passing, 90% statement coverage, ~135 s, no network. Includes analytic dispersion checks and well-mixed gates. ([docs/VALIDATION.md](docs/VALIDATION.md)) |
+| **Tests** | 319 passing, 90% statement coverage, about 2.5 minutes, no network. Includes analytic dispersion checks and well-mixed gates. ([docs/VALIDATION.md](docs/VALIDATION.md)) |
 
 ---
 
 ## What is not validated
 
 **This is the gating item for everything else.** The transport physics has not
-been compared against external references. The comparison machinery exists
-(`src/lpdm/comparison.py`, the notebooks under `notebooks/`), and a
-NAME/FLEXPART/EDGAR comparison is in progress, but nothing is signed off.
+been compared against external references in a way that can be signed off. The
+comparison machinery exists (`src/lpdm/comparison.py`, the notebooks under
+`notebooks/`), and earlier NAME and FLEXPART comparisons were exploratory. The
+validation that counts is the pre-registered ladder in
+[docs/validation-plan.md](docs/validation-plan.md), run once the physics is
+frozen.
 
 Three things a reader should know about the comparison history:
 
@@ -54,8 +57,8 @@ Three things a reader should know about the comparison history:
   of the same Hanna equations.
 
 The same "changes magnitudes everywhere" argument applies to the switch to native
-model levels, which is why it is sequenced *before* the big validation run below
-rather than after.
+model levels, which is why it is sequenced before the physics freeze and the
+validation (task A01).
 
 ---
 
@@ -73,7 +76,7 @@ wall. What remains:
 - **The untimed per-step "residual"** is the standout consumer — the wind-mean
   diagnostic, mask/liveness bookkeeping, per-batch particle generation and output
   writes, and Python loop overhead. This, not more graph work, is the next lever.
-  First step is to sub-time it to see what is actually in it.
+  First step is to sub-time it to see what is actually in it (task A1).
 - **Convection needs re-profiling.** The A/B that flagged it as a co-frontier at
   ~250 ms/window ran *before* the parcel lift was vectorised; that change removed
   a per-level loop and ~1,100 host synchronisations per window, so convection
@@ -86,39 +89,40 @@ wall. What remains:
 
 Primary GPU target is **Isambard AI (NVIDIA GH200)** via SLURM; the local
 development box is CPU-only. The codebase stays device-agnostic and the eager CPU
-path remains the numerical reference. Containerised/cloud packaging was removed
-and returns only once the architecture settles.
+path remains the numerical reference. An earlier container setup was removed;
+packaging, including an Apptainer container for Isambard, returns for the v1
+release (task B8).
 
 ---
 
-## What is next, roughly in order
+## What is next
 
-1. **Validate the model-level meteorology path.** The reader, the hydrostatic
-   pressure reconstruction and the download are all implemented. What remains is
-   a GH200 run on a model-level cube (~3.7× the vertical data — stream only the
-   lowest ~60–90 levels) and a check on whether the hydrostatic pressure
-   approximation is tight enough for convection. This lands *before* item 2,
-   because it shifts footprint magnitudes everywhere.
+The plan is [dev/roadmap.md](dev/roadmap.md): every item with an ID, the v1
+scope and release gate, and the sequence. The tasks themselves are in
+[dev/agent/QUEUE.md](dev/agent/QUEUE.md), and the validation protocol is
+[docs/validation-plan.md](docs/validation-plan.md). In outline:
 
-2. **Physics validation against NAME and FLEXPART** on identical release setups,
-   with the current defaults. Everything downstream depends on this.
+1. **Prepare** (human): environment, data inventory, FLEXPART v11 reference runs
+   on ERA5, tracer-experiment data.
+2. **Before the physics freeze**, in order: fix the footprint time-bin labels
+   (A00); validate model-level meteorology and make it the default (A01); golden
+   fixtures and benchmarks (A0); sub-time the residual phase (A1); optional
+   kernel deposition (A2); per-particle time steps (A3); local coordinates and
+   half-precision meteorology (A4); sorting particles for memory locality
+   (A4b); convergence studies that set the defaults
+   (A5); the reciprocity test (A6); in-batch parameter ensembles (A7).
+   In parallel: meteorology from [met-bazarr](https://github.com/mrghg/met-bazarr)
+   (B1, [decision 0018](dev/decisions/0018-met-bazarr.md)), smaller outputs,
+   column and satellite releases, the high-resolution near-receptor footprint,
+   figure tooling and packaging.
+3. **Freeze** the physics (`v0-physics`) with an external audit (A8).
+4. **Pre-register** the validation on OSF, with tolerances computed from
+   reference data only (A8a, A8b).
+5. **Validate**: Tier 1 component comparison with FLEXPART, Tier 2 whole-model
+   comparison, Tier 3 tracer experiments (A9 to A11).
+6. **Release v1**, then the model paper.
 
-3. **Performance: sub-time and attack the residual phase.** Any further
-   convection work is gated on the re-profile above.
-
-4. **Column releases** — tower inlets and aircraft profiles via importance
-   sampling over a pressure-weighted vertical PDF.
-
-5. **Satellite-style releases** — many irregular soundings per overpass, each
-   with its own averaging kernel. The flat `release` axis already accommodates
-   the geometry; the generator and weighting remain.
-
-6. **Particle aggregation** — far-field merging for compute savings, preserving
-   mass and moments, with no-merge zones in the boundary layer.
-
-7. **Convection refinements** — the full Emanuel quasi-equilibrium closure, and
-   per-column rather than bounding-box-mean profiles, if validation shows
-   under-convective transport.
+Particle aggregation (roadmap 6b) and convection refinements (6c) are after v1.
 
 ---
 
@@ -135,5 +139,5 @@ relevant docs page with its consequence.
 - **Meander timescale is not tied to the met cadence.** It defaults to 1800 s,
   half the hourly ERA5 interval, and stays there on a coarser source. Left as an
   explicit knob because changing it moves results.
-- **Forward/backward reciprocity test deferred.** It would test the backward
-  formulation directly, which nothing else does.
+- **Forward/backward reciprocity test.** It tests the backward formulation
+  directly, which nothing else does. Planned as task A6.

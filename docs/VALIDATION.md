@@ -31,7 +31,7 @@ comparison against another model yourself.
 .venv/bin/python -m pytest -q tests/test_physics.py # engine primitives only
 ```
 
-**298 tests across 16 files, ~135 s, 90% statement coverage, no network access.**
+**319 tests across 16 files, about 2.5 minutes, 90% statement coverage, no network access.**
 End-to-end tests use synthetic meteorology through `AnalyticMetReader`, so
 nothing depends on remote ERA5 or on the restricted validation datasets. Tests
 share no state and run order is irrelevant. Stochastic tests are seeded.
@@ -42,13 +42,13 @@ share no state and run order is irrelevant. Stochastic tests are seeded.
 
 | File | Scope | Tests |
 | --- | --- | --- |
-| `test_met_reader.py` | Reader mechanics: units, ω→w, heat-flux sign, longitude conventions, multi-store stitching, model-level detection, terrain-following wiring | 40 |
+| `test_met_reader.py` | Reader mechanics: units, ω→w, heat-flux sign, longitude conventions, multi-store stitching, model-level detection, terrain-following wiring | 54 |
 | `test_main_config.py` | Config schema, release expansion, batching | 39 |
-| `test_hanna.py` | Regime formulae, stability classification, meander, sub-step machinery, per-window caches, compile gating, static/dynamic equivalence | 35 |
-| `test_main_runtime.py` | End-to-end on synthetic met: trajectories, well-mixed through the production scheme, static/dynamic parity, graph guards, outputs, memory-guard aborts | 34 |
+| `test_main_runtime.py` | End-to-end on synthetic met: trajectories, well-mixed through the production scheme, static/dynamic parity, graph guards, outputs, memory-guard aborts | 37 |
+| `test_hanna.py` | Regime formulae, stability classification, meander, sub-step machinery, per-window caches, compile gating, static/dynamic equivalence | 36 |
 | `test_vertical_grid.py` | Terrain-following resample kernels: AGL regrid, sub-surface exclusion, slope correction, hydrostatic model-level pressure | 24 |
-| `test_download_sample_cube.py` | Meteorology download helper | 22 |
-| `test_convection.py` | Emanuel: thermodynamics, LCL/LNB/CAPE, mass-flux matrix non-divergence and well-mixedness | 19 |
+| `test_download_sample_cube.py` | Meteorology download helper | 23 |
+| `test_convection.py` | Emanuel: thermodynamics, LCL/LNB/CAPE, mass-flux matrix non-divergence and well-mixedness | 21 |
 | `test_footprint.py` | Gridder: binning, conservation, drop contracts, per-release scatter | 18 |
 | `test_comparison.py` | STILT conversion + conservative regridding | 18 |
 | `test_release_generator.py` | Point / column / batch particle generation, seeding | 15 |
@@ -195,8 +195,8 @@ degrades to eager rather than killing the run.
 
 **One deferred test.** A forward/backward reciprocity check (run a
 source–receptor pair both ways and require agreement) would test the backward
-formulation itself, which nothing else does directly. It is specified but not
-implemented.
+formulation itself, which nothing else does directly. It is planned as queue
+task A6 ([docs/validation-plan.md](validation-plan.md), Tier 0).
 
 **Sequencing caveat.** Both the terrain-following coordinate and the move to
 native model levels change footprint magnitudes *everywhere*, not only over
@@ -227,7 +227,10 @@ Align these fields:
 `configs/example_mhd_january_periodic.yaml` (hourly releases) are both already
 aligned with the FLEXPART reference fixture
 `data/FLEXPART/FLEXPART_MHD_test_202401.nc`. The fixture is not redistributed
-with the repository; see [data/README.md](../data/README.md) for access.
+with the repository; see [data/README.md](../data/README.md) for access. It was
+driven by different meteorology from ERA5, so differences against it mix
+meteorology and model; the ERA5-driven FLEXPART runs of the validation plan
+(Tier 2) are the reference for model comparisons.
 
 ### Step 2 — convert to STILT units
 
