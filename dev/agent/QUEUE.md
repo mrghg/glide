@@ -682,6 +682,42 @@ dependency is listed; run in the listed order by default.
   the repository. `data/tracer-experiments.md` §5 updated. No data files
   committed.
 
+### B11 — Performance comparison with FLEXPART and EASLEE (1h)
+
+- **Size:** S–M. **Depends on:** A8 merged (so the numbers describe the frozen
+  model) and B1; the ETEX-1 ERA5 store in the data inventory; EASLEE
+  installed by the human at `$GLIDE_EASLEE`, with the ERA5 input files its
+  ETEX-1 reference case uses; the FLEXPART reference runs' wall-clock times in
+  `$GLIDE_FLEXPART_OUTPUTS`. Stop if any is missing. Model: Sonnet 5.5.
+- **Why.** GPU execution is not new in itself (MPTRAC, Hoffmann et al., 2022),
+  and EASLEE (Brioude et al., 2026, doi:10.5194/egusphere-2026-5993) has a
+  partial GPU path. The paper's claim is footprint throughput for inversions,
+  so it needs like-for-like numbers.
+- **Scope.**
+  - **The shared case:** backward runs from a fixed set of ETEX-1 samples
+    (for example 100), with the same particle count per release, the same
+    backward duration and the same output grid in each model. ETEX-1 is used
+    because EASLEE's published configuration and ERA5 inputs for it are public.
+  - **GLIDE:** on one GH200 GPU, and on the node's Grace CPU cores, with the
+    phase breakdown from the A0 benchmark script.
+  - **EASLEE:** run directly on the node, with no job submission; first on
+    its CPU backend at 1, 16 and all available threads, then with its GPU
+    backend (`EASLEE_ADVANCE=ka_gpu`) if it runs on the GH200. If the GPU
+    backend does not work on this hardware, report that rather than
+    patching EASLEE. Also reproduce EASLEE's published forward ETEX-1 timing
+    configuration once, to check the installation against the paper.
+  - **FLEXPART v11:** use the wall-clock times the human recorded for the
+    reference runs, scaled to footprints per hour, with their thread counts
+    and hardware stated. Do not run FLEXPART.
+  - Report footprints per hour, wall-clock time, hardware, thread counts,
+    particle counts and model versions in one table, and say which
+    differences between the setups could not be removed.
+- **Out of scope.** Tuning either reference model for speed beyond its
+  documented options; comparing accuracy (that is Tiers 2 and 3).
+- **Acceptance.** The table and a short write-up in `docs/validation/`, the
+  scripts that produced them, and the EASLEE configuration files committed
+  (configuration only; no EASLEE source in the repository).
+
 ### B9 — Documentation upkeep (continuous)
 
 - **Size:** S per pass. Run whenever the human asks, or after every four

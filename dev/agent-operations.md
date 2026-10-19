@@ -130,6 +130,10 @@ Work through this once. The queue assumes all of it.
       Copernicus Climate Data Store (not in the Google Cloud ERA5 copy), list them in
       the data inventory, and put the model-error value the UK inversion
       assumes at each site in a small CSV under `$GLIDE_DATA`, also listed.
+- [ ] Build FLEXPART v11 for the reference runs with `lusekerneloutput =
+      .false.` in `src/par_mod.f90`, so it attributes each particle to one
+      output cell as GLIDE does in validation (validation-plan Tier 2); keep a
+      default build for one comparison case.
 - [ ] Start the FLEXPART v11 on ERA5 reference runs for the case library now.
       They do not depend on GLIDE, so they are done once, and they are the
       critical path for Tier 2 and for the tolerances. Besides gridded output
@@ -137,7 +141,11 @@ Work through this once. The queue assumes all of it.
       for the six standard cases, and five runs differing only in random seed
       for one week of hourly releases at three sites (the Tier 2 noise floor).
       Run each standard case as its own single-release run, because the
-      particle-position files do not record the release.
+      particle-position files do not record the release. Record every run's
+      wall-clock time, thread count and hardware (task B11 uses them).
+- [ ] Before task B11: install EASLEE (github.com/jbrioude/easlee, GPL-3) and
+      the ERA5 inputs of its ETEX-1 case (Zenodo, doi:10.5281/zenodo.22951136)
+      outside the repository, and set `GLIDE_EASLEE`.
 - [ ] Download the ETEX and DATEM tracer data per `data/tracer-experiments.md`
       and set `GLIDE_ETEX` and `GLIDE_DATEM`. ETEX downloads by script; DATEM
       needs a browser.

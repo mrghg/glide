@@ -75,6 +75,20 @@ needed for a particle model.
   such as GATES, redundant here.
 - Adaptive quadtree grids: dynamic shapes and complexity; two aligned regular
   grids suffice.
+- A per-particle bandwidth from the distance to its nearest neighbours, as in
+  EASLEE (Brioude et al., 2026, Sect. 2.16; doi:10.5194/egusphere-2026-5993),
+  which uses the mean squared distance to the 12 nearest particles. It is the
+  closest related method, and more local than ours, so it follows a split
+  plume without the split-plume test A2 adds. EASLEE computes it only at
+  output times. GLIDE deposits at every step inside the captured CUDA graph,
+  where a neighbour search per step would add a spatial hash and a variable
+  amount of work to every step, against a few sync-free reductions per
+  release and age band for the cloud spread. If the split-plume test or the
+  convergence study (A5) shows our bandwidth over-smoothing, a per-step
+  neighbour bandwidth is the first alternative to try. EASLEE's ETEX-1 result,
+  where changing the output kernel moved the near-source correlation from
+  0.66 to 0.33 through a single station, also supports keeping delta
+  deposition for validation.
 
 **Status.** Proposed 2026-09-16; revised 2026-10-14 to tie the bandwidth to
 cloud spread and to restrict the kernel to production use after convergence.

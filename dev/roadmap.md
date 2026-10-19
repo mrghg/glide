@@ -134,7 +134,12 @@ Explanations of each item follow each table.
   of NAME footprints, and compare the results. This is the paper's
   application.
 - **1h.** The model description paper (for GMD), a public benchmark that
-  others can run, and everything needed to reproduce the results.
+  others can run, and everything needed to reproduce the results. The paper
+  compares GLIDE's speed directly with FLEXPART v11 and with EASLEE (Brioude
+  et al., 2026), a recent FLEXPART-family model in Julia with a partial GPU
+  path, on the same backward cases (task B11). GPU execution as such is not
+  new (MPTRAC, Hoffmann et al., 2022), so the comparison is about footprint
+  throughput for inversions.
 
 ### Transport uncertainty (Track A)
 
@@ -423,7 +428,9 @@ same checklist is the final task in [dev/agent/QUEUE.md](agent/QUEUE.md).
     statistics, within the range published for NAME, FLEXPART, HYSPLIT and
     STILT.
 - A performance table is published: footprints per second on a GH200 GPU and
-  on CPU for a standard configuration, with the time spent in each phase.
+  on CPU for a standard configuration, with the time spent in each phase, and
+  the same backward cases timed in FLEXPART v11 and EASLEE on stated hardware
+  (task B11).
 - The results are reproducible: fixed software versions, a container, fixed
   random seeds, archived inputs for the validation cases, and a DOI. The
   met-bazarr version that prepared those inputs is pinned and archived too.

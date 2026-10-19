@@ -168,8 +168,20 @@ The main reference is **FLEXPART v11 driven by ERA5**. Both models use ERA5 on
 its native model levels: FLEXPART through its preparation tool, flex_extract,
 and GLIDE from the same fields in the ARCO ERA5 archive. Differences then come
 from the transport, not the meteorology, apart from the declared differences
-in how each model derives its vertical velocity (§1). The
-comparison works in the order below. Each level is stricter than the one after
+in how each model derives its vertical velocity and its boundary-layer inputs
+(§1).
+
+**FLEXPART's output smoothing is switched off for these runs.** By default
+FLEXPART v11 spreads each particle older than three hours over the four
+nearest output cells (a uniform kernel), and attributes younger particles to
+the single cell they are in. The switch is a compile-time constant,
+`lusekerneloutput` in `src/par_mod.f90`. The reference runs use a FLEXPART
+build with it set to `.false.`, so that both models attribute each particle
+to one cell, as GLIDE does in validation (§3). One standard case is also run
+with the default build, to show how much the smoothing changes FLEXPART's own
+footprints.
+
+The comparison works in the order below. Each level is stricter than the one after
 it, because each later level averages over more detail.
 
 1. **The particle clouds themselves,** from snapshots of FLEXPART's particle
@@ -227,6 +239,14 @@ CAPTEX and ANATEX are especially useful because the same score has already
 been published for four established models on them:
 - NAME (Selvaratnam, Thomson and Webster, 2023, doi:10.1175/JAMC-D-23-0021.1);
 - HYSPLIT, STILT and FLEXPART (Hegarty et al., 2013).
+
+A newer FLEXPART-family model, EASLEE (Brioude et al., 2026,
+doi:10.5194/egusphere-2026-5993), has published scores for ETEX-1 and CAPTEX.
+They are reported alongside GLIDE's, but are not used to set any threshold:
+EASLEE is not yet an established model, its scoring choices differ from
+Hegarty et al.'s (it scores the first 72 hours of ETEX-1, and its own ETEX-1
+rank falls from 2.76 to 2.41 over the full four days), and its paper and
+repository give different CAPTEX ranks (2.43 and 2.51).
 
 GLIDE can then be ranked among four models rather than against a single
 study. Selvaratnam et al. also tuned NAME's representation of unresolved
@@ -320,7 +340,11 @@ A decision record in [dev/decisions/](../dev/decisions/) fixes the following:
   reduce noise ("kernel" deposition). All Tier 1–3 runs, model comparisons and
   the v2 calibration use delta deposition. The spreading slightly widens
   plumes, which would be hard to tell apart from the effect of the meander term
-  (see [decision 0012](../dev/decisions/0012-kernel-deposition.md)).
+  (see [decision 0012](../dev/decisions/0012-kernel-deposition.md)). The
+  FLEXPART reference runs likewise use a build with its output kernel switched
+  off (Tier 2). Brioude et al. (2026) show how much this choice can matter:
+  on ETEX-1, changing EASLEE's output kernel moved the near-source correlation
+  from 0.66 to 0.33, through a single station.
 - **The expected differences** between GLIDE and FLEXPART in the Tier 2
   comparison (§1).
 - **The fitting and test sets:** fit on ETEX-1 and CAPTEX; test on ANATEX and
@@ -450,7 +474,9 @@ human to confirm or change before this plan is merged.
   - *ETEX-1:* "consistent" means each ATMES-II statistic lies within the
     range of the models published by Mosca et al. (1998).
   - Each score is reported with its particle-noise interval, from bootstrap
-    resamples, and with FLEXPART's published score alongside.
+    resamples, and with FLEXPART's published score alongside. EASLEE's
+    published scores are shown too, with their scoring choices, but play no
+    part in the grading.
   - ETEX-2 is reported without a grade.
 - **Radon and Tier 4: reported, not graded.** The uncertainty in the radon
   emission map is too large to support a threshold, so radon results are
@@ -622,7 +648,8 @@ The standard cases (§4) are used throughout.
   - maps of measured and modelled concentration for each release;
   - scatter plots of measured against modelled values for each sample;
   - the DATEM ranking score and its four terms as bars, beside the published
-    values for NAME, HYSPLIT, STILT and FLEXPART.
+    values for NAME, HYSPLIT, STILT and FLEXPART, with EASLEE's shown
+    separately.
 - **Radon:** time series and average daily cycles at each site.
 
 **Tier 4**
@@ -731,7 +758,7 @@ calibration.
 | Need | Tier | Who provides it | Notes |
 | --- | --- | --- | --- |
 | ERA5 stores for the standard cases, on model levels (the default); pressure levels only for comparison | 0–2 | Human, with met-bazarr (GLIDE's existing download scripts until task B1) | Listed in `dev/agent/PROGRESS.md` |
-| FLEXPART v11 on ERA5 via flex_extract: gridded output for each release; particle-position snapshots at 6, 24, 72 and 120 h for the six standard cases; five repeat-seed runs of one week of hourly releases at three sites | 2 | Human | FLEXPART's output does not depend on GLIDE, so these runs can be done once, early. The repeat-seed runs give the Tier 2 noise floor (§3). Run each standard case as its own FLEXPART run with a single release: FLEXPART's particle-position files do not record which release a particle came from |
+| FLEXPART v11 on ERA5 via flex_extract, built with `lusekerneloutput = .false.` (Tier 2), plus one standard case with the default build: gridded output for each release; particle-position snapshots at 6, 24, 72 and 120 h for the six standard cases; five repeat-seed runs of one week of hourly releases at three sites | 2 | Human | FLEXPART's output does not depend on GLIDE, so these runs can be done once, early. The repeat-seed runs give the Tier 2 noise floor (§3). Run each standard case as its own FLEXPART run with a single release: FLEXPART's particle-position files do not record which release a particle came from. Record each run's wall-clock time, thread count and hardware, for the performance comparison |
 | ERA5 ensemble (EDA) members for the columns of the standard cases | 1 | Human, from the Copernicus Climate Data Store ("ensemble members" product type; not in the Google Cloud ERA5 copy) | Small: single columns, pressure levels. For the Tier 1 tolerance rule (§3) |
 | The model-error term the group's UK inversion assumes at each site | 2 | Group | For the Tier 2 concentration rule (§3) |
 | FLEXPART v11 source code on Isambard, for the Tier 1 component comparison (no FLEXPART run is needed for Tier 1) | 1 | Human; set `GLIDE_FLEXPART_SRC` | GPL: use locally, never copy into the repository; `gfortran` on the compute node |
