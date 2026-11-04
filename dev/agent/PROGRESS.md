@@ -45,4 +45,4 @@ repository or the tests. Download recipes for the tracer data are in
 | `GLIDE_NAME_FOOTPRINTS` | NAME footprints for the same sites and dates | A8a (Tier 2 ceiling), A10 (secondary) |
 | `GLIDE_EDGAR` | EDGAR flux maps | A10 |
 | `GLIDE_ETEX` | ETEX observations from JRC | B10, A11 |
-| `GLIDE_DATEM` | CAPTEX and ANATEX observations, DATEM statistics code and HYSPLIT reference output | B10, A11 |
+| `GLIDE_DATEM` | CAPTEX, ANATEX and ACURATE observations, DATEM's copy of ETEX-1, DATEM statistics code and HYSPLIT reference output | B10, A11 |

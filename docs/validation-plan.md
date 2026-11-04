@@ -224,7 +224,7 @@ download the data, the file formats and the scoring are described in
   measured at about 168 stations in 3-hour samples. The ATMES-II model
   intercomparison (Mosca et al., 1998) published scores for the models of the
   time, including FLEXPART and NAME.
-- **CAPTEX** (eastern North America, 1983). Six short releases, measured at 84
+- **CAPTEX** (eastern North America, 1983). Seven short releases, measured at 84
   sites 300–800 km away in 3- and 6-hour samples. The data come from NOAA's
   DATEM archive (Data Archive of Tracer Experiments and Meteorology).
 - **ANATEX** (North America, 1987). 66 releases from two sites over three
@@ -234,6 +234,15 @@ download the data, the file formats and the scoring are described in
   roughly known rate and decays with a half-life of 3.8 days. It is a
   continuous check on boundary-layer mixing, although the uncertainty in its
   emission map limits what it can show.
+- **ACURATE** (south-eastern US, 1982–83; v1.x, reported only). Krypton-85
+  emitted continuously by the Savannah River Plant for 19 months, measured at
+  five sites 300–1,000 km away in mostly 12-hour samples. It is the experiment
+  closest to GLIDE's use in inversions: a continuous source seen for months at
+  a few sites. It is not graded, because Kr-85 has a large global background
+  and DATEM's preferred background comes from a global model, so the
+  observations are not independent of modelling. It is scored on both of
+  DATEM's backgrounds, and the difference is reported as an observation
+  uncertainty. Not part of the v1 pre-registration.
 
 CAPTEX and ANATEX are especially useful because the same score has already
 been published for four established models on them:
@@ -477,7 +486,7 @@ human to confirm or change before this plan is merged.
     resamples, and with FLEXPART's published score alongside. EASLEE's
     published scores are shown too, with their scoring choices, but play no
     part in the grading.
-  - ETEX-2 is reported without a grade.
+  - ETEX-2 is reported without a grade, and so is ACURATE (v1.x).
 - **Radon and Tier 4: reported, not graded.** The uncertainty in the radon
   emission map is too large to support a threshold, so radon results are
   compared descriptively with published radon evaluations. Tier 4 differences
@@ -764,7 +773,7 @@ calibration.
 | FLEXPART v11 source code on Isambard, for the Tier 1 component comparison (no FLEXPART run is needed for Tier 1) | 1 | Human; set `GLIDE_FLEXPART_SRC` | GPL: use locally, never copy into the repository; `gfortran` on the compute node |
 | NAME footprints for the same sites and dates | 2 | Group archive (restricted) | Secondary comparison, and the ceiling in the Tier 2 tolerance rules (§3) |
 | ETEX observations (JRC) | 3 | Human, using a download script | Instructions in [data/tracer-experiments.md](../data/tracer-experiments.md) |
-| CAPTEX and ANATEX observations, DATEM's scoring software and its HYSPLIT example output (NOAA DATEM) | 3 | Human, downloaded through a web browser | Same page |
+| CAPTEX, ANATEX, ACURATE and DATEM's copy of ETEX-1, DATEM's scoring software and its HYSPLIT example output (NOAA DATEM) | 3 | Human, downloaded through a web browser | Same page |
 | ERA5 for ETEX (Oct–Nov 1994, Europe), CAPTEX (Sep–Oct 1983) and ANATEX (Jan–Mar 1987), both North America | 3 | Human, with met-bazarr | On model levels. ANATEX is the largest download; estimate its size first |
 | Radon-222 concentrations and an emission map | 3 | Human | |
 | EDGAR or a similar emissions map, for the concentration comparison | 2 | Group archive (restricted) | |

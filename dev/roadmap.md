@@ -106,6 +106,7 @@ Explanations of each item follow each table.
 | 1f | Parameter sensitivity and calibration | M | 1e, 2a | yes | v2 |
 | 1g | UK CH₄ inversion compared with NAME-based results | M | 1a (v1) or 1f (v2) | — | v1 paper |
 | 1h | Model paper, public benchmark, reproducibility package | M | 1b–1e | — | v1 |
+| 1i | ACURATE: a continuous-source tracer test, reported only | S | 1e | — | v1.x |
 
 - **1a.** Fix the model physics and give it a version label (`v0-physics`) in
   git, so that all validation refers to one version. This waits until ERA5
@@ -143,6 +144,12 @@ Explanations of each item follow each table.
   than GLIDE and FLEXPART is run. GPU execution as such is not new, so the
   comparison is about footprint throughput for inversions, reported in
   particle-steps per second as well as footprints per hour.
+- **1i.** ACURATE measured krypton-85 from a nuclear plant in South Carolina,
+  emitted continuously for 19 months, at five sites on the US east coast. It
+  is the tracer experiment most like a greenhouse-gas inversion: one
+  continuous source seen for months at a few towers. It is reported but not
+  graded, because the krypton background is large and was partly estimated
+  with another model. It uses the same code as 1e.
 
 ### Transport uncertainty (Track A)
 
@@ -418,7 +425,7 @@ v1 does not include uncertainty quantification.
 | High-resolution footprint near the receptor (4b) | Inversions without stored footprints, machine-learning weather input, simulation-based inference |
 | Meteorology from met-bazarr stores (3a) and the GLIDE-ready cache (7d), smaller footprint files (7g), releases grouped by start time (7h), particle count per release (4e) | |
 | Parameter ensembles, as infrastructure only (2a) | |
-| Packaging: installable with pip, a container, a command-line interface, a tutorial, a stable output format and a DOI | |
+| Packaging: installable with pip, a container, a command-line interface, a tutorial, a stable output format and a DOI | ACURATE, the continuous-source tracer test (1i), reported in v1.x |
 
 **Release gate.** v1 is released only when every condition below is met. The
 same checklist is the final task in [dev/agent/QUEUE.md](agent/QUEUE.md).

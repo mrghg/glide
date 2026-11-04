@@ -6,13 +6,15 @@ archives by hand; re-check the access notes if a download fails._
 
 These are the observations for validation Tier 3
 ([docs/validation-plan.md](../docs/validation-plan.md) §2). Like everything in
-`data/`, the files are **not committed to this repository**. They live outside it,
-located by environment variables:
+`data/`, the files are **not committed to this repository**. Code finds them
+through environment variables, and falls back to `data/ETEX` and `data/DATEM`
+in the checkout when a variable is unset. The `.gitignore` rule `data/**`
+already keeps both directories out of git.
 
-| Variable | Contents |
-| --- | --- |
-| `GLIDE_ETEX` | the ETEX files below, in `ETEX_release1/` and `ETEX_release2/` |
-| `GLIDE_DATEM` | the DATEM files below, keeping DATEM's own directory names (`exp_data/captex/`, …) |
+| Variable | Default | Contents |
+| --- | --- | --- |
+| `GLIDE_ETEX` | `data/ETEX` | the ETEX files below, in `ETEX_release1/` and `ETEX_release2/` |
+| `GLIDE_DATEM` | `data/DATEM` | the DATEM files below, keeping DATEM's own directory names (`exp_data/captex/`, …) |
 
 The public benchmark (roadmap item 1h) fetches them from the original archives
 rather than redistributing them.
@@ -121,23 +123,125 @@ Tracer Experiments and Meteorology (DATEM) used in this publication."
 
 | Experiment | Use | Tracers | Releases and sampling |
 | --- | --- | --- | --- |
-| CAPTEX, Sep–Oct 1983 | **yes** | t1 PMCH | Six 3-hour releases, four from Dayton OH and two from Sudbury ON; 84 sites at 300–800 km; 3- and 6-hour samples for about 48 h after each release |
+| CAPTEX, Sep–Oct 1983 | **yes** | t1 PMCH | Seven releases (`emit-t1.txt`): five from Dayton OH, four of 3 hours and one of 30 minutes (28 Oct), and two of 3 hours from Sudbury ON; 84 sites at 300–800 km; 3- and 6-hour samples for about 48 h after each release |
 | ANATEX, Jan–Mar 1987 | **yes** | t1 PTCH from Glasgow MT; t2 PDCH from St Cloud MN; t3 PMCH from St Cloud | 66 releases, every 2.5 days from each site; 75 sites over the eastern US and SE Canada; 24-hour samples. **Do not score t3**: its releases coincide with t2, so it is not independent |
+| ETEX-1 | cross-check only | t1 PMCH | DATEM's reformatting of ETEX release 1. Use the JRC files (§1) as the observations; see "ETEX in DATEM" below |
+| ACURATE, Mar 1982 – Sep 1983 | **reported, not graded (v1.x)** | t1 Kr-85 | Continuous emission from the Savannah River Plant, SC; five sites at about 300–1,000 km along the US east coast; mostly 12-hour samples, some 24-hour. See "ACURATE" below |
 | OKC80, Jul 1980 | optional | PMCH, PDCH | One 3-hour release; 3-hour samples at 100 km and 600 km |
-| ACURATE, INEL74 | no | Kr-85 | Continuous sources, few sites |
+| INEL74 | no | Kr-85 | Continuous source and one arc of samplers; the same background problem as ACURATE with less coverage |
 | Project Sagebrush | no | — | Sub-kilometre scale, beyond a reanalysis-driven model |
 
 ### What to download
 
 | DATEM directory | Files | Why |
 | --- | --- | --- |
-| `exp_data/captex/`, `exp_data/anatex/` | `emit-t?.txt`, `meas-t?.txt` | emissions and measurements |
+| `exp_data/<exp>/` | `emit-t?.txt`, `meas-t?.txt`, `stations.txt`, `readme.txt` | emissions, measurements, sites, units |
 | `document/` | original experiment reports | release heights, sampler details |
-| `stat_pgm/` | `statmain` and `c2datem` source | reference implementation of the scoring |
-| `mdl_data/captex/`, `mdl_data/anatex/` | `ct?_001.txt` | HYSPLIT predictions, to verify our scoring code |
-| `mdl_stat/captex/`, `mdl_stat/anatex/` | `gbl?_001.txt`, `avg?_001.txt` | HYSPLIT statistics our code must reproduce |
+| `stat_pgm/` | `statmain/statmain.f` and `c2datem/c2datem.f` | reference implementation of the scoring |
+| `mdl_data/<exp>/` | `ct?_000.txt` | HYSPLIT predictions, to verify our scoring code |
+| `mdl_stat/<exp>/` | `statA?_000.txt` (all pairs), `statT?_000.txt` (time-averaged), `run_stat.sh` | HYSPLIT statistics our code must reproduce, and the options that made them |
 
-The `met_data/` files (NCEP/NCAR reanalysis on sigma levels) are not needed.
+Here `<exp>` is `captex`, `anatex`, `etex` and `acurate`, and optionally
+`okc80`. The `met_data/` files (NCEP/NCAR reanalysis on sigma levels) are not
+needed.
+
+**The DATEM readmes give the wrong file names.** `mdl_data/Readme.txt` and
+`mdl_stat/Readme.txt` (dated 2013) describe `ct1_001.txt`, `gbl1_001.txt` and
+`avg1_001.txt`. The files actually posted are `ct?_000.txt`, `statA?_000.txt`
+and `statT?_000.txt`. The header of every stats file names itself
+`stat?1_007.txt` with "Model variation: 007". `statmain` writes the run label
+it was given into this header, so the files were produced as run `007` and
+renamed afterwards. They do belong to the posted predictions. Checked
+2026-11-04: `statmain`, compiled with gfortran 16.2 and run through each
+`run_stat.sh` with run label `000` on a copy of the archive, reproduces all
+twelve `statA?_000.txt` and `statT?_000.txt` files byte for byte, apart from
+the run label in lines 2–3 (CAPTEX, ANATEX tracers 1 and 2, ETEX-1, ACURATE
+and OKC80).
+
+### What the scripts in `mdl_data` and `mdl_stat` do
+
+None of them needs to be run. They record how DATEM made the posted files.
+
+- **`stat_pgm/`** holds the Fortran source of two programs. The `compile.bat`
+  files call the Intel compiler on Windows (`ifort /convert:big_endian`). The
+  source is free-form Fortran in a `.f` file, so `gfortran` needs
+  `-ffree-form`; `gfortran -O1 -ffree-form -ffree-line-length-none
+  -fconvert=big-endian -o statmain statmain.f` builds it without warnings.
+  Run it on a copy of the archive: it writes its results into the current
+  directory, over the posted files. If an input file is missing it waits for
+  a keypress, so redirect standard input from `/dev/null` in scripts.
+  - `c2datem` reads a binary HYSPLIT concentration file (`cdump`) and writes
+    one predicted value for each measurement, in the measurement format.
+  - `statmain` reads the measurements (`<dir>/meas-t<tracer>.txt`) and the
+    predictions (`<dir>/ct<tracer>_<run>.txt`) and writes the statistics and
+    the ranking score to `statA<tracer>_<run>.txt` or `statT<tracer>_<run>.txt`.
+- **`mdl_data/<exp>/bin2txt.sh`** runs `c2datem` on HYSPLIT's binary output
+  (`ct?.bin`) to make `ct?_000.txt`, and renames the binary to `ct?_000.bin`.
+  **`txt2bin.sh`** only renames the binary back, so the conversion can be
+  rerun. The `.bin` files are HYSPLIT's raw output and are not needed; the
+  `.txt` files are what we score.
+- **`mdl_stat/<exp>/run_stat.sh`** runs `statmain` twice per tracer: once on all
+  pairs (giving `statA`) and once with `-at`, time-averaged (giving `statT`).
+  It uses `-z0.0` (measurements of zero count as zero) and does not pass `-x`,
+  so zero–zero pairs are included. These are the options to reproduce in B10.
+
+**CAPTEX specifics.** The CAPTEX HYSPLIT run is split across several binary
+files, apparently one per release: `ct1`, `ct2`, `ct3`, `ct4`, `ct5` and `ct7`,
+with no `ct6`. `bin2txt.sh` converts each one and appends them all to a single
+`ct1_000.txt`. As posted, `ct1_000.bin` is empty (0 bytes). This does not
+matter, because `ct1_000.txt` is complete: one prediction for each of the
+2,281 measurements, covering all seven release periods.
+
+### ETEX in DATEM
+
+`exp_data/etex/` is ETEX release 1 only, reformatted from the ATMES data
+(`mea95t1.txt`). Compared with the JRC files of §1:
+
+- there is no emissions file and no release 2;
+- concentrations are in pg m⁻³ rather than ng m⁻³, and the station codes are
+  numbers (`8002`) rather than letters (`A02`);
+- the JRC quality flags are dropped, and so are the samples marked `-.88`
+  (detected but not quantifiable);
+- JRC has 3,104 valid samples, 939 of them non-zero; DATEM has 3,105, 941 of
+  them non-zero. The small difference suggests a different data version.
+
+Use the JRC files as the ETEX observations. DATEM's version is kept for two
+reasons. Its HYSPLIT predictions and statistics (`mdl_data/etex/`,
+`mdl_stat/etex/`) are a third case for verifying the scoring code. And
+matching the two ETEX-1 files sample by sample, and explaining the
+differences, is a test of the readers.
+
+### ACURATE (reported, not graded; v1.x)
+
+The Atlantic Coast Unique Regional Atmospheric Tracer Experiment measured
+krypton-85 from the Savannah River Plant (33.28° N, 81.66° W), emitted
+continuously by nuclear-fuel reprocessing. Emissions are given hourly from
+5 March 1982 to 30 September 1983 in curies, averaging 55 Ci h⁻¹ over all
+hours and 110 Ci h⁻¹ while emitting. Five sites, from North Carolina to New
+Jersey, took mostly 12-hour samples in pCi m⁻³.
+
+It is not one of the graded Tier 3 tests, for three reasons:
+
+- **Background.** Kr-85 has a large global background from reprocessing
+  everywhere, so the plume is a small difference on top of it. DATEM gives
+  two versions of the measurements: `meas-t0.txt` uses the original
+  background analysis, and `meas-t1.txt` subtracts a variable background
+  **from a global model** (Draxler, 2007, doi:10.1016/j.atmosenv.2006.08.052).
+  The observations therefore partly depend on another model.
+- **Few sites.** With five samplers, the spatial scores mean little.
+- **Continuous emission.** Nearly every sample contains some tracer, so the
+  figure of merit in space hardly discriminates between models, and the
+  scores mostly test diluted, accumulated transport rather than where a plume
+  went.
+
+It is still worth running, because it is the experiment closest to how GLIDE
+is used: a continuous point source seen for many months at a few sites
+through long samples, which is a receptor-footprint, time-series problem like
+a greenhouse-gas inversion. GLIDE scores it on both backgrounds, and the
+difference between the two is reported as an uncertainty in the observations.
+HYSPLIT's statistics in `mdl_stat/acurate/` (against `meas-t1.txt`) are
+reported alongside. It is a v1.x item (roadmap 1i), so it is not part of the
+v1 pre-registration.
 
 ### File formats (from the DATEM description)
 
@@ -158,9 +262,11 @@ All times are UTC; line 1 names the file and line 2 names the columns.
 
 ## 3. Meteorology
 
-GLIDE uses ERA5 for all three experiments, so it runs through the normal
+GLIDE uses ERA5 for every experiment, so it runs through the normal
 pipeline. Each backward run must reach back to the start of the release it is
-scored against.
+scored against. ACURATE's source is continuous, so its backward runs need only
+be long enough to cover the travel time from the plant to the furthest site
+(a few days).
 
 | Experiment | Period to cover | Domain |
 | --- | --- | --- |
@@ -168,6 +274,7 @@ scored against.
 | ETEX-2 | 1994-11-14 to 1994-11-18 | Europe |
 | CAPTEX | 1983-09-18 to 1983-10-30 | eastern US and SE Canada, including Dayton and Sudbury |
 | ANATEX | 1987-01-05 to 1987-03-29 | most of the US and southern Canada, including Glasgow MT |
+| ACURATE (v1.x) | 1982-03-01 to 1983-09-30 | south-eastern US, from Georgia to New Jersey |
 
 Prepare these with [met-bazarr](https://github.com/mrghg/met-bazarr)
 ([decision 0018](../dev/decisions/0018-met-bazarr.md)) on ERA5 model levels,
@@ -176,6 +283,7 @@ fetching only the levels below the domain top.
 
 ANATEX covers about 2,000 hours over most of a continent, so it is the largest
 cube. Size it before downloading; the compressed met cache (queue task B1) helps.
+ACURATE's domain is small but its period is 19 months, so size it too.
 Add each cube to the inventory in `dev/agent/PROGRESS.md`.
 
 ---
@@ -201,14 +309,22 @@ The options change scores a lot, so the pre-registration must fix them:
 - whether zero–zero pairs are included;
 - unaveraged ("global") versus time- or space-averaged analysis.
 
-For scale, HYSPLIT with NCEP reanalysis scored, per the DATEM description
-Appendix D:
+For scale, HYSPLIT's ranks from two sources are below. They differ, and
+are not meant to agree: the DATEM description's Appendix D (2001, revised
+2002) reports HYSPLIT with NCEP reanalysis, while the posted `mdl_stat` files
+come from a later HYSPLIT run, `007`, whose configuration the archive does not
+document. **The posted files are the ones the B10 scoring code must
+reproduce.** Neither is a threshold for GLIDE; the thresholds come from the
+published model comparisons below (validation-plan §3).
 
-| Experiment | Rank, all pairs | Rank, time-averaged |
-| --- | --- | --- |
-| CAPTEX | 1.36 | 3.35 |
-| ANATEX tracer 1 | 1.69 | 2.69 |
-| ANATEX tracer 2 | 1.74 | 2.92 |
+| Experiment | Appendix D, all pairs | Appendix D, time-averaged | `statA?_000`, all pairs | `statT?_000`, time-averaged |
+| --- | --- | --- | --- | --- |
+| CAPTEX | 1.36 | 3.35 | 2.23 | 3.03 |
+| ANATEX tracer 1 | 1.69 | 2.69 | 2.03 | 3.47 |
+| ANATEX tracer 2 | 1.74 | 2.92 | 1.73 | 2.48 |
+| ETEX-1 | — | — | 2.34 | 2.74 |
+| ACURATE | — | — | 1.96 | 3.44 |
+| OKC80 | — | — | 1.94 | 2.51 |
 
 Published comparisons on the same score: NAME driven by ECMWF reanalysis and by
 WRF (Selvaratnam, Thomson and Webster, 2023, J. Appl. Meteor. Climatol. 62(9),
@@ -228,16 +344,23 @@ this section with what was actually built.
 1. **Readers** for both formats into one table of releases (start, duration,
    location, height, mass) and one of samples (start, duration, location,
    height, concentration, site, quality flag), with units converted to SI.
+   The ETEX reader is checked by matching JRC's ETEX-1 against DATEM's,
+   sample by sample, and explaining every difference. The ACURATE reader reads
+   both `meas-t0.txt` and `meas-t1.txt`, and keeps track of which background
+   each uses.
 2. **Scoring** in Python: the DATEM statistics and ranking score, and the ATMES-II
    statistics for ETEX. **Verify** against DATEM's own code: run on DATEM's
-   HYSPLIT predictions in `mdl_data` and reproduce the `mdl_stat` files to their
-   printed precision.
+   HYSPLIT predictions (`mdl_data/<exp>/ct?_000.txt`) with the options in each
+   `run_stat.sh`, and reproduce `statA?_000.txt` and `statT?_000.txt` to their
+   printed precision, for CAPTEX, both ANATEX tracers, ETEX-1 and ACURATE.
 3. **Receptor-oriented backward runs**: one backward release per measured
    sample, particles released uniformly over the sample period at sampler
    height. The predicted concentration is the release's emission rate times the
    sensitivity in a small volume around the source, summed over emission
    intervals. Both ANATEX tracers are sampled at the same sites and times, so one
-   backward footprint per sample scores both source locations.
+   backward footprint per sample scores both source locations. ACURATE (v1.x)
+   is run the same way, with each sample's sensitivity multiplied by the hourly
+   emissions; it is scored on both backgrounds.
 4. **Expected differences**, declared in the pre-registration: GLIDE runs
    backward and the published scores are forward; ERA5 versus the comparison
    models' meteorology. The backward-against-forward agreement is also a

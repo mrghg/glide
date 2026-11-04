@@ -530,7 +530,8 @@ Model: Opus 5.5, high effort. Run strictly in order unless a task is BLOCKED.
   ANATEX listed in the data inventory.
 - **Scope.** Receptor-oriented backward runs, one per measured sample, as set out
   in `data/tracer-experiments.md` §5: ETEX-1, ETEX-2, CAPTEX, and ANATEX tracers
-  1 and 2 (one footprint per sample serves both ANATEX tracers). Predicted
+  1 and 2 (one footprint per sample serves both ANATEX tracers). ACURATE is
+  v1.x (roadmap 1i) and not part of this task. Predicted
   concentrations written in DATEM format; scored with the B10 code using the
   pre-registered options; the Tier 3 figure set.
 - **Running and reporting.** Follow the registered rules
@@ -701,10 +702,17 @@ dependency is listed; run in the listed order by default.
   score; the ATMES-II statistics for ETEX. All options of DATEM's `statmain`
   that the pre-registration must fix (zero threshold, zero–zero pairs,
   averaging) exposed as arguments.
+  The ACURATE reader reads both `meas-t0.txt` and `meas-t1.txt` and records
+  which background each uses. Data paths come from `$GLIDE_ETEX` and
+  `$GLIDE_DATEM`, defaulting to `data/ETEX` and `data/DATEM`.
 - **Acceptance.** Running the scoring on DATEM's HYSPLIT predictions
-  (`mdl_data/<exp>/ct?_001.txt`) reproduces DATEM's `mdl_stat` files for CAPTEX
-  and both ANATEX tracers to their printed precision, as a test that skips
-  cleanly when `$GLIDE_DATEM` is unset. Reader tests on small synthetic files in
+  (`mdl_data/<exp>/ct?_000.txt`), with the options in each
+  `mdl_stat/<exp>/run_stat.sh`, reproduces `statA?_000.txt` (all pairs) and
+  `statT?_000.txt` (time-averaged) to their printed precision for CAPTEX, both
+  ANATEX tracers, ETEX-1 and ACURATE, as a test that skips cleanly when the
+  DATEM data are absent. The JRC and DATEM versions of ETEX-1 are matched
+  sample by sample, and every difference is explained in
+  `data/tracer-experiments.md`. Reader tests on small synthetic files in
   the repository. `data/tracer-experiments.md` §5 updated. No data files
   committed.
 
