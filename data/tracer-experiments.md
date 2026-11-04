@@ -127,7 +127,7 @@ Tracer Experiments and Meteorology (DATEM) used in this publication."
 | ANATEX, Jan–Mar 1987 | **yes** | t1 PTCH from Glasgow MT; t2 PDCH from St Cloud MN; t3 PMCH from St Cloud | 66 releases, every 2.5 days from each site; 75 sites over the eastern US and SE Canada; 24-hour samples. **Do not score t3**: its releases coincide with t2, so it is not independent |
 | ETEX-1 | cross-check only | t1 PMCH | DATEM's reformatting of ETEX release 1. Use the JRC files (§1) as the observations; see "ETEX in DATEM" below |
 | ACURATE, Mar 1982 – Sep 1983 | **reported, not graded (v1.x)** | t1 Kr-85 | Continuous emission from the Savannah River Plant, SC; five sites at about 300–1,000 km along the US east coast; mostly 12-hour samples, some 24-hour. See "ACURATE" below |
-| OKC80, Jul 1980 | optional | PMCH, PDCH | One 3-hour release; 3-hour samples at 100 km and 600 km |
+| OKC80, Jul 1980 | **benchmark test only** | PMCH, PDCH | One 3-hour release from Norman OK on 8 July; 697 samples of 45 minutes and 3 hours, on arcs at about 100 km and 600 km, over four days. The tracer benchmark (task B12) is tested on it before the pre-registration, because it is not graded |
 | INEL74 | no | Kr-85 | Continuous source and one arc of samplers; the same background problem as ACURATE with less coverage |
 | Project Sagebrush | no | — | Sub-kilometre scale, beyond a reanalysis-driven model |
 
@@ -275,6 +275,7 @@ be long enough to cover the travel time from the plant to the furthest site
 | CAPTEX | 1983-09-18 to 1983-10-30 | eastern US and SE Canada, including Dayton and Sudbury |
 | ANATEX | 1987-01-05 to 1987-03-29 | most of the US and southern Canada, including Glasgow MT |
 | ACURATE (v1.x) | 1982-03-01 to 1983-09-30 | south-eastern US, from Georgia to New Jersey |
+| OKC80 (benchmark test) | 1980-07-08 to 1980-07-12 | Oklahoma to Missouri, about 34–42° N, 99–90° W |
 
 Prepare these with [met-bazarr](https://github.com/mrghg/met-bazarr)
 ([decision 0018](../dev/decisions/0018-met-bazarr.md)) on ERA5 model levels,
@@ -305,9 +306,26 @@ the formula and later papers use R²; follow the formula and DATEM's code.
 
 The options change scores a lot, so the pre-registration must fix them:
 
-- the percentile below which measurements count as zero;
-- whether zero–zero pairs are included;
-- unaveraged ("global") versus time- or space-averaged analysis.
+- the percentile below which measurements count as zero (`-z`);
+- whether zero–zero pairs are included (`-x` excludes them);
+- unaveraged ("global") versus time- or space-averaged analysis (`-at`, `-as`);
+- whether the correlation is computed by resampling (`-b`).
+
+**The settings that match the published studies** (Hegarty et al., 2013;
+Selvaratnam et al., 2023; details and evidence in
+[../docs/published-tracer-scores.md](../docs/published-tracer-scores.md) §2)
+are: `-z0`, zero–zero pairs included, global analysis, and `-b`, with each
+CAPTEX release (1, 2, 3, 4, 5, 7) and the first ten ANATEX releases from each
+site (5–16 January 1987) scored as separate experiments. The DATEM description
+recommends the same defaults: "use all the data and rely upon more robust
+statistical parameters".
+
+`-b` replaces the correlation with the root-mean-square of the correlations
+from N passes, each of which drops a random 20% of the pairs (N is the number
+of pairs). It was added to `statmain` in October 2012, for Hegarty et al. The
+program seeds it from the clock, so repeated runs differ in the second
+decimal place (three CAPTEX runs gave ranks of 2.25, 2.25 and 2.24, against
+2.23 without `-b`). GLIDE's version takes a seed.
 
 For scale, HYSPLIT's ranks from two sources are below. They differ, and
 are not meant to agree: the DATEM description's Appendix D (2001, revised
@@ -315,7 +333,8 @@ are not meant to agree: the DATEM description's Appendix D (2001, revised
 come from a later HYSPLIT run, `007`, whose configuration the archive does not
 document. **The posted files are the ones the B10 scoring code must
 reproduce.** Neither is a threshold for GLIDE; the thresholds come from the
-published model comparisons below (validation-plan §3).
+published per-release comparisons (validation-plan §3). Both are for whole
+experiments, so they cannot be compared with the per-release scores.
 
 | Experiment | Appendix D, all pairs | Appendix D, time-averaged | `statA?_000`, all pairs | `statT?_000`, time-averaged |
 | --- | --- | --- | --- | --- |
@@ -326,20 +345,34 @@ published model comparisons below (validation-plan §3).
 | ACURATE | — | — | 1.96 | 3.44 |
 | OKC80 | — | — | 1.94 | 2.51 |
 
-Published comparisons on the same score: NAME driven by ECMWF reanalysis and by
-WRF (Selvaratnam, Thomson and Webster, 2023, J. Appl. Meteor. Climatol. 62(9),
-doi:10.1175/JAMC-D-23-0021.1); HYSPLIT, STILT and FLEXPART driven by WRF
-(Hegarty et al., 2013, cited there). All of these are **forward** runs.
+Published comparisons on the same score, per release: NAME driven by
+ERA-Interim and by WRF (Selvaratnam, Thomson and Webster, 2023, J. Appl.
+Meteor. Climatol. 62(9), doi:10.1175/JAMC-D-23-0021.1); HYSPLIT and STILT
+driven by NARR and by WRF, and FLEXPART by WRF (Hegarty et al., 2013,
+doi:10.1175/JAMC-D-13-0125.1). All are forward runs, apart from Hegarty et
+al.'s backward STILT runs. Every value, with its meteorology, is in
+[../docs/published-tracer-scores.md](../docs/published-tracer-scores.md).
 
 For ETEX, also compute the ATMES-II statistics (Mosca et al., 1998) so results
-compare with the original exercise.
+compare with the original exercise. They use their own method, not DATEM's:
+the zero filter (measured zeros kept only from 6 h before the cloud arrives
+at a station to 6 h after it leaves, which leaves 1,423 pairs), correlation
+of the logarithms, zeros set to 0.01 ng m⁻³ in logarithmic indices, and the
+figure of merit in space from interpolated contours at 0.1 ng m⁻³. The method
+and the published values are in
+[../docs/published-tracer-scores.md](../docs/published-tracer-scores.md) §6.
+Use the JRC files: the filter needs the quality flags and the `-.99` missing
+samples, which DATEM's copy drops. The graded ETEX-1 score, by contrast, is
+the DATEM rank on **DATEM's** copy with DATEM's defaults, so that it is
+computed exactly as HYSPLIT's published 1.96 was (validation-plan §3).
 
 ---
 
 ## 5. Processing plan
 
-Implemented by queue tasks B10 (readers and scoring) and A11 (model runs). Update
-this section with what was actually built.
+Implemented by queue tasks B10 (readers and scoring), B12 (the benchmark
+runner) and A11 (the registered runs). Update this section with what was
+actually built.
 
 1. **Readers** for both formats into one table of releases (start, duration,
    location, height, mass) and one of samples (start, duration, location,
@@ -353,11 +386,17 @@ this section with what was actually built.
    HYSPLIT predictions (`mdl_data/<exp>/ct?_000.txt`) with the options in each
    `run_stat.sh`, and reproduce `statA?_000.txt` and `statT?_000.txt` to their
    printed precision, for CAPTEX, both ANATEX tracers, ETEX-1 and ACURATE.
+   Then split the samples into the published experiments (per CAPTEX release;
+   ANATEX 5–16 January by site), choosing the assignment rule that comes
+   closest to Hegarty et al.'s pair counts, and record it.
 3. **Receptor-oriented backward runs**: one backward release per measured
-   sample, particles released uniformly over the sample period at sampler
-   height. The predicted concentration is the release's emission rate times the
-   sensitivity in a small volume around the source, summed over emission
-   intervals. Both ANATEX tracers are sampled at the same sites and times, so one
+   sample, particles released uniformly over the sample period and between the
+   ground and 100 m, the layer the published forward runs averaged over; a
+   second set at sampler height as a sensitivity test. The predicted
+   concentration is the release's emission rate times the surface sensitivity
+   in the footprint cell that contains the source, summed over emission
+   intervals. Hegarty et al.'s backward runs spread the source over 1°; that
+   is reported as a sensitivity test. Both ANATEX tracers are sampled at the same sites and times, so one
    backward footprint per sample scores both source locations. ACURATE (v1.x)
    is run the same way, with each sample's sensitivity multiplied by the hourly
    emissions; it is scored on both backgrounds.
@@ -365,3 +404,7 @@ this section with what was actually built.
    backward and the published scores are forward; ERA5 versus the comparison
    models' meteorology. The backward-against-forward agreement is also a
    real-case test of the backward formulation.
+5. **The benchmark command** (task B12) wraps steps 2–3. Given a GLIDE
+   configuration and a meteorology store, it runs the backward releases for
+   the chosen experiments, scores them, and writes a scorecard beside the
+   published values. How to run it: _to be written by B12_.

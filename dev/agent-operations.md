@@ -104,7 +104,9 @@ Work through this once. The queue assumes all of it.
       need them: a model-level cube matching the reference configuration's
       pressure-level cube (needed by A01, the second task); the Tier 3 cubes
       for ETEX (Oct–Nov 1994, Europe), CAPTEX (Sep–Oct 1983) and ANATEX
-      (Jan–Mar 1987, North America), on model levels; a UK cube (v1.x).
+      (Jan–Mar 1987, North America), on model levels; a small OKC80 cube
+      (8–12 July 1980, Oklahoma to Missouri), which task B12 needs early; a
+      UK cube (v1.x).
 
 ### Golden fixtures and benchmarks
 

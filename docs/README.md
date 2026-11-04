@@ -40,6 +40,12 @@ engineering.
 7. **[validation-plan.md](validation-plan.md)** — the validation ladder still to
    be climbed: tiers, pre-registration protocol, case library, figure set, and
    the v2 parameter-calibration plan.
+8. **[published-tracer-scores.md](published-tracer-scores.md)** — the ranking
+   scores other models have published for the CAPTEX and ANATEX tracer
+   experiments and the ATMES-II statistics for ETEX-1, with the meteorology
+   behind each, and how they were computed. Machine-readable copies:
+   [published-tracer-scores.csv](published-tracer-scores.csv) and
+   [published-etex-atmes2.csv](published-etex-atmes2.csv).
 
 ## Related
 

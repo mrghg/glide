@@ -126,9 +126,15 @@ Explanations of each item follow each table.
 - **1e.** GLIDE is compared with observations from controlled tracer releases
   (ETEX, CAPTEX, ANATEX) and with radon-222 (Tier 3). The metrics, tolerances
   and cases for Tiers 1–3 are fixed in advance and registered on OSF, which
-  gives the registration an independent timestamp and a DOI.
+  gives the registration an independent timestamp and a DOI. The tracer
+  scores are computed the same way as the published studies, so GLIDE can be
+  placed among NAME, HYSPLIT, STILT and FLEXPART
+  ([published-tracer-scores.md](../docs/published-tracer-scores.md)). The
+  tracer runs are built as a benchmark that is rerun with one command
+  whenever parameters, physics or meteorology change (task B12).
 - **1f.** Find which physical parameters matter most, then calibrate those
-  against the tracer experiments with Bayesian methods. The result is
+  against the tracer experiments with Bayesian methods, scoring each
+  candidate with the tracer benchmark (B12). The result is
   published as a table of each parameter's prior and fitted values (a
   "parameter card").
 - **1g.** Run the group's UK methane inversion with GLIDE footprints in place
@@ -443,9 +449,11 @@ same checklist is the final task in [dev/agent/QUEUE.md](agent/QUEUE.md).
 - A validation report in `docs/` shows that the pre-registered criteria are
   met:
   - agreement with FLEXPART at the particle and footprint levels;
-  - DATEM ranking scores for ETEX, CAPTEX and ANATEX, and the ETEX ATMES-II
-    statistics, within the range published for NAME, FLEXPART, HYSPLIT and
-    STILT.
+  - DATEM ranking scores for CAPTEX and ANATEX, computed as in the published
+    studies, with a mean at least the lowest published mean for NAME,
+    FLEXPART, HYSPLIT or STILT; an ETEX-1 DATEM rank at least HYSPLIT's on
+    the 1994 ECMWF analyses; and the ETEX ATMES-II statistics reported beside
+    the published models.
 - A performance table is published: footprints per second on a GH200 GPU and
   on CPU for a standard configuration, with the time spent in each phase;
   particle-steps per second; and the comparison with FLEXPART v11 on the same

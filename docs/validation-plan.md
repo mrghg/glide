@@ -221,9 +221,14 @@ download the data, the file formats and the scoring are described in
 [data/tracer-experiments.md](../data/tracer-experiments.md).
 
 - **ETEX** (Europe, 1994). Two 12-hour releases from north-west France,
-  measured at about 168 stations in 3-hour samples. The ATMES-II model
-  intercomparison (Mosca et al., 1998) published scores for the models of the
-  time, including FLEXPART and NAME.
+  measured at about 168 stations in 3-hour samples. In the ATMES-II
+  intercomparison, 35 models of the time reran ETEX-1 on ECMWF analyses, the
+  same lineage of meteorology as ERA5. Only four of them, identified by
+  number and chosen to span the range, are published in the journal paper
+  (Mosca et al., 1998, doi:10.1016/S1352-2310(98)00179-4), plus HYSPLIT's
+  values quoted in the DATEM description. The full results are in a JRC
+  report that is not online
+  ([published-tracer-scores.md](published-tracer-scores.md) §6).
 - **CAPTEX** (eastern North America, 1983). Seven short releases, measured at 84
   sites 300–800 km away in 3- and 6-hour samples. The data come from NOAA's
   DATEM archive (Data Archive of Tracer Experiments and Meteorology).
@@ -245,9 +250,22 @@ download the data, the file formats and the scoring are described in
   uncertainty. Not part of the v1 pre-registration.
 
 CAPTEX and ANATEX are especially useful because the same score has already
-been published for four established models on them:
+been published for four established models on them, computed the same way:
 - NAME (Selvaratnam, Thomson and Webster, 2023, doi:10.1175/JAMC-D-23-0021.1);
-- HYSPLIT, STILT and FLEXPART (Hegarty et al., 2013).
+- HYSPLIT, STILT and FLEXPART (Hegarty et al., 2013,
+  doi:10.1175/JAMC-D-13-0125.1).
+
+Every published score, with the meteorology behind it, is collected in
+[published-tracer-scores.md](published-tracer-scores.md) and, for code, in
+[published-tracer-scores.csv](published-tracer-scores.csv). Most of those runs
+used WRF on a 10 km grid with hourly output, which is finer than ERA5, and the
+best of them also nudged the boundary-layer winds towards a reanalysis. GLIDE
+is not expected to beat them. The aim is that GLIDE's metrics are computed
+the same way as theirs, so that its scores can be placed among them. The
+closest comparisons are the reanalysis-driven runs: NAME on ERA-Interim and
+HYSPLIT and STILT on NARR. Across all published runs, the mean rank over the
+eight experiments lies between 2.11 and 2.42, and the meteorology moves a
+single model's mean by about as much as the choice of model does.
 
 A newer FLEXPART-family model, EASLEE (Brioude et al., 2026,
 doi:10.5194/egusphere-2026-5993), has published scores for ETEX-1 and CAPTEX.
@@ -275,18 +293,59 @@ scaled from 0 (worst) to 1 (best), so a perfect score is 4:
 - a term based on the Kolmogorov–Smirnov parameter: the largest difference
   between the measured and modelled distributions of concentration values.
 
-For ETEX, the statistics used in ATMES-II are reported as well. Before any
+For ETEX, the statistics used in ATMES-II are reported as well, computed by
+the ATMES-II method rather than DATEM's: a filter that keeps measured zeros
+only within 6 hours of the cloud's arrival and departure at each station
+(1,423 pairs), correlation on the logarithms of the concentrations, zeros
+set to 0.01 ng m⁻³ in logarithmic indices, and the figure of merit in space
+from interpolated contours. Before any
 GLIDE result is scored, GLIDE's scoring code must reproduce the scores that
 DATEM's own software gives for the example HYSPLIT output in the DATEM
-archive. This checks the scoring code itself.
+archive. This checks the scoring code itself. It has been checked that
+DATEM's program, compiled here, reproduces the archive's twelve example
+statistics files exactly.
+
+**Scoring the same way as the published studies.** The published scores are
+only comparable with GLIDE's if they are computed alike. Both studies use the
+same protocol ([published-tracer-scores.md](published-tracer-scores.md) §2),
+and GLIDE's primary scores follow it:
+- **Each release is scored separately.** CAPTEX gives six experiments,
+  releases 1, 2, 3, 4, 5 and 7; the 30-minute release 6 is left out. ANATEX
+  gives two, one per release site (Glasgow, tracer PTCH; St Cloud, tracer
+  PDCH), using only the first ten releases, 5–16 January 1987. That makes
+  eight experiments in all.
+- **Every measured–modelled pair is scored separately**, without averaging
+  in time or space, with a zero threshold of 0 pg m⁻³, negative measurements
+  set to zero, and pairs where both are zero included.
+- **The correlation is computed by DATEM's resampling method** (`statmain -b`:
+  repeated passes that each drop a random 20% of the pairs), as Hegarty et al.
+  did. DATEM's program seeds this from the clock; GLIDE's code uses a fixed
+  seed, and the plain correlation is reported as well. The difference is
+  about 0.01 in the rank.
+- **The modelled concentration is the mean over the lowest 100 m above the
+  ground and over each sampling period**, as in all the published forward
+  runs.
+- **The sample selection** follows the published pair counts as closely as
+  the data allow. The papers do not state it exactly, and the DATEM files
+  give close but not identical counts. Task B10 fixes the rule from the data
+  alone, before any GLIDE run, and the pre-registration records it.
+
+GLIDE is also scored on every release and every sample of each experiment
+together, with DATEM's default options. Those scores are reported beside
+DATEM's HYSPLIT examples but are not graded, because no other model has
+published them.
 
 **How GLIDE is run for these experiments.** Each measured sample gets its own
-backward run. Particles are released from the sampler's location and height,
-spread over the sample's collection period, and run backward in time. The
-resulting footprint gives the sample's sensitivity to emissions at each
-location. The predicted concentration is that sensitivity at the release site
-multiplied by the known release rate. The numbers of samples, and so of
-backward runs, are:
+backward run. Particles are released at the sampler's location, spread evenly
+between the ground and 100 m and over the sample's collection period, and run
+backward in time. The 100 m layer matches the layer the published forward
+runs averaged over. A second set, released at the sampler's height, is
+reported as a sensitivity test, as in Hegarty et al.'s backward STILT runs,
+where receptors at 10 m scored about 0.04 lower than at 50 m. The resulting
+footprint gives the sample's sensitivity to emissions at each location. The
+predicted concentration is that sensitivity at the release site multiplied by
+the known release rate. The numbers of samples, and so of backward runs,
+are:
 - about 3,100 for ETEX;
 - 2,281 for CAPTEX;
 - about 5,500 per tracer for ANATEX.
@@ -297,7 +356,28 @@ predicts both. The
 published scores for the other models come from forward runs, from the source
 to the samplers. Our backward runs should give the same answer. This is
 declared in advance as a possible source of difference, and agreement is a
-test of GLIDE's backward formulation on real cases.
+test of GLIDE's backward formulation on real cases. Hegarty et al.'s
+backward STILT runs agreed with their forward runs to about 0.1 in the mean
+rank, which is the size of difference to expect.
+
+**Re-running the tracer benchmark.** The Tier 3 runs are not a one-off. The
+same tracer cases are rerun whenever the physics, its parameters or the
+meteorology change: in the v2 calibration (§7), when another meteorology is
+plugged in (an ERA5 ensemble member, another reanalysis, a regional model
+through met-bazarr, or several sources combined, roadmap 3b), and for the
+public benchmark (roadmap 1h). Queue task B12 therefore builds the runs as a
+single command. Given a GLIDE configuration and a meteorology store, it runs
+every backward release, scores the results with the registered options, and
+writes a scorecard. The scorecard sets each score beside the published
+values for the same experiment, grouped by the class of meteorology, and
+records the physics tag, the configuration's hash and the meteorology's
+provenance, so that two scorecards can be compared directly. Instructions for
+running it go in `data/tracer-experiments.md`.
+
+Before the pre-registration, the benchmark is only run on OKC80, which is not
+one of the graded experiments. GLIDE is not run on CAPTEX, ANATEX or ETEX
+until task A11, so that they stay an independent test. After A11, a rerun is
+labelled exploratory unless it is part of a registered update (§3).
 
 **Which experiments are used for fitting and which for testing (v2
 calibration only).** GLIDE's parameters are fitted to ETEX-1 and CAPTEX. The
@@ -335,14 +415,20 @@ A decision record in [dev/decisions/](../dev/decisions/) fixes the following:
   provenance attributes ([decision 0018](../dev/decisions/0018-met-bazarr.md)).
 - **The cases:** the standard cases (§4) with their dates, and the full list
   of releases.
-- **The metrics**, exactly as coded. This includes three options in the DATEM
-  scoring that can change scores a lot:
+- **The metrics**, exactly as coded. This includes the options in the DATEM
+  scoring that can change scores a lot, set to match the published studies
+  (Tier 3):
   - the concentration below which a measurement is treated as zero;
   - whether pairs where both measurement and model are zero are counted;
   - whether samples are compared one by one, or averaged over time or space
-    first.
+    first;
+  - how the correlation is computed (DATEM's resampling method, with its
+    random seed);
+  - how samples are assigned to releases and which are scored (B10's rule);
+  - the layer the receptor particles are released in (0–100 m).
 - **The tolerances,** computed by the rules below, and the published scores
-  of other models that GLIDE will be judged against.
+  of other models that GLIDE will be judged against, as the commit of
+  [published-tracer-scores.csv](published-tracer-scores.csv).
 - **How particles are counted onto the grid.** In normal use, each particle's
   contribution goes entirely into the grid cell that contains it ("delta"
   deposition). An optional alternative spreads it over neighbouring cells to
@@ -474,16 +560,37 @@ human to confirm or change before this plan is merged.
   - *Declared expected differences* (§1) may fall outside the noise floor,
     but must stay within the ceiling, and should have the predicted sign.
 - **Tier 3.**
-  - *CAPTEX and ANATEX:* "consistent" means GLIDE's DATEM ranking score is at
-    least the lowest score published for NAME, HYSPLIT, STILT and FLEXPART on
-    that experiment. Scores are computed with the same scoring options as
-    each published study. If the studies used different options, GLIDE is
-    scored separately with each study's options and compared with that
-    study's values.
-  - *ETEX-1:* "consistent" means each ATMES-II statistic lies within the
-    range of the models published by Mosca et al. (1998).
+  - *CAPTEX and ANATEX:* "consistent" means GLIDE's mean DATEM rank over the
+    eight experiments (§2, Tier 3) is at least the lowest mean published
+    for NAME, HYSPLIT, STILT or FLEXPART on any meteorology: **2.11**
+    (FLEXPART on WRF, Hegarty et al., 2013). The criterion uses the mean
+    because single releases vary a lot between models and meteorologies (for
+    CAPTEX-2, published ranks run from 2.47 to 3.47). The scores are computed
+    with the published protocol, and the lowest published mean is about the
+    same whether or not WRF-driven runs are counted (2.12 for reanalysis-driven
+    runs alone). Each experiment's rank is also shown against the published
+    range for reanalysis-driven and for WRF-driven runs, but these are not
+    graded.
+  - *ETEX-1:* "consistent" means GLIDE's DATEM rank on DATEM's copy of
+    ETEX-1, scored with DATEM's default options over all 3,105 pairs, is at
+    least **1.96**: HYSPLIT's rank on the 1994 ECMWF analyses, the
+    meteorology used in ATMES-II (DATEM description, Appendix C and §5.3).
+    This is the one ETEX-1 comparison that can be computed exactly as
+    published, since DATEM's program reproduces the archive's files. It is a
+    single model rather than a range, so it is a weaker test than CAPTEX and
+    ANATEX, and the 1994 analyses were much coarser than ERA5. HYSPLIT's
+    later archive run (2.34, meteorology not documented) and EASLEE (2.41
+    over four days) are reported beside it but set no threshold.
+  - *ETEX-1, ATMES-II statistics:* reported, not graded. The four models in
+    Mosca et al. (1998) were chosen to span the exercise, from 6th to 35th of
+    35, so "within their range" would be met by the worst model and tests
+    nothing. GLIDE's ATMES-II statistics are shown beside those four and
+    HYSPLIT, with the logarithmic indices (MG, VG, PCC) and FA5 first, as
+    Mosca et al. recommend. If the full results (JRC report EUR 17756) are
+    obtained before the pre-registration, the registration may add a rule
+    from them.
   - Each score is reported with its particle-noise interval, from bootstrap
-    resamples, and with FLEXPART's published score alongside. EASLEE's
+    resamples, and with the published scores alongside. EASLEE's
     published scores are shown too, with their scoring choices, but play no
     part in the grading.
   - ETEX-2 is reported without a grade, and so is ACURATE (v1.x).
@@ -775,6 +882,7 @@ calibration.
 | ETEX observations (JRC) | 3 | Human, using a download script | Instructions in [data/tracer-experiments.md](../data/tracer-experiments.md) |
 | CAPTEX, ANATEX, ACURATE and DATEM's copy of ETEX-1, DATEM's scoring software and its HYSPLIT example output (NOAA DATEM) | 3 | Human, downloaded through a web browser | Same page |
 | ERA5 for ETEX (Oct–Nov 1994, Europe), CAPTEX (Sep–Oct 1983) and ANATEX (Jan–Mar 1987), both North America | 3 | Human, with met-bazarr | On model levels. ANATEX is the largest download; estimate its size first |
+| ERA5 for OKC80 (8–11 July 1980, Oklahoma to Missouri) | 3 | Human, with met-bazarr | Small. Needed early: it is the only experiment the tracer benchmark (task B12) is tested on before the pre-registration |
 | Radon-222 concentrations and an emission map | 3 | Human | |
 | EDGAR or a similar emissions map, for the concentration comparison | 2 | Group archive (restricted) | |
 | UK DECC network data and the group's inversion setup | 4 | Group | Needed at the paper stage |

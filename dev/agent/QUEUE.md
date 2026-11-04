@@ -526,14 +526,17 @@ Model: Opus 5.5, high effort. Run strictly in order unless a task is BLOCKED.
 
 ### A11 — Tier 3 tracer-experiment runs (validation)
 
-- **Size:** M. **Depends on:** A8b (registered), A10, B10; the ERA5 cubes for ETEX, CAPTEX and
+- **Size:** M. **Depends on:** A8b (registered), A10, B10, B12; the ERA5 cubes for ETEX, CAPTEX and
   ANATEX listed in the data inventory.
 - **Scope.** Receptor-oriented backward runs, one per measured sample, as set out
   in `data/tracer-experiments.md` §5: ETEX-1, ETEX-2, CAPTEX, and ANATEX tracers
   1 and 2 (one footprint per sample serves both ANATEX tracers). ACURATE is
-  v1.x (roadmap 1i) and not part of this task. Predicted
-  concentrations written in DATEM format; scored with the B10 code using the
-  pre-registered options; the Tier 3 figure set.
+  v1.x (roadmap 1i) and not part of this task. Run through the B12
+  benchmark command with the registered configuration. Scored per release as
+  in the published studies (the eight graded experiments), and also over
+  whole experiments (reported only); predicted concentrations written in
+  DATEM format; scored with the B10 code using the pre-registered options;
+  the Tier 3 figure set; the sampler-height and 1° source sensitivity tests.
 - **Running and reporting.** Follow the registered rules
   (`docs/validation-plan.md` §3): log every run in
   `docs/validation/runs/<tier>.csv`, repeat a run only for a documented
@@ -549,8 +552,9 @@ Model: Opus 5.5, high effort. Run strictly in order unless a task is BLOCKED.
   scoring, and stop if any run used the kernel.
 - **Acceptance.** DATEM ranking scores and their four terms for every
   experiment, and ATMES-II statistics for ETEX, reported against the published
-  values for NAME, FLEXPART, HYSPLIT and STILT; pass or fail against the
-  pre-registered thresholds; figures in the gallery; `data/tracer-experiments.md`
+  values for NAME, FLEXPART, HYSPLIT and STILT in
+  `docs/published-tracer-scores.csv`; the B12 scorecard; pass or fail against
+  the pre-registered thresholds; figures in the gallery; `data/tracer-experiments.md`
   §5 updated with what was run.
 - **Runtime.** About 16,000 backward releases; estimate from the A0 benchmark
   before launching and stop if a batch exceeds twice the estimate.
@@ -701,7 +705,23 @@ dependency is listed; run in the listed order by default.
   units; a writer for DATEM-format predictions; the DATEM statistics and ranking
   score; the ATMES-II statistics for ETEX. All options of DATEM's `statmain`
   that the pre-registration must fix (zero threshold, zero–zero pairs,
-  averaging) exposed as arguments.
+  averaging, resampled correlation) exposed as arguments. The resampled
+  correlation (`-b`) follows `statmain`'s algorithm (N passes, each dropping a
+  random 20% of pairs; root-mean-square of the correlations) but takes a seed.
+  A function splits samples into the published experiments: CAPTEX releases
+  1, 2, 3, 4, 5 and 7 separately, and ANATEX tracers 1 (Glasgow) and 2 (St
+  Cloud) for the first ten releases, 5–16 January 1987
+  (`docs/published-tracer-scores.md` §2). Try the plausible assignment rules
+  (6-hour samples only or all samples; a sample belongs to the most recent
+  release, or to the release whose 60-hour window contains it), report each
+  rule's pair counts against Hegarty et al.'s (354, 365, 346, 299, 306, 183,
+  562, 556), and adopt the closest. An exact match is not required. This
+  uses the measurement files only, never GLIDE output. The ATMES-II
+  statistics follow Mosca et al. (1998) as summarised in
+  `docs/published-tracer-scores.md` §6, on the JRC ETEX-1 files: the zero
+  filter, logarithmic correlation, MG, VG, NMSE, bias with confidence
+  intervals, FA2, FA5, FOEX, KS, and the figure of merit in space from
+  interpolated contours.
   The ACURATE reader reads both `meas-t0.txt` and `meas-t1.txt` and records
   which background each uses. Data paths come from `$GLIDE_ETEX` and
   `$GLIDE_DATEM`, defaulting to `data/ETEX` and `data/DATEM`.
@@ -710,11 +730,63 @@ dependency is listed; run in the listed order by default.
   `mdl_stat/<exp>/run_stat.sh`, reproduces `statA?_000.txt` (all pairs) and
   `statT?_000.txt` (time-averaged) to their printed precision for CAPTEX, both
   ANATEX tracers, ETEX-1 and ACURATE, as a test that skips cleanly when the
-  DATEM data are absent. The JRC and DATEM versions of ETEX-1 are matched
+  DATEM data are absent. The ATMES-II zero filter applied to the JRC ETEX-1
+  measurements gives 1,423 pairs, or the difference is explained; the
+  arrival and departure rule chosen is recorded. (A first check gave 1,415,
+  with the rule in `docs/published-tracer-scores.md` §6.) The KS definition (the
+  published values are not percentages) is stated, with the evidence for
+  it. With `-b`, the mean over 20 seeds lies within the
+  range of 20 runs of DATEM's own `statmain -b` (built per
+  `data/tracer-experiments.md` §2) on the same file. The chosen sample-split
+  rule and its pair counts are recorded in `data/tracer-experiments.md` §5. The JRC and DATEM versions of ETEX-1 are matched
   sample by sample, and every difference is explained in
   `data/tracer-experiments.md`. Reader tests on small synthetic files in
   the repository. `data/tracer-experiments.md` §5 updated. No data files
   committed.
+
+### B12 — Tracer benchmark runner (1e, 1f, 1h)
+
+- **Size:** M. **Depends on:** B10 merged; the OKC80 ERA5 store in the data
+  inventory. Stop if it is missing. Does not change model output, so it can
+  run before the freeze. Model: Opus 5.5.
+- **Why.** The tracer experiments are rerun whenever parameters, physics or
+  meteorology change (validation-plan §2, Tier 3, "Re-running the tracer
+  benchmark"), so running and scoring them must be one command, and two runs
+  must be easy to compare.
+- **Scope.**
+  - A release type that takes an arbitrary list of samples, each with its own
+    location, start, duration and height range, so that one backward release
+    per measured sample can be configured. GLIDE already has a
+    `VolumeRelease` class in `src/lpdm/release_generator.py`; expose a height
+    range through the config. This adds a config option and does not change
+    the output of any existing config; say so in the PR and prove it with
+    the A0 comparison.
+  - `scripts/validation/tracers/benchmark.py`: given a GLIDE configuration
+    (or overrides on the registered one), a meteorology store and a list of
+    experiments, it builds the sample releases from the B10 readers (between
+    the ground and 100 m by default; sampler height as an option), runs them,
+    turns footprints into predicted concentrations at the source cell (with a
+    1° source as an option), writes DATEM-format predictions, and scores them
+    with B10 using the registered options.
+  - A scorecard per run, in Markdown and CSV: rank and its four terms for
+    each experiment and the mean over the published set, beside the published
+    values from `docs/published-tracer-scores.csv`, grouped by meteorology
+    class; with the physics tag, commit, configuration hash, meteorology
+    store and its met-bazarr provenance, scoring-code commit and seeds. A
+    `compare` subcommand puts two or more scorecards side by side.
+  - Instructions in `data/tracer-experiments.md` §5, step 5: how to rerun the
+    benchmark with a changed parameter, with another meteorology store, and
+    on a parameter ensemble (A7).
+- **Independence.** Before the pre-registration, run GLIDE **only on OKC80**
+  (and synthetic cases). Do not run it on CAPTEX, ANATEX or ETEX, and do not
+  write any configuration that would; the registered A11 runs are the first.
+  The tests use OKC80 or small synthetic files.
+- **Acceptance.** An end-to-end OKC80 run on the node produces a scorecard; a
+  rerun with the same seeds reproduces it exactly; a rerun with one parameter
+  changed produces a `compare` table showing the difference. Unit tests for
+  the sample-to-release conversion and the footprint-to-concentration step
+  on synthetic cases with known answers. The OKC80 scores are listed as
+  exploratory in the development history (validation-plan §3).
 
 ### B11 — Performance comparison (1h)
 
