@@ -211,7 +211,11 @@ Written under `io.output_uri`:
 
 ## Meteorology
 
-GLIDE reads from a Zarr store (`io.zarr_store`). For local development, download
+GLIDE reads from a Zarr store (`io.zarr_store`). Meteorology preparation is moving
+to the separate [met-bazarr](https://github.com/mrghg/met-bazarr) repository,
+which writes stores in GLIDE's format
+([decision 0018](dev/decisions/0018-met-bazarr.md)); until that lands (queue task
+B1), use the script below. For local development, download
 a cropped subset of just your area and window with
 [`scripts/download_sample_cube.py`](scripts/download_sample_cube.py). Public ARCO
 buckets open anonymously — no credentials needed.
@@ -276,7 +280,7 @@ uv pip install --python .venv/bin/python -e ".[dev]"   # once per environment
 .venv/bin/python -m pytest -q
 ```
 
-298 tests, ~135 s, 90% statement coverage, no network access — all end-to-end
+319 tests, about 2.5 minutes, 90% statement coverage, no network access — all end-to-end
 tests use synthetic meteorology. The suite includes analytic verification against
 the Taylor dispersion curve, the OU autocorrelation function, a cell-integrated
 reflected-Gaussian plume footprint, a Crank–Nicolson diffusion reference, and
@@ -291,7 +295,9 @@ production scheme and CPU-runnable guards for the CUDA-graph capture. See
 The hot path runs unmodified on CUDA. The SLURM scripts in `scripts/` are tuned
 for Isambard AI's Grace-Hopper nodes (aarch64, 4 × GH200 per node).
 
-**One-time setup**, in an interactive session on a login node:
+**One-time setup**, on a login node. The login nodes are Grace CPU nodes with no
+GPU, so this installs the CUDA build of PyTorch but cannot test it; the GPU check
+is in the interactive session below.
 
 ```bash
 module load cudatoolkit/24.11_12.6   # provides CUDA 12.6 runtime + nvcc/ptxas
@@ -299,20 +305,19 @@ module load cudatoolkit/24.11_12.6   # provides CUDA 12.6 runtime + nvcc/ptxas
 uv venv --python 3.11 .venv
 uv pip install --python .venv/bin/python -e ".[dev]"
 
-.venv/bin/python -c "import torch; print(torch.cuda.is_available(), torch.version.cuda)"
-# must print: True 12.6
+.venv/bin/python -c "import torch; print(torch.version.cuda)"
+# must print: 12.6  (the CUDA build is installed; no GPU is needed for this check)
 ```
 
 **Submitting:**
 
 ```bash
 mkdir -p slurm_logs
-# fill in --account and --partition in the script header first
+# no --account or --partition needed: the scheduler chooses them
 sbatch scripts/run_periodic_cuda.slurm configs/example_multisite_january.yaml
 ```
 
-**Interactive GPU session** — from the repo root, get a GPU shell (add
-`--account=<project>` if you have more than one SLURM account):
+**Interactive GPU session** — from the repo root, get a GPU shell:
 
 ```bash
 srun --gres=gpu:1 --cpus-per-task=16 --time=01:00:00 --pty bash
@@ -327,7 +332,8 @@ python -c "import torch; print('CUDA available:', torch.cuda.is_available(), tor
 python -m lpdm.main --config configs/smoke_mhd_single_release.yaml --device cuda
 ```
 
-The check must print `CUDA available: True 12.6`.
+The check must print `CUDA available: True 12.6`. This is the first point at
+which the GPU is visible, so run it once after the one-time setup.
 [`scripts/gpu_env.sh`](scripts/gpu_env.sh) is the same environment setup the
 SLURM script sources, so the two can't drift apart. It is safe to re-source,
 and does so if you `module load` anything else later in the session.
@@ -377,26 +383,28 @@ Notes:
 
 ## Roadmap
 
-- **Physics validation** against NAME, FLEXPART and observations. The comparison
-  machinery exists (`src/lpdm/comparison.py`, the validation notebooks) but a
-  systematic evaluation has not been completed. This gates everything else.
-- **Native model-level meteorology.** The plumbing is in place — download, reader
-  auto-detection, hydrostatic pressure reconstruction — and what remains is the
-  validation re-run. ERA5's 137 hybrid levels are terrain-following by
-  construction and far finer in the boundary layer (~20 levels below 1.5 km,
-  lowest at ~10 m AGL, against the pressure grid's ~0/300/600 m).
-- **Alternative turbulence and convection schemes**, so configurations can be
-  compared and chosen per application. The interfaces exist; there is one scheme
-  behind each today.
-- **Column releases** — vertically distributed releases (tower inlets, aircraft
-  profiles) by importance sampling over a pressure-weighted vertical PDF.
-- **Satellite-style releases** — many irregular soundings per overpass, each with
-  its own averaging kernel. The flat `release` axis already accommodates the
-  geometry.
-- **Performance** — the per-step path is no longer the wall; the remaining levers
-  are meteorology I/O, convection, and the untimed per-step residual.
-- **Cloud deployment** — containerised packaging returns once the architecture
-  settles.
+The full plan, with item IDs, the v1 scope and release gate, and the sequence,
+is in [dev/roadmap.md](dev/roadmap.md). In brief:
+
+- **v1: a validated, fast footprint model, without uncertainty
+  quantification.** Before the physics is frozen: efficiency work that changes
+  results (per-particle time steps, optional smoothed deposition, convergence
+  studies that set the defaults) and native model-level meteorology as the
+  default. Then a physics freeze with an external audit, and a validation
+  ladder pre-registered on OSF: component and whole-model comparisons with
+  FLEXPART v11 on identical ERA5 meteorology, and the ETEX, CAPTEX and ANATEX
+  tracer experiments ([docs/validation-plan.md](docs/validation-plan.md)).
+  Alongside: column and satellite releases, a high-resolution footprint near
+  the receptor, compressed meteorology prepared by
+  [met-bazarr](https://github.com/mrghg/met-bazarr), smaller outputs, and
+  packaging (pip install, container, DOI).
+- **After v1:** transport uncertainty from in-batch parameter ensembles and
+  footprint derivatives, with calibrated parameters; alternative turbulence and
+  convection schemes behind the existing interfaces, to estimate structural
+  uncertainty; combining meteorological
+  sources, including UKV nested in the global Met Office model; training the
+  GATES footprint emulator on GLIDE output; and longer research lines such as
+  learned meteorology compression.
 
 ## Contributing
 

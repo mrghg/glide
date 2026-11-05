@@ -29,9 +29,10 @@
 #     sbatch --time=00:30:00 scripts/run_periodic_cuda.slurm configs/ab_multisite_perf.yaml
 #     sbatch --time=45       scripts/run_periodic_cuda.slurm <config>   # 45 = 45 minutes
 # (SLURM --time accepts MM, MM:SS, HH:MM:SS, or DD-HH:MM:SS.) Same trick works for
-# --mem, --partition, etc. The config is the script's own positional arg and stays LAST.
+# --mem, etc. The config is the script's own positional arg and stays LAST.
 #
-# BEFORE FIRST USE, fill in the lines marked  # >>> EDIT (account / partition).
+# No account or partition is needed on Isambard AI: the scheduler chooses them.
+# Check the lines marked  # >>> EDIT  before first use.
 # =============================================================================
 
 #SBATCH --job-name=glide-periodic-gpu
@@ -49,8 +50,6 @@
 # a multi-batch 720-release run needs ~90 GiB. Grace has ~480 GB; raise this to match
 # your config (or use --mem=0 to request all node memory).
 #SBATCH --mem=256G                          # >>> EDIT to your node + the printed met-cache size
-# #SBATCH --account=CHEM007981                # >>> EDIT: set to your Isambard AI project code
-# #SBATCH --partition=workq                   # >>> EDIT: set to the Isambard AI GPU partition
 
 set -euo pipefail
 
