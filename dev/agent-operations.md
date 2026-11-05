@@ -128,20 +128,34 @@ Work through this once. The queue assumes all of it.
       Tier 1). Check `gfortran` works on a compute node. Never copy the source
       into the repository.
 - [ ] For the tolerance rules (validation-plan §3): download the ERA5 ensemble
-      (EDA) members for the columns of the six standard cases from the
+      (EDA) members for the columns of the seven standard cases from the
       Copernicus Climate Data Store (not in the Google Cloud ERA5 copy), list them in
       the data inventory, and put the model-error value the UK inversion
       assumes at each site in a small CSV under `$GLIDE_DATA`, also listed.
 - [ ] Build FLEXPART v11 for the reference runs with `lusekerneloutput =
       .false.` in `src/par_mod.f90`, so it attributes each particle to one
       output cell as GLIDE does in validation (validation-plan Tier 2); keep a
-      default build for one comparison case.
-- [ ] Start the FLEXPART v11 on ERA5 reference runs for the case library now.
+      default build for one comparison case. Use the default eta build. On
+      each Linux machine, check that the makefile's `-m64` and
+      `-mcmodel=large` flags are accepted, and record the compiler, flags and
+      FLEXPART commit. Run FLEXPART's own ETEX test (`tests/run_etex_test.sh`,
+      which needs 1994 ECMWF input from flex_extract) as a check on the build.
+- [ ] For the five repeat-seed runs, make one build per seed, changing
+      `idummy` in `FLEXPART.f90` and `iseed1`/`iseed2` in `random_mod.f90`,
+      and record the values. FLEXPART has no run-time seed option, and with
+      more than one thread even same-seed runs differ (validation-plan
+      Tier 2).
+- [ ] Get direct MARS access (an ECMWF account) and install flex_extract on
+      Isambard. Extract 23 Oct 1994, 00:00–23:00, over the EUR domain
+      (validation-plan §4) with `GRID=0.25` on all 137 levels, for task B13,
+      which compares it with ARCO before any reference run.
+- [ ] Start the FLEXPART v11 on ERA5 reference runs for the case library now
+      (domains, cases and meteorology windows in validation-plan §4).
       They do not depend on GLIDE, so they are done once, and they are the
       critical path for Tier 2 and for the tolerances. Besides gridded output
       for every release: particle-position snapshots at 6, 24, 72 and 120 h
-      for the six standard cases, and five runs differing only in random seed
-      for one week of hourly releases at three sites (the Tier 2 noise floor).
+      for the seven standard cases, and five runs differing only in random
+      seed for cases 1–3 (the Tier 2 noise floor).
       Run each standard case as its own single-release run, because the
       particle-position files do not record the release. Record every run's
       wall-clock time, thread count and hardware (task B11 uses them).
@@ -150,6 +164,9 @@ Work through this once. The queue assumes all of it.
       needs a browser.
 - [ ] Create an OSF account for the pre-registration (needed after the freeze;
       see §7).
+- [ ] Decide how NAME footprints for the case library are made: NAME runs on
+      ERA5 (preferred) or archive footprints at the same sites on other dates,
+      regridded (validation-plan §3, the ceiling). Settle before task A8a.
 - [ ] Locate the NAME footprints, EDGAR maps and radon data on the group
       archive, and set their variables in `env.local.sh`. They are restricted
       and never enter the repository.

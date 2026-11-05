@@ -315,8 +315,8 @@ The options change scores a lot, so the pre-registration must fix them:
 Selvaratnam et al., 2023; details and evidence in
 [../docs/published-tracer-scores.md](../docs/published-tracer-scores.md) §2)
 are: `-z0`, zero–zero pairs included, global analysis, and `-b`, with each
-CAPTEX release (1, 2, 3, 4, 5, 7) and the first ten ANATEX releases from each
-site (5–16 January 1987) scored as separate experiments. The DATEM description
+CAPTEX release (1, 2, 3, 4, 5, 7) and the first ten ANATEX releases (five from each
+site, 5–16 January 1987) scored by site as separate experiments. The DATEM description
 recommends the same defaults: "use all the data and rely upon more robust
 statistical parameters".
 

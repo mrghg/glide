@@ -407,7 +407,13 @@ Model: Opus 5.5, high effort. Run strictly in order unless a task is BLOCKED.
   - build the Fortran driver for FLEXPART's `hanna` and convection routines
     under `scripts/validation/tier1/` (A9 reuses it), compiled against
     `$GLIDE_FLEXPART_SRC` into `$GLIDE_SCRATCH`, and run it on every EDA
-    member of each standard-case column to get FLEXPART's spread;
+    member of each standard-case column to get FLEXPART's spread. What
+    is already known (validation-plan Tier 1, "What has been checked"):
+    `hanna` needs seven modules and no external libraries, and its inputs
+    are the module variables `ust`, `wst`, `ol`, `h` and `zeta`; the
+    convection routines need ecCodes (`module load` it, or stop if it is
+    absent); the cloud-base mass flux is iterated to convergence from zero,
+    and the matrix rows are checked against level mass;
   - compute the analytic predictions for the declared Tier 1 differences;
   - compute the Tier 2 noise floors from the spread across FLEXPART's
     repeat-seed runs;
@@ -438,7 +444,8 @@ Model: Opus 5.5, high effort. Run strictly in order unless a task is BLOCKED.
   - the scoring-code commit hash;
   - the met-bazarr version and commit that prepared every validation input
     store, read from the stores' provenance attributes;
-  - the six standard cases with exact dates, and the full release lists for
+  - the seven standard cases (`docs/validation-plan.md` §4) with the times
+    chosen by rule, and the full release lists for
     Tiers 1–3;
   - the metrics and the DATEM scoring options;
   - the tolerances from A8a's `tolerances.md`, copied unchanged, with the
@@ -649,7 +656,9 @@ dependency is listed; run in the listed order by default.
   documented as the satellite recommendation (7c). Flat release axis unchanged.
 - **Acceptance.** Tests for weighting and kernel application; a GOSAT-style
   example config; docs in README "Release geometries"; output contract
-  extended additively.
+  extended additively. The column release is uniform in pressure between the
+  surface and its top, matching FLEXPART's `ZKIND = 3` release used for case 7
+  of the case library (`docs/validation-plan.md` §4).
 
 ### B6 — Nested footprint output (4b)
 
@@ -778,8 +787,11 @@ dependency is listed; run in the listed order by default.
     benchmark with a changed parameter, with another meteorology store, and
     on a parameter ensemble (A7).
 - **Independence.** Before the pre-registration, run GLIDE **only on OKC80**
-  (and synthetic cases). Do not run it on CAPTEX, ANATEX or ETEX, and do not
-  write any configuration that would; the registered A11 runs are the first.
+  (and synthetic cases). Do not run it on the CAPTEX, ANATEX or ETEX releases
+  or samples, and do not write any configuration that would; the registered
+  A11 runs are the first. Case-library runs (`docs/validation-plan.md` §4) in
+  the same periods are allowed: they never use the tracer releases or
+  measurements.
   The tests use OKC80 or small synthetic files.
 - **Acceptance.** An end-to-end OKC80 run on the node produces a scorecard; a
   rerun with the same seeds reproduces it exactly; a rerun with one parameter
@@ -787,6 +799,29 @@ dependency is listed; run in the listed order by default.
   the sample-to-release conversion and the footprint-to-concentration step
   on synthetic cases with known answers. The OKC80 scores are listed as
   exploratory in the development history (validation-plan §3).
+
+### B13 — ERA5 from ARCO against ERA5 from flex_extract (Tier 2)
+
+- **Size:** S. **Depends on:** the one-day flex_extract extraction and the
+  matching ARCO cube in the data inventory (`docs/validation-plan.md` §8).
+  Stop if either is missing. Does not change model output. Model: Opus 5.5.
+- **Why.** Both models use ERA5 on the same 0.25° grid points and 137
+  levels, but ARCO interpolates via the N320 Gaussian grid and flex_extract
+  asks MARS for 0.25° directly (validation-plan Tier 2). The difference must
+  be measured before the reference runs, so that it is either declared or
+  removed.
+- **Scope.** `scripts/validation/met_routes.py`: read flex_extract's GRIB
+  output for 23 Oct 1994 over EUR and the ARCO cube of the same day; check
+  that the grid points and level coefficients match exactly; for u, v, T and
+  q, report differences on each level (bias, RMS, 99th-percentile absolute
+  difference), and maps on the lowest ten levels, split by terrain height.
+  Compare flex_extract's η̇ ∂p/∂η with ARCO's ω converted by the relation in
+  validation-plan Tier 2, as a check on both the relation and GLIDE's
+  conversion. Report in `docs/validation/met-routes.md`.
+- **Acceptance.** The report states, per field, whether the differences are
+  well below the expected spread between the models, and recommends either
+  declaring the difference (§1) or converting flex_extract's fields for GLIDE
+  through met-bazarr. A person decides.
 
 ### B11 — Performance comparison (1h)
 

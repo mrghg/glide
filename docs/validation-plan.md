@@ -64,9 +64,13 @@ comparisons. Examples include:
 - how the vertical grid is built: metres above ground on a fixed set of
   terrain-following levels, interpolated once from ERA5's native model levels
   (the default; ERA5 pressure levels are also supported);
-- the vertical velocity: GLIDE converts ERA5's pressure vertical velocity,
-  while FLEXPART uses a vertical velocity that flex_extract derives for its
-  own coordinate;
+- the vertical velocity: GLIDE converts ERA5's ω (the rate of change of a
+  parcel's pressure), while FLEXPART uses η̇ ∂p/∂η (the mass flux across
+  ERA5's hybrid levels), which flex_extract prepares. The two differ most near
+  the ground over terrain (definitions in Tier 2);
+- the horizontal interpolation of ERA5: both models use the same 0.25° grid
+  points, but the values reach them by different routes (Tier 2; measured by
+  task B13);
 - a more accurate time-stepping scheme for the resolved wind;
 - an exact, rather than approximate, update for the random turbulent velocity;
 - where the minimum turbulence timescales are applied;
@@ -75,7 +79,11 @@ comparisons. Examples include:
   FLEXPART computes its own, the friction velocity from the surface stress and
   the boundary-layer depth by a critical Richardson-number method
   (Vogelezang and Holtslag, 1996). This is likely to be one of the larger
-  sources of near-surface differences in Tier 2.
+  sources of near-surface differences in Tier 2;
+- the limits on boundary-layer depth: FLEXPART clamps it to 100–4500 m
+  (`hmixmin` and `hmixmax`, compile-time constants in `par_mod.f90`), while
+  GLIDE floors it at 50 m and sets no maximum. This matters most on stable
+  nights, when ERA5's boundary layer is often shallower than 100 m.
 
 If a difference was predicted before the comparison was run, it counts as
 evidence that the model is understood. If it is explained only after it is
@@ -143,8 +151,28 @@ transcriptions would only show that they agree with each other.
   FLEXPART imposes near the ground.
 - **Deep convection** (Emanuel's mass-flux scheme). This produces a matrix
   saying what fraction of the air at each level is moved to each other level.
-  Each column of the matrix should sum to one, so that no mass is created or
-  lost.
+  No mass should be created or lost. FLEXPART's matrix (`calcmatrix` in
+  `conv_mod.f90`) is in mass units: it sets each diagonal element so that
+  row k sums to the mass of level k, by construction. The check is
+  therefore that each row sums to its level's mass, or, normalised by level
+  mass, to one. GLIDE's matrix is compared after the same normalisation.
+  The scheme also carries the cloud-base mass flux over from the previous
+  time step, so a single call depends on its starting value. The driver
+  starts from zero and repeats the call on the same column until the flux
+  stops changing, and reports that converged state; the number of
+  iterations is recorded.
+
+**What has been checked (2026-11-05, FLEXPART v11.1, commit 71b7119).**
+FLEXPART's `hanna` routine compiles with gfortran together with the seven
+modules it depends on (`par_mod`, `com_mod`, `qvsat_mod`, `random_mod`,
+`particle_mod`, `pbl_profile_mod`, `cbl_mod`), with no external libraries.
+A small driver sets its inputs (`ust`, `wst`, `ol`, `h`, `zeta`), calls it,
+and reads σ_u, σ_v, σ_w, dσ_w/dz and the three timescales, with the 10 s
+and 30 s floors applied inside the routine. The model calls `hanna`, or
+`hanna1` when `turbswitch` is false; the driver calls both. The convection
+routines need twenty modules, including the ecCodes Fortran interface
+(`grib_api`, through `class_gribfile_mod`), so they compile only where
+ecCodes is installed; that is still to be checked.
 
 The tolerances follow the Tier 1 rules in §3: rounding level where the
 formulas are the same, and the spread of FLEXPART's own output across the ERA5
@@ -165,21 +193,72 @@ as one of three things:
 ### Tier 2: the whole model against FLEXPART on the same meteorology
 
 The main reference is **FLEXPART v11 driven by ERA5**. Both models use ERA5 on
-its native model levels: FLEXPART through its preparation tool, flex_extract,
-and GLIDE from the same fields in the ARCO ERA5 archive. Differences then come
-from the transport, not the meteorology, apart from the declared differences
-in how each model derives its vertical velocity and its boundary-layer inputs
-(§1).
+its 137 native model levels and on the same 0.25° grid points, over the
+case-library domains (§4). FLEXPART gets it through its preparation tool,
+flex_extract, from ECMWF's archive (MARS); GLIDE gets it from the ARCO ERA5
+copy on Google Cloud. The grid is the same but the numbers are not quite, so
+differences come mostly, but not only, from the transport. The declared
+differences in the meteorology are these (and the boundary-layer inputs, §1):
+
+- **The interpolation route.** ARCO converts ERA5's native fields to 0.25°
+  with Metview in two steps, from spherical harmonics to the N320 Gaussian
+  grid and then to 0.25° (`update_model_level_native_vertical_zarr.py` in the
+  arco-era5 repository). flex_extract asks MARS for the 0.25° grid directly.
+  The values at a grid point therefore differ slightly, most near steep
+  terrain. Task B13 measures this on one day before any reference run. If
+  the differences are not well below the spread expected between the models,
+  GLIDE reads flex_extract's fields instead, through a converter in
+  met-bazarr, and the plan records the change.
+- **The vertical velocity.** ERA5's model levels are defined by
+  $p_{k+1/2} = A_{k+1/2} + B_{k+1/2}\ p_s$, with fixed coefficients $A$ and
+  $B$ and surface pressure $p_s$. The hybrid coordinate η runs from 0 at the
+  model top to 1 at the ground. Three vertical velocities appear:
+  - η̇ = dη/dt (s⁻¹), the rate at which air crosses η surfaces; ERA5
+    parameter 77;
+  - η̇ ∂p/∂η (Pa s⁻¹), the same flux in pressure units; flex_extract prepares
+    it for FLEXPART;
+  - ω = Dp/Dt (Pa s⁻¹), the rate of change of a parcel's pressure; ERA5
+    parameter 135, ARCO's `vertical_velocity`, and what GLIDE reads.
+
+  They are related by
+  $\omega = \dot\eta\ \partial p/\partial\eta + B\ (\partial p_s/\partial t + \mathbf{v}\cdot\nabla p_s)$.
+  The second term is the pressure change of air that rides along a tilting,
+  rising or falling η surface. It vanishes at the model top ($B = 0$) and is
+  largest near the ground over terrain. FLEXPART treats any field labelled
+  parameter 77 or 135 as η̇ ∂p/∂η (`windfields_mod.f90`, near line 438;
+  `verttransform_mod.f90`, near line 450), so it must **never be given
+  ARCO's ω**. FLEXPART's "eta" build is a different use of the word: it
+  moves particles in FLEXPART's own terrain-following coordinate, labelled
+  in metres, not in ECMWF's η.
 
 **FLEXPART's output smoothing is switched off for these runs.** By default
 FLEXPART v11 spreads each particle older than three hours over the four
 nearest output cells (a uniform kernel), and attributes younger particles to
 the single cell they are in. The switch is a compile-time constant,
-`lusekerneloutput` in `src/par_mod.f90`. The reference runs use a FLEXPART
+`lusekerneloutput` in `src/par_mod.f90` (line 41 in v11.1). The reference runs use a FLEXPART
 build with it set to `.false.`, so that both models attribute each particle
 to one cell, as GLIDE does in validation (§3). One standard case is also run
 with the default build, to show how much the smoothing changes FLEXPART's own
 footprints.
+
+**The FLEXPART build is fixed and recorded.** The reference runs use
+FLEXPART's default build, with its model-level ("eta") vertical coordinate
+(`make eta=yes`, the default), on ERA5 model levels prepared by flex_extract.
+The pre-registration records the FLEXPART commit, the compiler and its
+version, the flags, and every edited constant (`lusekerneloutput` and the
+random seeds). The makefile's gfortran flags include `-m64` and
+`-mcmodel=large`; macOS rejects the second, so check both on each Linux
+machine before the reference runs and record any change.
+
+**FLEXPART's runs are not exactly repeatable.** Its random numbers come
+from a pool of six million Gaussian values generated at start-up from a
+fixed seed (`idummy = -320`, `FLEXPART.f90`), from which each particle step
+draws at a position set by a per-thread seed (`iseed1` and `iseed2`,
+`random_mod.f90`). The particle loop hands particles to threads dynamically
+(`SCHEDULE(dynamic)`), so with more than one thread two runs with the same
+seeds still differ. The repeat-seed runs for the noise floor (§3) therefore
+change all three seeds explicitly, one rebuild per seed, and record them;
+the five runs then sample both the seed and the thread scheduling.
 
 The comparison works in the order below. Each level is stricter than the one after
 it, because each later level averages over more detail.
@@ -375,8 +454,10 @@ provenance, so that two scorecards can be compared directly. Instructions for
 running it go in `data/tracer-experiments.md`.
 
 Before the pre-registration, the benchmark is only run on OKC80, which is not
-one of the graded experiments. GLIDE is not run on CAPTEX, ANATEX or ETEX
-until task A11, so that they stay an independent test. After A11, a rerun is
+one of the graded experiments. GLIDE is not run on the CAPTEX, ANATEX or ETEX
+releases or samples until task A11, so that they stay an independent test.
+The case library (§4) uses the same meteorology but never the tracer
+releases or measurements, so it may be run before then. After A11, a rerun is
 labelled exploratory unless it is part of a registered update (§3).
 
 **Which experiments are used for fitting and which for testing (v2
@@ -539,14 +620,24 @@ human to confirm or change before this plan is merged.
     level).
 - **Tier 2.** Two levels, both computed from reference data:
   - *Noise floor* (for "indistinguishable"): the 95% band of each metric
-    across repeated FLEXPART runs that differ only in their random seed. A
-    subset of cases is run five times: one week of hourly releases at three
-    sites. The resulting noise, expressed against particle count and footprint
+    across repeated FLEXPART runs that differ only in their random seeds
+    (Tier 2, "FLEXPART's runs are not exactly repeatable"). A
+    subset of cases is run five times: the five days of hourly releases at
+    the three European sites (cases 1–3, §4). The resulting noise, expressed against particle count and footprint
     size, is applied to the full set.
   - *Ceiling* (for "consistent"): the same metric computed between NAME and
     FLEXPART for the same sites and dates. NAME runs on different
     meteorology, so this is the disagreement between established models as
     they are actually used.
+    **Open decision, to settle before task A8a.** The case library falls in
+    the tracer-experiment periods (§4), which the group's NAME archive does
+    not cover, so the ceiling needs NAME runs for these cases. The preferred
+    option is NAME driven by ERA5 (Selvaratnam et al., 2023, ran NAME on
+    ERA-Interim), which would make the ceiling a same-meteorology one. The
+    fallback is NAME footprints from the archive at the same sites on other
+    dates, regridded onto the case-library grids, with the regridding error
+    stated; that gives a ceiling for the metric's typical size but not for
+    the same weather.
   - *Footprints:* for each metric, at least **90%** of footprints within the
     ceiling, and the median within the ceiling for every site and every
     standard case.
@@ -674,24 +765,150 @@ finding.
 
 ## 4. The case library
 
-Six standard cases are chosen once and used in every tier and every figure.
+Seven standard cases are chosen once and used in every tier and every figure.
 Readers then get to know a few situations well and can follow each one up the
 ladder. Each case is chosen to:
 
 - test one meteorological situation or model feature;
-- have FLEXPART and NAME output available for comparison;
-- where possible, include a site with observations.
+- fall inside the period and domain of a tracer experiment, so that the
+  meteorology prepared for Tier 3 also serves Tiers 0–2, and so that the
+  cases cover both Europe and North America;
+- where possible, sit at a site with observations.
 
-| Case | What it tests | Candidate |
-| --- | --- | --- |
-| Stable night, low inlet | Weak night-time mixing near the ground, where the minimum turbulence timescales matter | A UK or ICOS tower, winter night |
-| Convective summer afternoon | Daytime convective turbulence and boundary-layer depth | A continental site in July |
-| Frontal passage | Transport by the resolved winds, and interpolation between hourly meteorology | A tower during a well-documented front |
-| Mountain site | The terrain-following vertical coordinate | Jungfraujoch or similar |
-| Coastal site | The land–sea transition, and features smaller than a grid cell | Mace Head |
-| Satellite column | Releasing particles through a whole atmospheric column, as for a satellite retrieval, and how runs are ended | A GOSAT or TROPOMI sounding over Brazil |
+**The cases share the tracer experiments' meteorology, never their
+observations.** Case-library runs are compared only with other models. They
+never read the tracer measurements, and no case releases from a tracer
+source. Running GLIDE on these cases before the pre-registration therefore
+does not use up the independence of Tier 3 (§2, "Re-running the tracer
+benchmark"; task B12). The development history (§3) lists every such run all
+the same.
 
-The exact dates are fixed in the pre-registration record.
+### Domains and output grid
+
+Two domains, both on ERA5's 0.25° grid points. Each is used for both the
+meteorology and the footprint output.
+
+| Domain | Grid points | Size | Covers |
+| --- | --- | --- | --- |
+| **EUR** | 30° W – 40° E, 32 – 72° N | 281 × 161 | The ETEX release site (Monterfil, 48.05° N, 2.00° W) and all 168 of DATEM's ETEX stations (42.7–61.0° N, 4.4° W – 26.1° E); Mace Head, Jungfraujoch and Cabauw |
+| **NAM** | 120 – 55° W, 22 – 58° N | 261 × 145 | The ANATEX releases (Glasgow, Montana, 106.5° W; St Cloud, Minnesota) and stations (25.9–54.0° N, 103.2–60.4° W); the CAPTEX releases (Dayton, Ohio; Sudbury, Ontario) and stations; ACURATE; Lamont, Oklahoma |
+
+- **Output cells are centred on the ERA5 grid points.** The output grid's
+  edges therefore lie 0.125° outside the points listed:
+  - EUR: 30.125° W – 40.125° E and 31.875 – 72.125° N;
+  - NAM: 120.125 – 54.875° W and 21.875 – 58.125° N.
+
+  GLIDE's `output_grid` and FLEXPART's `OUTGRID` (`OUTLON0` and `OUTLAT0` at
+  the lower-left edge, `DXOUT = DYOUT = 0.25`) are both set from these edges.
+- **The meteorology and output domains are the same.** Both models remove
+  particles that leave the domain, so this does not affect a comparison
+  between them. The fraction that leaves is reported (Tier 2). A Mace Head
+  footprint in westerlies leaves EUR in about two days.
+- **NAME footprints**, if used (§3, the ceiling), are regridded
+  conservatively onto these grids (`src/lpdm/comparison.py`), and the
+  regridding error is stated.
+- **OKC80** (8–11 July 1980) uses a subdomain of NAM on the same grid points.
+- **Footprints run 10 days backward.**
+
+### The cases
+
+Every release lasts one hour and starts on the hour. Each case has two kinds
+of release:
+- the **hourly releases** in its window, for the footprint statistics;
+- one **snapshot release**, run as its own single-release run, for the
+  particle snapshots at 6, 24, 72 and 120 hours (Tier 2, step 1). It is run
+  separately because FLEXPART's particle files do not record which release a
+  particle came from.
+
+All times are UTC. Heights are above ground level unless marked as above sea
+level (asl).
+
+| # | Case | What it tests | Receptor | Height | Domain | Hourly releases | Snapshot release |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | Coastal | The land–sea transition, and features smaller than a grid cell | Mace Head, 53.326° N, 9.904° W | 10 m | EUR | 23 Oct 1994 00:00 – 27 Oct 23:00 | 25 Oct 1994 12:00 |
+| 2 | Mountain | The terrain-following vertical coordinate, and a release given above sea level over ERA5's smoothed terrain | Jungfraujoch, 46.548° N, 7.985° E | 3,580 m asl | EUR | as case 1 | 25 Oct 1994 12:00 |
+| 3 | Stable night, low inlet | Weak night-time mixing near the ground, the minimum turbulence timescales, and the boundary-layer floor (100 m in FLEXPART, 50 m in GLIDE; §1) | Cabauw, 51.971° N, 4.927° E | 20 m | EUR | as case 1 | 02:00 on the night chosen by rule (below) |
+| 4 | Convective afternoon | Daytime convective turbulence, boundary-layer depth, and deep convection | CAPTEX sampler 308, 40.77° N, 80.75° W | 10 m | NAM | 18 Sep 1983 00:00 – 20 Sep 23:00 | 19 Sep 1983 18:00 |
+| 5 | Frontal passage | Transport by the resolved winds, and interpolation between hourly meteorology | CAPTEX sampler 854, 45.60° N, 77.20° W | 10 m | NAM | 25 Oct 1983 00:00 – 27 Oct 23:00 | the hour of frontal passage, chosen by rule (below) |
+| 6 | Continental winter | Long-range transport over land in winter, and a stable continental boundary layer | ANATEX sampler 1609, 42.20° N, 89.10° W | 10 m | NAM | 10 Jan 1987 00:00 – 12 Jan 23:00 | 11 Jan 1987 18:00 |
+| 7 | Satellite column | Releasing particles through a whole atmospheric column, as for a satellite retrieval, and how runs are ended | Lamont, Oklahoma (the TCCON site), 36.604° N, 97.486° W | surface to 1 hPa, uniform in pressure | NAM | as case 4 | 19 Sep 1983 19:00 (about 13:30 local solar time, a typical overpass) |
+
+**How the receptors were chosen.**
+- In Europe, the receptors are long-running measurement sites.
+- North America had no comparable towers in the 1980s. The receptors there
+  were chosen by fixed rules from the samplers' coordinates alone:
+  - case 4 is the CAPTEX sampler nearest to 300 km from the Dayton release
+    (site 308, 300 km);
+  - case 5 is the one nearest to 300 km from the Sudbury release (site 854,
+    298 km);
+  - case 6 is the ANATEX sampler nearest the centre of the network (site
+    1609).
+- Lamont is a ground-based column-measuring site.
+
+**Times chosen by rule.** These rules use ERA5 fields only, never model
+output. They are applied before the pre-registration, and the resulting times
+are written into the record.
+- *Case 3, the stable night:* of the four nights from 23/24 to 26/27 October
+  1994, the one with the lowest mean ERA5 boundary-layer height between 00:00
+  and 05:00 at the grid point nearest Cabauw. Ties go to the earlier night.
+- *Case 5, the frontal passage:* the hour, between 25 October 06:00 and
+  27 October 18:00 1983, at the end of the largest 3-hour fall in ERA5's
+  850 hPa temperature at the grid point nearest site 854. If that fall is
+  under 2 K, there is no clear front, and the case is chosen again before
+  registration, with the change recorded.
+
+**The column release (case 7).**
+- *FLEXPART:* the release is an ordinary `RELEASES` entry with `ZKIND = 3`
+  (pressure). FLEXPART draws each particle's starting height uniformly
+  between the two pressure limits (`initialise_mod.f90`, near line 268), so
+  the release is weighted by air mass, as a column-average mole fraction
+  needs.
+  - `Z1` is ERA5's surface pressure at the receptor at the release time. If
+    `Z1` is above the actual surface pressure, FLEXPART puts the extra
+    particles in its lowest level.
+  - `Z2` is 1 hPa.
+  - In backward mode, `IOUTPUTFOREACHRELEASE` must be 1.
+  - FLEXPART's `SATELLITES` option is not used. It samples modelled
+    concentrations at retrieval layers in forward runs; it does not make
+    column footprints.
+- *GLIDE:* the column release (task B5) must use the same uniform-in-pressure
+  weighting.
+- *Averaging kernels:* a version with one release per retrieval layer,
+  weighted afterwards, is added only if B5 needs it.
+- *Why a 1983 date:* the case tests the release and how runs end, which does
+  not need a real satellite overpass. A modern case over Brazil (TROPOMI or
+  GOSAT) may be added later for the GATES work, outside the registered set.
+
+**Repeat-seed runs** for the Tier 2 noise floor (§3): cases 1–3, the full
+five days of hourly releases, with five sets of seeds.
+
+### Meteorology windows
+
+Each window covers both the case-library footprints (10 days back from a
+case's first release) and the scoring of the tracer experiments in it. All
+windows use all 137 levels, so that both models see the same column. A lower
+model top, to make the files smaller, is an option for the public benchmark
+(roadmap 1h) and is decided there.
+
+| Domain | Window (UTC) | Days | Used for |
+| --- | --- | --- | --- |
+| EUR | 13 Oct 1994 00:00 – 28 Oct 00:00 | 15 | Cases 1–3; ETEX-1 (release 23 Oct 16:00, sampling to 27 Oct 09:00) |
+| EUR | 14 Nov 1994 00:00 – 19 Nov 00:00 | 5 | ETEX-2 (release 14 Nov 15:00, sampling to 18 Nov 09:00) |
+| NAM | 8 Sep 1983 00:00 – 22 Sep 00:00 | 14 | Cases 4 and 7; CAPTEX-1 |
+| NAM | 25 Sep 1983 00:00 – 29 Sep 00:00 | 4 | CAPTEX-2 |
+| NAM | 2 Oct 1983 00:00 – 6 Oct 00:00 | 4 | CAPTEX-3 |
+| NAM | 14 Oct 1983 00:00 – 1 Nov 00:00 | 18 | Case 5; CAPTEX-4 to 7 |
+| NAM | 31 Dec 1986 00:00 – 18 Jan 1987 00:00 | 18 | Case 6; ANATEX's scored samples (5–16 January) |
+| NAM subdomain | 8 Jul 1980 00:00 – 12 Jul 00:00 | 4 | OKC80 (task B12) |
+
+**Sizes**, raw float32, for six 3-D fields every hour on 137 levels:
+- EUR: about 3.6 GB a day, so about 72 GB for 20 days;
+- NAM: about 3.0 GB a day, so about 175 GB for 58 days;
+- FLEXPART's GRIB copy: about the same again.
+
+Cutting the cubes at about 100 hPa (model levels 61–137) would roughly halve
+these sizes.
+
 
 ---
 
@@ -873,16 +1090,16 @@ calibration.
 
 | Need | Tier | Who provides it | Notes |
 | --- | --- | --- | --- |
-| ERA5 stores for the standard cases, on model levels (the default); pressure levels only for comparison | 0–2 | Human, with met-bazarr (GLIDE's existing download scripts until task B1) | Listed in `dev/agent/PROGRESS.md` |
-| FLEXPART v11 on ERA5 via flex_extract, built with `lusekerneloutput = .false.` (Tier 2), plus one standard case with the default build: gridded output for each release; particle-position snapshots at 6, 24, 72 and 120 h for the six standard cases; five repeat-seed runs of one week of hourly releases at three sites | 2 | Human | FLEXPART's output does not depend on GLIDE, so these runs can be done once, early. The repeat-seed runs give the Tier 2 noise floor (§3). Run each standard case as its own FLEXPART run with a single release: FLEXPART's particle-position files do not record which release a particle came from. Record each run's wall-clock time, thread count and hardware, for the performance comparison |
+| ERA5 stores for the meteorology windows of §4, from ARCO, on all 137 model levels (the default); pressure levels only for comparison | 0–3 | Human, with met-bazarr (GLIDE's existing download scripts until task B1) | EUR and NAM domains on ERA5's 0.25° grid points (§4). About 72 GB for EUR and 175 GB for NAM; listed in `dev/agent/PROGRESS.md` |
+| One day of ERA5 through flex_extract (23 Oct 1994, 00:00–23:00, EUR domain, `GRID=0.25`, all 137 levels), and the same day from ARCO | 2 | Human, with direct MARS access | For task B13, which measures the difference between the two routes (Tier 2). Do this before the reference runs |
+| FLEXPART v11 on ERA5 via flex_extract (from MARS, over the §4 domains and windows), built with `lusekerneloutput = .false.` (Tier 2), plus one standard case with the default build: gridded output for each release; particle-position snapshots at 6, 24, 72 and 120 h for the seven standard cases; five repeat-seed runs of cases 1–3 | 2 | Human | FLEXPART's output does not depend on GLIDE, so these runs can be done once, early. The repeat-seed runs give the Tier 2 noise floor (§3). Run each standard case as its own FLEXPART run with a single release: FLEXPART's particle-position files do not record which release a particle came from. Record each run's wall-clock time, thread count and hardware, for the performance comparison |
 | ERA5 ensemble (EDA) members for the columns of the standard cases | 1 | Human, from the Copernicus Climate Data Store ("ensemble members" product type; not in the Google Cloud ERA5 copy) | Small: single columns, pressure levels. For the Tier 1 tolerance rule (§3) |
 | The model-error term the group's UK inversion assumes at each site | 2 | Group | For the Tier 2 concentration rule (§3) |
 | FLEXPART v11 source code on Isambard, for the Tier 1 component comparison (no FLEXPART run is needed for Tier 1) | 1 | Human; set `GLIDE_FLEXPART_SRC` | GPL: use locally, never copy into the repository; `gfortran` on the compute node |
-| NAME footprints for the same sites and dates | 2 | Group archive (restricted) | Secondary comparison, and the ceiling in the Tier 2 tolerance rules (§3) |
+| NAME footprints for the case library | 2 | Group: NAME runs on ERA5 (preferred), or the archive at the same sites on other dates, regridded to the §4 grids | Secondary comparison, and the ceiling in the Tier 2 tolerance rules (§3). Which of the two is an open decision, settled before task A8a |
 | ETEX observations (JRC) | 3 | Human, using a download script | Instructions in [data/tracer-experiments.md](../data/tracer-experiments.md) |
 | CAPTEX, ANATEX, ACURATE and DATEM's copy of ETEX-1, DATEM's scoring software and its HYSPLIT example output (NOAA DATEM) | 3 | Human, downloaded through a web browser | Same page |
-| ERA5 for ETEX (Oct–Nov 1994, Europe), CAPTEX (Sep–Oct 1983) and ANATEX (Jan–Mar 1987), both North America | 3 | Human, with met-bazarr | On model levels. ANATEX is the largest download; estimate its size first |
-| ERA5 for OKC80 (8–11 July 1980, Oklahoma to Missouri) | 3 | Human, with met-bazarr | Small. Needed early: it is the only experiment the tracer benchmark (task B12) is tested on before the pre-registration |
+| ERA5 for OKC80 (8–11 July 1980, Oklahoma to Missouri; a subdomain of NAM, §4) | 3 | Human, with met-bazarr | Small. Needed early: it is the only experiment the tracer benchmark (task B12) is tested on before the pre-registration |
 | Radon-222 concentrations and an emission map | 3 | Human | |
 | EDGAR or a similar emissions map, for the concentration comparison | 2 | Group archive (restricted) | |
 | UK DECC network data and the group's inversion setup | 4 | Group | Needed at the paper stage |
