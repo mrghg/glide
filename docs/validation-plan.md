@@ -25,7 +25,9 @@ existing tests, is in [VALIDATION.md](VALIDATION.md)._
 - **FLEXPART and NAME.** The established Lagrangian models GLIDE is compared
   with. FLEXPART v11 is the main reference because GLIDE's turbulence scheme
   follows it and both can be run on the same ERA5 meteorology. NAME is the Met
-  Office model that the group's UK inversions currently use.
+  Office model that the group's UK inversions currently use. It is the second
+  reference: GLIDE is also run on NAME's own Met Office meteorology and
+  compared with it (Tier 2).
 - **The physics freeze.** The point at which the model physics is fixed and
   given a version label in git (a *physics tag*, for example `v0-physics`). All
   validation runs use one tagged version, so every result refers to the same
@@ -98,7 +100,7 @@ seen, it does not count. The full list is fixed in the pre-registration record
 | --- | --- | --- | --- |
 | 0 | Does the code solve the equations it claims to solve? | Exact mathematical solutions, numerical solutions of the diffusion equation, and conservation checks | Largely done. The reciprocity test and the convergence figures are still missing |
 | 1 | Do GLIDE's turbulence and convection schemes give the same numbers as FLEXPART's code? | FLEXPART v11's own routines, run on the same input profile | Not started |
-| 2 | Does the full model move particles like the established models when both use the same meteorology? | FLEXPART v11 on ERA5; NAME as a secondary check | Comparison tools exist, but have not been run on the frozen physics |
+| 2 | Does the full model move particles like the established models when both use the same meteorology? | FLEXPART v11 on ERA5 (primary, public); NAME on Met Office analyses (second) | Comparison tools exist, but have not been run on the frozen physics |
 | 3 | Does GLIDE reproduce measured concentrations from tracer releases with known emissions? | ETEX, CAPTEX and ANATEX observations; radon-222 | Data located; not started |
 | 4 | Does an inversion the group already trusts give the same answer with GLIDE footprints? | UK CH₄ inversion with NAME footprints | Not started; this is the paper's application |
 
@@ -122,7 +124,8 @@ These tests are already in the test suite (see
   - the number of vertical levels the meteorology is interpolated onto.
 
   The studies use the analytic plume test and one real-meteorology case. For
-  each setting, the error should fall at the rate theory predicts. The results
+  each setting, the error should fall as the setting is refined, at the rate
+  theory predicts where theory gives one (§3). The results
   set the v1 default values (roadmap 7b). They also show that these settings
   were chosen because the answer stopped changing, not to improve agreement
   with observations.
@@ -190,7 +193,7 @@ as one of three things:
   Where GLIDE copied the questionable behaviour, that is stated too.
   Confirmed problems are reported to the FLEXPART developers.
 
-### Tier 2: the whole model against FLEXPART on the same meteorology
+### Tier 2: the whole model against FLEXPART and NAME, each on the same meteorology
 
 The main reference is **FLEXPART v11 driven by ERA5**. Both models use ERA5 on
 its 137 native model levels and on the same 0.25° grid points, over the
@@ -281,16 +284,58 @@ it, because each later level averages over more detail.
    - the total sensitivity summed over all cells;
    - the sensitivity weighted by distance from the receptor, which measures
      how far upwind the influence extends;
-   - a map of the average ratio between the two models over a month, which
-     shows any systematic geographic difference.
+   - a map of the average ratio between the two models over each two-week
+     block (§4), which shows any systematic geographic difference.
 3. **Concentrations at measurement sites,** after each model's footprints are
    multiplied by the same emissions map.
 
-NAME is a secondary comparison because it is normally driven by Met Office
-meteorology, not ERA5. Comparing GLIDE on ERA5 with NAME on Met Office fields
-mixes up differences in meteorology with differences in the models, and the
-results will be reported with that caveat. A clean comparison with NAME will
-become possible once GLIDE can read Met Office fields (roadmap 3b and 3c).
+#### NAME and Met Office meteorology
+
+NAME is the second reference. It runs on the Met Office's global Unified
+Model (UM) analyses, which the group holds from 9 March 2010. The case
+library (§4) uses dates after 11 July 2017, when the archive's current
+series (Mk10PT to Mk12PT) begins. GLIDE is run on those same fields as well
+as on ERA5, which gives four comparisons:
+
+| Comparison | What it shows | Graded? |
+| --- | --- | --- |
+| GLIDE on ERA5 against FLEXPART on ERA5 | The difference between the models. The primary comparison, and the only one that outsiders can reproduce | Yes |
+| GLIDE on UM against NAME on UM | The difference between the models, against a second, independent model | Yes |
+| NAME on UM against FLEXPART on ERA5 | How much two established models differ as they are actually used. This is the ceiling in the tolerance rules (§3) | It sets the tolerance |
+| GLIDE on UM against GLIDE on ERA5 | The effect of the meteorology alone | No, reported |
+
+The same steps and metrics are used as for FLEXPART, with two exceptions.
+Particle snapshots are compared with NAME only if NAME's particle output can
+be written at the same times. NAME's own run-to-run noise comes from five
+repeat-seed NAME runs (§4).
+
+**Expected differences from NAME** are larger than from FLEXPART, because
+GLIDE's turbulence scheme follows FLEXPART's, not NAME's. They include:
+- NAME's own profiles of turbulent velocity and timescale in the boundary
+  layer, and its own treatment of the free troposphere;
+- NAME's representation of unresolved mesoscale motions, where GLIDE uses
+  its meander term;
+- NAME's convection scheme;
+- NAME's boundary-layer depth, taken from the UM or diagnosed by NAME;
+- the column release, if NAME has to build it from stacked sources (§4).
+
+The registered list (§3) gives each with its predicted direction.
+
+**What GLIDE needs to read UM fields** (task B14; roadmap 3g). The conversion
+to GLIDE's format is done in met-bazarr, as for ERA5.
+[met_schema.md](met_schema.md) already lists what a UM archive lacks against
+the format: geopotential, friction velocity, the sign of the heat flux, and
+variable names. Two things go beyond conversion and may need a change to
+GLIDE's reader:
+- the UM's levels are heights above the terrain, not pressures or ECMWF
+  hybrid levels;
+- its vertical velocity is in metres per second, not ω.
+
+Any reader change lands before the physics freeze, and must leave ERA5 runs
+bit-for-bit unchanged (shown with the A0 comparison). Only the global model
+is used; nesting the 1.5 km UK model inside it stays a later item (roadmap
+3c). The Met Office fields are restricted, so this comparison is not part of
+the public benchmark.
 
 ### Tier 3: tracer experiments with known emissions
 
@@ -314,7 +359,9 @@ download the data, the file formats and the scoring are described in
 - **ANATEX** (North America, 1987). 66 releases from two sites over three
   months, measured at 75 sites in 24-hour samples, at distances of up to
   several thousand kilometres. Also from DATEM.
-- **Radon-222** at a few European sites. Radon is emitted from soils at a
+- **Radon-222** at Cabauw and Mace Head, for the two European blocks of the
+  case library (§4), if the measurements for those weeks can be obtained;
+  otherwise radon moves to v1.x. Radon is emitted from soils at a
   roughly known rate and decays with a half-life of 3.8 days. It is a
   continuous check on boundary-layer mixing, although the uncertainty in its
   emission map limits what it can show.
@@ -417,7 +464,10 @@ published them.
 **How GLIDE is run for these experiments.** Each measured sample gets its own
 backward run. Particles are released at the sampler's location, spread evenly
 between the ground and 100 m and over the sample's collection period, and run
-backward in time. The 100 m layer matches the layer the published forward
+backward in time, to the start of the earliest release scored with that
+sample. That is at most five days for ETEX and CAPTEX, and up to twelve days
+for ANATEX, where a sample on 16 January can hold tracer released on
+5 January. The 100 m layer matches the layer the published forward
 runs averaged over. A second set, released at the sampler's height, is
 reported as a sensitivity test, as in Hegarty et al.'s backward STILT runs,
 where receptors at 10 m scored about 0.04 lower than at 50 m. The resulting
@@ -456,8 +506,7 @@ running it go in `data/tracer-experiments.md`.
 Before the pre-registration, the benchmark is only run on OKC80, which is not
 one of the graded experiments. GLIDE is not run on the CAPTEX, ANATEX or ETEX
 releases or samples until task A11, so that they stay an independent test.
-The case library (§4) uses the same meteorology but never the tracer
-releases or measurements, so it may be run before then. After A11, a rerun is
+The case library (§4) is in a different year. After A11, a rerun is
 labelled exploratory unless it is part of a registered update (§3).
 
 **Which experiments are used for fitting and which for testing (v2
@@ -507,6 +556,8 @@ A decision record in [dev/decisions/](../dev/decisions/) fixes the following:
     random seed);
   - how samples are assigned to releases and which are scored (B10's rule);
   - the layer the receptor particles are released in (0–100 m).
+- **The footprint layer:** the lowest 40 m above the ground, in every model
+  (§4).
 - **The tolerances,** computed by the rules below, and the published scores
   of other models that GLIDE will be judged against, as the commit of
   [published-tracer-scores.csv](published-tracer-scores.csv).
@@ -521,8 +572,10 @@ A decision record in [dev/decisions/](../dev/decisions/) fixes the following:
   off (Tier 2). Brioude et al. (2026) show how much this choice can matter:
   on ETEX-1, changing EASLEE's output kernel moved the near-source correlation
   from 0.66 to 0.33, through a single station.
-- **The expected differences** between GLIDE and FLEXPART in the Tier 2
-  comparison (§1).
+- **The expected differences** between GLIDE and FLEXPART, and between GLIDE
+  and NAME, in the Tier 2 comparisons (§1 and Tier 2). Each is registered
+  with the direction it should have and a rough size, so that "predicted"
+  can be checked.
 - **The fitting and test sets:** fit on ETEX-1 and CAPTEX; test on ANATEX and
   radon; report ETEX-2.
 - **The development history.** Listing earlier comparisons is not enough. The
@@ -545,7 +598,9 @@ A decision record in [dev/decisions/](../dev/decisions/) fixes the following:
     FLEXPART's source, such as adopting FLEXPART v11's Hanna coefficients
     (commit 01610bd), are listed separately, because no result prompted them.
   - *Data that are therefore not independent.* The UK sites and periods used
-    in those development comparisons, which matters for Tier 4, and the
+    in those development comparisons (January 2024 at Mace Head, Ridge Hill
+    and Tacolneston), which matters for Tier 4 and is why the case library
+    uses another year (§4), and the
     FLEXPART and NAME output already compared. The tracer experiments and the
     radon data have not been used, which is why Tier 3 is the independent
     test.
@@ -586,23 +641,68 @@ reported wherever it holds.
 footprints and several metrics. With a 95% noise band, about 5% would fall
 outside it even if GLIDE matched FLEXPART exactly. So the criteria apply to
 distributions, not to single cases: a metric is graded by the fraction of
-cases that meet it, and any failures must show no pattern by region, site or
-standard case.
+cases that meet it, and it is graded separately for every receptor and every
+block (§4), so that a failure confined to one site or season cannot be hidden
+in the total.
 
-**The rules, tier by tier.** The constants in **bold** are proposals for the
-human to confirm or change before this plan is merged.
+**The rules, tier by tier.** The constants in **bold** were confirmed by the
+human before this plan was merged. They are fixed at the pre-registration.
 
 - **Tier 0.** The existing test tolerances ([VALIDATION.md](VALIDATION.md))
   stand. For the new tests:
-  - *Reciprocity:* forward and backward results agree within the combined
-    95% particle-noise band (from bootstrap resamples of both runs) in at
-    least **95%** of the grid cells that carry non-negligible sensitivity.
-  - *Convergence:* the fitted rate at which the error falls is within **25%**
-    of the theoretical rate, over the range where the error is above the
-    particle noise.
+  - *Reciprocity:* the test makes the same sensitivity map twice, once
+    with a backward run and once with forward runs, and checks that the two
+    maps differ by no more than their particle noise. It has four steps.
+    1. *Choose the cells to test.* A third run, backward with its own random
+       seed, is used only for this. A cell is tested if at least **50**
+       different particles pass through it in that run. Cells with fewer
+       are left out, because the noise of a value built from a handful of
+       particles cannot be estimated. The cells are chosen from a third run
+       so that the choice cannot depend on the two maps being compared.
+    2. *Estimate the noise in each tested cell.* Each map is recomputed many
+       times from random resamples of its own particles (a bootstrap). This
+       gives, for each cell, the range that 95% of differences between the
+       two maps should fall in if only particle noise separates them.
+    3. *Count the cells that agree.* The test passes if the difference is
+       inside that range in at least **90%** of the tested cells. A correct
+       model scores 95% on average, not 100%, because the range covers 95%
+       of chance differences. Requiring 95% would fail a correct model about
+       half the time; 90% leaves room for chance.
+    4. *Check the total.* The sum over the tested cells must also agree
+       within its own 95% noise range. A small error of the same sign in
+       every cell would pass step 3 and fail here.
+
+    A companion test removes the sign change that the backward run needs,
+    and must fail (task A6). That shows the test can detect a real error.
+  - *Convergence:* the *rate* is the power with which the error changes as
+    a setting is refined. If the error is proportional to the time step,
+    halving the step halves the error and the rate is 1. It is measured as
+    the slope of the error against the setting on logarithmic axes. Two
+    rules apply, because theory predicts a rate for only two of the four
+    settings.
+    - *Number of particles and time step:* the measured rate is within
+      **25%** of the predicted rate, fitted over the range where the error
+      is above the particle noise. For the number of particles the
+      predicted rate is −1/2 (four times the particles halves the error),
+      so the measured rate must lie between −0.375 and −0.625. For the time
+      step the predicted rate is the order of GLIDE's stepping scheme,
+      stated from the code before the study is run (task A5); if it is 1,
+      the measured rate must lie between 0.75 and 1.25.
+    - *Sub-step accuracy target and number of vertical levels:* no rate is
+      graded. The sub-step target is a threshold, not a scheme with a known
+      order, and the rate for vertical levels depends on how sharp the
+      meteorological profiles are. Instead, the error must fall as the
+      setting is refined, and the v1 default must sit where refining it
+      further changes the result by less than the particle noise.
 - **Tier 1.** The routines are deterministic, so the tolerances can be tight.
   - Where GLIDE and FLEXPART use the same formula: agreement to within
     single-precision rounding, a relative difference of at most **10⁻⁵**.
+    Single precision carries about seven significant digits, and a formula
+    with several operations loses one or two of them. A relative difference
+    means nothing where the value itself is close to zero, such as a
+    turbulent velocity at the top of the boundary layer. So a point also
+    passes if the absolute difference is at most 10⁻⁵ times the largest
+    magnitude of that quantity in the profile being compared.
   - Where a declared design difference applies and its effect can be
     calculated: GLIDE must match FLEXPART's output with that calculated
     difference applied, to the same rounding level.
@@ -618,38 +718,37 @@ human to confirm or change before this plan is merged.
     quantities are the fraction of boundary-layer air moved above 5 km, the
     level of maximum outflow and the column-sum conservation (rounding
     level).
-- **Tier 2.** Two levels, both computed from reference data:
-  - *Noise floor* (for "indistinguishable"): the 95% band of each metric
-    across repeated FLEXPART runs that differ only in their random seeds
-    (Tier 2, "FLEXPART's runs are not exactly repeatable"). A
-    subset of cases is run five times: the five days of hourly releases at
-    the three European sites (cases 1–3, §4). The resulting noise, expressed against particle count and footprint
-    size, is applied to the full set.
-  - *Ceiling* (for "consistent"): the same metric computed between NAME and
-    FLEXPART for the same sites and dates. NAME runs on different
-    meteorology, so this is the disagreement between established models as
-    they are actually used.
-    **Open decision, to settle before task A8a.** The case library falls in
-    the tracer-experiment periods (§4), which the group's NAME archive does
-    not cover, so the ceiling needs NAME runs for these cases. The preferred
-    option is NAME driven by ERA5 (Selvaratnam et al., 2023, ran NAME on
-    ERA-Interim), which would make the ceiling a same-meteorology one. The
-    fallback is NAME footprints from the archive at the same sites on other
-    dates, regridded onto the case-library grids, with the regridding error
-    stated; that gives a ceiling for the metric's typical size but not for
-    the same weather.
-  - *Footprints:* for each metric, at least **90%** of footprints within the
-    ceiling, and the median within the ceiling for every site and every
-    standard case.
-  - *Concentrations at sites:* the root-mean-square difference between GLIDE
-    and FLEXPART at each site is at most **half** the model-error term the
-    group's UK inversion already assumes for that site, and no larger than
-    the NAME–FLEXPART difference.
+- **Tier 2.** Two levels, both computed from reference data. In what follows
+  a *difference* is one of the footprint metrics (Tier 2, step 2) computed
+  between two models' footprints for the same release.
+  - *Noise floor* (for "indistinguishable"): the 95% band of each difference
+    between pairs of repeat-seed runs of the same reference model, FLEXPART
+    or NAME (ten pairs from five runs, for every release in the repeat-seed
+    set, §4). GLIDE is run with the same number of particles per release as
+    the reference, so that its sampling noise is the same size. The noise,
+    expressed against particle count and footprint size, is applied to the
+    full set.
+  - *Ceiling* (for "consistent"): the differences between NAME on Met Office
+    meteorology and FLEXPART on ERA5, for the same releases. This is the
+    disagreement between two established models as they are actually used,
+    so it includes the effect of their different meteorology.
+  - *Footprints, GLIDE against FLEXPART (both on ERA5):* for each metric,
+    receptor and block, the median and the **90th** percentile of the
+    GLIDE–FLEXPART differences are no larger than the median and the 90th
+    percentile of the NAME–FLEXPART differences.
+  - *Footprints, GLIDE against NAME (both on Met Office meteorology):* the
+    same rule, with the GLIDE–NAME differences in place of GLIDE–FLEXPART.
+  - *Concentrations at sites:* at each receptor, the root-mean-square
+    difference between GLIDE and its reference on the same meteorology is no
+    larger than the root-mean-square difference between NAME and FLEXPART.
+  - *The effect of the meteorology* (GLIDE on Met Office fields against GLIDE
+    on ERA5) is reported with the same metrics, but not graded.
   - *Particle statistics* are diagnostic, graded only against the noise
     floor. They show where differences arise, rather than deciding the
     outcome.
-  - *Declared expected differences* (§1) may fall outside the noise floor,
-    but must stay within the ceiling, and should have the predicted sign.
+  - *Declared expected differences* (§1, Tier 2) may fall outside the noise
+    floor, but must stay within the ceiling, and should have the registered
+    direction.
 - **Tier 3.**
   - *CAPTEX and ANATEX:* "consistent" means GLIDE's mean DATEM rank over the
     eight experiments (§2, Tier 3) is at least the lowest mean published
@@ -680,8 +779,9 @@ human to confirm or change before this plan is merged.
     Mosca et al. recommend. If the full results (JRC report EUR 17756) are
     obtained before the pre-registration, the registration may add a rule
     from them.
-  - Each score is reported with its particle-noise interval, from bootstrap
-    resamples, and with the published scores alongside. EASLEE's
+  - The score itself is what is graded. Each score is reported with its
+    particle-noise interval, from bootstrap resamples, and with the published
+    scores alongside. EASLEE's
     published scores are shown too, with their scoring choices, but play no
     part in the grading.
   - ETEX-2 is reported without a grade, and so is ACURATE (v1.x).
@@ -765,99 +865,135 @@ finding.
 
 ## 4. The case library
 
-Seven standard cases are chosen once and used in every tier and every figure.
-Readers then get to know a few situations well and can follow each one up the
-ladder. Each case is chosen to:
+The case library is the set of receptors, periods and release times used for
+every comparison between models (Tiers 0–2) and in every figure. It is chosen
+once. Readers then get to know a few situations well and can follow each one
+up the ladder.
 
-- test one meteorological situation or model feature;
-- fall inside the period and domain of a tracer experiment, so that the
-  meteorology prepared for Tier 3 also serves Tiers 0–2, and so that the
-  cases cover both Europe and North America;
-- where possible, sit at a site with observations.
+It sits in **2019**, for four reasons:
 
-**The cases share the tracer experiments' meteorology, never their
-observations.** Case-library runs are compared only with other models. They
-never read the tracer measurements, and no case releases from a tracer
-source. Running GLIDE on these cases before the pre-registration therefore
-does not use up the independence of Tier 3 (§2, "Re-running the tracer
-benchmark"; task B12). The development history (§3) lists every such run all
-the same.
+- NAME can be run for it. The group's Met Office analyses start on 9 March
+  2010, and the current series (Mk10PT to Mk12PT) starts on 11 July 2017.
+- The receptors are working measurement sites, so modelled concentrations can
+  be set beside observations.
+- It avoids January 2024, the period of the development comparisons (§3,
+  "The development history").
+- It is separate from the tracer experiments (1980–1994), so no case-library
+  run comes near the Tier 3 data.
+
+Both fortnights lie within the Mk10 version of the Met Office series, so
+every block uses one version of the fields.
+
+The exact settings of the FLEXPART and NAME runs (coordinates, heights,
+grids, times, model options and the files to deliver) are in
+[reference-runs.md](reference-runs.md). That file is what the people running
+those models work from; this section gives the design and the reasons.
 
 ### Domains and output grid
 
-Two domains, both on ERA5's 0.25° grid points. Each is used for both the
-meteorology and the footprint output.
+Two domains, both on ERA5's 0.25° grid points. Each is used for the
+meteorology and as the edge at which particles are removed, in all three
+models.
 
-| Domain | Grid points | Size | Covers |
+| Domain | Grid points | Size | Receptors |
 | --- | --- | --- | --- |
-| **EUR** | 30° W – 40° E, 32 – 72° N | 281 × 161 | The ETEX release site (Monterfil, 48.05° N, 2.00° W) and all 168 of DATEM's ETEX stations (42.7–61.0° N, 4.4° W – 26.1° E); Mace Head, Jungfraujoch and Cabauw |
-| **NAM** | 120 – 55° W, 22 – 58° N | 261 × 145 | The ANATEX releases (Glasgow, Montana, 106.5° W; St Cloud, Minnesota) and stations (25.9–54.0° N, 103.2–60.4° W); the CAPTEX releases (Dayton, Ohio; Sudbury, Ontario) and stations; ACURATE; Lamont, Oklahoma |
+| **EUR** | 30° W – 40° E, 32 – 72° N | 281 × 161 | Mace Head, Jungfraujoch, Cabauw, Tacolneston. Also the ETEX release site and stations (Tier 3) |
+| **NAM** | 120 – 55° W, 22 – 58° N | 261 × 145 | Park Falls, Lamont. Also the CAPTEX, ANATEX, ACURATE and OKC80 releases and stations (Tier 3) |
 
-- **Output cells are centred on the ERA5 grid points.** The output grid's
-  edges therefore lie 0.125° outside the points listed:
-  - EUR: 30.125° W – 40.125° E and 31.875 – 72.125° N;
-  - NAM: 120.125 – 54.875° W and 21.875 – 58.125° N.
+- **Output cells are centred on the ERA5 grid points, leaving out the
+  outermost ring.** The output grid therefore stops 0.125° inside the
+  domain:
+  - EUR: 279 × 159 cells, edges 29.875° W – 39.875° E and
+    32.125 – 71.875° N;
+  - NAM: 259 × 143 cells, edges 119.875 – 55.125° W and
+    22.125 – 57.875° N.
 
-  GLIDE's `output_grid` and FLEXPART's `OUTGRID` (`OUTLON0` and `OUTLAT0` at
-  the lower-left edge, `DXOUT = DYOUT = 0.25`) are both set from these edges.
-- **The meteorology and output domains are the same.** Both models remove
-  particles that leave the domain, so this does not affect a comparison
-  between them. The fraction that leaves is reported (Tier 2). A Mace Head
-  footprint in westerlies leaves EUR in about two days.
-- **NAME footprints**, if used (§3, the ceiling), are regridded
-  conservatively onto these grids (`src/lpdm/comparison.py`), and the
-  regridding error is stated.
-- **OKC80** (8–11 July 1980) uses a subdomain of NAM on the same grid points.
-- **Footprints run 10 days backward.**
+  FLEXPART refuses an output grid that reaches beyond its meteorology
+  (`readoptions_mod.f90`, near line 1575), and a cell centred on an edge
+  point would be half outside the domain. GLIDE's `output_grid`, FLEXPART's
+  `OUTGRID` and NAME's output grid are all set from these edges, so no
+  footprint is regridded.
+- **The footprint is the sensitivity to emissions into the lowest 40 m above
+  the ground**, in all three models. This is NAME's usual surface layer, the
+  bottom bin of GLIDE's shipped configurations and the lowest FLEXPART output
+  layer in the earlier comparisons.
+- **Particles are removed at the domain edge in all three models.** FLEXPART
+  and GLIDE get meteorology only for the domain. NAME reads global fields, so
+  its computational domain is set to the same edges. The fraction of
+  particles that leaves is reported (Tier 2). A Mace Head footprint in
+  westerlies leaves EUR in about two days.
+- **Each particle is followed for 10 days (240 hours) from its own release
+  time,** in all three models, and then stopped.
+- **Particle numbers are the same in all three models:** 20,000 for each
+  point release and 100,000 for each column release.
+- **GLIDE on Met Office meteorology** uses the fields at their own resolution
+  (about 10 km) over the same domain, and writes footprints on the same
+  0.25° grid.
+- **OKC80** (8–11 July 1980, Tier 3) uses a subdomain of NAM on the same grid
+  points.
 
-### The cases
+### Blocks and receptors
 
-Every release lasts one hour and starts on the hour. Each case has two kinds
-of release:
-- the **hourly releases** in its window, for the footprint statistics;
-- one **snapshot release**, run as its own single-release run, for the
-  particle snapshots at 6, 24, 72 and 120 hours (Tier 2, step 1). It is run
-  separately because FLEXPART's particle files do not record which release a
-  particle came from.
+Four blocks of two weeks: a winter and a summer fortnight in each domain.
+Every receptor is released from every hour of both of its domain's blocks.
+Each release lasts one hour and starts on the hour. All times are UTC.
 
-All times are UTC. Heights are above ground level unless marked as above sea
-level (asl).
+| Block | Hourly releases | Meteorology window (10 days more, before the first release) |
+| --- | --- | --- |
+| EUR-Jan | 1 Jan 2019 00:00 – 14 Jan 23:00 | 22 Dec 2018 00:00 – 15 Jan 2019 00:00 |
+| EUR-Jul | 1 Jul 2019 00:00 – 14 Jul 23:00 | 21 Jun 2019 00:00 – 15 Jul 00:00 |
+| NAM-Jan | as EUR-Jan | as EUR-Jan |
+| NAM-Jul | as EUR-Jul | as EUR-Jul |
 
-| # | Case | What it tests | Receptor | Height | Domain | Hourly releases | Snapshot release |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| 1 | Coastal | The land–sea transition, and features smaller than a grid cell | Mace Head, 53.326° N, 9.904° W | 10 m | EUR | 23 Oct 1994 00:00 – 27 Oct 23:00 | 25 Oct 1994 12:00 |
-| 2 | Mountain | The terrain-following vertical coordinate, and a release given above sea level over ERA5's smoothed terrain | Jungfraujoch, 46.548° N, 7.985° E | 3,580 m asl | EUR | as case 1 | 25 Oct 1994 12:00 |
-| 3 | Stable night, low inlet | Weak night-time mixing near the ground, the minimum turbulence timescales, and the boundary-layer floor (100 m in FLEXPART, 50 m in GLIDE; §1) | Cabauw, 51.971° N, 4.927° E | 20 m | EUR | as case 1 | 02:00 on the night chosen by rule (below) |
-| 4 | Convective afternoon | Daytime convective turbulence, boundary-layer depth, and deep convection | CAPTEX sampler 308, 40.77° N, 80.75° W | 10 m | NAM | 18 Sep 1983 00:00 – 20 Sep 23:00 | 19 Sep 1983 18:00 |
-| 5 | Frontal passage | Transport by the resolved winds, and interpolation between hourly meteorology | CAPTEX sampler 854, 45.60° N, 77.20° W | 10 m | NAM | 25 Oct 1983 00:00 – 27 Oct 23:00 | the hour of frontal passage, chosen by rule (below) |
-| 6 | Continental winter | Long-range transport over land in winter, and a stable continental boundary layer | ANATEX sampler 1609, 42.20° N, 89.10° W | 10 m | NAM | 10 Jan 1987 00:00 – 12 Jan 23:00 | 11 Jan 1987 18:00 |
-| 7 | Satellite column | Releasing particles through a whole atmospheric column, as for a satellite retrieval, and how runs are ended | Lamont, Oklahoma (the TCCON site), 36.604° N, 97.486° W | surface to 1 hPa, uniform in pressure | NAM | as case 4 | 19 Sep 1983 19:00 (about 13:30 local solar time, a typical overpass) |
+Heights are above the model's own ground, and are the same number in every
+model. The positions and heights are definitions for these runs; they need
+not match the real inlets.
 
-**How the receptors were chosen.**
-- In Europe, the receptors are long-running measurement sites.
-- North America had no comparable towers in the 1980s. The receptors there
-  were chosen by fixed rules from the samplers' coordinates alone:
-  - case 4 is the CAPTEX sampler nearest to 300 km from the Dayton release
-    (site 308, 300 km);
-  - case 5 is the one nearest to 300 km from the Sudbury release (site 854,
-    298 km);
-  - case 6 is the ANATEX sampler nearest the centre of the network (site
-    1609).
-- Lamont is a ground-based column-measuring site.
+| Receptor | Location | Release height | Domain | Why it is there |
+| --- | --- | --- | --- | --- |
+| Mace Head (MHD) | 53.3267° N, 9.9046° W | 10 m | EUR | Coastal site; in the UK inversion |
+| Jungfraujoch (JFJ) | 46.5475° N, 7.9851° E | 1,000 m | EUR | Mountain site, in the free troposphere above smoothed terrain. Not given above sea level: ERA5 and the Met Office model smooth the Alps by different amounts |
+| Cabauw (CBW), low | 51.9703° N, 4.9264° E | 20 m | EUR | Low inlet over flat land |
+| Cabauw (CBW), high | same | 200 m | EUR | The same tower's top inlet, for the contrast with 20 m |
+| Tacolneston (TAC) | 52.5176° N, 1.1387° E | 185 m | EUR | Tall tower in the UK inversion |
+| Park Falls (LEF) | 45.9451° N, 90.2732° W | 30 m | NAM | Continental tall-tower site |
+| Lamont (SGP) | 36.6040° N, 97.4860° W | column, from the surface to 100 hPa, uniform in pressure | NAM | Column-measuring (TCCON) site |
+
+That is 336 releases per receptor in each block, and 4,704 footprints in
+all: 3,360 in EUR and 1,344 in NAM.
+
+### The seven standard cases
+
+The standard cases are single releases picked out of the blocks. Each tests
+one situation. They are the cases used for the particle snapshots at 6, 24,
+72 and 120 hours (Tier 2, step 1), for the Tier 1 columns and for the
+single-case figures. Each is also run as its own single-release run, because
+FLEXPART's particle files do not record which release a particle came from.
+
+| # | Case | What it tests | Receptor | Block | Release |
+| --- | --- | --- | --- | --- | --- |
+| 1 | Coastal | The land–sea transition, and features smaller than a grid cell | MHD | EUR-Jan | 8 Jan 2019 12:00 |
+| 2 | Mountain | The terrain-following vertical coordinate, and transport from the free troposphere over steep, smoothed terrain | JFJ | EUR-Jul | 8 Jul 2019 12:00 |
+| 3 | Stable night, low inlet | Weak night-time mixing near the ground, the minimum turbulence timescales, and the boundary-layer floor (100 m in FLEXPART, 50 m in GLIDE; §1) | CBW, 20 m | EUR-Jan | 02:00 on the night chosen by rule |
+| 4 | Convective afternoon | Daytime convective turbulence, boundary-layer depth, and deep convection | LEF | NAM-Jul | 20:00 (about 14:00 local solar time) on the day chosen by rule |
+| 5 | Frontal passage | Transport by the resolved winds, and interpolation in time between meteorological fields | TAC | EUR-Jan | the hour chosen by rule |
+| 6 | Continental winter | Long-range transport over snow-covered land, and a stable continental boundary layer | LEF | NAM-Jan | 8 Jan 2019 18:00 |
+| 7 | Satellite column | Releasing particles through a whole column, as for a satellite retrieval, and how runs are ended | SGP | NAM-Jul | 8 Jul 2019 19:00 (about 12:30 local solar time, near a typical overpass) |
 
 **Times chosen by rule.** These rules use ERA5 fields only, never model
-output. They are applied before the pre-registration, and the resulting times
-are written into the record.
-- *Case 3, the stable night:* of the four nights from 23/24 to 26/27 October
-  1994, the one with the lowest mean ERA5 boundary-layer height between 00:00
-  and 05:00 at the grid point nearest Cabauw. Ties go to the earlier night.
-- *Case 5, the frontal passage:* the hour, between 25 October 06:00 and
-  27 October 18:00 1983, at the end of the largest 3-hour fall in ERA5's
-  850 hPa temperature at the grid point nearest site 854. If that fall is
-  under 2 K, there is no clear front, and the case is chosen again before
-  registration, with the change recorded.
+output. They are applied before the pre-registration, and the resulting
+times are written into the record.
+- *Case 3, the stable night:* of the fourteen nights in EUR-Jan, the one with
+  the lowest mean ERA5 boundary-layer height between 00:00 and 05:00 at the
+  grid point nearest Cabauw. Ties go to the earlier night.
+- *Case 4, the convective afternoon:* of the fourteen days in NAM-Jul, the
+  one with the highest mean ERA5 boundary-layer height between 18:00 and
+  22:00 at the grid point nearest Park Falls. Ties go to the earlier day.
+- *Case 5, the frontal passage:* the hour in EUR-Jan at the end of the
+  largest 3-hour fall in ERA5's 850 hPa temperature at the grid point nearest
+  Tacolneston. The size of the fall is recorded.
 
-**The column release (case 7).**
+**The column release (case 7 and all Lamont releases).**
 - *FLEXPART:* the release is an ordinary `RELEASES` entry with `ZKIND = 3`
   (pressure). FLEXPART draws each particle's starting height uniformly
   between the two pressure limits (`initialise_mod.f90`, near line 268), so
@@ -866,48 +1002,68 @@ are written into the record.
   - `Z1` is ERA5's surface pressure at the receptor at the release time. If
     `Z1` is above the actual surface pressure, FLEXPART puts the extra
     particles in its lowest level.
-  - `Z2` is 1 hPa.
+  - `Z2` is 100 hPa (about 16 km). The column stops there so that all three
+    models can release it in the same way. The air above holds about a
+    tenth of the column and adds almost nothing to a 10-day surface
+    footprint.
   - In backward mode, `IOUTPUTFOREACHRELEASE` must be 1.
   - FLEXPART's `SATELLITES` option is not used. It samples modelled
     concentrations at retrieval layers in forward runs; it does not make
     column footprints.
-- *GLIDE:* the column release (task B5) must use the same uniform-in-pressure
-  weighting.
+- *GLIDE:* the column release (task B5) uses the same uniform-in-pressure
+  weighting. GLIDE's shipped configurations stop at 15 km, below the top
+  of the release. B5 raises the model top to at least 20 km for the column
+  runs, the height below which no reference run removes particles.
+- *NAME:* the same release if NAME can draw starting heights evenly in
+  pressure; otherwise 30 stacked sources of equal air mass
+  ([reference-runs.md](reference-runs.md), §5). The method used is
+  recorded.
 - *Averaging kernels:* a version with one release per retrieval layer,
   weighted afterwards, is added only if B5 needs it.
-- *Why a 1983 date:* the case tests the release and how runs end, which does
-  not need a real satellite overpass. A modern case over Brazil (TROPOMI or
-  GOSAT) may be added later for the GATES work, outside the registered set.
 
-**Repeat-seed runs** for the Tier 2 noise floor (§3): cases 1–3, the full
-five days of hourly releases, with five sets of seeds.
+**Repeat-seed runs** for the noise floors (§3): the first five days of
+EUR-Jan (1–5 January) at MHD, JFJ and CBW 20 m, five times each in FLEXPART
+and in NAME.
 
-### Meteorology windows
+### Meteorology windows and sizes
 
-Each window covers both the case-library footprints (10 days back from a
-case's first release) and the scoring of the tracer experiments in it. All
-windows use all 137 levels, so that both models see the same column. A lower
-model top, to make the files smaller, is an option for the public benchmark
-(roadmap 1h) and is decided there.
+All ERA5 windows use all 137 levels, so that GLIDE and FLEXPART see the same
+column. A lower model top, to make the files smaller, is an option for the
+public benchmark (roadmap 1h) and is decided there.
 
 | Domain | Window (UTC) | Days | Used for |
 | --- | --- | --- | --- |
-| EUR | 13 Oct 1994 00:00 – 28 Oct 00:00 | 15 | Cases 1–3; ETEX-1 (release 23 Oct 16:00, sampling to 27 Oct 09:00) |
+| EUR | 22 Dec 2018 00:00 – 15 Jan 2019 00:00 | 24 | Block EUR-Jan |
+| EUR | 21 Jun 2019 00:00 – 15 Jul 00:00 | 24 | Block EUR-Jul |
+| NAM | 22 Dec 2018 00:00 – 15 Jan 2019 00:00 | 24 | Block NAM-Jan |
+| NAM | 21 Jun 2019 00:00 – 15 Jul 00:00 | 24 | Block NAM-Jul |
+| EUR | 23 Oct 1994 00:00 – 28 Oct 00:00 | 5 | ETEX-1 (release 23 Oct 16:00, sampling to 27 Oct 09:00) |
 | EUR | 14 Nov 1994 00:00 – 19 Nov 00:00 | 5 | ETEX-2 (release 14 Nov 15:00, sampling to 18 Nov 09:00) |
-| NAM | 8 Sep 1983 00:00 – 22 Sep 00:00 | 14 | Cases 4 and 7; CAPTEX-1 |
+| NAM | 18 Sep 1983 00:00 – 22 Sep 00:00 | 4 | CAPTEX-1 |
 | NAM | 25 Sep 1983 00:00 – 29 Sep 00:00 | 4 | CAPTEX-2 |
 | NAM | 2 Oct 1983 00:00 – 6 Oct 00:00 | 4 | CAPTEX-3 |
-| NAM | 14 Oct 1983 00:00 – 1 Nov 00:00 | 18 | Case 5; CAPTEX-4 to 7 |
-| NAM | 31 Dec 1986 00:00 – 18 Jan 1987 00:00 | 18 | Case 6; ANATEX's scored samples (5–16 January) |
+| NAM | 14 Oct 1983 00:00 – 17 Oct 00:00 | 3 | CAPTEX-4 |
+| NAM | 26 Oct 1983 00:00 – 1 Nov 00:00 | 6 | CAPTEX-5 to 7 |
+| NAM | 5 Jan 1987 00:00 – 18 Jan 00:00 | 13 | ANATEX's scored samples (5–16 January) |
 | NAM subdomain | 8 Jul 1980 00:00 – 12 Jul 00:00 | 4 | OKC80 (task B12) |
 
-**Sizes**, raw float32, for six 3-D fields every hour on 137 levels:
-- EUR: about 3.6 GB a day, so about 72 GB for 20 days;
-- NAM: about 3.0 GB a day, so about 175 GB for 58 days;
-- FLEXPART's GRIB copy: about the same again.
+The tracer windows start on the day of the first release: a backward run
+from a sample only needs to reach the release.
 
-Cutting the cubes at about 100 hPa (model levels 61–137) would roughly halve
-these sizes.
+**Sizes**, raw float32, for six 3-D fields every hour on 137 levels (EUR
+about 3.6 GB a day, NAM about 3.0 GB a day):
+
+| | Case library | Tracer experiments |
+| --- | --- | --- |
+| EUR | 48 days, about 173 GB | 10 days, about 36 GB |
+| NAM | 48 days, about 144 GB | 34 days, about 102 GB |
+
+- FLEXPART's GRIB copy of the ERA5 windows is about the same again. It is
+  needed for the case-library windows only, unless FLEXPART is also run on
+  the tracer experiments.
+- The Met Office fields are finer in the horizontal, coarser in time and
+  have fewer levels. Their size is estimated in task B14 before conversion.
+- The public benchmark (roadmap 1h) uses a subset: one week of one block.
 
 
 ---
@@ -960,14 +1116,17 @@ The standard cases (§4) are used throughout.
 - For each case, three panels: GLIDE's footprint, FLEXPART's footprint and the
   log ratio. Both footprints use the same logarithmic colour scale, in
   physical units.
-- A map of the log ratio averaged over a month, to show systematic
-  differences.
+- A map of the log ratio averaged over each two-week block, to show
+  systematic differences.
+- The same footprint figures for GLIDE on Met Office meteorology beside
+  NAME, and for GLIDE on the two meteorologies.
 - Statistics over thousands of footprints:
   - a scatter plot of total sensitivity;
   - distributions of each comparison metric;
   - box plots by site.
-- Concentration time series at sites from GLIDE, FLEXPART and NAME, with
-  scatter plots and average daily cycles.
+- Concentration time series at sites from GLIDE (on both meteorologies),
+  FLEXPART and NAME, with the measurements where the site has them, scatter
+  plots and average daily cycles.
 
 **Tier 3**
 - **ETEX:**
@@ -1033,7 +1192,8 @@ The standard cases (§4) are used throughout.
 ## 7. Parameter calibration (v2)
 
 This is not part of v1. v1 uses published default values matching FLEXPART
-v11, so that the community's first comparisons are like for like. The plan is
+v11, apart from the declared design differences (§1), so that the community's
+first comparisons are like for like. The plan is
 recorded here because Tier 3 is designed around it.
 
 1. **Separate numerical settings from physical parameters.**
@@ -1090,18 +1250,18 @@ calibration.
 
 | Need | Tier | Who provides it | Notes |
 | --- | --- | --- | --- |
-| ERA5 stores for the meteorology windows of §4, from ARCO, on all 137 model levels (the default); pressure levels only for comparison | 0–3 | Human, with met-bazarr (GLIDE's existing download scripts until task B1) | EUR and NAM domains on ERA5's 0.25° grid points (§4). About 72 GB for EUR and 175 GB for NAM; listed in `dev/agent/PROGRESS.md` |
-| One day of ERA5 through flex_extract (23 Oct 1994, 00:00–23:00, EUR domain, `GRID=0.25`, all 137 levels), and the same day from ARCO | 2 | Human, with direct MARS access | For task B13, which measures the difference between the two routes (Tier 2). Do this before the reference runs |
-| FLEXPART v11 on ERA5 via flex_extract (from MARS, over the §4 domains and windows), built with `lusekerneloutput = .false.` (Tier 2), plus one standard case with the default build: gridded output for each release; particle-position snapshots at 6, 24, 72 and 120 h for the seven standard cases; five repeat-seed runs of cases 1–3 | 2 | Human | FLEXPART's output does not depend on GLIDE, so these runs can be done once, early. The repeat-seed runs give the Tier 2 noise floor (§3). Run each standard case as its own FLEXPART run with a single release: FLEXPART's particle-position files do not record which release a particle came from. Record each run's wall-clock time, thread count and hardware, for the performance comparison |
+| ERA5 stores for the meteorology windows of §4, from ARCO, on all 137 model levels (the default); pressure levels only for comparison | 0–3 | Human, with met-bazarr (GLIDE's existing download scripts until task B1) | EUR and NAM domains on ERA5's 0.25° grid points (§4). About 209 GB for EUR and 246 GB for NAM, case library and tracer windows together; listed in `dev/agent/PROGRESS.md` |
+| One day of ERA5 through flex_extract (8 Jan 2019, 00:00–23:00, EUR domain, `GRID=0.25`, all 137 levels), and the same day from ARCO | 2 | Human, with direct MARS access | For task B13, which measures the difference between the two routes (Tier 2). Do this before the reference runs |
+| FLEXPART v11 on ERA5 via flex_extract (from MARS, over the §4 domains and the four case-library windows), set up exactly as in [reference-runs.md](reference-runs.md) and built with `lusekerneloutput = .false.` (Tier 2), plus one standard case with the default build: gridded output for each release; particle-position snapshots at 6, 24, 72 and 120 h for the seven standard cases; five repeat-seed runs of the repeat-seed set (§4) | 2 | Human | FLEXPART's output does not depend on GLIDE, so these runs can be done once, early. The repeat-seed runs give the Tier 2 noise floor (§3). Run each standard case as its own FLEXPART run with a single release: FLEXPART's particle-position files do not record which release a particle came from. Record each run's wall-clock time, thread count and hardware, for the performance comparison |
 | ERA5 ensemble (EDA) members for the columns of the standard cases | 1 | Human, from the Copernicus Climate Data Store ("ensemble members" product type; not in the Google Cloud ERA5 copy) | Small: single columns, pressure levels. For the Tier 1 tolerance rule (§3) |
-| The model-error term the group's UK inversion assumes at each site | 2 | Group | For the Tier 2 concentration rule (§3) |
 | FLEXPART v11 source code on Isambard, for the Tier 1 component comparison (no FLEXPART run is needed for Tier 1) | 1 | Human; set `GLIDE_FLEXPART_SRC` | GPL: use locally, never copy into the repository; `gfortran` on the compute node |
-| NAME footprints for the case library | 2 | Group: NAME runs on ERA5 (preferred), or the archive at the same sites on other dates, regridded to the §4 grids | Secondary comparison, and the ceiling in the Tier 2 tolerance rules (§3). Which of the two is an open decision, settled before task A8a |
+| NAME on the Met Office global analyses (Mk10 series), for every case-library release, set up exactly as in [reference-runs.md](reference-runs.md): footprints on the §4 grids, with NAME's domain set to the same edges, the 0–40 m layer and 10 days back; five repeat-seed runs of the repeat-seed set; particle output for the seven standard cases if NAME can write it | 2 | Human | The second reference and the ceiling in the Tier 2 tolerance rules (§3). Record NAME's version, the meteorology series (Mk number), the particle count and the maximum height used for the column. Restricted: never in the repository |
+| Met Office global analyses for the four case-library windows, converted to GLIDE's format | 2 | Human, with met-bazarr (task B14) | For GLIDE on NAME's meteorology. Restricted: never in the repository or the public benchmark |
 | ETEX observations (JRC) | 3 | Human, using a download script | Instructions in [data/tracer-experiments.md](../data/tracer-experiments.md) |
 | CAPTEX, ANATEX, ACURATE and DATEM's copy of ETEX-1, DATEM's scoring software and its HYSPLIT example output (NOAA DATEM) | 3 | Human, downloaded through a web browser | Same page |
-| ERA5 for OKC80 (8–11 July 1980, Oklahoma to Missouri; a subdomain of NAM, §4) | 3 | Human, with met-bazarr | Small. Needed early: it is the only experiment the tracer benchmark (task B12) is tested on before the pre-registration |
-| Radon-222 concentrations and an emission map | 3 | Human | |
-| EDGAR or a similar emissions map, for the concentration comparison | 2 | Group archive (restricted) | |
+| ERA5 for OKC80 (8–11 July 1980, Oklahoma to Missouri; a subdomain of NAM, §4; in the first row's total) | 3 | Human, with met-bazarr | Small. Needed early: it is the only experiment the tracer benchmark (task B12) is tested on before the pre-registration |
+| Radon-222 concentrations at Cabauw and Mace Head for the two European blocks, and an emission map | 3 | Human | Reported only. If the data cannot be obtained, radon moves to v1.x |
+| EDGAR or a similar emissions map for 2019, and CH₄ measurements at the receptors for the four blocks, for the concentration comparison | 2 | Group archive (restricted) | The measurements are shown beside the models, not graded |
 | UK DECC network data and the group's inversion setup | 4 | Group | Needed at the paper stage |
 
 Restricted data never goes into the repository or the tests (see

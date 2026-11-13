@@ -202,7 +202,8 @@ Explanations of each item follow each table.
 | --- | --- | --- | --- | --- | --- |
 | 3a | Compressed meteorology stores; a store for the ERA5 ensemble (in met-bazarr) | S | none | no | v1 |
 | 3b | Combining several meteorological sources | L | none | yes | v1.x |
-| 3c | Met Office UKV nested inside the global model (converter in met-bazarr) | M | 3b | yes | v1.x |
+| 3c | Met Office UKV nested inside the global model | M | 3b, 3g | yes | v1.x |
+| 3g | Met Office global analyses as a meteorology source (converter in met-bazarr; reader support if needed) | M | none | no, for ERA5 runs | v1 |
 | 3d | Machine-learned compression of meteorology | L | 2c, 3b | — | research |
 | 3e | Generated meteorological perturbations | L | 3d | — | research |
 | 3f | Meteorology stored as a neural network | L | 3d | — | research |
@@ -223,8 +224,12 @@ Explanations of each item follow each table.
 - **3c.** The first use of 3b: the Met Office's 1.5 km UK model (UKV) nested
   inside its global model (UMG). The converter for Met Office files belongs in
   met-bazarr; the nesting, and physics settings that can differ between the
-  two domains, belong in GLIDE. It also
-  allows a direct comparison with NAME on the same meteorology.
+  two domains, belong in GLIDE.
+- **3g.** GLIDE run on the Met Office's global analyses, the meteorology NAME
+  uses. It allows a direct comparison with NAME on the same meteorology
+  (validation Tier 2) and a cleaner inversion comparison (1g). Only the
+  global model; the fields are restricted, so this is not in the public
+  benchmark. Task B14.
 - **3d.** A neural network (for example a variational autoencoder) that
   compresses meteorology much further than 3a. It is trained so that
   footprints computed from the compressed fields match those from the

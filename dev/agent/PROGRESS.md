@@ -42,7 +42,7 @@ repository or the tests. Download recipes for the tracer data are in
 | --- | --- | --- |
 | `GLIDE_FLEXPART_SRC` | FLEXPART v11 source | A8a, A9 |
 | `GLIDE_FLEXPART_OUTPUTS` | FLEXPART v11 on ERA5 particle and gridded output for the case library, repeat-seed runs, and run timings | A8a, A10, B11 |
-| `GLIDE_NAME_FOOTPRINTS` | NAME footprints for the same sites and dates | A8a (Tier 2 ceiling), A10 (secondary) |
+| `GLIDE_NAME_FOOTPRINTS` | NAME on Met Office global analyses: footprints for every case-library release on the EUR and NAM grids, repeat-seed runs, and particle output where available | A8a (Tier 2 ceiling and NAME noise floor), A10 (second reference) |
 | `GLIDE_EDGAR` | EDGAR flux maps | A10 |
 | `GLIDE_ETEX` | ETEX observations from JRC | B10, A11 |
 | `GLIDE_DATEM` | CAPTEX, ANATEX and ACURATE observations, DATEM's copy of ETEX-1, DATEM statistics code and HYSPLIT reference output | B10, A11 |

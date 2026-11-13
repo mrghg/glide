@@ -298,7 +298,12 @@ Model: Opus 5.5, high effort. Run strictly in order unless a task is BLOCKED.
   vs midpoint) [PR-F4]. Report sub-step saturation counts from A1 [PR-F2] for
   every sweep point. Produce error-against-parameter
   figures with expected slopes (Tier 0 figure set) and a table. Propose the v1
-  defaults with the converged values.
+  defaults with the converged values. Grade as `docs/validation-plan.md` §3
+  says (Tier 0, convergence): a fitted rate for particle count (−1/2) and
+  for Δt; for the sub-step target and the vertical ladder, the error falls
+  and the default sits where further refinement changes the result by less
+  than the particle noise. **Before running the Δt sweep,** state the order
+  of the stepping scheme from the code and record it in the task notes.
 - **Kernel bandwidth** (decision 0012). Sweep `bandwidth_fraction` over
   0, 0.05, 0.1, 0.2, 0.3 and 0.5 on the analytic plume, the real-met case and
   the A2 split-plume case. Take a delta-deposition run with a large particle
@@ -325,7 +330,9 @@ Model: Opus 5.5, high effort. Run strictly in order unless a task is BLOCKED.
   backward footprint from the receptor equals the forward concentration field
   at every cell, on synthetic met with turbulence and reflection on. Figure:
   forward field beside backward footprint, 1:1 scatter.
-- **Acceptance.** Test passes at a stated tolerance with a stated particle
+- **Acceptance.** Test passes at the tolerance in `docs/validation-plan.md`
+  §3 (Tier 0, reciprocity: the tested cells are chosen by a separate
+  backward run, at least 50 particles each) with a stated particle
   count; a "teeth" companion shows the test fails when the backward sign flip
   of the drift is removed. `docs/physics.md` backward-construction section
   cites the test.
@@ -387,9 +394,10 @@ Model: Opus 5.5, high effort. Run strictly in order unless a task is BLOCKED.
 - **Size:** M. **Depends on:** A8 merged and the `v0-physics` tag created; B10
   merged. Also needs, listed in the data inventory or set in the environment:
   the FLEXPART reference outputs including the repeat-seed runs
-  (`$GLIDE_FLEXPART_OUTPUTS`), the NAME footprints (`$GLIDE_NAME_FOOTPRINTS`),
-  the ERA5 ensemble (EDA) columns for the standard cases, the FLEXPART source
-  (`$GLIDE_FLEXPART_SRC`), and the inversion's model-error values per site.
+  (`$GLIDE_FLEXPART_OUTPUTS`), the NAME footprints and NAME repeat-seed runs
+  (`$GLIDE_NAME_FOOTPRINTS`),
+  the ERA5 ensemble (EDA) columns for the standard cases, and the FLEXPART
+  source (`$GLIDE_FLEXPART_SRC`).
   Stop if any is missing. Model: Opus 5.5.
 - **Isolation. This task must not see any GLIDE result.** Do not open any
   GLIDE output: no `footprints.zarr`, `run_metadata.json` or endpoint files,
@@ -417,8 +425,10 @@ Model: Opus 5.5, high effort. Run strictly in order unless a task is BLOCKED.
   - compute the analytic predictions for the declared Tier 1 differences;
   - compute the Tier 2 noise floors from the spread across FLEXPART's
     repeat-seed runs;
-  - compute the Tier 2 ceilings from NAME against FLEXPART, with the same
-    metric code A10 will use (write it here if A10 has not, under
+  - compute the NAME noise floor the same way, from NAME's repeat-seed runs;
+  - compute the Tier 2 ceilings from NAME against FLEXPART: for each metric,
+    receptor and block, the median and 90th percentile of the differences,
+    with the same metric code A10 will use (write it here if A10 has not, under
     `scripts/validation/`);
   - collect the Tier 3 thresholds and the scoring options of each published
     study.
@@ -444,8 +454,10 @@ Model: Opus 5.5, high effort. Run strictly in order unless a task is BLOCKED.
   - the scoring-code commit hash;
   - the met-bazarr version and commit that prepared every validation input
     store, read from the stores' provenance attributes;
-  - the seven standard cases (`docs/validation-plan.md` §4) with the times
-    chosen by rule, and the full release lists for
+  - the case library (`docs/validation-plan.md` §4): the blocks, receptors
+    and seven standard cases, with the times chosen by rule, the footprint
+    layer, the expected differences from FLEXPART and from NAME with their
+    predicted directions, and the full release lists for
     Tiers 1–3;
   - the metrics and the DATEM scoring options;
   - the tolerances from A8a's `tolerances.md`, copied unchanged, with the
@@ -519,7 +531,16 @@ Model: Opus 5.5, high effort. Run strictly in order unless a task is BLOCKED.
 - **Scope.** Readers for FLEXPART particle and gridded output; particle
   statistics against time; footprint metrics; systematic-difference maps;
   mole-fraction convolution; the Tier 2 figure set including the cloud
-  animation; a report page in `docs/validation/`.
+  animation; a report page in `docs/validation/`. All four comparisons in
+  validation-plan Tier 2 ("NAME and Met Office meteorology"): GLIDE against
+  FLEXPART on ERA5, GLIDE against NAME on Met Office meteorology (needs
+  B14's stores), NAME against FLEXPART, and GLIDE on the two meteorologies.
+  A reader for NAME's footprint and particle output. GLIDE's own runs follow
+  `docs/reference-runs.md` (§2–§6) exactly: the same particle domain and
+  output grid, release points and heights, particle numbers, the 0–40 m
+  layer, and each particle stopped 240 hours after its own release. If
+  GLIDE ends runs at a fixed time instead, fix that first, before the
+  freeze.
 - **Acceptance.** All Tier 2 figures for the case library, generated by
   scripts, with pre-registered metrics reported pass or fail.
 - **Running and reporting.** Follow the registered rules
@@ -658,7 +679,9 @@ dependency is listed; run in the listed order by default.
   example config; docs in README "Release geometries"; output contract
   extended additively. The column release is uniform in pressure between the
   surface and its top, matching FLEXPART's `ZKIND = 3` release used for case 7
-  of the case library (`docs/validation-plan.md` §4).
+  of the case library (`docs/validation-plan.md` §4;
+  `docs/reference-runs.md` §5: surface pressure to 100 hPa, 100,000
+  particles). The column runs need a model top of at least 20 km.
 
 ### B6 — Nested footprint output (4b)
 
@@ -789,9 +812,7 @@ dependency is listed; run in the listed order by default.
 - **Independence.** Before the pre-registration, run GLIDE **only on OKC80**
   (and synthetic cases). Do not run it on the CAPTEX, ANATEX or ETEX releases
   or samples, and do not write any configuration that would; the registered
-  A11 runs are the first. Case-library runs (`docs/validation-plan.md` §4) in
-  the same periods are allowed: they never use the tracer releases or
-  measurements.
+  A11 runs are the first.
   The tests use OKC80 or small synthetic files.
 - **Acceptance.** An end-to-end OKC80 run on the node produces a scorecard; a
   rerun with the same seeds reproduces it exactly; a rerun with one parameter
@@ -811,7 +832,7 @@ dependency is listed; run in the listed order by default.
   be measured before the reference runs, so that it is either declared or
   removed.
 - **Scope.** `scripts/validation/met_routes.py`: read flex_extract's GRIB
-  output for 23 Oct 1994 over EUR and the ARCO cube of the same day; check
+  output for 8 Jan 2019 over EUR and the ARCO cube of the same day; check
   that the grid points and level coefficients match exactly; for u, v, T and
   q, report differences on each level (bias, RMS, 99th-percentile absolute
   difference), and maps on the lowest ten levels, split by terrain height.
@@ -822,6 +843,44 @@ dependency is listed; run in the listed order by default.
   well below the expected spread between the models, and recommends either
   declaring the difference (§1) or converting flex_extract's fields for GLIDE
   through met-bazarr. A person decides.
+
+### B14 — Met Office global analyses as a meteorology source (3g)
+
+- **Size:** M. **Depends on:** B1 merged; the Met Office analyses for one day
+  of block EUR-Jan available on the node. Stop if they are missing. **Must
+  merge before the physics freeze (A8)** if it changes GLIDE's reader.
+  Model: Opus 5.5.
+- **Why.** NAME is the second reference (validation-plan Tier 2, "NAME and
+  Met Office meteorology"). Running GLIDE on NAME's own meteorology gives a
+  same-meteorology comparison with a second model, and separates the effect
+  of the meteorology from the effect of the model in Tiers 2 and 4.
+- **Scope.**
+  - In met-bazarr: a converter from the Met Office global analyses (series
+    Mk10PT to Mk12PT, NAME's input files) to GLIDE's format, over a
+    latitude–longitude box at the fields' own resolution. It handles what
+    `docs/met_schema.md` ("Preparing meteorology from a non-ERA5 source")
+    lists: geopotential from the level definition and orography, friction
+    velocity from the surface stresses, the sign of the heat flux, variable
+    names, staggered wind points, and provenance attributes.
+  - In GLIDE, only if conversion cannot cover it: reader support for levels
+    defined as heights above the terrain, and for a vertical velocity in
+    metres per second. Write a decision record. ERA5 runs must be
+    bit-for-bit unchanged; prove it with the A0 comparison.
+  - First, a short written assessment in the progress file: which of the two
+    routes each gap takes, the fields' time step and what it means for
+    GLIDE's time interpolation, and the size of the four case-library
+    windows (validation-plan §4). Stop for the human if a reader change is
+    needed, before making it.
+  - Checks on one day: the converted pressure, temperature and winds against
+    the source at a sample of points; hydrostatic consistency of the
+    geopotential; boundary-layer height and friction velocity within
+    plausible ranges; a GLIDE smoke run at Mace Head.
+- **Restricted data.** The Met Office fields and anything derived from them
+  stay under `$GLIDE_DATA`. Tests use small synthetic stores with the same
+  structure.
+- **Acceptance.** A converted store passes GLIDE's read-time checks; the
+  smoke run completes; the assessment and checks are in the PR; ERA5 golden
+  outputs are unchanged.
 
 ### B11 — Performance comparison (1h)
 
