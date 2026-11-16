@@ -27,6 +27,19 @@ This file is the agent-agnostic contributor guide (the `AGENTS.md` convention;
 - Historical dated work-orders (physics/test reviews) were retired; their durable
   content lives in STATUS / decisions / docs, and full history is in git.
 
+**Records for the paper.** A separate paper repository keeps a log of errors
+found in GLIDE and its development process, a dated notebook of decisions, and
+the human's time. These cannot be reconstructed later, so they are written as
+work happens:
+- **Agents on queue tasks** fill in the `incidents` line of their progress file
+  ([dev/agent/INSTRUCTIONS.md](dev/agent/INSTRUCTIONS.md) §2 and §8).
+- **Agents in interactive sessions with a human:** before the session ends, if
+  it changed the plan, made a decision or found something wrong, offer to draft
+  the notebook entry and incident files for the paper repository. Say which
+  model drafted them.
+- **The human** logs time daily and harvests incidents weekly
+  ([dev/agent-operations.md](dev/agent-operations.md) §7).
+
 ## Scope and priorities
 - Prioritise memory safety and predictable runtime behaviour over raw speed.
 - Keep changes small, explicit, and testable; avoid broad refactors unless asked.
