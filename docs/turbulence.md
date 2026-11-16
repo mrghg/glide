@@ -320,7 +320,11 @@ horizontally.
 
 GLIDE follows the Maryon (1998) "meandering" scheme that NAME originated and
 FLEXPART adopted — an **independent** horizontal OU process layered on top of the
-Hanna $u'/v'$ turbulence, applied at all altitudes:
+Hanna $u'/v'$ turbulence, applied at all altitudes. Two things differ from
+FLEXPART v11. FLEXPART's term is **off by default** there (`LTURBULENCE_MESO = 0`,
+"recommended"; its source says only that it "is found to give issues"), and when
+on it also perturbs the vertical velocity, which GLIDE's does not. The
+validation plan (Tier 2) sets out how the term is tested given that.
 
 $$
 \sigma_{m,i} = C_m \cdot \mathrm{std}_{\text{local}}(U_i), \quad i \in \lbrace u, v\rbrace
@@ -343,9 +347,11 @@ more of the mesoscale is already resolved. That is the behaviour NAME's
 resolution-dependent meander is designed to have, without a hand-tuned
 per-resolution constant.
 
-The process has **no drift** — the well-mixed inhomogeneity is vertical — and
-symmetric forcing, so unlike the vertical drift it needs no backward sign flip.
-State $(u_m, v_m)$ starts at zero.
+The process has **no drift term** and symmetric forcing, so unlike the vertical
+drift it needs no backward sign flip. Leaving out the drift is an approximation:
+$\sigma_m$ varies in the horizontal, and without a correction particles can
+slowly collect where it is small. The size of that effect is measured in the
+Tier 0 meander test (task A03). State $(u_m, v_m)$ starts at zero.
 
 Meander is **off by default** in code so existing baselines stay bit-identical,
 and **on** in every shipped example config.

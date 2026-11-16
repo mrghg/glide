@@ -343,7 +343,11 @@ Explanations of each item follow each table.
   saves computation. This is deferred until 7a, which gives similar savings
   more simply.
 - **6c.** Fuller versions of parts of the Emanuel convection scheme, if
-  validation shows that GLIDE under-represents convective transport.
+  validation shows that GLIDE under-represents convective transport. Two
+  parts are needed for the validation itself and are done before the freeze
+  (task A02): convection worked out for each column of the meteorology, not
+  for one average column, and applied once per meteorology interval, not
+  every 3,600 s.
 - **6d.** ERA5 is available on 37 pressure levels or on its 137 native model
   levels. Model levels follow the terrain and are about four times denser in
   the boundary layer, and FLEXPART uses them too. GLIDE can already read them,
