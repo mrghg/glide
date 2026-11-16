@@ -277,7 +277,7 @@ effect.
 Record the version. If a patched build is used (for example, to add the
 particle index and stop reason to the particle-fate output), name the patch
 in the run record, and show with one `Fixed`-seed run that the patched and
-unpatched builds give identical footprints (§10).
+unpatched builds give the same footprints, to within rounding (§10).
 
 | Setting | Value |
 | --- | --- |
@@ -475,7 +475,10 @@ Run one day (8 January 2019, 24 releases at MHD) in each model and confirm:
 7. NAME only: `n_particles` of every release is within a few particles of
    21,600, and the end records have exactly one row per particle.
 8. NAME only, if a patched build is used: one `Fixed` run with the patched
-   build and one with the unpatched build give identical footprints.
+   build and one with the unpatched build give identical particle-fate
+   records, and footprints that agree to one part in a million in every
+   cell (two separately built executables may round differently in the last
+   printed digit).
 
 Send the run record and the one-day files for checking before starting the
 blocks.
