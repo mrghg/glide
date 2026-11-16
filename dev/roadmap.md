@@ -252,6 +252,7 @@ Explanations of each item follow each table.
 | 4c | Ensemble members and derivatives in the footprint files | S | 2a, 2c | no | v2 |
 | 4d | Compressed footprint storage | M | 4a | no | v2 |
 | 4e | Particle count chosen per release | S | none | only if configured | v1 |
+| 4f | Global domain: follow every particle for a fixed time anywhere on the globe and record where it ends | L | 1d, 1e, 4a | must not, for regional runs | v1.x |
 
 - **4.** Release particles through a vertical column, not from a single point,
   weighted by height. This covers tower inlets at several heights and aircraft
@@ -272,6 +273,29 @@ Explanations of each item follow each table.
 - **4e.** Let the number of particles differ between releases, for example
   more where footprints are noisy. The default is a fixed count, which gives
   the same output as now.
+- **4f.** Run on global meteorology with no edge at which particles are
+  removed. Each particle is followed for a fixed time (10 days, say) and its
+  final position is recorded, as is usual with FLEXPART and FLEXINVERT+. The
+  final positions give the concentration of the air the particles started
+  in, from a global model.
+  - **It waits until the v1 validation is complete.** The validation tests
+    the particle physics, which this does not change. Regional runs must
+    stay bit-for-bit identical; if any regional result changes, this is a
+    physics change and the affected validation tiers are rerun.
+  - **It needs its own, smaller validation,** for what the regional
+    validation does not cover:
+    - geometry: wrapping in longitude, the poles, and reading global
+      fields;
+    - a global run against a regional run with the same random seeds, to
+      show the effect of particles that leave the region and return;
+    - final positions against FLEXPART's, and transport at ages and
+      distances the regional runs barely reach (the upper troposphere, the
+      tropics).
+  - **The v1 validation prepares for it** by comparing where particles
+    leave the regional domains (validation-plan Tier 2, step 1).
+  - **Cost to check first:** global ERA5 on 137 levels is about 80 GB a day,
+    and the efficiency items done before the freeze (7d, 7f) assume a
+    regional domain.
 
 ### Scale (Track C)
 

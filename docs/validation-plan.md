@@ -273,7 +273,14 @@ it, because each later level averages over more detail.
    - its horizontal spread;
    - the heights below which 10%, 50% and 90% of the particles lie;
    - the fraction of particles inside the boundary layer;
-   - the fraction that have left the model domain.
+   - the fraction that have left the model domain;
+   - where particles end: for each one, the place, height and age at which
+     it left the domain, or its position at 240 hours if it stayed inside
+     ([reference-runs.md](reference-runs.md), §8). These are compared as
+     distributions along each edge of the domain and with height. They
+     matter for the concentration of air arriving from outside, and they
+     test the record that a later global version of GLIDE would use for
+     every particle (roadmap 4f).
 
    Each is plotted with a band showing how much the statistic varies from
    particle sampling alone.

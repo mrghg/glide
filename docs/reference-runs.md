@@ -274,6 +274,35 @@ existing footprint files:
   top before reaching 240 hours. If a model cannot give these for the block
   runs, say so; they are then taken from the single-release runs (§9).
 
+### End records
+
+An end record says where each particle was when the model stopped following
+it. It is required for the seven single-release runs (§9), and wanted for
+the block runs from any model that can write it per release.
+
+One row per particle:
+
+- the longitude, latitude and height above the model's ground at the last
+  time the particle was followed;
+- the particle's age at that time, in hours;
+- why it stopped: it left through a side edge (and which: north, east,
+  south or west), it left through the top, or it reached 240 hours inside
+  the domain.
+
+How each model gets it:
+
+- **FLEXPART** does not record where a particle is removed. Write particle
+  positions every hour (`IPOUT = 1`) in the single-release runs, and take
+  each particle's last recorded position. That is within one hour of where
+  it left. Say in the run record whether the particle index stays the same
+  from one output time to the next; if it does not, report that before
+  running.
+- **NAME** writes the record directly if it can. If it can only give the
+  group's usual counts of particles crossing each edge, binned by position
+  and height, deliver those and say so.
+
+File name: as the footprint file, with `_end` before `.nc`.
+
 File name:
 `{receptor}_{model}_{meteorology}_{domain}_{YYYYMM}_{run}.nc`, for example
 `CBW-20_FLEXPART_ERA5_EUR_201901_main.nc` or
@@ -325,7 +354,8 @@ other settings as `main`.
 run, because FLEXPART's particle files do not say which release a particle
 came from. Write every particle's position at 6, 24, 72 and 120 hours before
 the release's start time: longitude, latitude, height above the model's
-ground, and whether it is still in the domain.
+ground, and whether it is still in the domain. Also deliver the end record
+of every particle (§8).
 
 | # | Case | Receptor | Release start (UTC) |
 | --- | --- | --- | --- |
