@@ -1,0 +1,75 @@
+source,model,analysis,statistic,value,ci95_low,ci95_high,atmes2_rank_of_35,how_obtained,notes
+"Mosca et al. (1998), Atmos. Environ. 32, 4307-4324, doi:10.1016/S1352-2310(98)00179-4",ATMES-II model 101,global,Bias,0.023,-0.013,0.059,7,Tables 3 and 5,
+"Mosca et al. (1998), Atmos. Environ. 32, 4307-4324, doi:10.1016/S1352-2310(98)00179-4",ATMES-II model 101,global,MG,1.258,1.18,1.346,14,Tables 3 and 5,
+"Mosca et al. (1998), Atmos. Environ. 32, 4307-4324, doi:10.1016/S1352-2310(98)00179-4",ATMES-II model 101,global,VG,6.234,,,2,Tables 3 and 5,
+"Mosca et al. (1998), Atmos. Environ. 32, 4307-4324, doi:10.1016/S1352-2310(98)00179-4",ATMES-II model 101,global,NMSE,9.965,5.326,16.058,8,Tables 3 and 5,
+"Mosca et al. (1998), Atmos. Environ. 32, 4307-4324, doi:10.1016/S1352-2310(98)00179-4",ATMES-II model 101,global,PCC,0.679,0.65,0.706,5,Tables 3 and 5,
+"Mosca et al. (1998), Atmos. Environ. 32, 4307-4324, doi:10.1016/S1352-2310(98)00179-4",ATMES-II model 101,global,FA2,28,,,14,Tables 3 and 5,
+"Mosca et al. (1998), Atmos. Environ. 32, 4307-4324, doi:10.1016/S1352-2310(98)00179-4",ATMES-II model 101,global,FA5,48,,,6,Tables 3 and 5,
+"Mosca et al. (1998), Atmos. Environ. 32, 4307-4324, doi:10.1016/S1352-2310(98)00179-4",ATMES-II model 101,global,FOEX,12,,,12,Tables 3 and 5,
+"Mosca et al. (1998), Atmos. Environ. 32, 4307-4324, doi:10.1016/S1352-2310(98)00179-4",ATMES-II model 101,global,KS,138,,,19,Tables 3 and 5,
+"Mosca et al. (1998), Atmos. Environ. 32, 4307-4324, doi:10.1016/S1352-2310(98)00179-4",ATMES-II model 101,global,DoseFMS,73,,,5,Tables 3 and 5,
+"Mosca et al. (1998), Atmos. Environ. 32, 4307-4324, doi:10.1016/S1352-2310(98)00179-4",ATMES-II model 101,global,sum_of_rankings,92,,,6,Table 5,rank column is the total ranking
+"Mosca et al. (1998), Atmos. Environ. 32, 4307-4324, doi:10.1016/S1352-2310(98)00179-4",ATMES-II model 117,global,Bias,-0.056,-0.104,-0.009,11,Tables 3 and 5,
+"Mosca et al. (1998), Atmos. Environ. 32, 4307-4324, doi:10.1016/S1352-2310(98)00179-4",ATMES-II model 117,global,MG,0.315,0.285,0.348,33,Tables 3 and 5,
+"Mosca et al. (1998), Atmos. Environ. 32, 4307-4324, doi:10.1016/S1352-2310(98)00179-4",ATMES-II model 117,global,VG,111.372,,,34,Tables 3 and 5,
+"Mosca et al. (1998), Atmos. Environ. 32, 4307-4324, doi:10.1016/S1352-2310(98)00179-4",ATMES-II model 117,global,NMSE,25.938,20.637,32.98,21,Tables 3 and 5,
+"Mosca et al. (1998), Atmos. Environ. 32, 4307-4324, doi:10.1016/S1352-2310(98)00179-4",ATMES-II model 117,global,PCC,0.216,0.166,0.265,33,Tables 3 and 5,
+"Mosca et al. (1998), Atmos. Environ. 32, 4307-4324, doi:10.1016/S1352-2310(98)00179-4",ATMES-II model 117,global,FA2,33,,,10,Tables 3 and 5,
+"Mosca et al. (1998), Atmos. Environ. 32, 4307-4324, doi:10.1016/S1352-2310(98)00179-4",ATMES-II model 117,global,FA5,35,,,15,Tables 3 and 5,
+"Mosca et al. (1998), Atmos. Environ. 32, 4307-4324, doi:10.1016/S1352-2310(98)00179-4",ATMES-II model 117,global,FOEX,-41,,,24,Tables 3 and 5,
+"Mosca et al. (1998), Atmos. Environ. 32, 4307-4324, doi:10.1016/S1352-2310(98)00179-4",ATMES-II model 117,global,KS,365,,,32,Tables 3 and 5,
+"Mosca et al. (1998), Atmos. Environ. 32, 4307-4324, doi:10.1016/S1352-2310(98)00179-4",ATMES-II model 117,global,DoseFMS,37,,,22,Tables 3 and 5,
+"Mosca et al. (1998), Atmos. Environ. 32, 4307-4324, doi:10.1016/S1352-2310(98)00179-4",ATMES-II model 117,global,sum_of_rankings,235,,,35,Table 5,rank column is the total ranking
+"Mosca et al. (1998), Atmos. Environ. 32, 4307-4324, doi:10.1016/S1352-2310(98)00179-4",ATMES-II model 122,global,Bias,0.789,0.495,1.083,32,Tables 3 and 5,
+"Mosca et al. (1998), Atmos. Environ. 32, 4307-4324, doi:10.1016/S1352-2310(98)00179-4",ATMES-II model 122,global,MG,0.843,0.759,0.945,13,Tables 3 and 5,
+"Mosca et al. (1998), Atmos. Environ. 32, 4307-4324, doi:10.1016/S1352-2310(98)00179-4",ATMES-II model 122,global,VG,67.007,,,31,Tables 3 and 5,
+"Mosca et al. (1998), Atmos. Environ. 32, 4307-4324, doi:10.1016/S1352-2310(98)00179-4",ATMES-II model 122,global,NMSE,157.767,92.561,220.747,32,Tables 3 and 5,
+"Mosca et al. (1998), Atmos. Environ. 32, 4307-4324, doi:10.1016/S1352-2310(98)00179-4",ATMES-II model 122,global,PCC,0.421,0.377,0.463,28,Tables 3 and 5,
+"Mosca et al. (1998), Atmos. Environ. 32, 4307-4324, doi:10.1016/S1352-2310(98)00179-4",ATMES-II model 122,global,FA2,31,,,12,Tables 3 and 5,
+"Mosca et al. (1998), Atmos. Environ. 32, 4307-4324, doi:10.1016/S1352-2310(98)00179-4",ATMES-II model 122,global,FA5,41,,,12,Tables 3 and 5,
+"Mosca et al. (1998), Atmos. Environ. 32, 4307-4324, doi:10.1016/S1352-2310(98)00179-4",ATMES-II model 122,global,FOEX,-12,,,12,Tables 3 and 5,
+"Mosca et al. (1998), Atmos. Environ. 32, 4307-4324, doi:10.1016/S1352-2310(98)00179-4",ATMES-II model 122,global,KS,86,,,13,Tables 3 and 5,
+"Mosca et al. (1998), Atmos. Environ. 32, 4307-4324, doi:10.1016/S1352-2310(98)00179-4",ATMES-II model 122,global,DoseFMS,56,,,20,Tables 3 and 5,
+"Mosca et al. (1998), Atmos. Environ. 32, 4307-4324, doi:10.1016/S1352-2310(98)00179-4",ATMES-II model 122,global,sum_of_rankings,205,,,33,Table 5,rank column is the total ranking
+"Mosca et al. (1998), Atmos. Environ. 32, 4307-4324, doi:10.1016/S1352-2310(98)00179-4",ATMES-II model 127,global,Bias,0.795,0.008,1.581,33,Tables 3 and 5,
+"Mosca et al. (1998), Atmos. Environ. 32, 4307-4324, doi:10.1016/S1352-2310(98)00179-4",ATMES-II model 127,global,MG,1.041,0.973,1.115,3,Tables 3 and 5,
+"Mosca et al. (1998), Atmos. Environ. 32, 4307-4324, doi:10.1016/S1352-2310(98)00179-4",ATMES-II model 127,global,VG,6.19,,,1,Tables 3 and 5,
+"Mosca et al. (1998), Atmos. Environ. 32, 4307-4324, doi:10.1016/S1352-2310(98)00179-4",ATMES-II model 127,global,NMSE,1091.147,108.572,1557.438,34,Tables 3 and 5,
+"Mosca et al. (1998), Atmos. Environ. 32, 4307-4324, doi:10.1016/S1352-2310(98)00179-4",ATMES-II model 127,global,PCC,0.704,0.677,0.73,2,Tables 3 and 5,
+"Mosca et al. (1998), Atmos. Environ. 32, 4307-4324, doi:10.1016/S1352-2310(98)00179-4",ATMES-II model 127,global,FA2,37,,,6,Tables 3 and 5,
+"Mosca et al. (1998), Atmos. Environ. 32, 4307-4324, doi:10.1016/S1352-2310(98)00179-4",ATMES-II model 127,global,FA5,53,,,1,Tables 3 and 5,
+"Mosca et al. (1998), Atmos. Environ. 32, 4307-4324, doi:10.1016/S1352-2310(98)00179-4",ATMES-II model 127,global,FOEX,1,,,2,Tables 3 and 5,
+"Mosca et al. (1998), Atmos. Environ. 32, 4307-4324, doi:10.1016/S1352-2310(98)00179-4",ATMES-II model 127,global,KS,72,,,9,Tables 3 and 5,
+"Mosca et al. (1998), Atmos. Environ. 32, 4307-4324, doi:10.1016/S1352-2310(98)00179-4",ATMES-II model 127,global,DoseFMS,76,,,2,Tables 3 and 5,
+"Mosca et al. (1998), Atmos. Environ. 32, 4307-4324, doi:10.1016/S1352-2310(98)00179-4",ATMES-II model 127,global,sum_of_rankings,93,,,7,Table 5,rank column is the total ranking
+"Mosca et al. (1998), Atmos. Environ. 32, 4307-4324, doi:10.1016/S1352-2310(98)00179-4",ATMES-II model 101,space,FMS_12h,34,,,,Table 6,"FMS at 0.1 ng m-3, h after release start, from interpolated contours"
+"Mosca et al. (1998), Atmos. Environ. 32, 4307-4324, doi:10.1016/S1352-2310(98)00179-4",ATMES-II model 101,space,FMS_24h,48,,,,Table 6,"FMS at 0.1 ng m-3, h after release start, from interpolated contours"
+"Mosca et al. (1998), Atmos. Environ. 32, 4307-4324, doi:10.1016/S1352-2310(98)00179-4",ATMES-II model 101,space,FMS_36h,71,,,,Table 6,"FMS at 0.1 ng m-3, h after release start, from interpolated contours"
+"Mosca et al. (1998), Atmos. Environ. 32, 4307-4324, doi:10.1016/S1352-2310(98)00179-4",ATMES-II model 101,space,FMS_48h,55,,,,Table 6,"FMS at 0.1 ng m-3, h after release start, from interpolated contours"
+"Mosca et al. (1998), Atmos. Environ. 32, 4307-4324, doi:10.1016/S1352-2310(98)00179-4",ATMES-II model 101,space,FMS_60h,46,,,,Table 6,"FMS at 0.1 ng m-3, h after release start, from interpolated contours"
+"Mosca et al. (1998), Atmos. Environ. 32, 4307-4324, doi:10.1016/S1352-2310(98)00179-4",ATMES-II model 101,space,FMS_72h,34,,,,Table 6,"FMS at 0.1 ng m-3, h after release start, from interpolated contours"
+"Mosca et al. (1998), Atmos. Environ. 32, 4307-4324, doi:10.1016/S1352-2310(98)00179-4",ATMES-II model 117,space,FMS_12h,8,,,,Table 6,"FMS at 0.1 ng m-3, h after release start, from interpolated contours"
+"Mosca et al. (1998), Atmos. Environ. 32, 4307-4324, doi:10.1016/S1352-2310(98)00179-4",ATMES-II model 117,space,FMS_24h,4,,,,Table 6,"FMS at 0.1 ng m-3, h after release start, from interpolated contours"
+"Mosca et al. (1998), Atmos. Environ. 32, 4307-4324, doi:10.1016/S1352-2310(98)00179-4",ATMES-II model 117,space,FMS_36h,1,,,,Table 6,"FMS at 0.1 ng m-3, h after release start, from interpolated contours"
+"Mosca et al. (1998), Atmos. Environ. 32, 4307-4324, doi:10.1016/S1352-2310(98)00179-4",ATMES-II model 117,space,FMS_48h,2,,,,Table 6,"FMS at 0.1 ng m-3, h after release start, from interpolated contours"
+"Mosca et al. (1998), Atmos. Environ. 32, 4307-4324, doi:10.1016/S1352-2310(98)00179-4",ATMES-II model 117,space,FMS_60h,8,,,,Table 6,"FMS at 0.1 ng m-3, h after release start, from interpolated contours"
+"Mosca et al. (1998), Atmos. Environ. 32, 4307-4324, doi:10.1016/S1352-2310(98)00179-4",ATMES-II model 117,space,FMS_72h,0,,,,Table 6,"FMS at 0.1 ng m-3, h after release start, from interpolated contours"
+"Mosca et al. (1998), Atmos. Environ. 32, 4307-4324, doi:10.1016/S1352-2310(98)00179-4",ATMES-II model 122,space,FMS_12h,28,,,,Table 6,"FMS at 0.1 ng m-3, h after release start, from interpolated contours"
+"Mosca et al. (1998), Atmos. Environ. 32, 4307-4324, doi:10.1016/S1352-2310(98)00179-4",ATMES-II model 122,space,FMS_24h,35,,,,Table 6,"FMS at 0.1 ng m-3, h after release start, from interpolated contours"
+"Mosca et al. (1998), Atmos. Environ. 32, 4307-4324, doi:10.1016/S1352-2310(98)00179-4",ATMES-II model 122,space,FMS_36h,49,,,,Table 6,"FMS at 0.1 ng m-3, h after release start, from interpolated contours"
+"Mosca et al. (1998), Atmos. Environ. 32, 4307-4324, doi:10.1016/S1352-2310(98)00179-4",ATMES-II model 122,space,FMS_48h,39,,,,Table 6,"FMS at 0.1 ng m-3, h after release start, from interpolated contours"
+"Mosca et al. (1998), Atmos. Environ. 32, 4307-4324, doi:10.1016/S1352-2310(98)00179-4",ATMES-II model 122,space,FMS_60h,37,,,,Table 6,"FMS at 0.1 ng m-3, h after release start, from interpolated contours"
+"Mosca et al. (1998), Atmos. Environ. 32, 4307-4324, doi:10.1016/S1352-2310(98)00179-4",ATMES-II model 122,space,FMS_72h,0,,,,Table 6,"FMS at 0.1 ng m-3, h after release start, from interpolated contours"
+"Mosca et al. (1998), Atmos. Environ. 32, 4307-4324, doi:10.1016/S1352-2310(98)00179-4",ATMES-II model 127,space,FMS_12h,24,,,,Table 6,"FMS at 0.1 ng m-3, h after release start, from interpolated contours"
+"Mosca et al. (1998), Atmos. Environ. 32, 4307-4324, doi:10.1016/S1352-2310(98)00179-4",ATMES-II model 127,space,FMS_24h,55,,,,Table 6,"FMS at 0.1 ng m-3, h after release start, from interpolated contours"
+"Mosca et al. (1998), Atmos. Environ. 32, 4307-4324, doi:10.1016/S1352-2310(98)00179-4",ATMES-II model 127,space,FMS_36h,66,,,,Table 6,"FMS at 0.1 ng m-3, h after release start, from interpolated contours"
+"Mosca et al. (1998), Atmos. Environ. 32, 4307-4324, doi:10.1016/S1352-2310(98)00179-4",ATMES-II model 127,space,FMS_48h,55,,,,Table 6,"FMS at 0.1 ng m-3, h after release start, from interpolated contours"
+"Mosca et al. (1998), Atmos. Environ. 32, 4307-4324, doi:10.1016/S1352-2310(98)00179-4",ATMES-II model 127,space,FMS_60h,56,,,,Table 6,"FMS at 0.1 ng m-3, h after release start, from interpolated contours"
+"Mosca et al. (1998), Atmos. Environ. 32, 4307-4324, doi:10.1016/S1352-2310(98)00179-4",ATMES-II model 127,space,FMS_72h,29,,,,Table 6,"FMS at 0.1 ng m-3, h after release start, from interpolated contours"
+"DATEM description (Draxler et al., 2001), section 5.3, quoting the ATMES-II report EUR 17756 p. 203",HYSPLIT (ATMES-II model 120),global,PCC,0.44,,,,"DATEM description, section 5.3",Bias converted from 180 pg m-3; which FMS is meant is not stated
+"DATEM description (Draxler et al., 2001), section 5.3, quoting the ATMES-II report EUR 17756 p. 203",HYSPLIT (ATMES-II model 120),global,NMSE,23.6,,,,"DATEM description, section 5.3",Bias converted from 180 pg m-3; which FMS is meant is not stated
+"DATEM description (Draxler et al., 2001), section 5.3, quoting the ATMES-II report EUR 17756 p. 203",HYSPLIT (ATMES-II model 120),global,Bias,0.180,,,,"DATEM description, section 5.3",Bias converted from 180 pg m-3; which FMS is meant is not stated
+"DATEM description (Draxler et al., 2001), section 5.3, quoting the ATMES-II report EUR 17756 p. 203",HYSPLIT (ATMES-II model 120),global,FMS,61,,,,"DATEM description, section 5.3",Bias converted from 180 pg m-3; which FMS is meant is not stated
+"DATEM description (Draxler et al., 2001), section 5.3, quoting the ATMES-II report EUR 17756 p. 203",HYSPLIT (ATMES-II model 120),global,FA2,35,,,,"DATEM description, section 5.3",Bias converted from 180 pg m-3; which FMS is meant is not stated
+"DATEM description (Draxler et al., 2001), section 5.3, quoting the ATMES-II report EUR 17756 p. 203",HYSPLIT (ATMES-II model 120),global,FA5,43,,,,"DATEM description, section 5.3",Bias converted from 180 pg m-3; which FMS is meant is not stated

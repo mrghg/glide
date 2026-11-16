@@ -50,7 +50,7 @@ add a scoped allow-list entry rather than disabling the hook.
 .venv/bin/python -m pytest -q tests/test_hanna.py   # a single module
 ```
 
-The suite is 298 tests and runs in about two minutes with no network access — all
+The suite is 319 tests and runs in about two and a half minutes with no network access — all
 tests use synthetic met via `AnalyticMetReader`. Please make sure it passes
 before opening a PR, and add tests for new behaviour. See
 [docs/VALIDATION.md](docs/VALIDATION.md) for what the suite covers and how to add
