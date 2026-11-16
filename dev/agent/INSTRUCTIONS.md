@@ -114,6 +114,16 @@ Never start work on an IN FLIGHT task unless a pending resume request or a
    verified, hand-off notes. Commit and push.
 9. **Stop.** Do not start another piece of work in the same session.
 
+**Record what was wrong.** The paper about GLIDE reports what this process
+catches and what it misses, so errors are evidence, not embarrassment. Whenever
+you find that something already in GLIDE was wrong (code, documentation, the
+plan, or the process itself), write one line under `incidents` in your progress
+file: what was wrong, what it would have affected, and what caught it (a test,
+a fixture, a review, reading a reference model's source, the human). Include
+your own mistakes that something else caught, and near-misses caught before
+any code ran. Small typos do not count. The human copies these lines into the
+paper repository's incident log.
+
 ### A resume request or a hand-off
 
 1. Check out the task branch and merge `origin/main` into it. Never rebase or
@@ -337,6 +347,7 @@ merged.
 - handoff: <for the next session and the human, including suggested updates to PROGRESS.md "Current state">
 - proposed follow-ups: <new tasks discovered, one line each>
 - reference issues: <suspected problems in FLEXPART, NAME, DATEM or published values (§3); "none" if none>
+- incidents: <anything in GLIDE's code, docs, plan or process that you found to be wrong, and what caught it; "none" if none>
 - question: <if BLOCKED: the question, and what you would do under each answer>
 - handled: <resume entry IDs, one per line, with a note>
 ```

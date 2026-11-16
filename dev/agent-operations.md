@@ -378,12 +378,24 @@ heading into a stop-condition area without stopping.
 ## 7. Cadence
 
 - **Daily, 20 minutes:** review and merge PRs; answer BLOCKED drafts with
-  resume requests; update "Current state".
+  resume requests; update "Current state". Then add one line for the day to
+  the paper repository's `metrics/human_time.csv`. It cannot be reconstructed
+  later.
 - **Weekly:** harvest `proposed follow-ups` from the week's merged progress
   files into QUEUE.md; reprioritise; update `dev/roadmap.md` if scope moved;
   check the benchmark and storage numbers against the roadmap targets; confirm
   the FLEXPART runs and the tracer data are progressing; delete resume requests
   for merged tasks.
+- **Weekly, for the paper's records** (in the paper repository):
+  - copy each `incidents` line from the week's merged progress files into
+    `incidents/`, one file per incident, and add it to the index;
+  - write a notebook entry: what was decided, what surprised you, what the
+    process caught;
+  - copy the driver loop's session log into `metrics/`.
+
+  At the end of an interactive session that changed the plan or found an
+  error, ask the agent to draft the notebook entry and the incident files
+  before you close it; it has the detail in context and you will not.
 - **At the freeze:** you and the external reviewer sign the physics audit;
   tag; update STATUS.
 - **Before validation runs:** when the A8a PR arrives, check that the

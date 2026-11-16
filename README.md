@@ -29,12 +29,14 @@ The question GLIDE was built to answer is whether such a model can be made
 *scalable* and *flexible* by attacking its two traditional bottlenecks.
 
 **Meteorology I/O.** Established LPDMs read monolithic NetCDF/GRIB files, so a
-regional, time-bounded run still pages through a large archive. GLIDE streams
+regional, time-bounded run still pages through a large archive. GLIDE reads
+ERA5 from a chunked **Zarr store**, fetching only the chunks a run actually
+touches — one hour at a time, over the particle cloud's bounding box. The
+stores are prepared in advance from the public
 [analysis-ready, cloud-optimised](https://www.frontiersin.org/journals/climate/articles/10.3389/fclim.2021.782909/full)
-[ERA5](https://cloud.google.com/storage/docs/public-datasets/era5) from a **Zarr
-store**, fetching only the chunks a run actually touches — one hour at a time,
-over the particle cloud's bounding box. The archive becomes something you sip
-from rather than something you copy.
+[ERA5](https://cloud.google.com/storage/docs/public-datasets/era5) archive and
+held on local disk; GLIDE does not stream from the cloud during a run. The
+store becomes something you sip from rather than something you read whole.
 
 **Single-threaded CPU physics.** The hot path — trilinear interpolation of the
 wind and turbulence fields, plus the elementwise Ornstein–Uhlenbeck turbulence
