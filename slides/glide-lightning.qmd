@@ -1,0 +1,119 @@
+---
+title: "GLIDE"
+subtitle: "A footprint model in pure PyTorch, and how I plan to trust it"
+author: "Matt Rigby · University of Bristol"
+date: "2026-11-14"
+byline: "Matt Rigby · University of Bristol · November 2026"
+format:
+  revealjs:
+    theme: [default, custom.scss]
+    slide-number: c/t
+    width: 1280
+    height: 780
+    transition: fade
+    transition-speed: fast
+    controls: true
+    progress: true
+    embed-resources: true
+    template-partials:
+      - title-slide.html
+---
+
+## Why build it
+
+Every emissions estimate needs a **footprint** for every measurement: the map
+of where the sampled air touched the surface.
+
+- Footprints are the **bottleneck**: about **10 minutes each** with NAME
+- Satellites bring **millions** of measurements
+
+::: {.card}
+::: {.card-title}
+Two bets
+:::
+Write the whole model in **PyTorch**, so the physics runs on a **GPU**. Read **only the weather data each run needs**.
+:::
+
+::: {.muted}
+And an experiment: could AI coding agents build a research model? Not one line
+was written by hand.
+:::
+
+---
+
+## Pure PyTorch
+
+- Particles are rows of a **tensor**: every one takes its step **at once**
+- **One code** for NVIDIA GPUs, Apple laptops and CPUs
+- A whole time step is recorded once, then replayed with **no CPU in the loop**: 30 → 5 ms
+- The same framework as machine learning: a route to **differentiable footprints** and ML weather models
+
+![](img/hiding-io.svg){width="88%" fig-align="center"}
+
+---
+
+## Reading only the weather it needs
+
+![](img/zarr-chunks.svg){width="100%"}
+
+- **Zarr** stores the weather as many small compressed chunks, each readable on its own
+- GLIDE asks for **one hour, over the box that holds the particles**
+- Only the chunks that overlap the box are read
+
+---
+
+## What it can do now
+
+::: {.columns}
+::: {.column width="56%"}
+<video class="anim-video" data-autoplay loop muted playsinline src="img/footprints-terrain-20s.mp4"></video>
+:::
+::: {.column width="44%"}
+**2,688 footprints in about 25 minutes** on one GPU node
+
+- 56 European tall towers, hourly
+- Turbulence and convection schemes that follow FLEXPART's
+- 319 automated tests
+
+[Back to back in NAME: about 19 days. A sense of scale, not a benchmark.]{.muted}
+:::
+:::
+
+> **Fast is not the same as right.** The physics is not yet validated.
+
+---
+
+## The validation plan {.big-table}
+
+| Tier | Question | Tested against |
+|:-|:-----------|:-----------|
+| 0 | Does the code solve its equations? | exact mathematical solutions |
+| 1 | Is each component right? | FLEXPART's own turbulence and convection code |
+| 2 | Does it move air like established models? | **FLEXPART** and **NAME**, 4,704 footprints |
+| 3 | Does it match the real atmosphere? | tracer releases with known emissions |
+| 4 | Does it change an emissions estimate? | a UK methane inversion |
+
+: {tbl-colwidths="[8,46,46]"}
+
+::: {.card}
+**The pass mark:** GLIDE must be as close to FLEXPART and NAME as they are to
+each other.
+:::
+
+---
+
+## Why so much effort
+
+- **I didn't write it, so I can't vouch for it.** The evidence has to.
+- **It is easy to tune a model until it agrees**, and an AI agent will happily
+  do that for you.
+- **Footprint errors are silent.** They become errors in national emissions.
+
+::: {.card}
+::: {.card-title}
+So the rules are fixed first
+:::
+Cases, metrics and pass marks are **publicly registered before any result
+exists**. Pass or fail is computed by script, and what happens after a failure
+is already written down.
+:::

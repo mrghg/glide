@@ -1,0 +1,8 @@
+# Rendered decks and their support files; the .qmd files are the source.
+.DS_Store
+*_files/
+glide-overview.html
+glide-lightning.html
+
+# Figures and animations are kept out of git (see README.md).
+img/

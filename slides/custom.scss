@@ -1,0 +1,160 @@
+/*-- scss:defaults --*/
+// GLIDE deck theme — atmospheric slate/teal, readable for a mixed
+// software-engineering + atmospheric-science audience.
+
+// Fonts (system stacks; no network fetch required)
+$font-family-sans-serif: "Helvetica Neue", "Segoe UI", system-ui, -apple-system, Arial, sans-serif !default;
+$font-family-monospace: "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace !default;
+
+// Palette
+$body-bg: #0f1b2d;          // deep atmospheric slate
+$body-color: #e8eef6;
+$link-color: #5fd0d6;        // teal
+$selection-bg: #2b4a6f;
+
+$heading-color: #ffffff;
+$accent: #5fd0d6;            // teal
+$accent-warm: #ffb454;       // amber (status / cautions)
+$muted: #9db0c7;
+$panel-bg: #16263d;
+$panel-border: #26405f;
+
+// reveal sizing
+$presentation-font-size-root: 30px;
+$presentation-heading-font-weight: 650;
+$presentation-h1-font-size: 2.1em;
+$presentation-h2-font-size: 1.5em;
+$presentation-h3-font-size: 1.15em;
+$code-block-font-size: 0.72em;
+
+/*-- scss:rules --*/
+
+.reveal .slides section {
+  text-align: left;
+}
+
+.reveal h1, .reveal h2, .reveal h3 {
+  letter-spacing: -0.01em;
+  line-height: 1.1;
+}
+
+// Accent underline under section H2s
+.reveal h2 {
+  border-bottom: 2px solid $accent;
+  padding-bottom: 0.25em;
+  margin-bottom: 0.6em;
+}
+
+.reveal .subtitle {
+  color: $accent;
+  font-weight: 400;
+}
+
+.reveal a { text-decoration: none; }
+.reveal a:hover { text-decoration: underline; }
+
+// Emphasis helpers
+.reveal .accent  { color: $accent; }
+.reveal .warm    { color: $accent-warm; }
+.reveal .muted   { color: $muted; font-size: 0.85em; }
+.reveal strong   { color: #ffffff; }
+
+// Panels / callout cards
+.reveal .card {
+  background: $panel-bg;
+  border: 1px solid $panel-border;
+  border-radius: 10px;
+  padding: 0.7em 0.9em;
+  margin: 0.3em 0;
+}
+.reveal .card h3 { margin-top: 0; color: $accent; }
+.reveal .card .card-title {
+  display: block;
+  color: $accent;
+  font-weight: 650;
+  font-size: 1.15em;
+  margin-bottom: 0.35em;
+}
+
+// Amber variant — for cautions / wider-context callouts.
+.reveal .card.card-amber {
+  border-color: rgba(255, 180, 84, 0.55);
+  background: rgba(255, 180, 84, 0.07);
+}
+.reveal .card.card-amber .card-title { color: $accent-warm; }
+
+// Two-column helper spacing
+.reveal .columns { gap: 1.2em; }
+
+// Tables
+.reveal table { font-size: 0.82em; border-collapse: collapse; }
+.reveal table th {
+  color: $accent;
+  border-bottom: 2px solid $panel-border;
+}
+.reveal table td { border-bottom: 1px solid rgba(255,255,255,0.07); }
+
+// Code
+.reveal pre { box-shadow: none; }
+.reveal code { color: #a8e6cf; }
+
+// Blockquote → status / caution callout
+.reveal blockquote {
+  background: rgba(255, 180, 84, 0.10);
+  border-left: 4px solid $accent-warm;
+  border-radius: 6px;
+  padding: 0.5em 0.9em;
+  width: 100%;
+  box-sizing: border-box;   // keep the padding inside the slide width
+  margin-left: 0;
+  margin-right: 0;
+  font-style: normal;
+}
+
+// Lists a touch tighter
+.reveal ul, .reveal ol { line-height: 1.35; }
+
+// Footer / slide number
+.reveal .slide-number { color: $muted; }
+
+// Title slide
+#title-slide { text-align: center; }
+#title-slide .title { font-size: 3.2em; letter-spacing: 0.02em; color: #ffffff; margin-bottom: 0.1em; }
+#title-slide .subtitle { font-size: 1.15em; margin-top: 0.15em; }
+#title-slide .author, #title-slide .date { color: $muted; }
+
+// Hero figure sits UNDER the title — sized so it doesn't dominate the slide
+#title-slide .title-hero-img {
+  display: block;
+  margin: 0.55em auto 0.35em;
+  max-height: 44vh;
+  width: auto;
+  max-width: 74%;
+  border-radius: 8px;
+  box-shadow: 0 8px 34px rgba(0, 0, 0, 0.5);
+}
+#title-slide .title-byline { color: $muted; font-size: 0.8em; margin: 0; }
+
+// Vertically-centred slides (add {.center} to the H2)
+.reveal .center h2 { text-align: center; border-bottom: none; }
+.reveal section.center { text-align: center; }
+
+// Footprint animation. Sized in px, not vh: reveal scales the whole slide with a
+// CSS transform, so viewport units inside it don't track the slide box.
+.reveal .anim-video {
+  display: block;
+  margin: 0 auto 0.35em;
+  max-height: 640px;
+  max-width: 92%;
+  width: auto;
+  border-radius: 8px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.45);
+}
+
+// Hero title text legibility over the dimmed background image
+#title-slide .title,
+#title-slide .subtitle { text-shadow: 0 2px 14px rgba(0, 0, 0, 0.6); }
+
+// Large table for short talks (add {.big-table} to the slide heading)
+.reveal .big-table table { font-size: 0.95em; width: 100%; margin: 0.2em 0 0.9em; }
+.reveal .big-table table td, .reveal .big-table table th { padding: 0.45em 0.6em; }
