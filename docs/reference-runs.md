@@ -290,8 +290,8 @@ unpatched builds give identical footprints (§10).
 | Output grid | §2; one layer, 0–40 m above ground |
 | Output quantity | air concentration integrated over the 240 hours, one field per release |
 | Turbulence | on. Record the scheme and its settings |
-| Unresolved mesoscale motions | on, with NAME's standard settings for these fields. Record the settings |
-| Deep convection | on. Record the scheme and its settings |
+| Unresolved mesoscale motions | on, with NAME's standard settings for these fields: since NAME 8 its velocity variances and timescales come with the met definition of each series, so the input sets none. Record the values used |
+| Deep convection | `New`, NAME's mass-flux scheme (Meneguz and Thomson, 2014), which NAME's user guide recommends for global met. NAME's other choices are `No` and `Old`; the group's site template uses `No` (measured by the `group` run, §9) |
 | Boundary-layer depth | from the meteorology, limited to 100 to 4,500 m (`Min B L Depth`, `Max B L Depth`) |
 | Deposition, decay, chemistry | off |
 | Random seed | `Fixed` for `main` and the single-release runs; `Random` for the repeat-seed runs (§9) |
@@ -394,7 +394,9 @@ One text file (YAML) per model, with:
 The files go to the locations named in
 [dev/agent/PROGRESS.md](../dev/agent/PROGRESS.md) (`GLIDE_FLEXPART_OUTPUTS`
 and `GLIDE_NAME_FOOTPRINTS`). NAME output and Met Office fields are
-restricted and never go into the repository.
+restricted and never go into the repository. Nor does NAME's run record:
+NAME's input file contains the NAME team's met declarations, which are
+licensed with NAME. It is kept with the NAME output.
 
 ## 9. The runs
 

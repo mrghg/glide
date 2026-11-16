@@ -376,7 +376,8 @@ GLIDE's turbulence scheme follows FLEXPART's, not NAME's. They include:
   layer, and its own treatment of the free troposphere;
 - NAME's representation of unresolved mesoscale motions, where GLIDE uses
   its meander term;
-- NAME's convection scheme, which is not Emanuel's;
+- NAME's convection scheme (`New`, a mass-flux scheme; Meneguz and Thomson,
+  2014), which is not Emanuel's;
 - NAME's boundary-layer depth, taken from the UM (and held within the same
   100 to 4,500 m);
 - the top: NAME removes particles at 20 km above the ground;
