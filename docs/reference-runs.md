@@ -476,9 +476,9 @@ Run one day (8 January 2019, 24 releases at MHD) in each model and confirm:
    21,600, and the end records have exactly one row per particle.
 8. NAME only, if a patched build is used: one `Fixed` run with the patched
    build and one with the unpatched build give identical particle-fate
-   records, and footprints that agree to one part in a million in every
-   cell (two separately built executables may round differently in the last
-   printed digit).
+   records, and footprints that differ in any cell by at most one unit in
+   the last digit NAME prints (about one part in a million; two separately
+   built executables may round that digit differently).
 
 Send the run record and the one-day files for checking before starting the
 blocks.
