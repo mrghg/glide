@@ -21,18 +21,19 @@ files are not committed.
 
 ## Figures and animations
 
-The decks read their figures from `slides/img/`, which is not in git. A deck
-still builds without them, with gaps where the figures go. The files needed:
+The figures are in `slides/img/`. The animations are not in git, because they
+are large and can be rebuilt. A deck still builds without them, with a gap
+where the animation goes.
 
-| File | Used by | Source |
-| --- | --- | --- |
-| `glide_feature.png` | both title slides, overview | a GLIDE multi-site footprint map |
-| `lpdm_schematic.svg` | overview | hand-drawn schematic |
-| `architecture.svg` | overview | hand-drawn schematic |
-| `hiding-io.svg` | lightning | the lower half of `architecture.svg` (same file, cropped `viewBox`) |
-| `zarr-chunks.svg` | lightning | schematic of reading Zarr chunks |
-| `footprints-terrain-small.mp4` | overview | `scripts/animate_footprints.py`, re-encoded at 640 pixels high |
-| `footprints-terrain-20s.mp4` | lightning | the first 20 seconds of the same animation |
+| File | In git | Used by | Source |
+| --- | --- | --- | --- |
+| `glide_feature.png` | yes | both title slides, overview | a GLIDE multi-site footprint map |
+| `lpdm_schematic.svg` | yes | overview | hand-drawn schematic |
+| `architecture.svg` | yes | overview | hand-drawn schematic |
+| `hiding-io.svg` | yes | lightning | the lower half of `architecture.svg` (same file, cropped `viewBox`) |
+| `zarr-chunks.svg` | yes | lightning | schematic of reading Zarr chunks |
+| `footprints-terrain-small.mp4` | no | overview | `scripts/animate_footprints.py`, re-encoded at 640 pixels high |
+| `footprints-terrain-20s.mp4` | no | lightning | the first 20 seconds of the same animation |
 
 To shrink an animation for a slide (ffmpeg ships with the `imageio-ffmpeg`
 package in the project environment):

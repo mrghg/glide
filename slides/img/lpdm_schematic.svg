@@ -1,0 +1,128 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 660" font-family="Helvetica Neue, Segoe UI, system-ui, Arial, sans-serif">
+  <defs>
+    <linearGradient id="skyGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#16283f"/>
+      <stop offset="1" stop-color="#1c3149"/>
+    </linearGradient>
+    <linearGradient id="fpGrad" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0" stop-color="#ffb454" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#ffb454" stop-opacity="0.04"/>
+    </linearGradient>
+    <clipPath id="boxClip">
+      <rect x="50" y="70" width="1000" height="490" rx="9"/>
+    </clipPath>
+    <marker id="arrWind" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#9db0c7"/>
+    </marker>
+    <marker id="arrBack" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#5fd0d6"/>
+    </marker>
+  </defs>
+
+  <!-- ===== scene interior (clipped to the domain box) ===== -->
+  <g clip-path="url(#boxClip)">
+    <rect x="50" y="70" width="1000" height="450" fill="url(#skyGrad)"/>
+    <!-- boundary layer shading -->
+    <rect x="50" y="290" width="1000" height="230" fill="#5fd0d6" opacity="0.07"/>
+    <!-- boundary-layer top -->
+    <line x1="50" y1="290" x2="1050" y2="290" stroke="#ffb454" stroke-width="1.3" stroke-dasharray="8 6" opacity="0.55"/>
+    <!-- ground -->
+    <rect x="50" y="520" width="1000" height="40" fill="#0c1626"/>
+
+    <!-- surface footprint (sensitivity band along the ground) -->
+    <path d="M290,520 C 450,519 600,514 760,504 C 840,498 910,492 960,496 L 975,520 Z"
+          fill="url(#fpGrad)" stroke="#ffb454" stroke-width="1.5" stroke-opacity="0.8"/>
+
+    <!-- backward trajectories fanning upwind from the receptor -->
+    <g fill="none" stroke="#e8eef6" stroke-opacity="0.35" stroke-width="1.6">
+      <path d="M963,478 C 800,505 560,514 260,518"/>
+      <path d="M963,478 C 820,470 600,450 300,440"/>
+      <path d="M963,478 C 815,430 610,360 360,330"/>
+      <path d="M963,478 C 840,410 680,320 500,255"/>
+      <path d="M963,478 C 850,455 690,415 430,400"/>
+      <path d="M963,478 C 830,440 620,395 330,375"/>
+    </g>
+
+    <!-- particles (teal = aloft, amber = near-surface → feed the footprint) -->
+    <g>
+      <circle cx="955" cy="495" r="3.2" fill="#ffb454"/>
+      <circle cx="940" cy="505" r="3.2" fill="#ffb454"/>
+      <circle cx="950" cy="472" r="3.2" fill="#5fd0d6"/>
+      <circle cx="925" cy="488" r="3.2" fill="#5fd0d6"/>
+      <circle cx="910" cy="510" r="3.2" fill="#ffb454"/>
+      <circle cx="930" cy="468" r="3.2" fill="#5fd0d6"/>
+      <circle cx="880" cy="500" r="3.2" fill="#5fd0d6"/>
+      <circle cx="850" cy="475" r="3.2" fill="#5fd0d6"/>
+      <circle cx="820" cy="455" r="3.2" fill="#5fd0d6"/>
+      <circle cx="800" cy="510" r="3.2" fill="#ffb454"/>
+      <circle cx="780" cy="440" r="3.2" fill="#5fd0d6"/>
+      <circle cx="760" cy="490" r="3.2" fill="#5fd0d6"/>
+      <circle cx="730" cy="460" r="3.2" fill="#5fd0d6"/>
+      <circle cx="710" cy="507" r="3.2" fill="#ffb454"/>
+      <circle cx="690" cy="425" r="3.2" fill="#5fd0d6"/>
+      <circle cx="660" cy="500" r="3.2" fill="#5fd0d6"/>
+      <circle cx="640" cy="455" r="3.2" fill="#5fd0d6"/>
+      <circle cx="600" cy="510" r="3.2" fill="#ffb454"/>
+      <circle cx="580" cy="430" r="3.2" fill="#5fd0d6"/>
+      <circle cx="540" cy="470" r="3.2" fill="#5fd0d6"/>
+      <circle cx="520" cy="390" r="3.2" fill="#5fd0d6"/>
+      <circle cx="500" cy="507" r="3.2" fill="#ffb454"/>
+      <circle cx="470" cy="445" r="3.2" fill="#5fd0d6"/>
+      <circle cx="450" cy="415" r="3.2" fill="#5fd0d6"/>
+      <circle cx="420" cy="512" r="3.2" fill="#ffb454"/>
+      <circle cx="390" cy="470" r="3.2" fill="#5fd0d6"/>
+      <circle cx="360" cy="430" r="3.2" fill="#5fd0d6"/>
+      <circle cx="340" cy="514" r="3.2" fill="#ffb454"/>
+      <circle cx="320" cy="380" r="3.2" fill="#5fd0d6"/>
+      <circle cx="300" cy="460" r="3.2" fill="#5fd0d6"/>
+      <circle cx="280" cy="507" r="3.2" fill="#ffb454"/>
+      <circle cx="260" cy="440" r="3.2" fill="#5fd0d6"/>
+      <!-- vented into the free troposphere -->
+      <circle cx="540" cy="250" r="3.2" fill="#5fd0d6"/>
+      <circle cx="500" cy="272" r="3.2" fill="#5fd0d6"/>
+      <circle cx="565" cy="238" r="3.2" fill="#5fd0d6"/>
+      <circle cx="600" cy="280" r="3.2" fill="#5fd0d6"/>
+    </g>
+
+    <!-- mean wind (blows downwind, toward the receptor) -->
+    <g stroke="#9db0c7" stroke-width="2" marker-end="url(#arrWind)" opacity="0.85">
+      <line x1="250" y1="130" x2="340" y2="130"/>
+      <line x1="430" y1="130" x2="520" y2="130"/>
+      <line x1="620" y1="130" x2="710" y2="130"/>
+    </g>
+
+    <!-- backward-in-time indicator (particles move upwind, against the wind) -->
+    <path d="M880,205 C 720,180 560,180 470,205" fill="none" stroke="#5fd0d6"
+          stroke-width="2" stroke-dasharray="7 5" marker-end="url(#arrBack)"/>
+
+    <!-- receptor: tall tower with inlet + release point -->
+    <line x1="963" y1="520" x2="963" y2="470" stroke="#e8eef6" stroke-width="3"/>
+    <line x1="955" y1="470" x2="975" y2="470" stroke="#e8eef6" stroke-width="3"/>
+    <circle cx="963" cy="478" r="6" fill="#ffffff" stroke="#5fd0d6" stroke-width="2.5"/>
+  </g>
+
+  <!-- surface line drawn over the clip edge -->
+  <line x1="50" y1="520" x2="1050" y2="520" stroke="#6b7f99" stroke-width="1.5"/>
+
+  <!-- ===== domain bounding box outline ===== -->
+  <rect x="50" y="70" width="1000" height="490" rx="9" fill="none"
+        stroke="#5fd0d6" stroke-width="2" stroke-dasharray="10 7"/>
+
+  <!-- ===== labels ===== -->
+  <text x="55" y="58" fill="#5fd0d6" font-size="16" font-weight="600">ERA5 meteorology domain — only the Zarr chunks inside this box are streamed</text>
+
+  <text x="905" y="120" fill="#9db0c7" font-size="15" text-anchor="end" font-style="italic">free troposphere</text>
+  <text x="70" y="130" fill="#9db0c7" font-size="15">mean wind</text>
+  <text x="675" y="175" fill="#5fd0d6" font-size="15">tracked backward in time</text>
+  <text x="65" y="285" fill="#ffb454" font-size="14.5">boundary-layer top (mixing height)</text>
+  <text x="70" y="410" fill="#cdd8e6" font-size="15" font-style="italic">boundary layer — turbulent mixing</text>
+
+  <text x="905" y="455" fill="#e8eef6" font-size="15" text-anchor="end">receptor</text>
+  <text x="905" y="474" fill="#9db0c7" font-size="13" text-anchor="end">(tall tower + release)</text>
+
+  <text x="300" y="551" fill="#ffb454" font-size="15" font-weight="600">surface footprint = sensitivity to surface emissions</text>
+
+  <!-- axes -->
+  <text x="30" y="315" fill="#9db0c7" font-size="14" transform="rotate(-90 30 315)" text-anchor="middle">altitude</text>
+  <text x="550" y="600" fill="#9db0c7" font-size="14" text-anchor="middle">&#8592; upwind distance from receptor</text>
+</svg>

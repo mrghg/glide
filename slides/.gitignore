@@ -4,5 +4,5 @@
 glide-overview.html
 glide-lightning.html
 
-# Figures and animations are kept out of git (see README.md).
-img/
+# Animations are kept out of git (see README.md).
+img/*.mp4
