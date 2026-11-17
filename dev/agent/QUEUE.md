@@ -118,6 +118,90 @@ Model: Opus 5.5, high effort. Run strictly in order unless a task is BLOCKED.
   bit-identical to before on CPU.
 - **Runtime.** Two reference runs on GH200: about 1 h.
 
+### A02 — Convection for each column, at the meteorology's interval
+
+- **Size:** M–L. **Depends on:** A01. Must merge before A0 (golden
+  fixtures) and the freeze: it changes footprints wherever convection is on.
+  Write a decision record.
+- **Why.** The Tier 2 runs have deep convection on in FLEXPART, NAME and
+  GLIDE (`docs/validation-plan.md`, Tier 2, "Settings that all three models
+  share"). GLIDE's scheme has two limits that make that comparison
+  meaningless over a continental domain (`docs/convection.md` §7 item 1;
+  `docs/physics.md`, approximations table):
+  - it lifts one parcel in the mean profile of the whole meteorology box,
+    so convection is on or off everywhere at once;
+  - its interval is fixed at 3,600 s, which is wrong on meteorology that is
+    not hourly (the Met Office fields, task B14).
+- **Scope.**
+  - Work out the redistribution matrix for each (longitude, latitude) column
+    of the meteorology, and move each particle with the matrix of the column
+    it is in. Keep it vectorised over columns; no Python loop over columns.
+  - Apply the scheme once per meteorology interval, read from the store, in
+    place of the fixed 3,600 s.
+  - Update `docs/convection.md` (§4, §7), `docs/physics.md` and STATUS.md.
+- **Out of scope.** The other simplifications in `docs/convection.md` §7
+  (detrainment profile, downdraughts, closure). They stay roadmap 6c.
+- **Acceptance.**
+  - With `convection.scheme: none`, output is bit-identical to before on
+    CPU.
+  - On a meteorology box that is uniform in the horizontal, the new scheme
+    gives the same matrix in every column, equal to the old scheme's.
+  - Mass conservation holds in every column (existing tests extended).
+  - A test with two columns, one unstable and one stable, shows convection
+    in the first only.
+  - On hourly ERA5 the interval is 3,600 s; on a store thinned to 3-hourly
+    it is 10,800 s.
+  - Benchmark with the A0 harness when it exists, or `scripts/` timing
+    before it does: report the cost against the old scheme.
+- **Stop for the human** if the cost more than doubles the reference
+  configuration's wall time, or if the work cannot be finished without one
+  of the out-of-scope items. The fallback is theirs to choose: convection
+  off in all three models for Tier 2.
+- **Runtime.** Reference config twice: about 1 h.
+
+### A03 — Boundary-layer depth limits, and the meander term's loose ends
+
+- **Size:** S–M. **Depends on:** A01. Must merge before A0 and the freeze.
+  Write a decision record.
+- **Why.** Decisions of 16 November 2026 on the reference runs
+  (`docs/reference-runs.md` §7; `docs/validation-plan.md`, Tier 2).
+- **Scope.**
+  - **Boundary-layer depth limits.** Replace the constant `BLH_MIN_M`
+    (`src/lpdm/turbulence/hanna.py`) with two configuration options, a
+    minimum and a maximum. The defaults keep today's behaviour (50 m, no
+    maximum). The validation configurations set 100 m and 4,500 m, the
+    values FLEXPART and NAME use in the reference runs. Apply the limits
+    everywhere the depth is used.
+  - **Meander timescale.** When `turbulence.meander.timescale_seconds` is
+    unset, use half the meteorology interval read from the store, not a
+    fixed 1,800 s. On hourly ERA5 nothing changes. Remove the matching item
+    from STATUS.md.
+  - **Tier 0 meander test, part 1.** Uniform wind, fixed meander velocity
+    scale and timescale, all other processes off. Compare the cloud's
+    horizontal variance with the exact variance of an Ornstein–Uhlenbeck
+    displacement that starts from rest, at several times from well below to
+    well above the timescale. State the formula in the test and in
+    `docs/turbulence.md` §7.
+  - **Tier 0 meander test, part 2.** The term has no drift correction for a
+    velocity scale that varies in space (`docs/turbulence.md` §7). Start
+    particles evenly over the EUR box on one case-library day, switch off
+    everything but the meander term, and report how uneven they are after
+    10 days, with the particle noise for comparison. Do not add a drift
+    term. Report the number and stop for the human if the unevenness is
+    more than the noise.
+  - **The top of the model.** State in `docs/physics.md` what GLIDE does
+    with a particle that reaches the top of its vertical grid, with the
+    code location and a test. Change nothing.
+  - **Stopping by age.** State, with the code location and a test, whether
+    GLIDE stops each particle 240 hours after its own release or ends the
+    run at a fixed time (task A10 needs the first). Change nothing here;
+    report it.
+- **Acceptance.** Shipped configurations give bit-identical output on CPU;
+  tests for both limits, for the timescale on an hourly and a 3-hourly
+  store, and for meander part 1; the part 2 number, the top and the
+  stopping rule reported in the progress file.
+- **Runtime.** Minutes, plus one 10-day run for part 2.
+
 ### A0 — Golden fixtures, comparison and benchmark harness
 
 - **Roadmap:** enabler for everything. **Size:** S. **Depends on:** A01.
@@ -352,8 +436,8 @@ Model: Opus 5.5, high effort. Run strictly in order unless a task is BLOCKED.
 
 ### A8 — Physics freeze preparation and audit table (1a, 1c)
 
-- **Size:** S. **Depends on:** A00–A7 merged (A01 validates the model-level
-  met path).
+- **Size:** S. **Depends on:** A00–A7 merged, including A02 and A03 (A01
+  validates the model-level met path).
 - **Scope.** Write `docs/physics-audit.md`: a table with one row per equation
   in `docs/physics.md`, `turbulence.md`, `convection.md`, giving the literature
   source, the code location and the test that exercises it, with gaps marked.
@@ -540,9 +624,19 @@ Model: Opus 5.5, high effort. Run strictly in order unless a task is BLOCKED.
   output grid, release points and heights, particle numbers, the 0–40 m
   layer, and each particle stopped 240 hours after its own release. If
   GLIDE ends runs at a fixed time instead, fix that first, before the
-  freeze. GLIDE also writes the end record of every particle
-  (`docs/reference-runs.md` §8), and the comparison of end records is part
-  of the particle statistics.
+  freeze (A03 reports which it does). GLIDE also writes the end record of
+  every particle (`docs/reference-runs.md` §8), and the comparison of end
+  records is part of the particle statistics. NAME delivers end records
+  for every release, FLEXPART for the seven standard cases only.
+- **Settings.** GLIDE's Tier 2 runs use `convection.scheme:
+  emanuel_reduced` (A02), boundary-layer depth limits of 100 and 4,500 m
+  (A03), the meander term on, and the number of particles each reference
+  run actually released (its `n_particles`). On Met Office fields the
+  meander timescale is half the fields' interval.
+- **Meander sensitivity runs** (reported, not graded): GLIDE with the
+  meander term off, same seeds, for the seven standard cases and block
+  EUR-Jan at Mace Head; and the readers and figures for FLEXPART's `meso`
+  runs and NAME's `nomeso` and `group` runs (`docs/reference-runs.md` §9).
 - **Acceptance.** All Tier 2 figures for the case library, generated by
   scripts, with pre-registered metrics reported pass or fail.
 - **Running and reporting.** Follow the registered rules
@@ -580,6 +674,9 @@ Model: Opus 5.5, high effort. Run strictly in order unless a task is BLOCKED.
   would widen plumes and confound the comparison with the published scores and
   with the meander term. Confirm the setting from each run's metadata before
   scoring, and stop if any run used the kernel.
+- **Meander off.** Repeat the graded runs with the meander term off, same
+  seeds, and report the scores beside the graded ones. These are reported
+  only (`docs/validation-plan.md`, Tier 2).
 - **Acceptance.** DATEM ranking scores and their four terms for every
   experiment, and ATMES-II statistics for ETEX, reported against the published
   values for NAME, FLEXPART, HYSPLIT and STILT in
@@ -682,8 +779,10 @@ dependency is listed; run in the listed order by default.
   extended additively. The column release is uniform in pressure between the
   surface and its top, matching FLEXPART's `ZKIND = 3` release used for case 7
   of the case library (`docs/validation-plan.md` §4;
-  `docs/reference-runs.md` §5: surface pressure to 100 hPa, 100,000
-  particles). The column runs need a model top of at least 20 km.
+  `docs/reference-runs.md` §5: surface pressure to 100 hPa, 100,800
+  particles). The column runs need a model top of at least 20 km. State
+  what GLIDE does with a particle that reaches that top (A03 reports it),
+  beside FLEXPART's and NAME's behaviour in `docs/reference-runs.md` §2.
 
 ### B6 — Nested footprint output (4b)
 
@@ -868,7 +967,9 @@ dependency is listed; run in the listed order by default.
     defined as heights above the terrain, and for a vertical velocity in
     metres per second. Write a decision record. ERA5 runs must be
     bit-for-bit unchanged; prove it with the A0 comparison.
-  - First, a short written assessment in the progress file: which of the two
+  - First, a short written assessment in the progress file: the fields'
+    grid spacing, levels and interval, read from the Mk10 files themselves
+    (do not rely on figures quoted for earlier series); which of the two
     routes each gap takes, the fields' time step and what it means for
     GLIDE's time interpolation, and the size of the four case-library
     windows (validation-plan §4). Stop for the human if a reader change is
