@@ -11,11 +11,18 @@ downloads and prepares meteorology for GLIDE
 ([dev/decisions/0018](../dev/decisions/0018-met-bazarr.md)). A change here is a
 change to that format: note it in the decision records and tell met-bazarr.
 
-**What is prescribed:** container format, coordinate conventions, variable names,
-dimensions, units, and sign conventions. Get these exact.
+**Format version: 1.0.** Stores record the version they implement in
+`glide_format_version` (see [Provenance attributes](#provenance-attributes)).
+The history is under [Format versions](#format-versions).
 
-**What is not:** horizontal resolution, vertical resolution, domain extent, time
-span, chunk sizes. GLIDE adapts. In particular it runs on **either** pressure
+**What is prescribed:** container format, coordinate conventions, variable names,
+dimensions, units, sign conventions, a single grid shared by all fields, and the
+provenance attributes. Get these exact. Stores used as validation inputs
+satisfy [Validation inputs](#validation-inputs) as well.
+
+**What is not:** horizontal resolution, vertical resolution, domain extent
+(beyond covering the run's domain, see [Domain and extent](#domain-and-extent)),
+time span, chunk sizes. GLIDE adapts. In particular it runs on **either** pressure
 levels **or** model (hybrid) levels — see [Vertical coordinate](#vertical-coordinate).
 
 `scripts/download_sample_cube.py` produces conforming stores from ARCO ERA5 and
@@ -51,6 +58,16 @@ for the gaps you will most likely have to close yourself.
 | Latitude | `latitude` | Degrees north. Ascending or descending both accepted. |
 | Longitude | `longitude` | Degrees east. Either $-180..180$ or $0..360$; GLIDE detects and normalises. |
 | Vertical | `level` | 1-D. Its *meaning* depends on the vertical mode below. |
+
+**One grid for every field.** All variables share one set of `latitude` and
+`longitude` points, and all 3-D variables share one vertical coordinate. GLIDE
+has no notion of staggering. A source that stores fields at different points
+(for example the Met Office UM: winds offset horizontally on an Arakawa C grid,
+and potential temperature, humidity and vertical velocity on different levels
+from the winds and pressure) is interpolated onto one grid by the converter.
+The target grid and the interpolation method are the converter's choice. They
+are recorded in the `processing` attribute, and for validation inputs they are
+fixed before conversion (see [Validation inputs](#validation-inputs)).
 
 Coordinate names are configurable on the reader (`lon_name`, `lat_name`,
 `level_name`, `time_name`), but the defaults above are the path of least
@@ -148,6 +165,14 @@ happily and produce nonsense.
 
 Accumulated (`J m**-2`) fluxes are de-accumulated before use; instantaneous
 (`W m**-2`) fluxes pass through unscaled.
+
+A `W m**-2` field may be an instantaneous value or a mean over an interval
+(the UM writes means over its output interval). GLIDE uses the value as given
+at its timestamp in both cases. Record which it is in the store attribute
+`glide_flux_averaging_seconds`: `0` for instantaneous, otherwise the length of
+the averaging interval, which ends at the timestamp. GLIDE does not read this
+attribute yet; it is required in validation inputs, so the difference from
+ERA5's treatment is on record.
 
 **Tag the accumulation period.** `J m**-2` says the field is accumulated but not
 over how long, and the period is not recoverable from the data. GLIDE therefore
@@ -351,6 +376,75 @@ exist.
 
 ---
 
+## Domain and extent
+
+- **Horizontal.** The store's grid points must cover the run's `met_domain`
+  box, including at least one point on or beyond each edge. GLIDE removes a
+  particle when it leaves `met_domain`, not the store's extent, so a store
+  wider than the box does not change results. Note: GLIDE's reader currently
+  cuts the store to exactly the `met_domain` bounds. When the source's grid
+  points do not lie on those bounds, the strip between the outermost point
+  inside and the edge has no point beyond it to interpolate from. ERA5 runs on
+  the EUR and NAM domains are unaffected, because their edges are ERA5 grid
+  points. For any other source, check how GLIDE interpolates in that strip
+  (task B14).
+- **Vertical.** Keep the source's levels up to at least 20 km above the
+  ground everywhere in the domain; for ERA5 and the UM, keep all levels. The
+  column releases need a model top of at least 20 km (validation-plan §4). Dropping levels above the run's
+  `alt_max_m` (as under
+  [Preparing meteorology from a non-ERA5 source](#preparing-meteorology-from-a-non-era5-source))
+  is for development stores only.
+- **Time.** The source's own timestamps, without interpolation in time,
+  covering the run's backward window.
+
+---
+
+## Provenance attributes
+
+Store-level attributes that say what the store is and how it was made. GLIDE
+copies them into each run's `run_metadata.json` (task B1). Stores written by
+met-bazarr carry all of them; they are required in validation inputs. All
+values are strings unless stated.
+
+| Attribute | Content |
+| --- | --- |
+| `glide_format` | `"glide"` |
+| `glide_format_version` | The version of this page the store implements, e.g. `"1.0"` |
+| `glide_vertical_coordinate` | `"pressure_level"` or `"model_level"` (see [Vertical coordinate](#vertical-coordinate)) |
+| `glide_flux_accumulation_seconds` | Accumulation period of a `J m**-2` heat flux (see [Sensible heat flux](#sensible-heat-flux)); omit for `W m**-2` |
+| `glide_flux_averaging_seconds` | Averaging interval of a `W m**-2` heat flux; `0` for instantaneous; omit for `J m**-2` |
+| `source_dataset` | The source product, precisely enough to fetch it again: e.g. `"ERA5 model levels, ARCO gs://gcp-public-data-arco-era5/ar/model-level-1h-0p25deg.zarr-v1"`, or `"Met Office global UM analyses, NAME met archive series UMG_Mk10PT"` |
+| `source_access` | How and when it was read: host or archive path, and the UTC date |
+| `producer` | The tool that wrote the store, e.g. `"met-bazarr"` |
+| `producer_version` | Its version |
+| `producer_commit` | Its git commit |
+| `processing` | Every derivation and interpolation applied, in order, as plain text: derived fields and their formulas, destaggering (target grid and method), unit and sign changes, cropping |
+| `compression` | Codec and level, and any lossy encoding per variable; `"lossless"` if none |
+| `domain` | A name for the box, e.g. `"EUR"` or `"NAM"`, if it is one of the validation domains |
+
+---
+
+## Validation inputs
+
+The meteorology for the registered validation runs (validation-plan §3–§4)
+meets these rules in addition to the rest of this page:
+
+- **Lossless.** Variables are stored as the source gives them or as
+  `float32`, with lossless compression only: no `int16` scale and offset, no
+  bit-rounding (decision [0018](../dev/decisions/0018-met-bazarr.md)). A
+  lossy encoding is allowed only after a decision record that compares it
+  against the golden fixtures.
+- **All provenance attributes** above are present.
+- **The conversion is fixed before it runs.** For a non-ERA5 source, the
+  choices that affect results (the vertical coordinate route, the destaggering
+  target and method, which source fields each GLIDE variable comes from) are
+  written down and agreed before the case-library windows are converted, and
+  are the same in every window.
+- **Produced by a tagged met-bazarr release,** whose version is pinned in the
+  pre-registration record.
+
+---
+
 ## Storage precision
 
 Meteorology stores are large enough that encoding matters. Measured on a
@@ -449,3 +543,15 @@ reader = ArcoEra5ZarrReader("path/to/your_met_ml.zarr")
 A missing variable, a missing or empty `units` attribute, an unrecognised unit
 string, non-finite geopotential, or an untagged model-level coordinate will each
 raise a clear error at this point.
+
+---
+
+## Format versions
+
+| Version | Date | Change |
+| --- | --- | --- |
+| 1.0 | 2026-11-17 | First versioned definition ([decision 0019](../dev/decisions/0019-met-format-versioning.md)). Adds the format version, the provenance attributes, `glide_flux_averaging_seconds`, the one-grid rule, the domain and extent rules, and the rules for validation inputs. No change to what GLIDE reads: stores that conformed before still run. |
+
+A change that GLIDE's reader depends on, or that alters what a conforming store
+contains, takes a new version and a decision record. Additions that only record
+information take a minor version; anything else takes a major one.
