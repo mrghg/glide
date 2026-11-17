@@ -34,6 +34,7 @@ htmlcov/
 
 # SLURM run logs (personal run artifacts)
 /slurm_logs/
+/logs/
 
 # Personal SLURM-log helper scripts (untracked dev convenience; ignore if present)
 /scripts/glogs.sh

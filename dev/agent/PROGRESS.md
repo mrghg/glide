@@ -31,6 +31,14 @@ never download data._
 | --- | --- | --- | --- | --- | --- | --- |
 | _to fill_ | | | | | | smoke tests |
 | _to fill_ | | | | | | reference multi-site benchmark |
+| `era5-model/EUR_19941023-19941028_ml.zarr` | EUR (30° W–40° E, 32–72° N) | 1994-10-23 00:00 – 1994-10-28 00:00 | model, 137 | 1 h | 13 GB | ETEX-1 (B10, A11) |
+| `era5-model/EUR_19941114-19941119_ml.zarr` | EUR (30° W–40° E, 32–72° N) | 1994-11-14 00:00 – 1994-11-19 00:00 | model, 137 | 1 h | 13 GB | ETEX-2 (B10, A11) |
+| `era5-model/NAM_19800708-19800712_ml.zarr` | NAM (120–55° W, 22–58° N) | 1980-07-08 00:00 – 1980-07-12 00:00 | model, 137 | 1 h | 8.3 GB | OKC80 (B12) |
+| `era5-model/NAM_19830918-19830922_ml.zarr` | NAM (120–55° W, 22–58° N) | 1983-09-18 00:00 – 1983-09-22 00:00 | model, 137 | 1 h | 8.3 GB | CAPTEX-1 (B10, A11) |
+| `era5-model/NAM_19830925-19830929_ml.zarr` | NAM (120–55° W, 22–58° N) | 1983-09-25 00:00 – 1983-09-29 00:00 | model, 137 | 1 h | 8.3 GB | CAPTEX-2 (B10, A11) |
+| `era5-model/NAM_19831002-19831006_ml.zarr` | NAM (120–55° W, 22–58° N) | 1983-10-02 00:00 – 1983-10-06 00:00 | model, 137 | 1 h | 8.3 GB | CAPTEX-3 (B10, A11) |
+| `era5-model/NAM_19831014-19831017_ml.zarr` | NAM (120–55° W, 22–58° N) | 1983-10-14 00:00 – 1983-10-17 00:00 | model, 137 | 1 h | 6.3 GB | CAPTEX-4 (B10, A11) |
+| `era5-model/NAM_19831026-19831101_ml.zarr` | NAM (120–55° W, 22–58° N) | 1983-10-26 00:00 – 1983-11-01 00:00 | model, 137 | 1 h | 13 GB | CAPTEX-5 to 7 (B10, A11) |
 
 ## Reference data outside the repository
 
