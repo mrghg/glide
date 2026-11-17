@@ -1054,9 +1054,9 @@ FLEXPART's particle files do not record which release a particle came from.
 | --- | --- | --- | --- | --- | --- |
 | 1 | Coastal | The land–sea transition, and features smaller than a grid cell | MHD | EUR-Jan | 8 Jan 2019 12:00 |
 | 2 | Mountain | The terrain-following vertical coordinate, and transport from the free troposphere over steep, smoothed terrain | JFJ | EUR-Jul | 8 Jul 2019 12:00 |
-| 3 | Stable night, low inlet | Weak night-time mixing near the ground, the minimum turbulence timescales, and boundary layers shallower than the 100 m minimum that all three models apply | CBW, 20 m | EUR-Jan | 02:00 on the night chosen by rule |
-| 4 | Convective afternoon | Daytime convective turbulence, boundary-layer depth, and deep convection | LEF | NAM-Jul | 20:00 (about 14:00 local solar time) on the day chosen by rule |
-| 5 | Frontal passage | Transport by the resolved winds, and interpolation in time between meteorological fields | TAC | EUR-Jan | the hour chosen by rule |
+| 3 | Stable night, low inlet | Weak night-time mixing near the ground, the minimum turbulence timescales, and boundary layers shallower than the 100 m minimum that all three models apply | CBW, 20 m | EUR-Jan | 7 Jan 2019 02:00 (chosen by rule) |
+| 4 | Convective afternoon | Daytime convective turbulence, boundary-layer depth, and deep convection | LEF | NAM-Jul | 13 Jul 2019 20:00 (about 14:00 local solar time; day chosen by rule) |
+| 5 | Frontal passage | Transport by the resolved winds, and interpolation in time between meteorological fields | TAC | EUR-Jan | 13 Jan 2019 15:00 (chosen by rule) |
 | 6 | Continental winter | Long-range transport over snow-covered land, and a stable continental boundary layer | LEF | NAM-Jan | 8 Jan 2019 18:00 |
 | 7 | Satellite column | Releasing particles through a whole column, as for a satellite retrieval, and how runs are ended | SGP | NAM-Jul | 8 Jul 2019 19:00 (about 12:30 local solar time, near a typical overpass) |
 
@@ -1072,6 +1072,19 @@ times are written into the record.
 - *Case 5, the frontal passage:* the hour in EUR-Jan at the end of the
   largest 3-hour fall in ERA5's 850 hPa temperature at the grid point nearest
   Tacolneston. The size of the fall is recorded.
+
+**The chosen times** (17 Nov 2026, `scripts/select_case_times.py`, ERA5 from
+the ARCO pressure-level and surface store). The hours are hourly ERA5 values,
+both ends included: 00:00–05:00 is six values and 18:00–22:00 is five. For
+case 5, the hour is the release hour *t* in EUR-Jan (1 Jan 00:00 to 14 Jan
+23:00) that maximises $T_{850}(t - 3\ \mathrm{h}) - T_{850}(t)$, so the fall
+may start before the block.
+
+| Case | Grid point | Chosen | Value | Runner-up |
+| --- | --- | --- | --- | --- |
+| 3 | 52.0° N, 5.0° E | night of 7 Jan 2019 | mean boundary-layer height 82 m | 4 Jan, 184 m |
+| 4 | 46.0° N, 90.25° W | 13 Jul 2019 | mean boundary-layer height 1,602 m | 3 Jul, 1,509 m |
+| 5 | 52.5° N, 1.25° E | 13 Jan 2019 15:00 | fall of 5.31 K (278.18 to 272.86 K) | 13 Jan 14:00, 5.11 K (the same front); next front 7 Jan 19:00, 4.50 K |
 
 **The column release (case 7 and all Lamont releases).**
 - *FLEXPART:* the release is an ordinary `RELEASES` entry with `ZKIND = 3`

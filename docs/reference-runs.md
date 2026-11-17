@@ -442,16 +442,16 @@ of every particle (§8).
 | --- | --- | --- | --- |
 | 1 | Coastal | MHD | 8 Jan 2019 12:00 |
 | 2 | Mountain | JFJ | 8 Jul 2019 12:00 |
-| 3 | Stable night | CBW-20 | a night in EUR-Jan, 02:00; supplied |
-| 4 | Convective afternoon | LEF | a day in NAM-Jul, 20:00; supplied |
-| 5 | Frontal passage | TAC | an hour in EUR-Jan; supplied |
+| 3 | Stable night | CBW-20 | 7 Jan 2019 02:00 |
+| 4 | Convective afternoon | LEF | 13 Jul 2019 20:00 |
+| 5 | Frontal passage | TAC | 13 Jan 2019 15:00 |
 | 6 | Continental winter | LEF | 8 Jan 2019 18:00 |
 | 7 | Column | SGP | 8 Jul 2019 19:00 |
 
-The times for cases 3 to 5 are picked from ERA5 by fixed rules
-([validation-plan.md](validation-plan.md), §4) and supplied before the
-single-release runs. They are all releases that `main` already contains, so
-`main` does not wait for them.
+The times for cases 3 to 5 were picked from ERA5 by the fixed rules of
+[validation-plan.md](validation-plan.md) §4, with
+`scripts/select_case_times.py` (17 Nov 2026). They are all releases that
+`main` already contains.
 
 ## 10. Checks before the full runs
 
