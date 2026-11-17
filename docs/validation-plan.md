@@ -381,8 +381,8 @@ GLIDE's turbulence scheme follows FLEXPART's, not NAME's. They include:
 - NAME's boundary-layer depth, taken from the UM (and held within the same
   100 to 4,500 m);
 - the top: NAME removes particles at 20 km above the ground;
-- the interval between UM fields, which is longer than ERA5's hour (believed
-  to be 3 hours; task B14 records it from the files). Differences from
+- the interval between UM fields, which is 3 hours where ERA5's is one
+  (read from the Mk10 file headers by the NAME runs). Differences from
   interpolating in time, which case 5 tests, are expected to be larger on
   UM fields than on ERA5;
 - the column release, if NAME has to build it from stacked sources (§4).
@@ -1006,7 +1006,8 @@ models.
 - **Shared settings:** deep convection on, and the boundary-layer depth held
   between 100 and 4,500 m, in all three models (Tier 2).
 - **GLIDE on Met Office meteorology** uses the fields at their own resolution
-  (about 10 km) over the same domain, and writes footprints on the same
+  (0.140625° in longitude by 0.09375° in latitude, about 10 km; 59 levels;
+  every 3 hours) over the same domain, and writes footprints on the same
   0.25° grid.
 - **OKC80** (8–11 July 1980, Tier 3) uses a subdomain of NAM on the same grid
   points.
