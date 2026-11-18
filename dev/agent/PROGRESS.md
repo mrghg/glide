@@ -39,6 +39,12 @@ never download data._
 | `era5-model/NAM_19831002-19831006_ml.zarr` | NAM (120–55° W, 22–58° N) | 1983-10-02 00:00 – 1983-10-06 00:00 | model, 137 | 1 h | 8.3 GB | CAPTEX-3 (B10, A11) |
 | `era5-model/NAM_19831014-19831017_ml.zarr` | NAM (120–55° W, 22–58° N) | 1983-10-14 00:00 – 1983-10-17 00:00 | model, 137 | 1 h | 6.3 GB | CAPTEX-4 (B10, A11) |
 | `era5-model/NAM_19831026-19831101_ml.zarr` | NAM (120–55° W, 22–58° N) | 1983-10-26 00:00 – 1983-11-01 00:00 | model, 137 | 1 h | 13 GB | CAPTEX-5 to 7 (B10, A11) |
+| `era5-model/EUR_20181222-20190115_ml.zarr` | EUR (30° W–40° E, 32–72° N) | 2018-12-22 00:00 – 2019-01-15 00:00 | model, 137 | 1 h | 59 GB | Block EUR-Jan (A01 onward, A8a, A10); one heat-flux value filled, see `glide_filled_values` |
+  | `era5-model/EUR_20190621-20190715_ml.zarr` | EUR (30° W–40° E, 32–72° N) | 2019-06-21 00:00 – 2019-07-15 00:00 | model, 137 | 1 h | 58 GB | Block EUR-Jul (A8a, A10) |
+  | `era5-model/NAM_20181222-20190115_ml.zarr` | NAM (120–55° W, 22–58° N) | 2018-12-22 00:00 – 2019-01-15 00:00 | model, 137 | 1 h | 49 GB |Block NAM-Jan (A8a, A10) |
+  | `era5-model/NAM_20190621-20190715_ml.zarr` | NAM (120–55° W, 22–58° N) | 2019-06-21 00:00 – 2019-07-15 00:00 | model, 137 | 1 h | 50 GB | Block NAM-Jul (A8a, A10) |
+  | `era5-model/NAM_19870105-19870118_ml.zarr` | NAM (120–55° W, 22–58° N) | 1987-01-05 00:00 – 1987-01-18 00:00 | model, 137 | 1 h | 27 GB | ANATEX (B10, A11) |
+
 
 ## Reference data outside the repository
 
