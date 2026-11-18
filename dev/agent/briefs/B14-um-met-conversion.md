@@ -114,6 +114,10 @@ reader changes), and only then is stage 2 built against them.
   - every level kept;
   - no interpolation in time (3-hourly stays 3-hourly);
   - cropped to cover the EUR or NAM box with one point beyond each edge.
+  - isolated missing values in the source filled only by the documented rule
+    (one timestep, at most 10 per variable per store, mean of the neighbouring
+    timesteps, listed in `glide_filled_values`); anything more is reported,
+    not filled.
 - Checks on one day, reported in the PR:
   - converted pressure, temperature and winds against the source at a sample
     of points;

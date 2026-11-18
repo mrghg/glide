@@ -421,6 +421,7 @@ values are strings unless stated.
 | `processing` | Every derivation and interpolation applied, in order, as plain text: derived fields and their formulas, destaggering (target grid and method), unit and sign changes, cropping |
 | `compression` | Codec and level, and any lossy encoding per variable; `"lossless"` if none |
 | `domain` | A name for the box, e.g. `"EUR"` or `"NAM"`, if it is one of the validation domains |
+| `glide_filled_values` | Only if values were filled ([Validation inputs](#validation-inputs)): a JSON list with one object per filled value, with keys `variable`, `time` (ISO, UTC), `latitude`, `longitude`, `level` (3-D variables only), `before`, `after` and `filled` |
 
 ---
 
@@ -435,6 +436,23 @@ meets these rules in addition to the rest of this page:
   lossy encoding is allowed only after a decision record that compares it
   against the golden fixtures.
 - **All provenance attributes** above are present.
+- **Isolated missing values in the source are filled by a fixed rule.**
+  Source archives occasionally hold a missing value (NaN). ARCO's ERA5, for
+  example, has one in `surface_sensible_heat_flux` at 59.0° N, 35.0° E at
+  2018-12-28 21:00. GLIDE rejects non-finite input, so:
+  - **What may be filled:** a non-finite value in a time-varying variable,
+    where the same grid cell (and level) has finite values at the timesteps
+    immediately before and after it. Each fill covers a single timestep, and
+    a store has no more than 10 filled values per variable.
+    `geopotential` and `geopotential_at_surface` are never filled.
+  - **How:** the mean of the values at the same cell at the timesteps before
+    and after, that is, linear interpolation in time.
+  - **Record:** every filled value is listed in the store attribute
+    `glide_filled_values`, and the fill is noted in `processing`.
+  - **Otherwise:** a gap longer than one timestep, a gap at the first or last
+    timestep, or more than 10 per variable is not filled. The values are
+    fetched from the original archive (for ERA5, the Copernicus Climate Data
+    Store or MARS), or the conversion stops and the case is reported.
 - **The conversion is fixed before it runs.** For a non-ERA5 source, the
   choices that affect results (the vertical coordinate route, the destaggering
   target and method, which source fields each GLIDE variable comes from) are
@@ -550,7 +568,7 @@ raise a clear error at this point.
 
 | Version | Date | Change |
 | --- | --- | --- |
-| 1.0 | 2026-11-17 | First versioned definition ([decision 0019](../dev/decisions/0019-met-format-versioning.md)). Adds the format version, the provenance attributes, `glide_flux_averaging_seconds`, the one-grid rule, the domain and extent rules, and the rules for validation inputs. No change to what GLIDE reads: stores that conformed before still run. |
+| 1.0 | 2026-11-17 | First versioned definition ([decision 0019](../dev/decisions/0019-met-format-versioning.md)). Adds the format version, the provenance attributes, `glide_flux_averaging_seconds`, the one-grid rule, the domain and extent rules, and the rules for validation inputs (including the fill rule for isolated missing source values and `glide_filled_values`). No change to what GLIDE reads: stores that conformed before still run. |
 
 A change that GLIDE's reader depends on, or that alters what a conforming store
 contains, takes a new version and a decision record. Additions that only record

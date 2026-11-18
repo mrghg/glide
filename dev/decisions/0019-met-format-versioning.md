@@ -24,7 +24,16 @@ validation input may be lossy.
   edge, keep levels to at least 20 km, and do not interpolate in time;
 - rules for validation inputs: lossless, all provenance present, the conversion
   choices fixed and agreed before conversion, produced by a tagged met-bazarr
-  release.
+  release;
+- a documented fill for isolated missing source values: a single timestep with
+  finite values either side at the same cell, at most 10 per variable per
+  store, filled with the mean of the two neighbouring timesteps and listed in
+  `glide_filled_values`. Anything more is fetched from the original archive or
+  stops the conversion. Prompted by a missing value in ARCO's ERA5 heat flux
+  (59.0° N, 35.0° E, 2018-12-28 21:00), found when the EUR-Jan window was
+  downloaded. Matt chose a documented fill over fetching each value from the
+  Copernicus Climate Data Store, for simplicity, provided it stays at a few
+  cells.
 
 None of this changes what GLIDE reads, so existing stores still run.
 
