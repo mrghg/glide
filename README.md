@@ -13,12 +13,13 @@ footprints, written in pure PyTorch.
 
 ![GLIDE footprint](docs/img/glide_feature.png)
 
-*GLIDE 5-day surface footprints for 56 European measurement sites, released at
-12:00 UTC on 12 January 2024 and summed on one map. The frame is one hour of a
-month-long run on ERA5 model levels: hourly releases from every site through
-January 2024, 40,320 footprints of 20,000 particles each, which took 4 h 14 min
-on a single NVIDIA GH200 node. Rendered with
-[`scripts/plot_feature.py`](scripts/plot_feature.py).*
+*GLIDE 5-day surface footprints for 56 ICOS network sites, released at 12:00 UTC
+on 12 January 2024 and summed on one map. The frame is one hour of a run that
+computed hourly footprints for every site through January 2024 (40,320
+footprints of 20,000 particles each, ERA5 model levels) at **0.38 s per
+footprint** on a single NVIDIA GH200 node. For scale, NAME takes about 10
+minutes per footprint; the models and meteorology differ, so this is not a
+benchmark. Rendered with [`scripts/plot_feature.py`](scripts/plot_feature.py).*
 
 ---
 
