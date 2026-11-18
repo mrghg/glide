@@ -29,4 +29,4 @@ alternatives → Status**, with a pointer to the relevant `docs/` page.
 | [0017](0017-model-levels-default.md) | ERA5 model levels as the default meteorology (proposed) |
 | [0018](0018-met-bazarr.md) | Meteorology preparation lives in met-bazarr (proposed; GATES may join) |
 | [0019](0019-met-format-versioning.md) | A versioned `glide` met format, with provenance and rules for validation inputs (proposed) |
-| [0020](0020-time-meaning-of-period-fields.md) | Means and accumulations placed at the middle of their period (proposed) |
+| [0020](0020-time-meaning-of-period-fields.md) | Means and accumulations held through the interval they average, as NAME does; u* from stresses (proposed) |

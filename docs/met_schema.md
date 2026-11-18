@@ -96,10 +96,10 @@ A field's value at a timestamp is one of two things:
   the winds, temperature, humidity, pressure and boundary-layer depth of ERA5
   and of the UM.
 - **A mean or an accumulation over a period that ends at the timestamp.** For
-  example, ERA5's surface sensible heat flux is accumulated over the hour
-  ending at its timestamp. The UM's heat flux and surface stresses, and so the
-  friction velocity derived from them, are means over the 3 hours ending at
-  theirs.
+  example, ERA5's surface sensible heat flux and surface stresses are
+  accumulated over the hour ending at their timestamp. The UM's heat flux and
+  surface stresses are means over the 3 hours ending at theirs. A friction
+  velocity derived from mean stresses is itself a period variable.
 
 Each variable of the second kind carries two attributes of its own:
 
@@ -116,7 +116,13 @@ store's time step is held constant through each window, at its value at the
 window's end, which is the mean over exactly that window. This places it at
 the middle of the period it represents, as a snapshot is placed at its
 timestamp. GLIDE refuses a period variable whose period differs from the time
-step (for example ERA5 thinned to 3-hourly), rather than guess.
+step (for example ERA5 thinned to 3-hourly), rather than guess. This is how
+NAME treats the UM's time-mean fluxes
+([decision 0020](../dev/decisions/0020-time-meaning-of-period-fields.md)).
+
+Validation inputs derive `friction_velocity` from the surface stresses, as NAME
+and FLEXPART do, rather than taking a source's own friction velocity (ERA5's
+`zust`).
 
 **Stores written before format 2.0** carry no variable attributes. GLIDE then
 treats `surface_sensible_heat_flux` as a period variable when the store has
@@ -605,7 +611,7 @@ raise a clear error at this point.
 | --- | --- | --- |
 | 1.0 | 2026-11-17 | First versioned definition ([decision 0019](../dev/decisions/0019-met-format-versioning.md)). Adds the format version, the provenance attributes, `glide_flux_averaging_seconds`, the one-grid rule, the domain and extent rules, and the rules for validation inputs (including the fill rule for isolated missing source values and `glide_filled_values`). No change to what GLIDE reads: stores that conformed before still run. |
 
-| 2.0 | _draft_ | Per-variable `cell_methods` and `glide_period_seconds` mark means and accumulations; GLIDE holds a period variable constant through each window at its end value, instead of treating it as a snapshot at its timestamp ([decision 0020](../dev/decisions/0020-time-meaning-of-period-fields.md)). Stores of format 1.0 still read; their heat flux is placed by the store-level flux attributes. Changes results: ERA5 heat flux moves 30 minutes earlier, UM heat flux and friction velocity 1.5 hours earlier. |
+| 2.0 | _draft_ | Per-variable `cell_methods` and `glide_period_seconds` mark means and accumulations; GLIDE holds a period variable constant through each window at its end value, as NAME does, instead of treating it as a snapshot at its timestamp; validation inputs derive `friction_velocity` from the surface stresses ([decision 0020](../dev/decisions/0020-time-meaning-of-period-fields.md)). Stores of format 1.0 still read; their heat flux is placed by the store-level flux attributes. Changes results: ERA5 heat flux moves 30 minutes earlier, UM heat flux and friction velocity 1.5 hours earlier. |
 
 A change that GLIDE's reader depends on, or that alters what a conforming store
 contains, takes a new version and a decision record. Additions that only record
