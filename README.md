@@ -16,8 +16,8 @@ footprints, written in pure PyTorch.
 *GLIDE 5-day surface footprints for 56 European measurement sites, released at
 12:00 UTC on 12 January 2024 and summed on one map. The frame is one hour of a
 month-long run on ERA5 model levels: hourly releases from every site through
-January 2024, 40,320 footprints of 20,000 particles each, which took about 25
-minutes on a single NVIDIA GH200 node. Rendered with
+January 2024, 40,320 footprints of 20,000 particles each, which took 4 h 14 min
+on a single NVIDIA GH200 node. Rendered with
 [`scripts/plot_feature.py`](scripts/plot_feature.py).*
 
 ---
