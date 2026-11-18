@@ -28,3 +28,4 @@ alternatives → Status**, with a pointer to the relevant `docs/` page.
 | 0016 | _Reserved for queue task A00 (time-bin width in the footprint output)_ |
 | [0017](0017-model-levels-default.md) | ERA5 model levels as the default meteorology (proposed) |
 | [0018](0018-met-bazarr.md) | Meteorology preparation lives in met-bazarr (proposed; GATES may join) |
+| [0019](0019-met-format-versioning.md) | A versioned `glide` met format, with provenance and rules for validation inputs (proposed) |
