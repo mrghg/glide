@@ -11,7 +11,7 @@ downloads and prepares meteorology for GLIDE
 ([dev/decisions/0018](../dev/decisions/0018-met-bazarr.md)). A change here is a
 change to that format: note it in the decision records and tell met-bazarr.
 
-**Format version: 1.0 (2.0 in draft, see [Format versions](#format-versions)).** Stores record the version they implement in
+**Format version: 2.0** (GLIDE's reader implements it in task B14; until then it reads every store as 1.0, see [Format versions](#format-versions)). Stores record the version they implement in
 `glide_format_version` (see [Provenance attributes](#provenance-attributes)).
 The history is under [Format versions](#format-versions).
 
@@ -611,7 +611,7 @@ raise a clear error at this point.
 | --- | --- | --- |
 | 1.0 | 2026-11-17 | First versioned definition ([decision 0019](../dev/decisions/0019-met-format-versioning.md)). Adds the format version, the provenance attributes, `glide_flux_averaging_seconds`, the one-grid rule, the domain and extent rules, and the rules for validation inputs (including the fill rule for isolated missing source values and `glide_filled_values`). No change to what GLIDE reads: stores that conformed before still run. |
 
-| 2.0 | _draft_ | Per-variable `cell_methods` and `glide_period_seconds` mark means and accumulations; GLIDE holds a period variable constant through each window at its end value, as NAME does, instead of treating it as a snapshot at its timestamp; validation inputs derive `friction_velocity` from the surface stresses ([decision 0020](../dev/decisions/0020-time-meaning-of-period-fields.md)). Stores of format 1.0 still read; their heat flux is placed by the store-level flux attributes. Changes results: ERA5 heat flux moves 30 minutes earlier, UM heat flux and friction velocity 1.5 hours earlier. |
+| 2.0 | 2026-11-18 | Per-variable `cell_methods` and `glide_period_seconds` mark means and accumulations; GLIDE holds a period variable constant through each window at its end value, as NAME does, instead of treating it as a snapshot at its timestamp; validation inputs derive `friction_velocity` from the surface stresses ([decision 0020](../dev/decisions/0020-time-meaning-of-period-fields.md)). Stores of format 1.0 still read; their heat flux is placed by the store-level flux attributes. Changes results: ERA5 heat flux moves 30 minutes earlier, UM heat flux and friction velocity 1.5 hours earlier. |
 
 A change that GLIDE's reader depends on, or that alters what a conforming store
 contains, takes a new version and a decision record. Additions that only record

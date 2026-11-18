@@ -24,10 +24,9 @@ exactly as the winds are.
   through each interval at the values stamped at the interval's end, which are
   the means over that interval. Its met definition for this series is set up
   for time-averaged fluxes. NAME derives u\* from the stresses itself, so u\*
-  is held the same way. Measured in a NAME 8.7.1 met-only run with the
-  reference-run settings, at two points over 12 hours, by the met-bazarr agent;
-  the evidence is kept outside the public repositories because it draws on
-  NAME's restricted documentation.
+  is held the same way. Sources: the NAME 8.7.1 documentation, and NAME
+  8.7.1's behaviour tested in a met-only run with the reference-run settings
+  and meteorology (two points, 12 hours).
 - *FLEXPART*, on ERA5, gets its fluxes from flex_extract, which de-accumulates
   the hourly heat flux and stresses into interval means and then converts them
   to values at the met times with an integral-preserving cubic,
@@ -37,7 +36,7 @@ exactly as the winds are.
   (`getfields_mod.f90`, `scalev`) and interpolates u\*, w\* and the inverse
   Obukhov length linearly in time (`interpol_mod.f90`).
 
-**Decision (proposed).**
+**Decision.**
 
 - **Each field says what its timestamp means.** A variable that is a mean or an
   accumulation over a period ending at its timestamp carries the CF attribute
@@ -91,7 +90,8 @@ hour of FLEXPART's treatment.
   (format 1.0, "One grid for every field"), so a period variable cannot carry
   different times from the snapshots.
 
-**Before adoption.** Matt agrees the treatment. The change to GLIDE's reader is
-specified in a queue task and made before A0.
+**Implementation.** GLIDE's reader change is part of the GLIDE side of task
+B14 (`dev/agent/QUEUE.md`), made before A0. met-bazarr adds the variable
+attributes and the ERA5 u\* from stresses.
 
-**Status.** Proposed 2026-11-18, not yet adopted. Docs: [docs/met_schema.md](../../docs/met_schema.md), "What a timestamp means".
+**Status.** Adopted 2026-11-18. GLIDE's reader does not implement it yet (task B14). Docs: [docs/met_schema.md](../../docs/met_schema.md), "What a timestamp means".

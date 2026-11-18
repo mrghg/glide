@@ -963,10 +963,22 @@ dependency is listed; run in the listed order by default.
     lists: geopotential from the level definition and orography, friction
     velocity from the surface stresses, the sign of the heat flux, variable
     names, staggered wind points, and provenance attributes.
-  - In GLIDE, only if conversion cannot cover it: reader support for levels
-    defined as heights above the terrain, and for a vertical velocity in
-    metres per second. Write a decision record. ERA5 runs must be
-    bit-for-bit unchanged; prove it with the A0 comparison.
+  - In GLIDE, the two reader changes the assessment found (the UM levels
+    need none: met-bazarr writes them as model levels, route A of met-bazarr
+    decision 0003, and GLIDE already accepts `w` in m s⁻¹). Neither waits for
+    B1, and both **merge before A0**:
+    - **Means held through their interval** (decision 0020, format 2.0): a
+      variable with `cell_methods` and `glide_period_seconds` equal to the
+      store's time step is held constant through each window at its value at
+      the window's end; refuse a period that differs from the time step;
+      stores of format 1.0 take the period of `surface_sensible_heat_flux`
+      from the store-level flux attributes. This changes ERA5 results (the
+      heat flux moves 30 minutes earlier), which is why it precedes A0.
+    - **The edge strip** (decision 0019): keep one source point beyond each
+      `met_domain` edge when the store has one, so particles between the
+      outermost interior point and the edge interpolate rather than fall
+      outside the fetched grid. ERA5 runs on stores that end at the edges
+      (EUR, NAM) must be bit-for-bit unchanged; test it.
   - First, a short written assessment in the progress file: the fields'
     grid spacing, levels and interval, read from the Mk10 files themselves
     (do not rely on figures quoted for earlier series); which of the two
