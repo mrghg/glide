@@ -357,7 +357,11 @@ Notes:
      `-std=c++20`; without GCC 14, compilation **silently falls back to eager**.
      The run still works, but without CUDA-graph capture, so it is much slower.
      Check the log for `torch.compile(mode='reduce-overhead') enabled` and no
-     `WON'T CONVERT` warnings.
+     `WON'T CONVERT` warnings. Triton also compiles a small C helper against
+     `Python.h`. A venv built on the system Python has no headers on Isambard
+     AI, so in that case the script borrows those of the `cray-python` module of
+     the same minor version and prints a warning. Without them, compilation
+     falls back to eager in the same silent way.
   4. Puts PyTorch's bundled NCCL first on `LD_LIBRARY_PATH`, *after* all module
      loads. Modules prepend their own library paths, so a later `module load`
      puts cudatoolkit's older NCCL (which lacks `ncclCommResume`) back in front.

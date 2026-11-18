@@ -39,6 +39,32 @@ if [[ "${GLIDE_COMPILE}" != "0" ]]; then
 	module load gcc-native/14.2 || return 1
 	export CC=gcc
 	export CXX=g++
+
+	# Triton compiles a small C helper against Python.h on first use. A venv
+	# built on the system Python has no headers on Isambard AI (no python3-devel),
+	# and compilation then silently falls back to eager ("WON'T CONVERT").
+	# Until the venv is rebuilt on a uv-managed Python (which ships its headers),
+	# borrow those of the cray-python module of the same minor version.
+	_glide_py_inc="$("${GLIDE_PYTHON}" -c 'import sysconfig; print(sysconfig.get_paths()["include"])')" || return 1
+	if [[ ! -f "${_glide_py_inc}/Python.h" ]]; then
+		_glide_py_ver="$("${GLIDE_PYTHON}" -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")')"
+		_glide_cray_inc=""
+		for _glide_d in /opt/cray/pe/python/"${_glide_py_ver}".*/include/python"${_glide_py_ver}"; do
+			[[ -f "${_glide_d}/Python.h" ]] && _glide_cray_inc="${_glide_d}"
+		done
+		if [[ -n "${_glide_cray_inc}" ]]; then
+			case ":${C_INCLUDE_PATH:-}:" in
+				*":${_glide_cray_inc}:"*) ;;
+				*) export C_INCLUDE_PATH="${_glide_cray_inc}${C_INCLUDE_PATH:+:${C_INCLUDE_PATH}}" ;;
+			esac
+			echo "gpu_env: WARNING venv Python has no Python.h; using ${_glide_cray_inc} for Triton" >&2
+		else
+			echo "gpu_env: WARNING venv Python has no Python.h and no cray-python ${_glide_py_ver} headers found;" \
+				"torch.compile will fall back to eager. Rebuild the venv on a uv-managed Python." >&2
+		fi
+		unset _glide_py_ver _glide_cray_inc _glide_d
+	fi
+	unset _glide_py_inc
 fi
 
 # 3. Prefer PyTorch's bundled NCCL over cudatoolkit's. MUST come after ALL
