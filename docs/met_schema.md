@@ -11,7 +11,7 @@ downloads and prepares meteorology for GLIDE
 ([dev/decisions/0018](../dev/decisions/0018-met-bazarr.md)). A change here is a
 change to that format: note it in the decision records and tell met-bazarr.
 
-**Format version: 1.0.** Stores record the version they implement in
+**Format version: 1.0 (2.0 in draft, see [Format versions](#format-versions)).** Stores record the version they implement in
 `glide_format_version` (see [Provenance attributes](#provenance-attributes)).
 The history is under [Format versions](#format-versions).
 
@@ -87,6 +87,42 @@ from the store's `glide_flux_accumulation_seconds` attr (see
 [Sensible heat flux](#sensible-heat-flux)), not from the time coordinate. An
 hourly-accumulated ERA5 cube thinned to 3-hourly has a 10800 s cadence and a
 3600 s accumulation period.
+
+### What a timestamp means
+
+A field's value at a timestamp is one of two things:
+
+- **A snapshot**, valid at the timestamp. This is the default, and it covers
+  the winds, temperature, humidity, pressure and boundary-layer depth of ERA5
+  and of the UM.
+- **A mean or an accumulation over a period that ends at the timestamp.** For
+  example, ERA5's surface sensible heat flux is accumulated over the hour
+  ending at its timestamp. The UM's heat flux and surface stresses, and so the
+  friction velocity derived from them, are means over the 3 hours ending at
+  theirs.
+
+Each variable of the second kind carries two attributes of its own:
+
+| Variable attribute | Content |
+| --- | --- |
+| `cell_methods` | `"time: mean"` or `"time: sum"` (CF convention) |
+| `glide_period_seconds` | Length of the period, in seconds; the period ends at the timestamp |
+
+A variable with neither attribute is a snapshot.
+
+**How GLIDE uses them.** Snapshots are interpolated linearly in time across
+each meteorology window, as before. A period variable whose period equals the
+store's time step is held constant through each window, at its value at the
+window's end, which is the mean over exactly that window. This places it at
+the middle of the period it represents, as a snapshot is placed at its
+timestamp. GLIDE refuses a period variable whose period differs from the time
+step (for example ERA5 thinned to 3-hourly), rather than guess.
+
+**Stores written before format 2.0** carry no variable attributes. GLIDE then
+treats `surface_sensible_heat_flux` as a period variable when the store has
+`glide_flux_accumulation_seconds` or a non-zero
+`glide_flux_averaging_seconds`, with that period, and every other variable as
+a snapshot.
 
 Coarser meteorology is read directly, but it is not free of consequence: GLIDE
 interpolates the wind linearly across a window, so anything varying inside one —
@@ -167,12 +203,11 @@ Accumulated (`J m**-2`) fluxes are de-accumulated before use; instantaneous
 (`W m**-2`) fluxes pass through unscaled.
 
 A `W m**-2` field may be an instantaneous value or a mean over an interval
-(the UM writes means over its output interval). GLIDE uses the value as given
-at its timestamp in both cases. Record which it is in the store attribute
-`glide_flux_averaging_seconds`: `0` for instantaneous, otherwise the length of
-the averaging interval, which ends at the timestamp. GLIDE does not read this
-attribute yet; it is required in validation inputs, so the difference from
-ERA5's treatment is on record.
+(the UM writes means over its output interval). Record which it is in the store
+attribute `glide_flux_averaging_seconds`: `0` for instantaneous, otherwise the
+length of the averaging interval, which ends at the timestamp. How GLIDE places
+a mean or an accumulation in time is under
+[What a timestamp means](#what-a-timestamp-means).
 
 **Tag the accumulation period.** `J m**-2` says the field is accumulated but not
 over how long, and the period is not recoverable from the data. GLIDE therefore
@@ -569,6 +604,8 @@ raise a clear error at this point.
 | Version | Date | Change |
 | --- | --- | --- |
 | 1.0 | 2026-11-17 | First versioned definition ([decision 0019](../dev/decisions/0019-met-format-versioning.md)). Adds the format version, the provenance attributes, `glide_flux_averaging_seconds`, the one-grid rule, the domain and extent rules, and the rules for validation inputs (including the fill rule for isolated missing source values and `glide_filled_values`). No change to what GLIDE reads: stores that conformed before still run. |
+
+| 2.0 | _draft_ | Per-variable `cell_methods` and `glide_period_seconds` mark means and accumulations; GLIDE holds a period variable constant through each window at its end value, instead of treating it as a snapshot at its timestamp ([decision 0020](../dev/decisions/0020-time-meaning-of-period-fields.md)). Stores of format 1.0 still read; their heat flux is placed by the store-level flux attributes. Changes results: ERA5 heat flux moves 30 minutes earlier, UM heat flux and friction velocity 1.5 hours earlier. |
 
 A change that GLIDE's reader depends on, or that alters what a conforming store
 contains, takes a new version and a decision record. Additions that only record
