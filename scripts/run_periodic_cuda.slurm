@@ -169,8 +169,16 @@ fi
 echo "=== GLIDE run complete: ${OUTPUT_URI} ==="
 if [[ -f "${GPU_LOG:-}" ]]; then
 	echo "--- GPU utilisation summary (sm% column) ---"
-	# Mean/Max of the sm% column (3rd field on data rows; skip the two header lines).
-	awk 'NR>2 && $3 ~ /^[0-9]+$/ {n++; s+=$3; if ($3>m) m=$3} END {if (n) printf "  samples=%d  mean_sm=%.1f%%  max_sm=%d%%\n", n, s/n, m}' "${GPU_LOG}" || true
+	# Mean/max of the sm% column. Its position is read from the header line rather
+	# than hard-coded: `-o DT` above adds date and time columns in front of it.
+	awk '
+		NR == 1 { sub(/^# */, ""); for (i = 1; i <= NF; i++) if ($i == "sm") c = i; next }
+		/^#/ { next }
+		c && $c ~ /^[0-9]+$/ { n++; s += $c; if ($c > m) m = $c }
+		END {
+			if (!c) print "  (no sm column in the GPU log header)"
+			else if (n) printf "  samples=%d  mean_sm=%.1f%%  max_sm=%d%%\n", n, s / n, m
+		}' "${GPU_LOG}" || true
 fi
 
 # =============================================================================
