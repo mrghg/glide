@@ -48,11 +48,11 @@ exactly as the winds are.
   equals the store's time step. This is NAME's treatment. Snapshots are
   interpolated as before. GLIDE refuses a period that differs from the time
   step.
-- **u\* comes from the surface stresses in every source,** as both reference
-  models derive it. met-bazarr derives it from the mean stresses and labels it
-  as a period variable: the UM's (10,800 s, already done) and, for ERA5, the
-  hourly accumulated stresses `ewss` and `nsss` (3,600 s), in place of ERA5's
-  own `zust`.
+- **u\* comes from the surface stresses in every source.** met-bazarr derives
+  it from the mean stresses and labels it as a period variable: the UM's
+  (10,800 s, already done) and, for ERA5, the hourly accumulated stresses
+  `ewss` and `nsss` (3,600 s), in place of ERA5's own `zust`. The reasons are
+  below, under "u\* from the stresses, not ERA5's `zust`".
 - **Stores of format 1.0** still read. Their heat flux is a period variable when
   the store has `glide_flux_accumulation_seconds` or a non-zero
   `glide_flux_averaging_seconds`; everything else, including `zust`, is a
@@ -74,7 +74,45 @@ at the end of its period is what creates the lag. Holding the value is exact for
 the window mean, needs no extra data, matches NAME exactly, and stays within the
 hour of FLEXPART's treatment.
 
+**u\* from the stresses, not ERA5's `zust`** (agreed with Matt, 19 Nov 2026).
+
+- *What the two are.* ERA5's surface stresses are the momentum the model
+  removes from the atmosphere at the surface: the drag of the local surface
+  plus the drag of hills too small for its grid (turbulent orographic form
+  drag). u\* derived from them is an effective, grid-box value. `zust` is the
+  u\* of the surface-layer scheme with the local roughness only, without the
+  hill drag. Both are ERA5's own fields; neither is more direct.
+- *How much they differ* (met-bazarr decision 0006, NAM, 6 hours): the same over
+  the sea (median ratio 1.00); over land above 100 m, u\* from the stresses is
+  1.9 times `zust` (median), and 3.6 times over mountains above 1,500 m.
+- *Why the stresses.*
+  - **The same definition on both meteorologies.** The UM meteorology NAME
+    runs on supplies only the stresses, so u\* there can only come from them.
+    With `zust` for ERA5, GLIDE on the two meteorologies (Tier 2) would mix two
+    definitions of u\* into the comparison meant to isolate the meteorology.
+  - **The quantity GLIDE needs.** GLIDE uses u\* for turbulence averaged over a
+    grid cell. Over hilly terrain, flow over hills smaller than the grid makes
+    the boundary layer more turbulent on average, which the hill drag
+    represents and `zust` leaves out. Over flat terrain the two agree.
+  - Both reference models use the stresses (FLEXPART through flex_extract,
+    NAME from the UM), so this adds no difference from them. This is a
+    consequence, not the reason: GLIDE aims to be independent of them.
+- *Why FLEXPART uses them*, as far as is known: availability. FLEXPART's u\*
+  routine (1994) predates ERA5, the accumulated stresses have long been
+  standard ECMWF fields, and `zust` was not offered in ERA-Interim or earlier.
+- *Not settled for good.* Neither choice is clearly right at a 30 km grid
+  spacing. GLIDE's earlier over-estimates of near-surface CH₄ at low inlets
+  (STATUS, traced to weak near-surface mixing) were made with `zust`, which may
+  have contributed. Revisit after v1, by comparing the two against the tracer
+  experiments and radon (roadmap §5).
+
 **Rejected alternatives.**
+- *u\* from ERA5's `zust`.* See above: it would give GLIDE different
+  definitions of u\* on ERA5 and on the UM, and leaves out the hill drag that
+  the grid-cell average turbulence includes.
+- *Choose between the two in the pre-registered fit on ETEX-1 and CAPTEX.*
+  Decides it on data, but adds a dimension to the fit and needs a store format
+  that can carry both. Deferred to after v1.
 - *Keep treating means as snapshots.* A lag of 1.5 hours in the surface forcing
   on the UM and 30 minutes on ERA5, which neither reference model has.
 - *Convert means to point values in met-bazarr, as flex_extract does.* GLIDE

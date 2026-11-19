@@ -565,7 +565,10 @@ Until B1, GLIDE's existing download scripts stay in use.
   - combining meteorological sources (3b);
   - UKV nesting (3c);
   - merging far-field particles (6b);
-  - convection improvements, if validation shows they are needed (6c).
+  - convection improvements, if validation shows they are needed (6c);
+  - the source of u\*: from the surface stresses (v1, decision 0020) or from
+    ERA5's `zust`, which leaves out sub-grid hill drag and is about half as
+    large over land. Compare the two against the tracer experiments and radon.
 - **v2:**
   - Track A in full: footprint derivatives and transport-error estimates
     (2c–2e);
