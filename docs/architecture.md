@@ -144,8 +144,8 @@ how many particles are involved — fetching and regridding the meteorology,
 building the convection matrix, constructing the turbulence support fields, the
 per-step bookkeeping — is then paid **once for the whole network** instead of
 once per site. This is the intended way to scale a run across a station network,
-and it is why the reference run in the README does 56 sites × 48 hours in a
-single process.
+and it is why the run behind the README's feature image does 56 sites × 720
+hourly releases (all of January 2024) in a single process.
 
 Outputs land under `io.output_uri`:
 
