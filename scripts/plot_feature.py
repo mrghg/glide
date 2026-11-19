@@ -57,7 +57,14 @@ def save(args, ds: xr.Dataset, field: np.ndarray, caption: str, out: Path) -> No
     fmap = build_map(args, ds, vmax)
     fmap.show(field, caption)
     out.parent.mkdir(parents=True, exist_ok=True)
-    fmap.fig.savefig(out, dpi=fmap.fig.dpi, facecolor=fmap.fig.get_facecolor())
+    # JPEG keeps the README image small; palette-quantised PNG bands visibly.
+    jpeg = out.suffix.lower() in {".jpg", ".jpeg"}
+    fmap.fig.savefig(
+        out,
+        dpi=fmap.fig.dpi,
+        facecolor=fmap.fig.get_facecolor(),
+        pil_kwargs={"quality": 90, "optimize": True, "progressive": True} if jpeg else None,
+    )
     plt.close(fmap.fig)
     print(f"wrote {out}  (colour scale {fmap.norm.vmin:.3g} .. {vmax:.3g})")
 
@@ -78,7 +85,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--out",
         type=Path,
-        default=Path("docs/img/glide_feature.png"),
+        default=Path("docs/img/glide_feature.jpg"),
         help="output PNG; '{time}' is replaced by the release hour",
     )
     add_style_args(p, width=2400)

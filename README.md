@@ -11,7 +11,7 @@ footprints, written in pure PyTorch.
 > [validation plan](docs/validation-plan.md) sets out the tests and the order
 > they run in.
 
-![GLIDE footprint](docs/img/glide_feature.png)
+![GLIDE footprint](docs/img/glide_feature.jpg)
 
 *GLIDE 5-day surface footprints for 56 ICOS network sites, released at 12:00 UTC
 on 12 January 2024 and summed on one map. The frame is one hour of a run that
