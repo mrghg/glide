@@ -95,7 +95,7 @@ Model: Opus 5.5, high effort. Run strictly in order unless a task is BLOCKED.
     in the `glide` format when this task starts, use those for the
     validation runs below and make only the config and ladder changes here;
     the download scripts are retired in B1.) `scripts/download_sample_cube.py` and
-    `scripts/download_era5_europe.slurm` download model levels by default,
+    `scripts/download_era5.sh` download model levels by default,
     with an option to fetch only the levels below a given height (default:
     enough to cover `alt_max_m` of the shipped configs). Shipped configs read
     `data/era5-model/`. The built-in ladder used when
@@ -725,7 +725,7 @@ dependency is listed; run in the listed order by default.
     whether either should be enabled. Neither is enabled by default in this
     task; enabling one needs a decision record.
   - **Retire GLIDE's download path.** Replace `scripts/download_sample_cube.py`
-    and `scripts/download_era5_europe.slurm` with pointers to met-bazarr,
+    and `scripts/download_era5.sh` with pointers to met-bazarr,
     keeping whatever the smoke tests and the README quick start need to make
     the small sample cube (or point them at a met-bazarr command).
   - **Docs.** `docs/met_schema.md` (met-bazarr produces the `glide` format;
