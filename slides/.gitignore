@@ -1,0 +1,3 @@
+# Rendered decks are large (media are embedded); render them from the .qmd.
+*.html
+*_files/
