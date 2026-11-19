@@ -11,7 +11,7 @@ downloads and prepares meteorology for GLIDE
 ([dev/decisions/0018](../dev/decisions/0018-met-bazarr.md)). A change here is a
 change to that format: note it in the decision records and tell met-bazarr.
 
-**Format version: 2.0** (GLIDE's reader implements it in task B14; until then it reads every store as 1.0, see [Format versions](#format-versions)). Stores record the version they implement in
+**Format version: 2.0** (see [Format versions](#format-versions)). Stores record the version they implement in
 `glide_format_version` (see [Provenance attributes](#provenance-attributes)).
 The history is under [Format versions](#format-versions).
 
@@ -421,14 +421,12 @@ exist.
 
 - **Horizontal.** The store's grid points must cover the run's `met_domain`
   box, including at least one point on or beyond each edge. GLIDE removes a
-  particle when it leaves `met_domain`, not the store's extent, so a store
-  wider than the box does not change results. Note: GLIDE's reader currently
-  cuts the store to exactly the `met_domain` bounds. When the source's grid
-  points do not lie on those bounds, the strip between the outermost point
-  inside and the edge has no point beyond it to interpolate from. ERA5 runs on
-  the EUR and NAM domains are unaffected, because their edges are ERA5 grid
-  points. For any other source, check how GLIDE interpolates in that strip
-  (task B14).
+  particle when it leaves `met_domain`, not the store's extent. Where no grid
+  point lies on a `met_domain` bound, GLIDE's reader also takes the first
+  point beyond it, so particles between the outermost interior point and the
+  bound interpolate instead of taking the edge value (decision 0019). Where a
+  grid point lies on the bound (ERA5 on the EUR and NAM boxes), nothing beyond
+  it is read, so a store wider than the box does not change results.
 - **Vertical.** Keep the source's levels up to at least 20 km above the
   ground everywhere in the domain; for ERA5 and the UM, keep all levels. The
   column releases need a model top of at least 20 km (validation-plan §4). Dropping levels above the run's

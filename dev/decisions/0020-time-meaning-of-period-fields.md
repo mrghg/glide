@@ -151,4 +151,6 @@ hour of FLEXPART's treatment.
 B14 (`dev/agent/QUEUE.md`), made before A0. met-bazarr adds the variable
 attributes and the ERA5 u\* from stresses.
 
-**Status.** Adopted 2026-11-18. GLIDE's reader does not implement it yet (task B14). Docs: [docs/met_schema.md](../../docs/met_schema.md), "What a timestamp means".
+**Status.** Adopted 2026-11-18; implemented in GLIDE's reader 2026-11-19 (B14).
+The Mace Head smoke test on ERA5 (heat flux held, 1 h) keeps the total
+sensitivity (ratio 1.0000) and moves cells by 1.9% in sum (correlation 0.9998). Docs: [docs/met_schema.md](../../docs/met_schema.md), "What a timestamp means".

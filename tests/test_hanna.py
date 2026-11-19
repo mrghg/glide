@@ -1029,3 +1029,38 @@ def test_gather_static_inputs_reuses_buffers_across_steps() -> None:
         assert second[key] is first[key], f"{key} was reallocated between steps"
     # ...and the per-step values really did update in place.
     assert float(second["alpha"]) == 0.75
+
+
+def test_period_channels_held_at_window_end_in_both_paths() -> None:
+    """Decision 0020: a mean/accumulation channel is held at its window-end value
+    (the mean over the window), in the static (GPU) and dynamic (CPU) paths alike;
+    snapshots are still interpolated linearly in time."""
+
+    import dataclasses
+    from datetime import datetime
+
+    t0 = datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC)
+    met = _make_meander_test_window(t0, 4.0, 6.0)
+    names = met.channel_names
+    hs, he = met.hour_start.clone(), met.hour_end.clone()
+    for name, start, end in (("shf", -100.0, -300.0), ("ustar", 0.2, 0.6), ("blh", 1000.0, 2000.0)):
+        hs[names.index(name)] = start
+        he[names.index(name)] = end
+    snapshots = dataclasses.replace(met, hour_start=hs, hour_end=he)
+    held = dataclasses.replace(snapshots, period_channels=frozenset({"shf", "ustar"}))
+    dev, dtp, alpha = torch.device("cpu"), torch.float32, 0.25
+
+    assert held.time_weight("shf", alpha) == 1.0
+    assert held.time_weight("blh", alpha) == alpha
+
+    for window, shf_want, ustar_want in ((snapshots, -150.0, 0.3), (held, -300.0, 0.6)):
+        static = HannaScheme(meander_enabled=False)._gather_static_inputs(window, alpha, dev, dtp)
+        assert torch.allclose(static["shf_field"], torch.tensor(shf_want))
+        assert torch.allclose(static["ustar_field"], torch.tensor(ustar_want))
+        assert torch.allclose(static["blh_field"], torch.tensor(1250.0))  # snapshot
+
+        lon = torch.tensor([0.3, -1.1])
+        lat = torch.tensor([0.7, 1.2])
+        for name, want in (("shf", shf_want), ("ustar", ustar_want), ("blh", 1250.0)):
+            got = HannaScheme._interp_surface_field(window, name, alpha, lon, lat, dev, dtp)
+            assert torch.allclose(got, torch.tensor(want)), name
