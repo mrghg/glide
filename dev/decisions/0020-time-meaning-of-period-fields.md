@@ -97,6 +97,25 @@ hour of FLEXPART's treatment.
   - Both reference models use the stresses (FLEXPART through flex_extract,
     NAME from the UM), so this adds no difference from them. This is a
     consequence, not the reason: GLIDE aims to be independent of them.
+- *The UM's stresses include hill drag too, but less of it* (met-bazarr
+  decision 0007, 19 Nov 2026). The UM configuration that made our meteorology
+  (GA6.1) represents the drag of small hills by increasing the surface
+  roughness length, so its surface stresses carry it; blocking and
+  gravity-wave drag are separate, as in ERA5. Measured on 8 Jan 2019 over EUR
+  (median u\*, m s⁻¹):
+
+  | | UM, from stresses | ERA5, from stresses | ERA5 `zust` |
+  |---|---|---|---|
+  | sea | 0.30 | 0.31 | 0.31 |
+  | land 100–1,500 m | 0.31 | 0.42 | 0.18 |
+  | mountains above 1,500 m | 0.32 | 0.69 | 0.07 |
+
+  So u\* from the stresses has the same kind of definition on both
+  meteorologies, and the UM's values are much closer to ERA5's stress-based
+  u\* than to `zust`. The remaining difference over hilly land (about 0.75 of
+  ERA5's over land, about half over mountains) comes from the two models' drag
+  schemes. It is a real difference between the meteorologies and belongs in
+  GLIDE's comparison of the two (Tier 2), not in the definition of u\*.
 - *Why FLEXPART uses them*, as far as is known: availability. FLEXPART's u\*
   routine (1994) predates ERA5, the accumulated stresses have long been
   standard ECMWF fields, and `zust` was not offered in ERA-Interim or earlier.
