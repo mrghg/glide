@@ -44,7 +44,8 @@ never download data._
   | `era5-model/NAM_20181222-20190115_ml.zarr` | NAM (120–55° W, 22–58° N) | 2018-12-22 00:00 – 2019-01-15 00:00 | model, 137 | 1 h | 49 GB |Block NAM-Jan (A8a, A10) |
   | `era5-model/NAM_20190621-20190715_ml.zarr` | NAM (120–55° W, 22–58° N) | 2019-06-21 00:00 – 2019-07-15 00:00 | model, 137 | 1 h | 50 GB | Block NAM-Jul (A8a, A10) |
   | `era5-model/NAM_19870105-19870118_ml.zarr` | NAM (120–55° W, 22–58° N) | 1987-01-05 00:00 – 1987-01-18 00:00 | model, 137 | 1 h | 27 GB | ANATEX (B10, A11) |
-
+| `era5-model/EUROPE_20231201-20231231_ml.zarr` | EUROPE (98° W–39.5° E, 10.6–79.2° N) | 2023-12-01 00:00 – 2023-12-31 23:00 | model, 137 | 1 h | 244 GB | Reference config, model levels (A01 onward); same grid and times as `EUROPE_202312.zarr` |
+| `era5-model/EUROPE_20240101-20240131_ml.zarr` | EUROPE (98° W–39.5° E, 10.6–79.2° N) | 2024-01-01 00:00 – 2024-01-31 23:00 | model, 137 | 1 h | 245 GB | Reference config, model levels (A01 onward); same grid and times as `EUROPE_202401.zarr` |
 
 ## Reference data outside the repository
 
