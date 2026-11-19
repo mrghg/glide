@@ -1,0 +1,133 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1500 710" width="1500" height="710">
+<title>A meteorology Zarr store</title>
+<defs>
+<marker id="arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#9db0c7"/></marker>
+<marker id="arrAmber" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#ffb454"/></marker>
+</defs>
+<rect width="1500" height="710" rx="18" fill="#06080d"/>
+<circle cx="65" cy="62" r="15" fill="none" stroke="#ffb454" stroke-width="2"/>
+<text x="65.0" y="68.0" font-size="17" fill="#ffb454" font-weight="700" text-anchor="middle" font-family="Helvetica Neue, Segoe UI, system-ui, Arial, sans-serif" >1</text>
+<text x="92.0" y="69.0" font-size="24" fill="#e8eef6" font-weight="700" text-anchor="start" font-family="Helvetica Neue, Segoe UI, system-ui, Arial, sans-serif" >It is a folder</text>
+<text x="50.0" y="104.0" font-size="16" fill="#9db0c7" font-weight="400" text-anchor="start" font-family="Helvetica Neue, Segoe UI, system-ui, Arial, sans-serif" >Small JSON files describe the data;</text>
+<text x="50.0" y="126.4" font-size="16" fill="#9db0c7" font-weight="400" text-anchor="start" font-family="Helvetica Neue, Segoe UI, system-ui, Arial, sans-serif" >the data sit in many chunk files.</text>
+<text x="50.0" y="178.0" font-size="17" fill="#e8eef6" font-weight="700" text-anchor="start" font-family="SF Mono, Menlo, Consolas, DejaVu Sans Mono, monospace" xml:space="preserve">era5_europe.zarr/</text>
+<text x="50.0" y="207.0" font-size="17" fill="#5fd0d6" font-weight="400" text-anchor="start" font-family="SF Mono, Menlo, Consolas, DejaVu Sans Mono, monospace" xml:space="preserve">├─ zarr.json</text>
+<text x="272.0" y="207.0" font-size="14" fill="#5fd0d6" font-weight="400" text-anchor="start" font-family="Helvetica Neue, Segoe UI, system-ui, Arial, sans-serif" >← dimensions, units</text>
+<text x="50.0" y="236.0" font-size="17" fill="#e8eef6" font-weight="400" text-anchor="start" font-family="SF Mono, Menlo, Consolas, DejaVu Sans Mono, monospace" xml:space="preserve">├─ temperature/</text>
+<text x="50.0" y="265.0" font-size="17" fill="#5fd0d6" font-weight="400" text-anchor="start" font-family="SF Mono, Menlo, Consolas, DejaVu Sans Mono, monospace" xml:space="preserve">│  ├─ zarr.json</text>
+<text x="272.0" y="265.0" font-size="14" fill="#5fd0d6" font-weight="400" text-anchor="start" font-family="Helvetica Neue, Segoe UI, system-ui, Arial, sans-serif" >← shape, chunks, codec</text>
+<text x="50.0" y="294.0" font-size="17" fill="#e8eef6" font-weight="400" text-anchor="start" font-family="SF Mono, Menlo, Consolas, DejaVu Sans Mono, monospace" xml:space="preserve">│  └─ c/</text>
+<text x="50.0" y="323.0" font-size="17" fill="#9db0c7" font-weight="400" text-anchor="start" font-family="SF Mono, Menlo, Consolas, DejaVu Sans Mono, monospace" xml:space="preserve">│     ├─ 0/0/0/0</text>
+<text x="50.0" y="352.0" font-size="17" fill="#9db0c7" font-weight="400" text-anchor="start" font-family="SF Mono, Menlo, Consolas, DejaVu Sans Mono, monospace" xml:space="preserve">│     ├─ 0/0/0/1</text>
+<text x="50.0" y="381.0" font-size="17" fill="#ffb454" font-weight="700" text-anchor="start" font-family="SF Mono, Menlo, Consolas, DejaVu Sans Mono, monospace" xml:space="preserve">│     ├─ 0/1/0/2</text>
+<text x="272.0" y="381.0" font-size="14" fill="#ffb454" font-weight="400" text-anchor="start" font-family="Helvetica Neue, Segoe UI, system-ui, Arial, sans-serif" >← one chunk</text>
+<text x="50.0" y="410.0" font-size="17" fill="#9db0c7" font-weight="400" text-anchor="start" font-family="SF Mono, Menlo, Consolas, DejaVu Sans Mono, monospace" xml:space="preserve">│     └─ …</text>
+<text x="50.0" y="439.0" font-size="17" fill="#e8eef6" font-weight="400" text-anchor="start" font-family="SF Mono, Menlo, Consolas, DejaVu Sans Mono, monospace" xml:space="preserve">├─ u_component_of_wind/</text>
+<text x="50.0" y="468.0" font-size="17" fill="#e8eef6" font-weight="400" text-anchor="start" font-family="SF Mono, Menlo, Consolas, DejaVu Sans Mono, monospace" xml:space="preserve">├─ v_component_of_wind/</text>
+<text x="50.0" y="497.0" font-size="17" fill="#e8eef6" font-weight="400" text-anchor="start" font-family="SF Mono, Menlo, Consolas, DejaVu Sans Mono, monospace" xml:space="preserve">├─ geopotential/</text>
+<text x="50.0" y="526.0" font-size="17" fill="#9db0c7" font-weight="400" text-anchor="start" font-family="SF Mono, Menlo, Consolas, DejaVu Sans Mono, monospace" xml:space="preserve">├─ …</text>
+<text x="50.0" y="555.0" font-size="17" fill="#e8eef6" font-weight="400" text-anchor="start" font-family="SF Mono, Menlo, Consolas, DejaVu Sans Mono, monospace" xml:space="preserve">└─ surface_pressure/</text>
+<circle cx="535" cy="62" r="15" fill="none" stroke="#ffb454" stroke-width="2"/>
+<text x="535.0" y="68.0" font-size="17" fill="#ffb454" font-weight="700" text-anchor="middle" font-family="Helvetica Neue, Segoe UI, system-ui, Arial, sans-serif" >2</text>
+<text x="562.0" y="69.0" font-size="24" fill="#e8eef6" font-weight="700" text-anchor="start" font-family="Helvetica Neue, Segoe UI, system-ui, Arial, sans-serif" >Each variable is a 4-D array, cut into chunks</text>
+<text x="520.0" y="104.0" font-size="16" fill="#9db0c7" font-weight="400" text-anchor="start" font-family="SF Mono, Menlo, Consolas, DejaVu Sans Mono, monospace" >temperature(time, level, latitude, longitude)</text>
+<g opacity="0.75">
+<polygon points="652.0,520.0 982.0,520.0 982.0,310.0 652.0,310.0" fill="#0f1a2b" stroke="none" stroke-width="1.0" stroke-linejoin="round" />
+<polygon points="652.0,310.0 982.0,310.0 1087.0,232.0 757.0,232.0" fill="#14223a" stroke="none" stroke-width="1.0" stroke-linejoin="round" />
+<polygon points="982.0,520.0 1087.0,442.0 1087.0,232.0 982.0,310.0" fill="#0c1626" stroke="none" stroke-width="1.0" stroke-linejoin="round" />
+<polygon points="652.0,520.0 982.0,520.0 982.0,310.0 652.0,310.0" fill="none" stroke="#5d6f88" stroke-width="1.6" stroke-linejoin="round" />
+<polygon points="652.0,310.0 982.0,310.0 1087.0,232.0 757.0,232.0" fill="none" stroke="#5d6f88" stroke-width="1.6" stroke-linejoin="round" />
+<polygon points="982.0,520.0 1087.0,442.0 1087.0,232.0 982.0,310.0" fill="none" stroke="#5d6f88" stroke-width="1.6" stroke-linejoin="round" />
+</g>
+<g opacity="0.9">
+<polygon points="606.0,560.0 936.0,560.0 936.0,350.0 606.0,350.0" fill="#0f1a2b" stroke="none" stroke-width="1.0" stroke-linejoin="round" />
+<polygon points="606.0,350.0 936.0,350.0 1041.0,272.0 711.0,272.0" fill="#14223a" stroke="none" stroke-width="1.0" stroke-linejoin="round" />
+<polygon points="936.0,560.0 1041.0,482.0 1041.0,272.0 936.0,350.0" fill="#0c1626" stroke="none" stroke-width="1.0" stroke-linejoin="round" />
+<polygon points="606.0,560.0 936.0,560.0 936.0,350.0 606.0,350.0" fill="none" stroke="#5d6f88" stroke-width="1.6" stroke-linejoin="round" />
+<polygon points="606.0,350.0 936.0,350.0 1041.0,272.0 711.0,272.0" fill="none" stroke="#5d6f88" stroke-width="1.6" stroke-linejoin="round" />
+<polygon points="936.0,560.0 1041.0,482.0 1041.0,272.0 936.0,350.0" fill="none" stroke="#5d6f88" stroke-width="1.6" stroke-linejoin="round" />
+</g>
+<g opacity="1.0">
+<polygon points="560.0,600.0 890.0,600.0 890.0,390.0 560.0,390.0" fill="#16263d" stroke="none" stroke-width="1.0" stroke-linejoin="round" />
+<polygon points="560.0,390.0 890.0,390.0 995.0,312.0 665.0,312.0" fill="#1f3554" stroke="none" stroke-width="1.0" stroke-linejoin="round" />
+<polygon points="890.0,600.0 995.0,522.0 995.0,312.0 890.0,390.0" fill="#112038" stroke="none" stroke-width="1.0" stroke-linejoin="round" />
+<line x1="642.5" y1="600.0" x2="642.5" y2="390.0" stroke="#33507a" stroke-width="1.2" />
+<line x1="642.5" y1="390.0" x2="747.5" y2="312.0" stroke="#33507a" stroke-width="1.2" />
+<line x1="725.0" y1="600.0" x2="725.0" y2="390.0" stroke="#33507a" stroke-width="1.2" />
+<line x1="725.0" y1="390.0" x2="830.0" y2="312.0" stroke="#33507a" stroke-width="1.2" />
+<line x1="807.5" y1="600.0" x2="807.5" y2="390.0" stroke="#33507a" stroke-width="1.2" />
+<line x1="807.5" y1="390.0" x2="912.5" y2="312.0" stroke="#33507a" stroke-width="1.2" />
+<line x1="560.0" y1="495.0" x2="890.0" y2="495.0" stroke="#33507a" stroke-width="1.2" />
+<line x1="890.0" y1="495.0" x2="995.0" y2="417.0" stroke="#33507a" stroke-width="1.2" />
+<line x1="595.0" y1="364.0" x2="925.0" y2="364.0" stroke="#33507a" stroke-width="1.2" />
+<line x1="925.0" y1="574.0" x2="925.0" y2="364.0" stroke="#33507a" stroke-width="1.2" />
+<line x1="630.0" y1="338.0" x2="960.0" y2="338.0" stroke="#33507a" stroke-width="1.2" />
+<line x1="960.0" y1="548.0" x2="960.0" y2="338.0" stroke="#33507a" stroke-width="1.2" />
+<polygon points="560.0,600.0 890.0,600.0 890.0,390.0 560.0,390.0" fill="none" stroke="#9db0c7" stroke-width="1.6" stroke-linejoin="round" />
+<polygon points="560.0,390.0 890.0,390.0 995.0,312.0 665.0,312.0" fill="none" stroke="#9db0c7" stroke-width="1.6" stroke-linejoin="round" />
+<polygon points="890.0,600.0 995.0,522.0 995.0,312.0 890.0,390.0" fill="none" stroke="#9db0c7" stroke-width="1.6" stroke-linejoin="round" />
+</g>
+<polygon points="725.0,390.0 807.5,390.0 807.5,495.0 725.0,495.0" fill="rgba(255,180,84,0.30)" stroke="#ffb454" stroke-width="2.4" stroke-linejoin="round" />
+<polygon points="725.0,390.0 807.5,390.0 842.5,364.0 760.0,364.0" fill="rgba(255,180,84,0.42)" stroke="#ffb454" stroke-width="2.4" stroke-linejoin="round" />
+<text x="725.0" y="632.0" font-size="16" fill="#9db0c7" font-weight="400" text-anchor="middle" font-family="Helvetica Neue, Segoe UI, system-ui, Arial, sans-serif" >longitude</text>
+<text x="542" y="495.0" font-size="16" fill="#9db0c7" font-family="Helvetica Neue, Segoe UI, system-ui, Arial, sans-serif" text-anchor="middle" transform="rotate(-90 542 495.0)">level</text>
+<text x="956.5" y="575.0" font-size="16" fill="#9db0c7" font-family="Helvetica Neue, Segoe UI, system-ui, Arial, sans-serif" transform="rotate(-36.6 956.5 575.0)">latitude</text>
+<line x1="659.0" y1="298.0" x2="755.0" y2="222.0" stroke="#9db0c7" stroke-width="1.6"  marker-end="url(#arr)"/>
+<text x="765.0" y="220.0" font-size="15" fill="#9db0c7" font-weight="400" text-anchor="start" font-family="Helvetica Neue, Segoe UI, system-ui, Arial, sans-serif" >time: one block per hour</text>
+<text x="560.0" y="670.0" font-size="16" fill="#e8eef6" font-weight="400" text-anchor="start" font-family="Helvetica Neue, Segoe UI, system-ui, Arial, sans-serif" >Chunk: 1 hour × 24 levels × 128 × 128 grid points</text>
+<text x="560.0" y="696.0" font-size="15" fill="#9db0c7" font-weight="400" text-anchor="start" font-family="Helvetica Neue, Segoe UI, system-ui, Arial, sans-serif" >Its file name is its position in the grid of chunks: c/time/level/lat/lon</text>
+<circle cx="1155" cy="62" r="15" fill="none" stroke="#ffb454" stroke-width="2"/>
+<text x="1155.0" y="68.0" font-size="17" fill="#ffb454" font-weight="700" text-anchor="middle" font-family="Helvetica Neue, Segoe UI, system-ui, Arial, sans-serif" >3</text>
+<text x="1182.0" y="69.0" font-size="24" fill="#e8eef6" font-weight="700" text-anchor="start" font-family="Helvetica Neue, Segoe UI, system-ui, Arial, sans-serif" >Chunks are compressed</text>
+<text x="1182.0" y="97.0" font-size="24" fill="#e8eef6" font-weight="700" text-anchor="start" font-family="Helvetica Neue, Segoe UI, system-ui, Arial, sans-serif" >one by one</text>
+<g opacity="1.0">
+<polygon points="1170.0,380.0 1340.0,380.0 1340.0,210.0 1170.0,210.0" fill="rgba(255,180,84,0.22)" stroke="none" stroke-width="1.0" stroke-linejoin="round" />
+<polygon points="1170.0,210.0 1340.0,210.0 1412.0,156.0 1242.0,156.0" fill="rgba(255,180,84,0.34)" stroke="none" stroke-width="1.0" stroke-linejoin="round" />
+<polygon points="1340.0,380.0 1412.0,326.0 1412.0,156.0 1340.0,210.0" fill="rgba(255,180,84,0.14)" stroke="none" stroke-width="1.0" stroke-linejoin="round" />
+<line x1="1191.2" y1="380.0" x2="1191.2" y2="210.0" stroke="rgba(255,180,84,0.35)" stroke-width="0.8" />
+<line x1="1191.2" y1="210.0" x2="1263.2" y2="156.0" stroke="rgba(255,180,84,0.35)" stroke-width="0.8" />
+<line x1="1212.5" y1="380.0" x2="1212.5" y2="210.0" stroke="rgba(255,180,84,0.35)" stroke-width="0.8" />
+<line x1="1212.5" y1="210.0" x2="1284.5" y2="156.0" stroke="rgba(255,180,84,0.35)" stroke-width="0.8" />
+<line x1="1233.8" y1="380.0" x2="1233.8" y2="210.0" stroke="rgba(255,180,84,0.35)" stroke-width="0.8" />
+<line x1="1233.8" y1="210.0" x2="1305.8" y2="156.0" stroke="rgba(255,180,84,0.35)" stroke-width="0.8" />
+<line x1="1255.0" y1="380.0" x2="1255.0" y2="210.0" stroke="rgba(255,180,84,0.35)" stroke-width="0.8" />
+<line x1="1255.0" y1="210.0" x2="1327.0" y2="156.0" stroke="rgba(255,180,84,0.35)" stroke-width="0.8" />
+<line x1="1276.2" y1="380.0" x2="1276.2" y2="210.0" stroke="rgba(255,180,84,0.35)" stroke-width="0.8" />
+<line x1="1276.2" y1="210.0" x2="1348.2" y2="156.0" stroke="rgba(255,180,84,0.35)" stroke-width="0.8" />
+<line x1="1297.5" y1="380.0" x2="1297.5" y2="210.0" stroke="rgba(255,180,84,0.35)" stroke-width="0.8" />
+<line x1="1297.5" y1="210.0" x2="1369.5" y2="156.0" stroke="rgba(255,180,84,0.35)" stroke-width="0.8" />
+<line x1="1318.8" y1="380.0" x2="1318.8" y2="210.0" stroke="rgba(255,180,84,0.35)" stroke-width="0.8" />
+<line x1="1318.8" y1="210.0" x2="1390.8" y2="156.0" stroke="rgba(255,180,84,0.35)" stroke-width="0.8" />
+<line x1="1170.0" y1="351.7" x2="1340.0" y2="351.7" stroke="rgba(255,180,84,0.35)" stroke-width="0.8" />
+<line x1="1340.0" y1="351.7" x2="1412.0" y2="297.7" stroke="rgba(255,180,84,0.35)" stroke-width="0.8" />
+<line x1="1170.0" y1="323.3" x2="1340.0" y2="323.3" stroke="rgba(255,180,84,0.35)" stroke-width="0.8" />
+<line x1="1340.0" y1="323.3" x2="1412.0" y2="269.3" stroke="rgba(255,180,84,0.35)" stroke-width="0.8" />
+<line x1="1170.0" y1="295.0" x2="1340.0" y2="295.0" stroke="rgba(255,180,84,0.35)" stroke-width="0.8" />
+<line x1="1340.0" y1="295.0" x2="1412.0" y2="241.0" stroke="rgba(255,180,84,0.35)" stroke-width="0.8" />
+<line x1="1170.0" y1="266.7" x2="1340.0" y2="266.7" stroke="rgba(255,180,84,0.35)" stroke-width="0.8" />
+<line x1="1340.0" y1="266.7" x2="1412.0" y2="212.7" stroke="rgba(255,180,84,0.35)" stroke-width="0.8" />
+<line x1="1170.0" y1="238.3" x2="1340.0" y2="238.3" stroke="rgba(255,180,84,0.35)" stroke-width="0.8" />
+<line x1="1340.0" y1="238.3" x2="1412.0" y2="184.3" stroke="rgba(255,180,84,0.35)" stroke-width="0.8" />
+<line x1="1188.0" y1="196.5" x2="1358.0" y2="196.5" stroke="rgba(255,180,84,0.35)" stroke-width="0.8" />
+<line x1="1358.0" y1="366.5" x2="1358.0" y2="196.5" stroke="rgba(255,180,84,0.35)" stroke-width="0.8" />
+<line x1="1206.0" y1="183.0" x2="1376.0" y2="183.0" stroke="rgba(255,180,84,0.35)" stroke-width="0.8" />
+<line x1="1376.0" y1="353.0" x2="1376.0" y2="183.0" stroke="rgba(255,180,84,0.35)" stroke-width="0.8" />
+<line x1="1224.0" y1="169.5" x2="1394.0" y2="169.5" stroke="rgba(255,180,84,0.35)" stroke-width="0.8" />
+<line x1="1394.0" y1="339.5" x2="1394.0" y2="169.5" stroke="rgba(255,180,84,0.35)" stroke-width="0.8" />
+<polygon points="1170.0,380.0 1340.0,380.0 1340.0,210.0 1170.0,210.0" fill="none" stroke="#ffb454" stroke-width="1.6" stroke-linejoin="round" />
+<polygon points="1170.0,210.0 1340.0,210.0 1412.0,156.0 1242.0,156.0" fill="none" stroke="#ffb454" stroke-width="1.6" stroke-linejoin="round" />
+<polygon points="1340.0,380.0 1412.0,326.0 1412.0,156.0 1340.0,210.0" fill="none" stroke="#ffb454" stroke-width="1.6" stroke-linejoin="round" />
+</g>
+<text x="1255.0" y="410.0" font-size="15" fill="#ffb454" font-weight="700" text-anchor="middle" font-family="SF Mono, Menlo, Consolas, DejaVu Sans Mono, monospace" >temperature/c/0/1/0/2</text>
+<line x1="848.5" y1="368.0" x2="1160.0" y2="220.0" stroke="#ffb454" stroke-width="1.6" stroke-dasharray="5 5" marker-end="url(#arrAmber)"/>
+<line x1="719.0" y1="442.5" x2="395.0" y2="375.0" stroke="#ffb454" stroke-width="1.6" stroke-dasharray="5 5" marker-end="url(#arrAmber)"/>
+<text x="1140.0" y="458.0" font-size="17" fill="#e8eef6" font-weight="700" text-anchor="start" font-family="SF Mono, Menlo, Consolas, DejaVu Sans Mono, monospace" >float32 → int16 → zstd</text>
+<text x="1140.0" y="490.0" font-size="15" fill="#9db0c7" font-weight="400" text-anchor="start" font-family="Helvetica Neue, Segoe UI, system-ui, Arial, sans-serif" >About half the size of compressed</text>
+<text x="1140.0" y="511.0" font-size="15" fill="#9db0c7" font-weight="400" text-anchor="start" font-family="Helvetica Neue, Segoe UI, system-ui, Arial, sans-serif" >float32. The rounding errors are far</text>
+<text x="1140.0" y="532.0" font-size="15" fill="#9db0c7" font-weight="400" text-anchor="start" font-family="Helvetica Neue, Segoe UI, system-ui, Arial, sans-serif" >below what the physics resolves.</text>
+<text x="1140.0" y="582.0" font-size="15" fill="#e8eef6" font-weight="400" text-anchor="start" font-family="Helvetica Neue, Segoe UI, system-ui, Arial, sans-serif" >A reader works out from the JSON</text>
+<text x="1140.0" y="603.0" font-size="15" fill="#e8eef6" font-weight="400" text-anchor="start" font-family="Helvetica Neue, Segoe UI, system-ui, Arial, sans-serif" >which chunks hold the hours, levels</text>
+<text x="1140.0" y="624.0" font-size="15" fill="#e8eef6" font-weight="400" text-anchor="start" font-family="Helvetica Neue, Segoe UI, system-ui, Arial, sans-serif" >and region it wants, and opens</text>
+<text x="1140.0" y="645.0" font-size="15" fill="#e8eef6" font-weight="400" text-anchor="start" font-family="Helvetica Neue, Segoe UI, system-ui, Arial, sans-serif" >only those: on a laptop disk or in</text>
+<text x="1140.0" y="666.0" font-size="15" fill="#e8eef6" font-weight="400" text-anchor="start" font-family="Helvetica Neue, Segoe UI, system-ui, Arial, sans-serif" >cloud object storage.</text>
+</svg>

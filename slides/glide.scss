@@ -1,0 +1,260 @@
+/*-- scss:defaults --*/
+
+// A dark theme built around the footprint maps: the background is the maps'
+// own ink (#06080d), so the feature image and the video sit on the slide
+// without a visible frame, and the accents come from the magma colour map.
+
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&family=JetBrains+Mono:wght@400;600&display=swap");
+
+$ink: #06080d;
+$panel: #10141c;
+$rule: #262c38;
+$text: #e6e9ef;
+$muted: #8a93a6;
+$amber: #fcb862;  // magma, near the top of the scale
+$coral: #f7705c;  // magma, middle of the scale
+$plum: #b5367a;   // magma, lower middle
+
+$body-bg: $ink;
+$body-color: $text;
+$link-color: $amber;
+$selection-bg: $plum;
+
+$font-family-sans-serif: "Inter", "Helvetica Neue", system-ui, sans-serif;
+$font-family-monospace: "JetBrains Mono", Menlo, monospace;
+$presentation-font-size-root: 38px;
+$presentation-line-height: 1.35;
+
+$presentation-heading-font: $font-family-sans-serif;
+$presentation-heading-color: #ffffff;
+$presentation-heading-font-weight: 800;
+$presentation-heading-letter-spacing: -0.02em;
+$presentation-heading-text-transform: none;
+$presentation-h2-font-size: 1.55em;
+
+$code-color: $amber;
+
+/*-- scss:rules --*/
+
+.reveal .slides {
+  text-align: left;
+}
+
+// A short magma bar under each slide title.
+.reveal h2 {
+  margin-bottom: 0.7em;
+  &::after {
+    content: "";
+    display: block;
+    width: 2.2em;
+    height: 0.12em;
+    margin-top: 0.28em;
+    border-radius: 0.06em;
+    background: linear-gradient(90deg, $plum, $coral, $amber);
+  }
+}
+
+.reveal strong {
+  color: #ffffff;
+  font-weight: 600;
+}
+
+.reveal .hl {
+  color: $amber;
+  font-weight: 600;
+}
+
+.reveal .muted {
+  color: $muted;
+}
+
+.reveal .small {
+  font-size: 0.7em;
+}
+
+.reveal ul,
+.reveal ol {
+  margin-left: 1em;
+}
+
+.reveal li {
+  margin-bottom: 0.35em;
+}
+
+.reveal ul li::marker {
+  color: $coral;
+}
+
+.reveal ol li::marker {
+  color: $amber;
+  font-weight: 800;
+}
+
+// Boxed aside with a magma edge.
+.reveal .card {
+  background: $panel;
+  border-left: 0.14em solid $coral;
+  border-radius: 0.25em;
+  padding: 0.5em 0.8em;
+  margin-top: 0.6em;
+  font-size: 0.85em;
+  p {
+    margin: 0.2em 0;
+  }
+}
+
+// One big number with a label.
+.reveal .stat {
+  font-size: 2.6em;
+  font-weight: 800;
+  line-height: 1;
+  letter-spacing: -0.03em;
+  background: linear-gradient(90deg, $coral, $amber);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.reveal .stat-label {
+  color: $muted;
+  font-size: 0.8em;
+  margin-top: 0.15em;
+}
+
+// Repository links, shown as monospace chips.
+.reveal .repo {
+  font-family: $font-family-monospace;
+  font-size: 0.95em;
+  line-height: 1.9;
+  margin: 0.4em 0 1.2em;
+  a {
+    color: $amber;
+  }
+  .what {
+    font-family: $font-family-sans-serif;
+    color: $muted;
+    font-size: 0.85em;
+    margin-left: 0.5em;
+  }
+}
+
+// Title slide: fade the map's left edge into the background.
+.reveal .backgrounds > .slide-background:first-child .slide-background-content::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, $ink 18%, rgba($ink, 0.85) 30%, rgba($ink, 0) 48%);
+}
+
+// Title slide: words on the left, the map fills the right.
+.reveal #title-slide {
+  text-align: left;
+  .title {
+    font-size: 3.1em;
+    font-weight: 800;
+    letter-spacing: -0.04em;
+    margin-bottom: 0.1em;
+  }
+  .subtitle {
+    font-size: 1.05em;
+    color: $text;
+    font-weight: 400;
+    max-width: 15em;
+    line-height: 1.3;
+  }
+  .quarto-title-author-name,
+  .date {
+    color: $muted;
+    font-size: 0.62em;
+    margin: 0;
+  }
+  .quarto-title-authors {
+    margin-top: 1.4em;
+    justify-content: flex-start;
+  }
+  .quarto-title-author {
+    padding-left: 0;
+  }
+}
+
+.reveal table {
+  font-size: 0.72em;
+  th {
+    color: $muted;
+    font-weight: 600;
+    border-bottom: 1px solid $rule;
+  }
+  td {
+    border-bottom: 1px solid $rule;
+    padding: 0.35em 0.6em;
+  }
+  td:first-child {
+    color: $amber;
+    font-weight: 800;
+  }
+}
+
+.reveal figcaption,
+.reveal .caption {
+  color: $muted;
+  font-size: 0.55em;
+}
+
+.reveal .footer {
+  color: $muted;
+  font-family: $font-family-monospace;
+  font-size: 0.42em;
+  a {
+    color: $muted;
+  }
+}
+
+.reveal .slide-number {
+  background: transparent;
+  color: $muted;
+}
+
+.reveal video {
+  border-radius: 0.2em;
+}
+
+.reveal .compact {
+  font-size: 0.82em;
+}
+
+// Validation ladder: the physics-freeze line across the table.
+.reveal table.ladder {
+  width: 100%;
+  tr.freeze td {
+    color: $text;
+    font-weight: 400;
+    font-size: 0.92em;
+    padding: 0.45em 0.6em;
+    background: rgba($coral, 0.1);
+    border-top: 2px solid $coral;
+    border-bottom: 2px solid $coral;
+  }
+  .freeze-mark {
+    color: $coral;
+  }
+}
+
+.reveal table.ladder tr.after td {
+  color: $muted;
+  font-weight: 400;
+  font-size: 0.92em;
+  padding: 0.45em 0.6em;
+  border-bottom: none;
+}
+
+.reveal img[src*="gates-figure"] {
+  border-radius: 0.3em;
+}
+
+// A reference pinned to the bottom-left of a slide, above the footer.
+.reveal .ref-bottom {
+  position: absolute;
+  left: 0;
+  bottom: 0.4em;
+  margin: 0;
+}
