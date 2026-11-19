@@ -6,13 +6,20 @@ footprints, written in pure PyTorch.
 > **Research code, under active development, shared for input from the research
 > community.** The core model is implemented and tested against analytic
 > solutions, but **the physics has not been validated against other models or
-> observations**. Do not use it for production inference.
+> observations**. Do not use it for production inference. Validation against
+> FLEXPART, NAME and observations is under way; the
+> [validation plan](docs/validation-plan.md) sets out the tests and the order
+> they run in.
 
-![GLIDE footprint](docs/img/glide_feature.png)
+![GLIDE footprint](docs/img/glide_feature.jpg)
 
-*GLIDE 5-day integrated footprints for ICOS tall-tower sites in Europe, 20 January
-2024. The run batched 48 hours × 56 sites (2,688 footprints) and took about 25
-minutes on a single NVIDIA GH200 node.*
+*GLIDE 5-day surface footprints for 56 ICOS network sites, released at 12:00 UTC
+on 12 January 2024 and summed on one map. The frame is one hour of a run that
+computed hourly footprints for every site through January 2024 (40,320
+footprints of 20,000 particles each, ERA5 model levels) at **0.38 s per
+footprint** on a single NVIDIA GH200 node. For scale, NAME takes about 10
+minutes per footprint; the models and meteorology differ, so this is not a
+benchmark. Rendered with [`scripts/plot_feature.py`](scripts/plot_feature.py).*
 
 ---
 
