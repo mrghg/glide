@@ -1,0 +1,9 @@
+# GLIDE case-library block NAM-Jan. ERA5 from ARCO on Google Cloud (met-bazarr decision 0006).
+# Domain: GLIDE docs/validation-plan.md §4 (EUR, NAM) or the development domain (EUROPE).
+format: glide
+output: $METBAZARR_OUT/NAM_20181222-20190115_ERA5-ARCO.zarr
+domain: {name: NAM, lon_min: -120, lon_max: -55, lat_min: 22, lat_max: 58}
+period: {start: "2018-12-22T00:00", end: "2019-01-15T00:00"}
+source: {type: era5_arco}
+compression: {codec: zstd, level: 5}
+chunks: {tile: 128}

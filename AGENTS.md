@@ -17,6 +17,8 @@ This file is the agent-agnostic contributor guide (the `AGENTS.md` convention;
   [dev/decisions/](dev/decisions/).
 - Development plan and v1 release gate: [dev/roadmap.md](dev/roadmap.md).
   Validation ladder and figure set: [docs/validation-plan.md](docs/validation-plan.md).
+  The recipes and jobs that build its meteorology with met-bazarr:
+  [validation/met-inputs/](validation/met-inputs/).
 - Agent sessions: read [dev/agent/INSTRUCTIONS.md](dev/agent/INSTRUCTIONS.md)
   (session protocol, verification standard, stop conditions), take tasks from
   [dev/agent/QUEUE.md](dev/agent/QUEUE.md), record per-task state in
