@@ -1,0 +1,17 @@
+# GLIDE task B14: Met Office global UM (NAME's UMG_Mk10PT) for the EUR domain.
+# Domain box: GLIDE docs/reference-runs.md §2. Conversion: met-bazarr decision 0003.
+format: glide
+output: /work/scratch-pw5/{user}/met-bazarr/EUR_20190621-20190715_UMG-Mk10.zarr
+domain: {name: EUR, lon_min: -30, lon_max: 40, lat_min: 32, lat_max: 72}
+period: {start: "2019-06-21T00:00", end: "2019-07-15T00:00"}
+source:
+  type: um_global
+  series: UMG_Mk10PT
+  description: >-
+    00/06/12/18Z fields are analyses (T+0), 03/09/15/21Z are 3-hour forecasts
+    from the preceding analysis
+  met_dir: /gws/ssde/j25a/name/met_archive/Global/UMG_Mk10PT
+  file_pattern: "MO{time:%Y%m%d%H%M}.UMG_Mk10_I_L59PT{part}.pp"
+  topography: /gws/ssde/j25a/name/data/UMTopogData/TopogUMG_Mk10_PT{part}.pp
+compression: {codec: zstd, level: 5}
+chunks: {tile: 128}

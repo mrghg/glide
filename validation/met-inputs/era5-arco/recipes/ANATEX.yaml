@@ -1,0 +1,9 @@
+# Tracer experiment ANATEX (scored samples 5-16 Jan). ERA5 from ARCO on Google Cloud (met-bazarr decision 0006).
+# Domain: GLIDE docs/validation-plan.md §4 (EUR, NAM) or the development domain (EUROPE).
+format: glide
+output: $METBAZARR_OUT/NAM_19870105-19870118_ERA5-ARCO.zarr
+domain: {name: NAM, lon_min: -120, lon_max: -55, lat_min: 22, lat_max: 58}
+period: {start: "1987-01-05T00:00", end: "1987-01-18T00:00"}
+source: {type: era5_arco}
+compression: {codec: zstd, level: 5}
+chunks: {tile: 128}

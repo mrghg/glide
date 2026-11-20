@@ -1,0 +1,9 @@
+# GLIDE development domain, reference configuration (task A01). ERA5 from ARCO on Google Cloud (met-bazarr decision 0006).
+# Domain: GLIDE docs/validation-plan.md §4 (EUR, NAM) or the development domain (EUROPE).
+format: glide
+output: $METBAZARR_OUT/EUROPE_20231201-20231231_ERA5-ARCO.zarr
+domain: {name: EUROPE, lon_min: -98, lon_max: 39.5, lat_min: 10.6, lat_max: 79.2}
+period: {start: "2023-12-01T00:00", end: "2023-12-31T23:00"}
+source: {type: era5_arco}
+compression: {codec: zstd, level: 5}
+chunks: {tile: 128}

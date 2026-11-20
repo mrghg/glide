@@ -1,0 +1,9 @@
+# Test day (8 Jan 2019, EUR). ERA5 from ARCO on Google Cloud (met-bazarr decision 0006).
+# Domain: GLIDE docs/validation-plan.md §4 (EUR, NAM) or the development domain (EUROPE).
+format: glide
+output: $METBAZARR_OUT/EUR_20190108-20190108_ERA5-ARCO.zarr
+domain: {name: EUR, lon_min: -30, lon_max: 40, lat_min: 32, lat_max: 72}
+period: {start: "2019-01-08T00:00", end: "2019-01-08T23:00"}
+source: {type: era5_arco}
+compression: {codec: zstd, level: 5}
+chunks: {tile: 128}
