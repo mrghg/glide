@@ -696,9 +696,14 @@ dependency is listed; run in the listed order by default.
 ### B1 — Adopt met-bazarr stores; GLIDE-ready met cache (3a, 7d)
 
 - **Size:** M. **Depends on:** a met-bazarr release that writes the `glide`
-  format, with stores for the reference configuration on pressure and model
-  levels listed in the data inventory (the human confirms both in
-  PROGRESS.md). Stop if either is missing. **Decision record:** 0018.
+  format (v0.3.0), with model-level stores for the reference configuration
+  (`era5-arco/EUROPE_2023120…`, `…202401…`) listed in the data inventory (the
+  human confirms in PROGRESS.md). Stop if missing. **Decision record:** 0018.
+- **Re-scoped 2026-11-20 (Matt):** model levels only (pressure-level support
+  is dropped: A01 makes model levels the default, and met-bazarr does not
+  write them); equivalence redefined, because u\* now comes from the surface
+  stresses rather than `zust` (decision 0020); the lossy-option comparison
+  moves after A0, which makes the golden fixtures it needs.
 - **Why.** Meteorology preparation now lives in met-bazarr
   ([decision 0018](../decisions/0018-met-bazarr.md)), which wraps the
   download clients GLIDE should not carry. GLIDE keeps its reader, its
@@ -710,20 +715,26 @@ dependency is listed; run in the listed order by default.
     workaround. Copy each store's provenance attributes (met-bazarr version
     and commit, source, format and version, compression) into
     `run_metadata.json` (additive; authorised by this spec).
-  - **Equivalence.** On the reference config, footprints from the met-bazarr
-    lossless store are bit-identical on CPU to those from the cube GLIDE's
-    current download produces, on both pressure and model levels. If not,
-    find the cause before going further.
+  - **Equivalence (model levels).** On the reference config: (i) every
+    variable except `friction_velocity` is bit-identical between the
+    met-bazarr store and GLIDE's downloaded model-level cube (met-bazarr's
+    `check_era5_equivalence.py`, now `validation/met-inputs/checks/`); (ii)
+    footprints are bit-identical on CPU between the met-bazarr store and the
+    downloaded cube **with its `friction_velocity` replaced by the met-bazarr
+    store's**, which tests the whole path with the intended u\* difference
+    taken out. Report the footprint difference that u\* alone makes. If (i) or
+    (ii) fails, find the cause before going further.
   - **The GLIDE-ready cache (7d).** `scripts/build_met_cache.py` builds, from
     a met-bazarr store, a cache with only the variables and levels GLIDE
     uses, optionally pre-resampled onto the AGL ladder, in float32 or
     float16; a reader path uses it when present (add a `glide_cache`
     attribute set). This stays in GLIDE because it depends on GLIDE's
     vertical grid.
-  - **Lossy options.** Compare bit-rounded met-bazarr stores and the float16
-    cache against the golden fixtures, and recommend in the progress file
-    whether either should be enabled. Neither is enabled by default in this
-    task; enabling one needs a decision record.
+  - **Lossy options: after A0** (it needs the golden fixtures). Then compare
+    bit-rounded met-bazarr stores and the float16 cache against the golden
+    fixtures and recommend in the progress file whether either should be
+    enabled. Neither is enabled by default; enabling one needs a decision
+    record.
   - **Retire GLIDE's download path.** Replace `scripts/download_sample_cube.py`
     and `scripts/download_era5.sh` with pointers to met-bazarr,
     keeping whatever the smoke tests and the README quick start need to make
@@ -733,10 +744,10 @@ dependency is listed; run in the listed order by default.
     data inventory.
 - **Out of scope.** Changes to met-bazarr itself (report what it needs in the
   progress file); any physics change.
-- **Acceptance.** The equivalence result on both level types; storage and
-  met-fetch time before and after; the golden comparison for each lossy
-  option with its recommendation; provenance in `run_metadata.json` with a
-  test; docs updated.
+- **Acceptance.** The two equivalence results on model levels, and the
+  footprint difference u\* alone makes; storage and met-fetch time before and
+  after; provenance in `run_metadata.json` with a test; docs updated. (The
+  lossy-option comparison is accepted separately, after A0.)
 
 ### B2 — Sparse and bit-rounded footprint output (7g)
 

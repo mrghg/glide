@@ -19,8 +19,9 @@
 # parallel threads. Measured on a GH200 node (19 Nov 2026): about 12 s per hour
 # of data and 2 GB per process; with 8 processes, 24 EUR hours in 2.5 min, so a
 # 24-day window takes about an hour. A one-GPU allocation has 115 GB of memory.
-# A store that already exists is kept and every time is filled again (use it to
-# resume after a time-out) unless OVERWRITE=1, which recreates it. Exits non-zero if any step or validation fails.
+# A store that already exists is kept and only its unwritten times are filled
+# (met-bazarr >= v0.3.0, --missing-only), so resubmitting resumes after a
+# time-out; OVERWRITE=1 recreates it. Exits non-zero if any step or validation fails.
 # =============================================================================
 
 #SBATCH --job-name=metbazarr-era5
@@ -58,7 +59,7 @@ for recipe in "$@"; do
 	for (( k = 0; k < NPROC; k++ )); do
 		a=$(( k * block )); b=$(( a + block < n ? a + block : n ))
 		(( a < b )) || continue
-		"${MB}" build "${recipe}" --step fill --times "${a}:${b}" >"${out%.zarr}.fill-${k}.log" 2>&1 &
+		"${MB}" build "${recipe}" --step fill --missing-only --times "${a}:${b}" >"${out%.zarr}.fill-${k}.log" 2>&1 &
 		pids+=($!)
 	done
 	fill_ok=1
