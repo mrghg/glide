@@ -5,7 +5,7 @@ what GLIDE is, see [README.md](README.md); for the physics and engineering, see
 [docs/](docs/); for why the major choices were made, see
 [dev/decisions/](dev/decisions/). Narrative history lives in git.
 
-_Last updated: 2026-10-19._
+_Last updated: 2026-11-20._
 
 > **Research code under active development. The physics has not been validated
 > against other models or observations. Not for production use.**
@@ -20,11 +20,12 @@ _Last updated: 2026-10-19._
 | **Turbulence** | Hanna (1982) in three regimes, aligned to FLEXPART v11; gradient-Richardson free-troposphere closure; Maryon meander. Behind a swappable `TurbulenceScheme` interface. ([docs/turbulence.md](docs/turbulence.md)) |
 | **Convection** | Reduced Emanuel mass-flux scheme, non-divergent matrix, once per meteorology window. ([docs/convection.md](docs/convection.md)) |
 | **Terrain-following vertical coordinate** | Meteorology resampled onto a fixed AGL grid per window, with slope-corrected vertical velocity. Fixed the zero-surface-footprint problem over high terrain. |
-| **Model-level meteorology** | Reader auto-detects hybrid model levels and reconstructs per-level pressure hydrostatically. Download path implemented (`--levels model`). **Plumbing complete; not yet validated.** Becomes the default in task A01 ([decision 0017](dev/decisions/0017-model-levels-default.md)). |
+| **Model-level meteorology** | Reader auto-detects hybrid model levels and reconstructs per-level pressure hydrostatically. **Plumbing complete; not yet validated.** Becomes the default in task A01 ([decision 0017](dev/decisions/0017-model-levels-default.md)); the model-level cubes A01 needs (EUROPE, Dec 2023 and Jan 2024, matching the pressure-level reference cubes) are downloaded. |
+| **Meteorology input** | Met format 2.0 ([docs/met_schema.md](docs/met_schema.md); decisions [0019](dev/decisions/0019-met-format-versioning.md), [0020](dev/decisions/0020-time-meaning-of-period-fields.md)): provenance attributes, a fill rule for isolated missing source values, and per-variable labels for means and accumulations, which the reader holds through the window they average (as NAME does). Where no grid point lies on a `met_domain` bound, the reader also reads the first point beyond it. u\* comes from the surface stresses. Stores are prepared by [met-bazarr](https://github.com/mrghg/met-bazarr) `v0.2.0` ([decision 0018](dev/decisions/0018-met-bazarr.md)): ERA5 from the ARCO copy (bit-identical to GLIDE's own downloader apart from u\*) and the Met Office UM analyses NAME runs on. ERA5 straight from ECMWF is a separate, later source. |
 | **Multi-site releases** | `multi_point_periodic` — sites share meteorology windows, so per-window costs amortise across the whole network. |
 | **Streaming output** | `footprints.zarr` (5-D), `endpoint_particles.parquet`, `trajectory_diagnostics.parquet`, `run_metadata.json`, written per batch. |
-| **GPU execution** | Whole per-step body captured as one CUDA graph, device-gated; the eager CPU path is the numerical reference. ([docs/architecture.md](docs/architecture.md)) |
-| **Tests** | 319 passing, 90% statement coverage, about 2.5 minutes, no network. Includes analytic dispersion checks and well-mixed gates. ([docs/VALIDATION.md](docs/VALIDATION.md)) |
+| **GPU execution** | Whole per-step body captured as one CUDA graph, device-gated; the eager CPU path is the numerical reference. ([docs/architecture.md](docs/architecture.md)) The venv must be built on uv's own Python, which ships `Python.h`; without it `torch.compile` silently falls back to eager, and `scripts/gpu_env.sh` warns and borrows the `cray-python` headers. |
+| **Tests** | 332 passing, about 2.5 minutes, no network. Includes analytic dispersion checks and well-mixed gates. ([docs/VALIDATION.md](docs/VALIDATION.md)) |
 
 ---
 
@@ -55,6 +56,18 @@ Three things a reader should know about the comparison history:
   crosswind direction on stable nights, with no effect on vertical mixing or on
   footprint magnitude. Found by comparing against an independent implementation
   of the same Hanna equations.
+
+- Two input conventions were corrected in November 2026, both before the
+  freeze ([decision 0020](dev/decisions/0020-time-meaning-of-period-fields.md)):
+  - ERA5's heat flux, an hourly accumulation, had been used as a snapshot, so
+    30 minutes late. It is now held through the hour it averages. On the Mace
+    Head smoke test this keeps the total sensitivity and moves cells by about
+    2% in sum.
+  - GLIDE took u\* from ERA5's `zust`, which leaves out the drag of sub-grid
+    hills. FLEXPART derives u\* from the surface stresses, which include it. So
+    in earlier comparisons GLIDE's u\* over land was about half FLEXPART's (1.9
+    times smaller, median; 3.6 over mountains). u\* now comes from the
+    stresses.
 
 The same "changes magnitudes everywhere" argument applies to the switch to native
 model levels, which is why it is sequenced before the physics freeze and the
@@ -103,7 +116,18 @@ scope and release gate, and the sequence. The tasks themselves are in
 [docs/validation-plan.md](docs/validation-plan.md). In outline:
 
 1. **Prepare** (human): environment, data inventory, FLEXPART v11 reference runs
-   on ERA5, tracer-experiment data.
+   on ERA5, tracer-experiment data. As of 2026-11-20:
+   - **Done:** the NAME reference runs (all of `docs/reference-runs.md` §9);
+     release times for standard cases 3–5; EDGAR CH₄ (2019, 2024) on the EUR
+     and NAM grids; ETEX and DATEM data; ERA5 model-level cubes for every
+     validation window and for A01 (downloaded by GLIDE's own script, for
+     development); the GPU environment, with `torch.compile` working.
+   - **In progress:** the Met Office UM stores, rebuilt from met-bazarr
+     `v0.2.0`; the ERA5 validation stores from met-bazarr `v0.2.0`; the B14
+     reader changes (PR #33).
+   - **Not started:** the FLEXPART reference runs (waiting for MARS access,
+     then flex_extract and task B13); the ERA5 ensemble columns; CH₄ and radon
+     observations; CI and branch protection on GitHub; an OSF account.
 2. **Before the physics freeze**, in order: fix the footprint time-bin labels
    (A00); validate model-level meteorology and make it the default (A01); golden
    fixtures and benchmarks (A0); sub-time the residual phase (A1); optional
@@ -141,3 +165,6 @@ relevant docs page with its consequence.
   explicit knob because changing it moves results.
 - **Forward/backward reciprocity test.** It tests the backward formulation
   directly, which nothing else does. Planned as task A6.
+- **The source of u\*.** From the surface stresses for v1; ERA5's `zust` is
+  the alternative, about half as large over land. To compare against the
+  tracer experiments and radon after v1 (roadmap §5).
