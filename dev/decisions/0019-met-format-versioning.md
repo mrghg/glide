@@ -42,12 +42,14 @@ choices that change results without recording them, and the pre-registration
 needs to state exactly what the inputs were. Versioning gives met-bazarr
 something to target and GLIDE something to check.
 
-**Open, for B14.** Whether UM levels are read as model levels with derived
-geopotential or through a new height-based vertical mode; whether GLIDE uses
-the UM's own pressure; how GLIDE interpolates in the strip between a non-ERA5
-store's outermost interior point and the `met_domain` edge (the reader
-currently cuts the store at the bounds). Each that changes the reader takes a
-new format version.
+**Settled in B14.** UM levels are read as model levels with geopotential
+derived from the level definition (met-bazarr decision 0003, route A), and
+GLIDE rebuilds pressure hydrostatically rather than using the UM's own (within
+0.75 hPa of it). The edge strip: where no grid point lies on a `met_domain`
+bound, the reader also takes the first point beyond it (19 Nov 2026), so the
+strip interpolates instead of taking the edge value; where a point lies on the
+bound, nothing changes (ERA5 on EUR and NAM, and the EUROPE reference
+configuration, read identical windows). Neither needed a new format version.
 
 **Rejected alternatives.**
 - Leave the details to met-bazarr: the choices would be made without the

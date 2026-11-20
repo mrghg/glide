@@ -1168,14 +1168,37 @@ def test_store_attr_supplies_the_accumulation_period() -> None:
 
     ds = _build_mock_era5_dataset()
     ds.attrs["glide_flux_accumulation_seconds"] = "10800"
+    # A 3-hourly store: the accumulation period must equal the time step (0020).
+    ds = ds.assign_coords(time=ds.time.values[0] + np.array([0, 3], dtype="timedelta64[h]"))
 
     reader = _shf_reader(ds)
-    result = reader.fetch_hourly_window(_shf_request())
+    req = _shf_request()
+    result = reader.fetch_hourly_window(
+        BoundingBoxRequest(
+            spatial=req.spatial,
+            time=TimeBounds(
+                start=datetime(2024, 1, 1, 0, 0, tzinfo=UTC),
+                end=datetime(2024, 1, 1, 3, 0, tzinfo=UTC),
+            ),
+        )
+    )
 
     assert reader.accumulation_seconds == 10800
     # +360_000 J/m^2 over 10800 s = +33.33 W/m^2 downward -> -33.33 upward.
     shf_start, _ = result.channel("shf")
     assert torch.allclose(shf_start, torch.full_like(shf_start, -360_000.0 / 10800.0))
+
+
+def test_accumulation_period_other_than_the_time_step_is_refused() -> None:
+    """Decision 0020: a mean is held through the window it averages, so its period
+    must equal the store's time step; an hourly store accumulated over 3 h is refused."""
+
+    ds = _build_mock_era5_dataset()
+    ds.attrs["glide_flux_accumulation_seconds"] = "10800"
+
+    reader = _shf_reader(ds)
+    with pytest.raises(ValueError, match="time step is 3600 s"):
+        reader.fetch_hourly_window(_shf_request())
 
 
 def test_explicit_accumulation_seconds_overrides_the_store_attr() -> None:
@@ -1333,3 +1356,110 @@ def test_explicit_met_interval_overrides_the_measured_cadence() -> None:
     reader = _InMemoryArcoReader(ds, met_interval_seconds=3600)
 
     assert reader.met_interval_seconds == 3600
+
+
+# --- Decision 0020: means/accumulations held through their window ---------------
+
+
+def _label(ds: xr.Dataset, var: str, method: str | None, period) -> xr.Dataset:
+    if method is not None:
+        ds[var].attrs["cell_methods"] = method
+    if period is not None:
+        ds[var].attrs["glide_period_seconds"] = period
+    return ds
+
+
+def test_format_2_labels_mark_held_channels() -> None:
+    ds = _build_mock_era5_dataset()
+    _label(ds, "friction_velocity", "time: mean", 3600)
+    _label(ds, "surface_sensible_heat_flux", "time: sum", 3600)
+    reader = _shf_reader(ds)
+    result = reader.fetch_hourly_window(_shf_request())
+    assert result.period_channels == frozenset({"ustar", "shf"})
+    assert reader.period_details["ustar"]["cell_methods"] == "time: mean"
+    assert reader.period_details["shf"]["period_seconds"] == 3600
+
+
+def test_format_1_store_holds_the_accumulated_heat_flux_only() -> None:
+    """No variable labels: the heat flux is a period variable from the store-level
+    accumulation attr; u* (ERA5's zust in such stores) stays a snapshot."""
+
+    reader = _shf_reader(_build_mock_era5_dataset())
+    result = reader.fetch_hourly_window(_shf_request())
+    assert result.period_channels == frozenset({"shf"})
+    assert "format 1.0" in reader.period_details["shf"]["from"]
+
+
+def test_instantaneous_heat_flux_is_a_snapshot() -> None:
+    ds = _build_mock_era5_dataset()
+    del ds.attrs["glide_flux_accumulation_seconds"]
+    ds["surface_sensible_heat_flux"] = ds["surface_sensible_heat_flux"] / 3600.0
+    ds["surface_sensible_heat_flux"].attrs["units"] = "W m**-2"
+    result = _shf_reader(ds).fetch_hourly_window(_shf_request())
+    assert result.period_channels == frozenset()
+
+
+@pytest.mark.parametrize(
+    ("method", "period", "match"),
+    [
+        ("time: mean", None, "needs both"),
+        (None, 3600, "needs both"),
+        ("time: max", 3600, "understands"),
+        ("time: mean", "an hour", "whole number"),
+        ("time: mean", 10800, "time step is 3600 s"),
+    ],
+)
+def test_bad_period_labels_are_refused(method, period, match) -> None:
+    ds = _label(_build_mock_era5_dataset(), "friction_velocity", method, period)
+    with pytest.raises(ValueError, match=match):
+        _shf_reader(ds).fetch_hourly_window(_shf_request())
+
+
+# --- Decision 0019: the edge strip -----------------------------------------------
+
+
+def test_pad_bounds_only_where_no_grid_point_lies_on_the_bound() -> None:
+    from lpdm.met_reader import _pad_lower, _pad_upper
+
+    v = np.array([0.0, 1.0, 2.0, 3.0])
+    assert _pad_lower(v, 0.5) == 0.0  # strip: take the point below
+    assert _pad_lower(v, 1.0) == 1.0  # a point on the bound: unchanged
+    assert _pad_lower(v, -1.0) == -1.0  # nothing below: unchanged
+    assert _pad_upper(v, 2.5) == 3.0
+    assert _pad_upper(v, 3.0) == 3.0
+    assert _pad_upper(v, 9.0) == 9.0
+    assert _pad_lower(v, 1.0 + 1e-9) == 1.0 + 1e-9  # within tolerance of a point
+
+
+def _edge_request(lat_min: float, lat_max: float, lon_min: float, lon_max: float):
+    req = _shf_request()
+    sp = req.spatial
+    return BoundingBoxRequest(
+        spatial=SpatialBounds(
+            lon_min=lon_min,
+            lon_max=lon_max,
+            lat_min=lat_min,
+            lat_max=lat_max,
+            z_min=sp.z_min,
+            z_max=sp.z_max,
+        ),
+        time=req.time,
+    )
+
+
+def test_reader_takes_one_point_beyond_a_bound_between_grid_points() -> None:
+    """Grid lat 10, 11 and lon 20, 21. A box 10.5..11, 20.5..21 has no point on
+    its lower bounds, so the points below (10, 20) are fetched too; its upper
+    bounds lie on grid points and are not extended."""
+
+    reader = _shf_reader(_build_mock_era5_dataset())
+    result = reader.fetch_hourly_window(_edge_request(10.5, 11.0, 20.5, 21.0))
+    assert np.array_equal(np.sort(result.metadata.lat), [10.0, 11.0])
+    assert np.array_equal(result.metadata.lon, [20.0, 21.0])
+
+
+def test_reader_unchanged_when_bounds_lie_on_grid_points() -> None:
+    reader = _shf_reader(_build_mock_era5_dataset())
+    result = reader.fetch_hourly_window(_edge_request(10.0, 10.0, 21.0, 21.0))
+    assert np.array_equal(result.metadata.lat, [10.0])
+    assert np.array_equal(result.metadata.lon, [21.0])

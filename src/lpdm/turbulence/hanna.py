@@ -807,9 +807,12 @@ class HannaScheme(TurbulenceScheme):
             # result is a compiled-core input, and a fresh tensor each step would
             # be restaged by cudagraph on every replay. `torch.lerp(..., out=)`
             # runs in eager, outside the captured region.
+            # A mean/accumulation channel (decision 0020) is held at its window-end
+            # value, the mean over exactly this window: weight 1.0, not alpha.
             s, e = pair
             buf = self._to_static_buffer(f"surf.{name}", s, copy_src=False)
-            torch.lerp(s, e, float(t_alpha), out=buf)
+            held = name in getattr(met_window, "period_channels", ())
+            torch.lerp(s, e, 1.0 if held else float(t_alpha), out=buf)
             return buf
 
         ft_fields, grid_bounds = self._free_trop_fields(met_window, device, dtype)
@@ -1937,12 +1940,19 @@ class HannaScheme(TurbulenceScheme):
         device: torch.device,
         dtype: torch.dtype,
     ) -> torch.Tensor:
-        """Interpolate a surface (z-broadcast) channel at particle (lon, lat)."""
+        """Interpolate a surface (z-broadcast) channel at particle (lon, lat).
+
+        In time: linear for a snapshot; a mean/accumulation channel (decision
+        0020) is held at its window-end value, the mean over this window.
+        """
 
         chan_start, chan_end = met_window.channel(channel_name)  # [Z, Y, X] each
         field_start = chan_start[0].to(device=device, dtype=dtype)
         field_end = chan_end[0].to(device=device, dtype=dtype)
-        field_2d = field_start * (1.0 - t_alpha) + field_end * t_alpha
+        if channel_name in getattr(met_window, "period_channels", ()):
+            field_2d = field_end
+        else:
+            field_2d = field_start * (1.0 - t_alpha) + field_end * t_alpha
         return cls._interp_2d_bilinear(
             field_2d,
             met_window.metadata.lon,

@@ -136,6 +136,18 @@ class HourlyMetTensors:
     metadata: MetFieldMetadata
     channel_names: tuple[str, ...]
     height_agl_m: torch.Tensor | None = None
+    # Channels whose stored value is a mean or accumulation over the source time
+    # step ending at its timestamp (met format 2.0, decision 0020). Their
+    # hour_end value is the mean over exactly this window, so it is held
+    # constant through the window instead of interpolated (see `time_weight`).
+    period_channels: frozenset[str] = frozenset()
+
+    def time_weight(self, name: str, alpha: float) -> float:
+        """Weight of ``hour_end`` when interpolating channel ``name`` at
+        fraction ``alpha`` of the window: ``alpha`` for a snapshot, 1.0 for a
+        period channel (held at its window-end value, the window mean)."""
+
+        return 1.0 if name in self.period_channels else alpha
 
     def _channel_index(self, name: str) -> int:
         try:
@@ -164,6 +176,32 @@ class HourlyMetTensors:
 
         indices = [self._channel_index(name) for name in names]
         return self.hour_start[indices], self.hour_end[indices]
+
+
+#: Tolerance (degrees) for deciding that a grid point lies on a domain bound.
+_EDGE_TOL_DEG = 1e-6
+
+
+def _pad_lower(values: np.ndarray, bound: float) -> float:
+    """``bound``, or the nearest grid value below it when no grid value lies on
+    or within ``_EDGE_TOL_DEG`` of it and the selection would otherwise start
+    inside the bound (decision 0019, the edge strip)."""
+
+    v = np.asarray(values, dtype=np.float64)
+    if np.any(np.abs(v - bound) <= _EDGE_TOL_DEG):
+        return bound
+    below = v[v < bound]
+    return float(below.max()) if below.size else bound
+
+
+def _pad_upper(values: np.ndarray, bound: float) -> float:
+    """Mirror of `_pad_lower` for an upper bound."""
+
+    v = np.asarray(values, dtype=np.float64)
+    if np.any(np.abs(v - bound) <= _EDGE_TOL_DEG):
+        return bound
+    above = v[v > bound]
+    return float(above.min()) if above.size else bound
 
 
 class MetReader(ABC):
@@ -391,6 +429,13 @@ class ArcoEra5ZarrReader(MetReader):
         self._cadence_resolved = False
         # One-shot magnitude guard on the converted flux (see SHF_PLAUSIBLE_MAX_W_M2).
         self._shf_magnitude_checked = False
+        # Channels that are means/accumulations over the time step ending at their
+        # timestamp (met format 2.0, decision 0020), resolved on first open from the
+        # per-variable `cell_methods` / `glide_period_seconds` attrs, or for a
+        # format 1.0 store from the store-level heat-flux attrs.
+        self.period_channels: frozenset[str] = frozenset()
+        self.period_details: dict[str, dict[str, object]] = {}
+        self._periods_resolved = False
         # Terrain-following (hybrid) vertical coordinate: resample pressure levels
         # onto a fixed AGL grid once per window (Finding 7). Off => legacy path that
         # ships fields on the pressure grid with a bbox-mean level array (biased over
@@ -602,6 +647,97 @@ class ArcoEra5ZarrReader(MetReader):
 
         self._flux_accumulation_resolved = True
 
+    _PERIOD_METHODS = ("time: mean", "time: sum")
+
+    def _resolve_period_channels(self, ds: xr.Dataset) -> None:
+        """Find the channels that are means or accumulations, once (decision 0020).
+
+        Format 2.0: a variable carrying ``cell_methods`` ("time: mean" or
+        "time: sum") and ``glide_period_seconds``. Format 1.0 (no such attrs on
+        any variable): the heat flux, when the store has
+        ``glide_flux_accumulation_seconds`` or a non-zero
+        ``glide_flux_averaging_seconds``. A period must equal the store's time
+        step: the window-end value is then the mean over exactly that window,
+        which is what GLIDE holds through the window. Any other period is
+        refused rather than guessed at.
+        """
+
+        if self._periods_resolved:
+            return
+        interval = self.met_interval_seconds
+        details: dict[str, dict[str, object]] = {}
+        labelled_any = False
+        for key in self.channel_names:
+            var = self.variable_map.get(key)
+            if var is None or var not in ds.variables:
+                continue
+            attrs = ds[var].attrs
+            has_cm = "cell_methods" in attrs
+            has_p = "glide_period_seconds" in attrs
+            if not (has_cm or has_p):
+                continue
+            labelled_any = True
+            if has_cm != has_p:
+                raise ValueError(
+                    f"Variable {var!r} has only one of cell_methods and "
+                    "glide_period_seconds; a mean or accumulation needs both "
+                    "(docs/met_schema.md, 'What a timestamp means')."
+                )
+            method = str(attrs["cell_methods"]).strip()
+            if method not in self._PERIOD_METHODS:
+                raise ValueError(
+                    f"Variable {var!r} has cell_methods={method!r}; GLIDE understands "
+                    f"{list(self._PERIOD_METHODS)}."
+                )
+            try:
+                period = int(attrs["glide_period_seconds"])
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"Variable {var!r} has glide_period_seconds="
+                    f"{attrs['glide_period_seconds']!r}, not a whole number of seconds."
+                ) from exc
+            details[key] = {"variable": var, "cell_methods": method, "period_seconds": period}
+
+        if not labelled_any:
+            # Format 1.0: only the heat flux can be a mean, flagged at store level.
+            var = self.variable_map.get("shf")
+            if "shf" in self.channel_names and var is not None and var in ds.variables:
+                period = None
+                if self.accumulation_seconds is not None:
+                    period, method = int(self.accumulation_seconds), "time: sum"
+                else:
+                    raw = ds.attrs.get("glide_flux_averaging_seconds")
+                    if raw is not None and str(raw).strip() not in ("", "0"):
+                        period, method = int(round(float(raw))), "time: mean"
+                if period is not None:
+                    details["shf"] = {
+                        "variable": var,
+                        "cell_methods": method,
+                        "period_seconds": period,
+                        "from": "store-level heat-flux attrs (format 1.0)",
+                    }
+
+        for d in details.values():
+            if d["period_seconds"] != interval:
+                raise ValueError(
+                    f"Variable {d['variable']!r} is a {d['cell_methods']} over "
+                    f"{d['period_seconds']} s, but the store's time step is {interval} s. "
+                    "GLIDE holds a mean through the window it averages, which needs the "
+                    "period to equal the time step; it will not guess otherwise "
+                    "(decision 0020). Use the store at its native time step."
+                )
+        self.period_details = details
+        self.period_channels = frozenset(details)
+        if details:
+            LOGGER.info(
+                "met: held through each window (means/accumulations ending at the timestamp): %s",
+                ", ".join(
+                    f"{k} ({d['cell_methods']}, {d['period_seconds']} s)"
+                    for k, d in sorted(details.items())
+                ),
+            )
+        self._periods_resolved = True
+
     def _resolve_vertical_mode(self, ds: xr.Dataset) -> None:
         """Resolve pressure- vs model-level mode and the vertical coord name once.
 
@@ -672,6 +808,7 @@ class ArcoEra5ZarrReader(MetReader):
         self._resolve_vertical_mode(ds)
         self._resolve_flux_accumulation(ds)
         self._resolve_time_cadence(ds)
+        self._resolve_period_channels(ds)
         ds = self._select_variables(ds)
 
         # `ds` is the reader's memoized shared handle — do not close it here.
@@ -737,6 +874,7 @@ class ArcoEra5ZarrReader(MetReader):
                 height_agl_m=torch.as_tensor(
                     height_broadcast, dtype=self.dtype, device=self.device
                 ),
+                period_channels=self.period_channels,
             )
 
         hour_start = self._dataset_to_channel_tensor(ds_start)
@@ -760,6 +898,7 @@ class ArcoEra5ZarrReader(MetReader):
             metadata=metadata,
             channel_names=self.channel_names,
             height_agl_m=height_agl_m,
+            period_channels=self.period_channels,
         )
 
     def _processed_hour(self, ds: xr.Dataset, when: datetime, spatial: SpatialBounds) -> dict:
@@ -1153,11 +1292,13 @@ class ArcoEra5ZarrReader(MetReader):
 
         lat_values = ds[self.lat_name].values
         lat_descending = lat_values[0] > lat_values[-1]
-        lat_slice = (
-            slice(spatial.lat_max, spatial.lat_min)
-            if lat_descending
-            else slice(spatial.lat_min, spatial.lat_max)
-        )
+        # Edge strip (decision 0019): where no grid point lies on a bound, take the
+        # first point beyond it as well, so particles between the outermost
+        # interior point and the bound interpolate instead of clamping. A grid
+        # whose points fall on the bounds (ERA5 on the EUR/NAM boxes) is unchanged.
+        lat_lo = _pad_lower(lat_values, spatial.lat_min)
+        lat_hi = _pad_upper(lat_values, spatial.lat_max)
+        lat_slice = slice(lat_hi, lat_lo) if lat_descending else slice(lat_lo, lat_hi)
         ds = ds.sel({self.lat_name: lat_slice})
 
         if int(ds.sizes.get(self.lat_name, 0)) == 0:
@@ -1167,6 +1308,8 @@ class ArcoEra5ZarrReader(MetReader):
             )
 
         # Slice longitude safely without .where(drop=True) over massive datasets
+        lon_min = _pad_lower(lon_values, lon_min)
+        lon_max = _pad_upper(lon_values, lon_max)
         if lon_min <= lon_max:
             ds = ds.sel({self.lon_name: slice(lon_min, lon_max)})
         else:

@@ -1740,6 +1740,10 @@ def _run(
             # heat fluxes look wrong is diagnosed by reading it back here rather than
             # re-deriving it from the cube.
             flux_accumulation_seconds=getattr(reader, "accumulation_seconds", None),
+            # Channels held through each window as means/accumulations (decision
+            # 0020), with their cell_methods and period: how the surface forcing
+            # was placed in time is part of what a run used.
+            met_period_channels=dict(getattr(reader, "period_details", {}) or {}),
         ),
         "schedule": {
             "n_batches": len(batches),

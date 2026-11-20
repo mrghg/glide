@@ -966,7 +966,9 @@ dependency is listed; run in the listed order by default.
   - In GLIDE, the two reader changes the assessment found (the UM levels
     need none: met-bazarr writes them as model levels, route A of met-bazarr
     decision 0003, and GLIDE already accepts `w` in m s⁻¹). Neither waits for
-    B1, and both **merge before A0**:
+    B1, and both **merge before A0**. **Done 2026-11-19** (branch
+    `b14-reader-periods-edges`); what remains of B14 is the GLIDE reader check
+    on the four case-library stores rebuilt from met-bazarr `v0.2.0`:
     - **Means held through their interval** (decision 0020, format 2.0): a
       variable with `cell_methods` and `glide_period_seconds` equal to the
       store's time step is held constant through each window at its value at
