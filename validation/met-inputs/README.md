@@ -23,8 +23,12 @@ The job scripts run met-bazarr from its own checkout, `$METBAZARR_REPO`
 (default `~/code/met-bazarr`), and print the tag they used:
 
 ```bash
-git -C ~/code/met-bazarr fetch --tags && git -C ~/code/met-bazarr checkout v0.2.0
+git -C ~/code/met-bazarr fetch --tags && git -C ~/code/met-bazarr checkout v0.3.0
 ```
+
+Releases used: the UM stores from **v0.2.0** (19 Nov 2026); the ERA5 stores
+from **v0.3.0** (rebuilt 20 Nov 2026, after the v0.2.0 build stalled; no values
+differ between the two releases).
 
 The recipes here and the met-bazarr release are a pair: a recipe uses
 met-bazarr's recipe keys and source types, so check that a recipe still loads
