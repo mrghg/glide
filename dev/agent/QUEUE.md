@@ -947,6 +947,17 @@ dependency is listed; run in the listed order by default.
 
 ### B14 — Met Office global analyses as a meteorology source (3g)
 
+**Status: done 2026-11-20.** Converter in met-bazarr (decisions 0003–0007;
+release `v0.2.0`); GLIDE's reader changes in PR #33 (decisions 0019, 0020).
+The four case-library stores, built from `v0.2.0` with `--validation-input`
+(recipes in `validation/met-inputs/um/`), are in `$GLIDE_DATA/um-mk10/`:
+checksums confirmed after copying; met-bazarr's full-scan validator passes on
+all four; GLIDE's reader opens each with the 3-hour step, the full grid, and
+the heat flux and u\* held as 3-hour means; and GLIDE completes a one-day GPU
+run on EUR-Jan (Mace Head) and NAM-Jan (Park Falls), compiled once, no
+particles lost at the edge. Footprints from these runs were not inspected or
+compared with NAME: they fall in the validation periods.
+
 - **Size:** M. **Depends on:** B1 merged; the Met Office analyses for one day
   of block EUR-Jan available on the node. Stop if they are missing. **Must
   merge before the physics freeze (A8)** if it changes GLIDE's reader.
