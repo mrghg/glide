@@ -39,7 +39,7 @@ work happens:
   it changed the plan, made a decision or found something wrong, offer to draft
   the notebook entry and incident files for the paper repository. Say which
   model drafted them.
-- **The human** logs time daily and harvests incidents weekly
+- **The human** harvests incidents weekly
   ([dev/agent-operations.md](dev/agent-operations.md) §7).
 
 ## Scope and priorities

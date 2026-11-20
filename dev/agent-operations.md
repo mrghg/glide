@@ -258,8 +258,7 @@ fresh session for the next task (`/clear` or a new `claude`), so each task
 starts cold as it would in the loop. If you redirect it or answer a question
 mid-task, it records your instruction in its progress file
 (INSTRUCTIONS.md §1). Long runs, such as A5's sweeps, can be left running
-while you detach. Log your watching time in the paper repository's
-`metrics/human_time.csv`.
+while you detach.
 
 **The unattended loop.** Each iteration checks that the working tree has no
 uncommitted changes (it stops rather than discard anything), syncs `main`,
@@ -294,7 +293,7 @@ without touching them; attach, look, and commit or discard by hand.
 `$GLIDE_AGENT_OUTPUTS/session_log.jsonl`: job, queue, model, start and end
 times, exit code, outcome (`delivered`, `waiting`, `no_task` or `failed`) and
 the branch it ended on. The paper's metrics scripts read it. Watched sessions
-are not logged automatically; note them in `human_time.csv`.
+are not logged automatically.
 
 **Walltime.** Sessions check the time left before long runs and hand off if a
 run will not fit. When the allocation ends, resubmit. The repository is the
@@ -378,9 +377,8 @@ heading into a stop-condition area without stopping.
 ## 7. Cadence
 
 - **Daily, 20 minutes:** review and merge PRs; answer BLOCKED drafts with
-  resume requests; update "Current state". Then add one line for the day to
-  the paper repository's `metrics/human_time.csv`. It cannot be reconstructed
-  later.
+  resume requests; update "Current state". (A daily human-time log was kept
+  13–17 Nov 2026 and then dropped.)
 - **Weekly:** harvest `proposed follow-ups` from the week's merged progress
   files into QUEUE.md; reprioritise; update `dev/roadmap.md` if scope moved;
   check the benchmark and storage numbers against the roadmap targets; confirm
