@@ -1463,3 +1463,31 @@ def test_reader_unchanged_when_bounds_lie_on_grid_points() -> None:
     result = reader.fetch_hourly_window(_edge_request(10.0, 10.0, 21.0, 21.0))
     assert np.array_equal(result.metadata.lat, [10.0])
     assert np.array_equal(result.metadata.lon, [21.0])
+
+
+def test_store_provenance_lists_each_store(tmp_path) -> None:
+    """Task B1: the provenance attrs of each store, metadata only; unreadable
+    stores are listed with the error rather than failing the run."""
+
+    ds = _build_mock_era5_dataset()
+    ds.attrs.update(
+        {
+            "glide_format": "glide",
+            "glide_format_version": "2.0",
+            "producer": "met-bazarr",
+            "producer_version": "0.3.0",
+            "producer_commit": "98598db",
+            "recipe_text": "format: glide\n",
+            "unrelated": "dropped",
+        }
+    )
+    path = tmp_path / "store.zarr"
+    ds.to_zarr(path, consolidated=True)
+    reader = ArcoEra5ZarrReader([str(path), str(tmp_path / "missing.zarr")], device="cpu")
+    prov = reader.store_provenance()
+    assert prov[0]["store"] == str(path)
+    assert prov[0]["producer_commit"] == "98598db"
+    assert prov[0]["recipe_text"] == "format: glide\n"
+    assert prov[0]["glide_flux_accumulation_seconds"] == "3600"
+    assert "unrelated" not in prov[0]
+    assert "error" in prov[1]
