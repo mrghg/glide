@@ -1744,6 +1744,9 @@ def _run(
             # 0020), with their cell_methods and period: how the surface forcing
             # was placed in time is part of what a run used.
             met_period_channels=dict(getattr(reader, "period_details", {}) or {}),
+            # Each meteorology store's provenance (format version, producer,
+            # source, recipe...): which inputs a run used (task B1).
+            met_stores=(reader.store_provenance() if hasattr(reader, "store_provenance") else []),
         ),
         "schedule": {
             "n_batches": len(batches),
