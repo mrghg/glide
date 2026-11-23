@@ -49,6 +49,12 @@ Model: Opus 5.5, high effort. Run strictly in order unless a task is BLOCKED.
   multi-bin configs use one bin per hour and are unaffected. The defect is
   latent but will be hit as soon as coarser bins are used (e.g. daily bins on a
   30-day run), which the storage items invite.
+- **Already done (PR #41, 23 Nov 2026).** The labels are one hour wide,
+  matching the indexing. The axis also adds one bin per started hour of the
+  longest release window: ages count from the window's end, and every
+  particle is now followed for the full length from its own release, so ages
+  reach the length plus the window. What remains is below. Where it says
+  `length_seconds`, read the length plus the longest release window.
 - **Scope.** Add `output_grid.time_bin_seconds` (default 3600). Index bins as
   `floor(elapsed_s / time_bin_seconds)` on both runtime paths and in
   `_footprint_time_bin_index`, and derive the metadata from the same value.
@@ -258,6 +264,12 @@ Model: Opus 5.5, high effort. Run strictly in order unless a task is BLOCKED.
 ### A2 — Kernel deposition in the gridder (2b)
 
 - **Size:** S–M. **Depends on:** A0. **Decision record:** 0012.
+- **Split (validation review, 23 Nov 2026).** Only the deposition position
+  ([PR-F4], below) is needed before the freeze: A3 uses it, and A5 sweeps it.
+  The Gaussian kernel is deferred to after v1. All graded runs use delta
+  deposition, so the kernel would add code to the frozen physics that no
+  graded run uses. Do the deposition position first, as its own PR; the rest
+  of this task waits.
 - **Scope.** Read decision 0012 first: the kernel is a numerical parameter,
   converged and never tuned, and delta deposition stays the reference. Add
   `output_grid.deposition` with `kind: delta | gaussian` (default `delta`, so
@@ -388,7 +400,9 @@ Model: Opus 5.5, high effort. Run strictly in order unless a task is BLOCKED.
   and the default sits where further refinement changes the result by less
   than the particle noise. **Before running the Δt sweep,** state the order
   of the stepping scheme from the code and record it in the task notes.
-- **Kernel bandwidth** (decision 0012). Sweep `bandwidth_fraction` over
+- **Kernel bandwidth** (decision 0012). **Deferred to after v1 with the
+  kernel (A2).** Before the freeze, A5 depends only on A2's deposition
+  position. When the kernel lands: sweep `bandwidth_fraction` over
   0, 0.05, 0.1, 0.2, 0.3 and 0.5 on the analytic plume, the real-met case and
   the A2 split-plume case. Take a delta-deposition run with a large particle
   count as the reference for each case. The **converged fraction** is the
@@ -424,6 +438,10 @@ Model: Opus 5.5, high effort. Run strictly in order unless a task is BLOCKED.
 ### A7 — In-batch parameter ensembles (2a, plumbing)
 
 - **Size:** S. **Depends on:** A5.
+- **Split (validation review, 23 Nov 2026).** Only the particle-subset
+  bootstrap (last sentence of the scope) is needed before the freeze: Tier 3's
+  noise intervals and B4 use it. The parameter groups are for calibration (v2,
+  validation-plan §7) and are deferred to after v1.
 - **Scope.** Allow the turbulence and convection schemes to take per-particle
   parameter tensors (broadcast from a per-group table) instead of scalars, and
   the release generator to assign particles to groups with drawn parameters.
@@ -436,7 +454,9 @@ Model: Opus 5.5, high effort. Run strictly in order unless a task is BLOCKED.
 
 ### A8 — Physics freeze preparation and audit table (1a, 1c)
 
-- **Size:** S. **Depends on:** A00–A7 merged, including A02 and A03 (A01
+- **Size:** S. **Depends on:** A00–A7 merged, including A02 and A03, except
+  the parts deferred to after v1: A2's Gaussian kernel, A5's bandwidth sweep
+  and A7's parameter groups (A01
   validates the model-level met path).
 - **Scope.** Write `docs/physics-audit.md`: a table with one row per equation
   in `docs/physics.md`, `turbulence.md`, `convection.md`, giving the literature
@@ -514,6 +534,15 @@ Model: Opus 5.5, high effort. Run strictly in order unless a task is BLOCKED.
     receptor and block, the median and 90th percentile of the differences,
     with the same metric code A10 will use (write it here if A10 has not, under
     `scripts/validation/`);
+  - choose the Tier 1 convection columns by the rule in validation-plan
+    Tier 1 (an active column moving at least 1% of boundary-layer air above
+    5 km in FLEXPART, and an inactive control), from the compiled driver's
+    output, and record them for A9;
+  - apply the Tier 2 rules for empty maps and zeros, and try the complete
+    Tier 2 grading on reference data (validation-plan §3, Tier 2): one
+    FLEXPART repeat-seed run against another, and shifted and scaled copies
+    of FLEXPART's footprints; report the smallest change graded "outside"
+    for each metric;
   - collect the Tier 3 thresholds and the scoring options of each published
     study.
 
@@ -578,7 +607,9 @@ Model: Opus 5.5, high effort. Run strictly in order unless a task is BLOCKED.
 - **Scope.** Scripts under `scripts/validation/tier1/` that call FLEXPART v11's
   compiled `hanna` routine (`turbulence_mod.f90`) and its convection routines,
   and GLIDE's equivalents, on identical inputs: ERA5 columns from the case
-  library and synthetic stable, neutral and convective profiles. FLEXPART's
+  library and synthetic stable, neutral and convective profiles. For
+  convection these include the active and inactive columns A8a chose and
+  recorded (validation-plan Tier 1). FLEXPART's
   routines read their inputs from module variables, so the expected route is
   the Fortran driver program A8a built under `scripts/validation/tier1/`,
   which `use`s the FLEXPART modules, sets those variables, calls the routine
@@ -614,8 +645,7 @@ Model: Opus 5.5, high effort. Run strictly in order unless a task is BLOCKED.
   FLEXPART reference outputs available.
 - **Scope.** Readers for FLEXPART particle and gridded output; particle
   statistics against time; footprint metrics; systematic-difference maps;
-  mole-fraction convolution; the Tier 2 figure set including the cloud
-  animation; a report page in `docs/validation/`. All four comparisons in
+  mole-fraction convolution; the Tier 2 figure set; a report page in `docs/validation/`. All four comparisons in
   validation-plan Tier 2 ("NAME and Met Office meteorology"): GLIDE against
   FLEXPART on ERA5, GLIDE against NAME on Met Office meteorology (needs
   B14's stores), NAME against FLEXPART, and GLIDE on the two meteorologies.
@@ -650,15 +680,20 @@ Model: Opus 5.5, high effort. Run strictly in order unless a task is BLOCKED.
 
 ### A11 — Tier 3 tracer-experiment runs (validation)
 
-- **Size:** M. **Depends on:** A8b (registered), A10, B10, B12; the ERA5 cubes for ETEX, CAPTEX and
+- **Size:** M. **Depends on:** A8b (registered), B10, B12; the ERA5 cubes for ETEX, CAPTEX and
   ANATEX listed in the data inventory.
 - **Scope.** Receptor-oriented backward runs, one per measured sample, as set out
   in `data/tracer-experiments.md` §5: ETEX-1, ETEX-2, CAPTEX, and ANATEX tracers
   1 and 2 (one footprint per sample serves both ANATEX tracers). ACURATE is
   v1.x (roadmap 1i) and not part of this task. Run through the B12
-  benchmark command with the registered configuration. Scored per release as
+  benchmark command with the registered configuration. Not after A10: Tier 3
+  needs none of A10's tools, and a delay with the restricted NAME data must
+  not hold up the independent tracer evidence (validation review, 23 Nov
+  2026). ANATEX is the ten scored releases, 5–16 January 1987, for v1; the
+  full experiment, to 29 March, is v1.x (its meteorology is not yet
+  prepared). Scored per release as
   in the published studies (the eight graded experiments), and also over
-  whole experiments (reported only); predicted concentrations written in
+  whole experiments (reported only; for ANATEX, over the January subset); predicted concentrations written in
   DATEM format; scored with the B10 code using the pre-registered options;
   the Tier 3 figure set; the sampler-height and 1° source sensitivity tests.
 - **Running and reporting.** Follow the registered rules
@@ -683,8 +718,9 @@ Model: Opus 5.5, high effort. Run strictly in order unless a task is BLOCKED.
   `docs/published-tracer-scores.csv`; the B12 scorecard; pass or fail against
   the pre-registered thresholds; figures in the gallery; `data/tracer-experiments.md`
   §5 updated with what was run.
-- **Runtime.** About 16,000 backward releases; estimate from the A0 benchmark
-  before launching and stop if a batch exceeds twice the estimate.
+- **Runtime.** Count the releases from B10's sample list (ANATEX January
+  subset only), estimate from the A0 benchmark before launching, and stop if
+  a batch exceeds twice the estimate.
 
 ---
 
@@ -859,7 +895,10 @@ dependency is listed; run in the listed order by default.
   (6-hour samples only or all samples; a sample belongs to the most recent
   release, or to the release whose 60-hour window contains it), report each
   rule's pair counts against Hegarty et al.'s (354, 365, 346, 299, 306, 183,
-  562, 556), and adopt the closest. An exact match is not required. This
+  562, 556), and adopt the closest. An exact match is not required.
+  Export the resulting sample list (sample ID, site, UTC start and end,
+  assigned release, and the unique receptor windows to run) for A11 to size
+  its runs. This
   uses the measurement files only, never GLIDE output. The ATMES-II
   statistics follow Mosca et al. (1998) as summarised in
   `docs/published-tracer-scores.md` §6, on the JRC ETEX-1 files: the zero
