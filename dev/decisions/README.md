@@ -26,7 +26,7 @@ alternatives → Status**, with a pointer to the relevant `docs/` page.
 | [0014](0014-v1-scope-and-release-gate.md) | v1 scope: validated, fast footprint model without UQ |
 | [0015](0015-agent-driven-development-process.md) | Agent-driven development: one task per session, PR per task, human merges |
 | [0016](0016-time-ago-bin-width.md) | Time-ago bins of a configured width, covering the run unless dropping old ages is asked for |
-| [0017](0017-model-levels-default.md) | ERA5 model levels as the default meteorology (proposed) |
+| [0017](0017-model-levels-default.md) | ERA5 model levels as the default meteorology |
 | [0018](0018-met-bazarr.md) | Meteorology preparation lives in met-bazarr (proposed; GATES may join) |
 | [0019](0019-met-format-versioning.md) | A versioned `glide` met format, with provenance and rules for validation inputs (proposed) |
 | [0020](0020-time-meaning-of-period-fields.md) | Means and accumulations held through the interval they average, as NAME does; u* from stresses |

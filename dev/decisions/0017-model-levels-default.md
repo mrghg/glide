@@ -40,5 +40,6 @@ subsetting; a larger host meteorology cache, roughly in proportion to the
 number of internal levels (about 90 GiB instead of 52 GiB at 192 cached hours on
 the EUROPE domain); a somewhat slower vertical interpolation.
 
-**Status.** Proposed 2026-10-16. Implemented by queue task A01 (roadmap 6d).
+**Status.** Adopted 2026-11-23, implemented and validated by queue task A01
+(roadmap 6d); results in `dev/agent/progress/A01.md`.
 Docs: [docs/met_schema.md](../../docs/met_schema.md).

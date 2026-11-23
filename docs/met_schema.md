@@ -350,8 +350,10 @@ list** of AGL heights in metres. Omit it for the 40-level default.
 Guidance: ~40 levels roughly matches ERA5 model levels' near-surface density (~23
 below 1.5 km); beyond that you are interpolating rather than resolving new
 structure. **The host meteorology cache scales linearly with the level count** —
-at 192 cached hours on the EUROPE domain, 23 levels is ≈52 GiB but 40 levels is
-≈90 GiB, so raise SLURM `--mem` accordingly.
+measured on the EUROPE domain (task A01, GH200), about 0.15 GiB per cached hour
+at 23 levels and 0.26 GiB at 40, so 192 cached hours need ≈32 GiB and ≈56 GiB
+plus a few GiB of base, within a 115 GB one-GPU allocation. Size SLURM `--mem`
+accordingly; `make_multisite_config.py`'s estimate is deliberately higher.
 `make_multisite_config.py --vertical-levels N` does this arithmetic for you.
 
 ---

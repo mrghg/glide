@@ -5,7 +5,7 @@ set -euo pipefail
 source scripts/gpu_env.sh
 export GLIDE_PHASE_TIMERS=1
 mkdir -p outputs
-for name in model pressure23; do
+for name in ${A01_RUNS:-model pressure23}; do
 	/usr/bin/time -v "${GLIDE_PYTHON}" -m lpdm.main \
 		--config "scripts/validation/a01/${name}.yaml" --device cuda \
 		--output-uri "outputs/a01-${name}" > "outputs/a01-${name}.log" 2>&1
