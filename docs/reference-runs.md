@@ -197,7 +197,9 @@ $$
 - $N$ is the number of particles the model actually released (§4);
 - $I_p(t)$ is 1 while particle $p$ is inside the cell horizontally **and**
   between 0 and 40 m above the model's ground, and 0 otherwise;
-- $\rho_p(t)$ is the model's air density at the particle (kg m⁻³);
+- $\rho_p(t)$ is the model's **dry-air** density at the particle,
+  $(p - e)/(R_d T)$ (kg m⁻³), so $S$ is for the dry-air mole fraction
+  (decision 0022);
 - $h$ = 40 m;
 - $M_\mathrm{air}$ = 0.02897 kg mol⁻¹;
 - the integral runs over the particle's 240 hours.
@@ -214,13 +216,22 @@ Points to hold to:
   field per release is delivered. Footprints resolved in time are not
   needed.
 - **Particles that leave the domain stop contributing.**
+- **The density divides each particle as it is counted,** at every 300 s
+  sample, not the summed residence afterwards. Near the surface, residence and
+  density vary together (more time in the layer at night, in denser air), so
+  dividing afterwards is biased (decision 0022).
 
 FLEXPART's native backward output with `IND_SOURCE = 1` and
-`IND_RECEPTOR = 2` is in s m³ kg⁻¹. Summed over all output times and
-multiplied by $M_\mathrm{air} / h$, it gives $S$. NAME's output is converted
-with the group's usual conversion, with the 40 m layer and the same
-$M_\mathrm{air}$. Each runner records the conversion used, and keeps the
-native output.
+`IND_RECEPTOR = 2` is in s m³ kg⁻¹, divided per particle by the moist-air
+density $p/(R_d T_v)$. Summed over all output times and multiplied by
+$M_\mathrm{air} / h$, it gives $S$ for moist air; multiplying each cell by
+$p / ((p - e)(1 + 0.608\,q))$, averaged over the period from FLEXPART's
+meteorology, gives it for dry air. NAME's output is its Mixing Ratio in
+ppm s, divided per cell by $p/(R_d T)$; ppm s × 10⁻⁶ × cell area ÷ 3,600 s
+gives $S$ for moist air, and multiplying each cell by $p/(p - e)$, from the
+UM, gives it for dry air. In humid summer air the two corrections are about
+1.5% (FLEXPART) and 2.5% (NAME). Each runner records the conversion used, and
+keeps the native output.
 
 ## 7. Model settings
 
