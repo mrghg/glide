@@ -276,13 +276,13 @@ Two modes, distinguished only by what the level coordinate *means*. Both require
 3-D `geopotential` and `geopotential_at_surface`; height always comes from
 geopotential, so both share the same AGL machinery.
 
-### Pressure levels (default)
+### Pressure levels
 
 The level coordinate holds **pressure**. Units come from its `units` attribute —
 `hPa` (or `mbar`/`millibar`) or `Pa`. With no units attribute, values ≤ 2000 are
 assumed hPa, otherwise Pa. Any ordering and any number of levels.
 
-### Model / hybrid levels
+### Model / hybrid levels (the default, decision 0017)
 
 The level coordinate is a **level index**. Per-level heights come directly from
 the 3-D `geopotential` field, exactly as on pressure levels — but pressure has to
@@ -329,9 +329,11 @@ ladder is what makes the vertical interpolation cheap enough for the per-step ho
 path.) So the *source's* level count does not set the model's effective vertical
 resolution — this grid does, and it also sets the meteorology cache size.
 
-The default is 23 levels, 13 of them below 1.5 km. That suits 37 pressure levels
-(~5 below 1.5 km) but **under-uses a model-level source**, which carries ~20
-there. Raise it:
+The default is 40 levels stretched from `first_layer_m` (decision 0017, task
+A01; interim until the convergence study, A5), which roughly matches the
+near-surface density of ERA5's model levels (~20 below 1.5 km). Before A01 the
+default was a fixed 23-level ladder, 13 below 1.5 km; pin it explicitly with
+`vertical_levels: <list>` to reproduce older runs. To set the grid yourself:
 
 ```yaml
 met_domain:
@@ -343,7 +345,7 @@ met_domain:
 `vertical_levels` accepts either a **count** (layers stretch geometrically from
 `first_layer_m` to `alt_max_m`, concentrating resolution near the surface, with
 the ratio solved so they span the domain exactly) or an **explicit ascending
-list** of AGL heights in metres. Omit it for the built-in default.
+list** of AGL heights in metres. Omit it for the 40-level default.
 
 Guidance: ~40 levels roughly matches ERA5 model levels' near-surface density (~23
 below 1.5 km); beyond that you are interpolating rather than resolving new

@@ -144,9 +144,11 @@ upward by roughly the full hill height; with it, it holds its AGL to a few metre
 (`tests/test_terrain_transport.py`). The consequence for footprints is not
 subtle: before the fix, 86.6% of high-terrain cells had *zero* surface footprint.
 
-The default ladder is 23 levels from 0 to `met_domain.alt_max_m`, 13 of them
-below 1.5 km; `met_domain.vertical_levels` replaces it with a geometrically
-stretched grid of any count, or an explicit list. **This grid, not the source's
+The default ladder is 40 levels from 0 to `met_domain.alt_max_m`, stretched
+geometrically from a `first_layer_m` (10 m) lowest layer (decision 0017;
+interim until task A5). `met_domain.vertical_levels` replaces it with a
+stretched grid of any count, or an explicit list; the pre-A01 default was a
+fixed 23-level ladder. **This grid, not the source's
 level count, sets the vertical resolution the physics sees** — see
 [met_schema.md](met_schema.md).
 
