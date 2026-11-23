@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -466,7 +467,7 @@ def parse_stat_file(path) -> list[tuple[str, str]]:
     """Read a ``statA``/``statT`` file as (label, printed value) in order,
     skipping the header and the record-count line."""
     out = []
-    lines = open(path, encoding="latin-1").read().splitlines()
+    lines = Path(path).read_text(encoding="latin-1").splitlines()
     for line in lines[5:]:
         if not line.strip():
             continue
@@ -493,7 +494,7 @@ def compare_with_stat_file(stats: DatemStatistics, path) -> list[tuple[str, str,
     if len(printed) != len(ours):
         raise ValueError(f"{path}: {len(printed)} values, expected {len(ours)}")
     diffs = []
-    for (lab_p, val_p), (lab_o, val_o) in zip(printed, ours, strict=True):
+    for (_lab_p, val_p), (lab_o, val_o) in zip(printed, ours, strict=True):
         if val_p != val_o:
             diffs.append((lab_o, val_o, val_p))
     return diffs
