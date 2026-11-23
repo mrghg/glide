@@ -366,6 +366,14 @@ class OutputGridConfig(_Frozen):
     n_y: int = Field(..., gt=0)
     z_edges_m: tuple[float, ...] = Field(..., min_length=2)
     n_time_bins: int = Field(..., gt=0)
+    # Width of each time-ago bin (decision 0016). Ages count back from each release
+    # window's end; bin k holds ages in [k, k+1) x time_bin_seconds. With one bin
+    # the footprint is time-integrated and the width is not used.
+    time_bin_seconds: int = Field(3600, gt=0)
+    # With several bins, n_time_bins x time_bin_seconds must cover the simulation
+    # length, or residence older than the axis is dropped. Dropping it must be
+    # asked for (decision 0016).
+    drop_older_ages: bool = False
 
     @field_validator("z_edges_m")
     @classmethod
@@ -501,6 +509,23 @@ class RunConfig(_Frozen):
     def _check_simulation_length_vs_release(self) -> RunConfig:
         if self.simulation.length_seconds <= self.release.duration_seconds:
             raise ValueError("simulation.length_seconds must be > release.duration_seconds")
+        return self
+
+    @model_validator(mode="after")
+    def _check_time_bins_cover_simulation(self) -> RunConfig:
+        og = self.output_grid
+        covered = og.n_time_bins * og.time_bin_seconds
+        if (
+            og.n_time_bins > 1
+            and covered < self.simulation.length_seconds
+            and not og.drop_older_ages
+        ):
+            raise ValueError(
+                f"output_grid: {og.n_time_bins} time bins of {og.time_bin_seconds} s cover "
+                f"{covered} s, less than simulation.length_seconds="
+                f"{self.simulation.length_seconds}, so older residence would be dropped. "
+                "Add bins, widen them, or set output_grid.drop_older_ages: true (decision 0016)."
+            )
         return self
 
     @model_validator(mode="after")

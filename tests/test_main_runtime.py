@@ -1461,6 +1461,7 @@ def test_met_ending_exactly_at_release_end_is_enough(
     cfg = _make_run_config(
         release_duration_seconds=interval_seconds,
         simulation_length_seconds=21600,
+        n_time_bins=1,
         dt_seconds=300,
         n_particles=64,
         release_seed=42,
@@ -1603,6 +1604,7 @@ def test_held_mean_used_by_a_step_is_the_mean_over_that_step(
     cfg = _make_run_config(
         release_duration_seconds=interval_seconds,
         simulation_length_seconds=21600,
+        n_time_bins=1,
         dt_seconds=300,
         n_particles=32,
         release_seed=42,
@@ -2178,3 +2180,61 @@ def test_run_metadata_lists_met_stores(tmp_path: Path) -> None:
     cfg = _make_run_config(output_uri=str(tmp_path / "out"))
     metadata = _run(cfg, reader=_make_reader(cfg, wind_fn=lambda _: (5.0, 0.0, 0.0)))
     assert metadata["runtime"]["met_stores"] == []
+
+
+# ---- A00: time-ago bin width (decision 0016) ------------------------------------
+
+
+def _binned_config(tmp_path: Path, name: str, length_s: int, n_bins: int, width_s: int, **og):
+    base = _make_periodic_config(
+        output_uri=str(tmp_path / name),
+        n_releases=1,
+        duration_seconds=300,
+        n_particles_per_release=16,
+        simulation_length_seconds=3600,  # valid with the fixture's 3 bins; set below
+    ).model_dump()
+    base["simulation"]["length_seconds"] = length_s
+    base["output_grid"].update(n_time_bins=n_bins, time_bin_seconds=width_s, **og)
+    return RunConfig.model_validate(base)
+
+
+@pytest.mark.parametrize(
+    ("length_s", "n_bins", "width_s"),
+    [(10800, 1, 3600), (10800, 3, 3600), (21600, 3, 7200), (172800, 2, 86400)],
+    ids=["one-bin", "hourly", "two-hourly", "daily-on-two-days"],
+)
+def test_time_bin_labels_match_indexing(
+    tmp_path: Path, length_s: int, n_bins: int, width_s: int, monkeypatch
+) -> None:
+    """Each bin holds the residence its labels say: in still air every particle
+    spends one bin width in each full bin, the axis carries one more bin for the
+    release window, and the whole run is kept."""
+
+    monkeypatch.setattr(PlaceholderConstantOU, "sigma_w2", 0.0)
+    cfg = _binned_config(tmp_path, "out", length_s, n_bins, width_s)
+    _run(cfg, reader=_make_multi_release_reader(cfg, wind_fn=lambda _: (0.0, 0.0, 0.0)))
+
+    fp = xr.open_zarr(tmp_path / "out" / "footprints.zarr")
+    per_bin = fp["footprint"].sum(dim=("release", "z_bin", "latitude", "longitude")).values
+    assert float(per_bin.sum()) == pytest.approx(length_s, rel=1e-3)
+    if n_bins == 1:
+        assert per_bin.shape == (1,)
+        return
+    w_h = width_s / 3600.0
+    assert per_bin.shape == (n_bins + 1,)  # one extra bin for the 300 s release window
+    np.testing.assert_allclose(fp["time_ago_start_hours"].values, np.arange(n_bins + 1) * w_h)
+    np.testing.assert_allclose(fp["time_ago_end_hours"].values, (np.arange(n_bins + 1) + 1) * w_h)
+    # Ages count from the window's end, so the first bin gives up to one window
+    # (300 s) to the extra last bin; the middle bins are full.
+    assert width_s - 300 - 1 <= per_bin[0] <= width_s + 1
+    np.testing.assert_allclose(per_bin[1:n_bins], width_s, rtol=1e-3)
+    assert 0 <= per_bin[n_bins] <= 300 + 1
+
+
+def test_time_bins_must_cover_the_simulation(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="drop_older_ages"):
+        _binned_config(tmp_path, "a", 10800, 2, 3600)
+    cfg = _binned_config(tmp_path, "b", 10800, 2, 3600, drop_older_ages=True)
+    assert cfg.output_grid.drop_older_ages
+    _binned_config(tmp_path, "c", 10800, 1, 3600)  # one bin: time-integrated, always fine
+    _binned_config(tmp_path, "d", 10800, 2, 5400)  # 2 x 1.5 h covers 3 h

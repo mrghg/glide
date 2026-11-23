@@ -419,33 +419,36 @@ def _met_interval(reader: MetReader) -> timedelta:
     return timedelta(seconds=reader.met_interval_seconds)
 
 
-def _footprint_time_bin_index(release_end: datetime, t_cursor: datetime, n_time_bins: int) -> int:
+def _footprint_time_bin_index(
+    release_end: datetime, t_cursor: datetime, n_time_bins: int, time_bin_seconds: float = 3600.0
+) -> int:
     """Map the current backward integration cursor to a 0-based time_ago bin."""
 
     if n_time_bins <= 0:
         raise ValueError("n_time_bins must be > 0")
 
     elapsed_seconds = max(0.0, release_end.timestamp() - t_cursor.timestamp())
-    return min(n_time_bins - 1, int(elapsed_seconds / 3600.0))
+    return min(n_time_bins - 1, int(elapsed_seconds / time_bin_seconds))
 
 
 def _footprint_time_bin_count(cfg: RunConfig, releases: Sequence[ConcreteRelease]) -> int:
     """Length of the footprint's ``time_ago`` axis.
 
-    Ages are measured from each release window's END in one-hour bins, and a
-    particle released at the window's start is followed for
-    ``simulation.length_seconds`` from there, so it reaches an age of the length
-    plus the release duration. ``output_grid.n_time_bins`` counts the hours of
-    travel to resolve; the axis adds enough bins for the longest release window,
-    so no particle's resolved hours fall off the end. One bin stays one bin: the
-    time-integrated footprint.
+    Ages are measured from each release window's END in bins of
+    ``output_grid.time_bin_seconds`` (decision 0016), and a particle released at
+    the window's start is followed for ``simulation.length_seconds`` from there,
+    so it reaches an age of the length plus the release duration.
+    ``output_grid.n_time_bins`` counts the bins of travel to resolve; the axis
+    adds enough bins for the longest release window, so no particle's resolved
+    travel falls off the end. One bin stays one bin: the time-integrated
+    footprint.
     """
 
     n_time_bins = cfg.output_grid.n_time_bins
     if n_time_bins == 1:
         return 1
     longest_window_s = max(float(r.duration_seconds) for r in releases)
-    return n_time_bins + math.ceil(longest_window_s / 3600.0)
+    return n_time_bins + math.ceil(longest_window_s / cfg.output_grid.time_bin_seconds)
 
 
 def _build_footprint_dataset_metadata(
@@ -465,16 +468,17 @@ def _build_footprint_dataset_metadata(
     lon_edges = np.linspace(gridder.lon_min, gridder.lon_max, gridder.n_x + 1, dtype=np.float64)
     lat_edges = np.linspace(gridder.lat_min, gridder.lat_max, gridder.n_y + 1, dtype=np.float64)
     z_edges_m = gridder.z_edges.detach().cpu().numpy().astype(np.float64)
-    # Bins are one hour wide (the runtime's `t_idx`), counted back from each
-    # release window's end. A single bin holds every age: up to the simulation
-    # length plus the longest release window.
+    # Bins are output_grid.time_bin_seconds wide (the runtime's `t_idx`), counted
+    # back from each release window's end. A single bin holds every age: up to
+    # the simulation length plus the longest release window.
     if gridder.n_t == 1:
         longest_window_s = max(float(r.duration_seconds) for r in releases)
         time_bin_start_h = np.array([0.0])
         time_bin_end_h = np.array([(cfg.simulation.length_seconds + longest_window_s) / 3600.0])
     else:
-        time_bin_start_h = np.arange(gridder.n_t, dtype=np.float64)
-        time_bin_end_h = time_bin_start_h + 1.0
+        bin_h = cfg.output_grid.time_bin_seconds / 3600.0
+        time_bin_start_h = np.arange(gridder.n_t, dtype=np.float64) * bin_h
+        time_bin_end_h = time_bin_start_h + bin_h
 
     # Per-release coords ride along the `release` axis: a single timestamp may repeat across
     # sites (multi-site) or every release may be a distinct (location, time) (satellite).
@@ -1394,6 +1398,9 @@ def _run(
 
     outputs = _build_output_paths(cfg.io.output_uri)
     sim_length_s = float(sim.length_seconds)
+    # Time-ago bin width (decision 0016): fixed for the run, so a constant to the
+    # compiled step, never a per-step value (decision 0004).
+    time_bin_s = float(cfg.output_grid.time_bin_seconds)
     # Total particles killed for leaving met_domain across the whole run.
     run_escaped_total = 0
 
@@ -1586,7 +1593,7 @@ def _run(
                         )
                     last_convection_bracket_start = bracket_start
                 elapsed_s = (release_window_end_offsets_s - cursor_offset_s).clamp_(min=0.0)
-                t_idx = (elapsed_s / 3600.0).floor().to(torch.int64)
+                t_idx = (elapsed_s / time_bin_s).floor().to(torch.int64)
                 # Single-bin footprint = time-integrated: lump ALL residence ages into
                 # bin 0. Multi-bin: leave out-of-range ages for the gridder to DROP
                 # (clamping them into the last bin would contradict time_ago_end_hours).
@@ -1662,7 +1669,7 @@ def _run(
                     # Per-particle time-ago bin: each particle measures elapsed time
                     # from *its own* release window's end (stage 3 semantics).
                     elapsed_s = (release_window_end_offsets_s - cursor_offset_s).clamp_(min=0.0)
-                    t_idx = (elapsed_s / 3600.0).floor().to(torch.int64)
+                    t_idx = (elapsed_s / time_bin_s).floor().to(torch.int64)
                     # Single-bin footprint = time-integrated: lump ALL residence ages into
                     # bin 0. Multi-bin: leave out-of-range ages for the gridder to DROP
                     # (clamping them into the last bin would contradict time_ago_end_hours).
