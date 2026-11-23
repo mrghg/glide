@@ -6,6 +6,7 @@ accumulation, output writing) without depending on remote ERA5 data.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -2058,3 +2059,91 @@ def test_time_ago_axis_covers_release_window_in_hourly_bins(tmp_path: Path) -> N
         if n_bins > 1:
             widths = fp["time_ago_end_hours"].values - fp["time_ago_start_hours"].values
             np.testing.assert_array_equal(widths, 1.0)
+
+
+_HELD_T0 = datetime(2024, 1, 1, 0, 0, tzinfo=UTC)
+
+
+@dataclass
+class _HeldUstarReader(AnalyticMetReader):
+    """u* as a period mean (decision 0020) whose value in each window is the hour
+    its averaging period ends, counted from `_HELD_T0`, so the value a step uses
+    says which period it took its mean from."""
+
+    channel_names: tuple[str, ...] = ("u", "v", "w", "blh", "sp", "ustar")
+
+    def fetch_hourly_window(self, request: BoundingBoxRequest) -> HourlyMetTensors:
+        window = super().fetch_hourly_window(request)
+        k = window.channel_names.index("ustar")
+        start, end = window.hour_start.clone(), window.hour_end.clone()
+        start[k] = (request.time.start - _HELD_T0).total_seconds() / 3600.0
+        end[k] = (request.time.end - _HELD_T0).total_seconds() / 3600.0
+        return dataclasses.replace(
+            window, hour_start=start, hour_end=end, period_channels=frozenset({"ustar"})
+        )
+
+
+@pytest.mark.parametrize("static", [False, True], ids=["dynamic", "static"])
+@pytest.mark.parametrize("interval_seconds", [3600, 10800])
+def test_held_mean_used_by_a_step_is_the_mean_over_that_step(
+    tmp_path: Path, interval_seconds: int, static: bool, monkeypatch
+) -> None:
+    """Every step must use the period mean whose averaging period contains it.
+
+    Before the fix a step ending exactly on a met time read the window starting
+    there, and so held the FOLLOWING period's mean for that step (one step in
+    twelve at hourly met, 300 s steps).
+    """
+
+    import lpdm.main as glide_main
+
+    monkeypatch.setenv("GLIDE_STATIC_SUBSTEPS", "1" if static else "0")
+    current_step: dict[str, datetime] = {}
+    used: list[tuple[datetime, datetime, float]] = []
+
+    real_window_time = glide_main._step_window_time
+
+    def window_time(t_cursor: datetime, delta_s: float) -> datetime:
+        current_step["end"] = t_cursor
+        current_step["start"] = t_cursor - timedelta(seconds=delta_s)
+        return real_window_time(t_cursor, delta_s)
+
+    real_step = PlaceholderConstantOU.step
+
+    def step(self, particles, state, met_window, t_alpha, dt_seconds, active_mask, engine):
+        s, e = met_window.channel("ustar")
+        w = met_window.time_weight("ustar", float(t_alpha))
+        held = float(s[0, 0, 0] * (1.0 - w) + e[0, 0, 0] * w)
+        used.append((current_step["start"], current_step["end"], held))
+        return real_step(
+            self, particles, state, met_window, t_alpha, dt_seconds, active_mask, engine
+        )
+
+    monkeypatch.setattr(glide_main, "_step_window_time", window_time)
+    monkeypatch.setattr(PlaceholderConstantOU, "step", step)
+
+    cfg = _make_run_config(
+        release_duration_seconds=interval_seconds,
+        simulation_length_seconds=21600,
+        dt_seconds=300,
+        n_particles=32,
+        release_seed=42,
+        output_uri=str(tmp_path / "out"),
+    )
+    reader = _HeldUstarReader(
+        coverage_start=cfg.simulation.start_time - timedelta(hours=12),
+        coverage_end=cfg.simulation.start_time + timedelta(hours=6),
+        wind_fn=lambda _: (0.0, 0.0, 0.0),
+        interval_seconds=interval_seconds,
+    )
+
+    _run(cfg, reader=reader)
+
+    assert len(used) >= 21600 // 300
+    interval = timedelta(seconds=interval_seconds)
+    for step_start, step_end, held in used:
+        period_end = _HELD_T0 + timedelta(hours=held)
+        assert period_end - interval <= step_start and step_end <= period_end, (
+            f"step {step_start:%H:%M}-{step_end:%H:%M} used the mean over the period "
+            f"ending {period_end:%H:%M}"
+        )
