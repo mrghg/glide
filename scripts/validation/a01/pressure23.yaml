@@ -1,0 +1,98 @@
+# Task A01 comparison run (pressure23): configs/ab_multisite_perf.yaml with one day of
+# releases (3 sites x 24 h, one batch) and a 48 h met cache, to fit the 115 GB
+# allocation. Physics, particles, seed and grids as the reference config.
+batch:
+  max_releases_per_batch: 72
+convection:
+  emanuel:
+    closure_c: 0.03
+  scheme: emanuel_reduced
+io:
+  zarr_store: data/era5/EUROPE_*.zarr
+  output_uri: outputs/a01-pressure23
+memory:
+  gc_every_steps: 50
+  guard_check_every_steps: 10
+  log_every_steps: 100
+  met_cache_max_hours: 48
+  met_cache_on_host: true
+  met_prefetch: true
+met_domain:
+  alt_max_m: 15000.0
+  lat_bounds:
+  - 10.0
+  - 80.0
+  lon_bounds:
+  - -100.0
+  - 40.0
+  vertical_levels:
+  - 0.0
+  - 10.0
+  - 20.0
+  - 40.0
+  - 80.0
+  - 120.0
+  - 200.0
+  - 300.0
+  - 500.0
+  - 750.0
+  - 1000.0
+  - 1250.0
+  - 1500.0
+  - 2000.0
+  - 2500.0
+  - 3000.0
+  - 4000.0
+  - 5000.0
+  - 6000.0
+  - 8000.0
+  - 10000.0
+  - 12000.0
+  - 15000.0
+output_grid:
+  lat_bounds:
+  - 10.612
+  - 79.174
+  lon_bounds:
+  - -98.076
+  - 39.556
+  n_time_bins: 1
+  n_x: 391
+  n_y: 293
+  z_edges_m:
+  - 0.0
+  - 40.0
+  - 1000.0
+  - 5000.0
+release:
+  duration_seconds: 3600
+  kind: multi_point_periodic
+  n_particles_per_release: 20000
+  n_releases: 24
+  period_seconds: 3600
+  seed: 42
+  sites:
+  - alt_agl_m: 10.0
+    lat: 53.3267
+    lon: -9.9046
+    name: MHD
+  - alt_agl_m: 90.0
+    lat: 51.997
+    lon: -2.54
+    name: RGL
+  - alt_agl_m: 185.0
+    lat: 52.5176
+    lon: 1.1387
+    name: TAC
+  start_time: 2024-01-01 00:00:00+00:00
+simulation:
+  device: auto
+  dt_seconds: 60
+  length_seconds: 432000
+  start_time: 2024-01-01 00:00:00+00:00
+turbulence:
+  max_substeps: 6
+  meander:
+    coefficient: 0.16
+    enabled: true
+  scheme: hanna_1982
