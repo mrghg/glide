@@ -414,7 +414,7 @@ licensed with NAME. It is kept with the NAME output.
 | Run | Releases | Models | Purpose |
 | --- | --- | --- | --- |
 | `main` | All 4,704 (§4) | Both | The reference footprints |
-| `seed1` … `seed5` | 1 Jan 2019 00:00 – 5 Jan 23:00 (120 releases) at MHD, JFJ and CBW-20 | Both | How much footprints differ from random sampling alone |
+| `seed1` … `seed5` | 1 Jan 2019 00:00 – 5 Jan 23:00 (120 releases) at MHD, JFJ and CBW-20; and 1 Jul 2019 00:00 – 5 Jul 23:00 (120 releases) at LEF and at SGP (column) | Both | How much footprints differ from random sampling alone, for point and column releases, in winter and summer. NAME's January runs are done; the July LEF and SGP runs were added on 23 Nov 2026 |
 | Single-release runs | The seven standard cases below, one release per run | Both (NAME: if it can write particle positions) | Particle positions |
 | `kernel` | Standard case 1 only | FLEXPART | The effect of FLEXPART's default output kernel (`lusekerneloutput = .true.`) |
 | `meso` | The seven standard cases, one release per run | FLEXPART | The effect of FLEXPART's mesoscale term: `LTURBULENCE_MESO = 1`, all else as `main` |
