@@ -1910,9 +1910,11 @@ def test_met_cache_thrash_threshold_counts_windows_not_hours(caplog) -> None:
 # ---- VALIDATION-HANDOFF findings 1 and 2: release lifetime and the last window ----
 
 
+@pytest.mark.parametrize("static", [False, True], ids=["dynamic", "static"])
+@pytest.mark.parametrize("n_time_bins", [1, 3])
 @pytest.mark.parametrize("max_per_batch", [1, 2])
 def test_every_particle_followed_for_full_simulation_length(
-    tmp_path: Path, max_per_batch: int, monkeypatch
+    tmp_path: Path, max_per_batch: int, n_time_bins: int, static: bool, monkeypatch
 ) -> None:
     """Each particle is followed for simulation.length_seconds from its own release
     time, so with hour-long release windows every release accumulates the full
@@ -1921,6 +1923,10 @@ def test_every_particle_followed_for_full_simulation_length(
     Before the fix a batch stopped one length before its earliest window's END,
     so particles released early in that window lost up to an hour: 8,735 s of
     10,800 s for the first release, and the second's total depended on batching.
+
+    With hourly time-ago bins the axis must reach the length plus the release
+    window, as ages count from the window's end: 3 bins for 3 h become 4, and the
+    hourly totals sum to the same 10,800 s.
     """
 
     cfg = _make_periodic_config(
@@ -1933,11 +1939,12 @@ def test_every_particle_followed_for_full_simulation_length(
         max_releases_per_batch=max_per_batch,
     )
     # Still air, as in the review's probe: no particle leaves the footprint grid, so
-    # a release's total is exactly the time its particles were followed. One
-    # integrated time bin, so no age falls outside the time_ago axis.
+    # a release's total is exactly the time its particles were followed, and every
+    # resolved age stays on the time_ago axis.
     monkeypatch.setattr(PlaceholderConstantOU, "sigma_w2", 0.0)
+    monkeypatch.setenv("GLIDE_STATIC_SUBSTEPS", "1" if static else "0")
     cfg = cfg.model_copy(
-        update={"output_grid": cfg.output_grid.model_copy(update={"n_time_bins": 1})}
+        update={"output_grid": cfg.output_grid.model_copy(update={"n_time_bins": n_time_bins})}
     )
     reader = _make_multi_release_reader(cfg, wind_fn=lambda _: (0.0, 0.0, 0.0))
 
@@ -1946,6 +1953,7 @@ def test_every_particle_followed_for_full_simulation_length(
     fp = xr.open_zarr(tmp_path / "out" / "footprints.zarr")["footprint"]
     per_release = fp.sum(dim=("time_ago", "z_bin", "latitude", "longitude")).values
     np.testing.assert_allclose(per_release, cfg.simulation.length_seconds, rtol=1e-3)
+    assert fp.sizes["time_ago"] == (1 if n_time_bins == 1 else 4)
 
 
 @dataclass
@@ -1961,8 +1969,11 @@ class _CoverageCheckingReader(AnalyticMetReader):
         return super().fetch_hourly_window(request)
 
 
+@pytest.mark.parametrize("static", [False, True], ids=["dynamic", "static"])
 @pytest.mark.parametrize("interval_seconds", [3600, 10800])
-def test_met_ending_exactly_at_release_end_is_enough(tmp_path: Path, interval_seconds: int) -> None:
+def test_met_ending_exactly_at_release_end_is_enough(
+    tmp_path: Path, interval_seconds: int, static: bool, monkeypatch
+) -> None:
     """A store whose last time is the release end covers the run: the last backward
     step ends there and lies in the window before it. Before the fix the preflight
     asked for one more field, and the step ending on a met time read the window
@@ -1976,6 +1987,7 @@ def test_met_ending_exactly_at_release_end_is_enough(tmp_path: Path, interval_se
         release_seed=42,
         output_uri=str(tmp_path / "out"),
     )
+    monkeypatch.setenv("GLIDE_STATIC_SUBSTEPS", "1" if static else "0")
     release_end = cfg.simulation.start_time + timedelta(seconds=interval_seconds)
     reader = _CoverageCheckingReader(
         coverage_start=cfg.simulation.start_time
@@ -2020,3 +2032,29 @@ def test_backward_step_takes_the_short_step_first() -> None:
     assert _backward_step_seconds(3600.0, 300.0) == 300.0
     assert _backward_step_seconds(120.0, 300.0) == pytest.approx(120.0)
     assert _backward_step_seconds(300.0000001, 300.0) == 300.0
+
+
+def test_time_ago_axis_covers_release_window_in_hourly_bins(tmp_path: Path) -> None:
+    """n_time_bins hours of travel plus the longest release window, labelled in
+    hours; a single bin holds every age and says so."""
+
+    for n_bins, want_len, want_end in ((3, 5, 5.0), (2, 4, 4.0), (1, 1, 3.0 + 1.5)):
+        cfg = _make_periodic_config(
+            output_uri=str(tmp_path / f"out{n_bins}"),
+            n_releases=2,
+            duration_seconds=5400,
+            period_seconds=7200,
+            n_particles_per_release=16,
+            simulation_length_seconds=10800,
+        )
+        cfg = cfg.model_copy(
+            update={"output_grid": cfg.output_grid.model_copy(update={"n_time_bins": n_bins})}
+        )
+        _run(cfg, reader=_make_multi_release_reader(cfg, wind_fn=lambda _: (0.0, 0.0, 0.0)))
+        fp = xr.open_zarr(tmp_path / f"out{n_bins}" / "footprints.zarr")
+        assert fp.sizes["time_ago"] == want_len
+        assert float(fp["time_ago_start_hours"][0]) == 0.0
+        assert float(fp["time_ago_end_hours"][-1]) == want_end
+        if n_bins > 1:
+            widths = fp["time_ago_end_hours"].values - fp["time_ago_start_hours"].values
+            np.testing.assert_array_equal(widths, 1.0)

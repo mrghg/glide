@@ -429,6 +429,25 @@ def _footprint_time_bin_index(release_end: datetime, t_cursor: datetime, n_time_
     return min(n_time_bins - 1, int(elapsed_seconds / 3600.0))
 
 
+def _footprint_time_bin_count(cfg: RunConfig, releases: Sequence[ConcreteRelease]) -> int:
+    """Length of the footprint's ``time_ago`` axis.
+
+    Ages are measured from each release window's END in one-hour bins, and a
+    particle released at the window's start is followed for
+    ``simulation.length_seconds`` from there, so it reaches an age of the length
+    plus the release duration. ``output_grid.n_time_bins`` counts the hours of
+    travel to resolve; the axis adds enough bins for the longest release window,
+    so no particle's resolved hours fall off the end. One bin stays one bin: the
+    time-integrated footprint.
+    """
+
+    n_time_bins = cfg.output_grid.n_time_bins
+    if n_time_bins == 1:
+        return 1
+    longest_window_s = max(float(r.duration_seconds) for r in releases)
+    return n_time_bins + math.ceil(longest_window_s / 3600.0)
+
+
 def _build_footprint_dataset_metadata(
     cfg: RunConfig,
     gridder: FootprintGridder,
@@ -446,9 +465,16 @@ def _build_footprint_dataset_metadata(
     lon_edges = np.linspace(gridder.lon_min, gridder.lon_max, gridder.n_x + 1, dtype=np.float64)
     lat_edges = np.linspace(gridder.lat_min, gridder.lat_max, gridder.n_y + 1, dtype=np.float64)
     z_edges_m = gridder.z_edges.detach().cpu().numpy().astype(np.float64)
-    hours_per_bin = max(1.0, float(cfg.simulation.length_seconds) / 3600.0 / max(1, gridder.n_t))
-    time_bin_start_h = np.arange(gridder.n_t, dtype=np.float64) * hours_per_bin
-    time_bin_end_h = time_bin_start_h + hours_per_bin
+    # Bins are one hour wide (the runtime's `t_idx`), counted back from each
+    # release window's end. A single bin holds every age: up to the simulation
+    # length plus the longest release window.
+    if gridder.n_t == 1:
+        longest_window_s = max(float(r.duration_seconds) for r in releases)
+        time_bin_start_h = np.array([0.0])
+        time_bin_end_h = np.array([(cfg.simulation.length_seconds + longest_window_s) / 3600.0])
+    else:
+        time_bin_start_h = np.arange(gridder.n_t, dtype=np.float64)
+        time_bin_end_h = time_bin_start_h + 1.0
 
     # Per-release coords ride along the `release` axis: a single timestamp may repeat across
     # sites (multi-site) or every release may be a distinct (location, time) (satellite).
@@ -1380,7 +1406,7 @@ def _run(
             lon_bounds=tuple(out_grid.lon_bounds),
             lat_bounds=tuple(out_grid.lat_bounds),
             z_edges_m=out_grid.z_edges_m,
-            n_time_bins=out_grid.n_time_bins,
+            n_time_bins=_footprint_time_bin_count(cfg, all_releases),
             n_y=out_grid.n_y,
             n_x=out_grid.n_x,
             n_releases=len(batch.releases),
