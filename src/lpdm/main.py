@@ -388,6 +388,33 @@ def _met_window_start(reader: MetReader, dt: datetime) -> datetime:
     return reader.floor_to_window_start(dt)
 
 
+def _step_window_time(t_cursor: datetime, delta_s: float) -> datetime:
+    """The time that picks a backward step's met window: the step's midpoint.
+
+    A step covers (t_cursor - delta_s, t_cursor]. Taking the window that contains
+    `t_cursor` would give a step ending exactly on a met timestamp the window that
+    starts there, which the step never enters: it would need one field beyond the
+    end of a store, and would hold the next window's mean for that step (decision
+    0020). The midpoint is also where the time weight is evaluated
+    (`_advection_alpha_wind_mean`), so the two always agree.
+    """
+
+    return t_cursor - timedelta(seconds=0.5 * delta_s)
+
+
+def _backward_step_seconds(remaining_s: float, dt_s: float) -> float:
+    """Length of the next backward step when `remaining_s` is left to the terminus.
+
+    Full steps of `dt_s` end exactly on the terminus; any remainder is taken by the
+    first step. Remainders within 1 ms of 0 or `dt_s` count as whole steps.
+    """
+
+    remainder = remaining_s % dt_s
+    if remainder < 1e-3 or dt_s - remainder < 1e-3:
+        return min(dt_s, remaining_s)
+    return remainder
+
+
 def _met_interval(reader: MetReader) -> timedelta:
     return timedelta(seconds=reader.met_interval_seconds)
 
@@ -465,8 +492,12 @@ def _validate_meteorology_time_coverage(
     """Fail early when the configured run requires times outside dataset coverage."""
 
     available_start, available_end = reader.get_time_coverage()
+    # Backward steps take the met window containing each step's midpoint
+    # (`_step_window_time`), so the latest window needed is the one ending at or
+    # after `release_end`: no further field when `release_end` lies on the met grid.
     required_start = _met_window_start(reader, sim_start)
-    required_end = _met_window_start(reader, release_end) + _met_interval(reader)
+    end_window = _met_window_start(reader, release_end)
+    required_end = end_window if end_window == release_end else end_window + _met_interval(reader)
 
     if required_start < available_start or required_end > available_end:
         cadence_h = reader.met_interval_seconds / 3600.0
@@ -1265,7 +1296,11 @@ def _run(
         rel.release_time + timedelta(seconds=rel.duration_seconds) for rel in all_releases
     ]
     schedule_release_end = max(all_window_ends)
-    schedule_sim_start = min(all_window_ends) - timedelta(seconds=sim.length_seconds)
+    # Every particle is followed for sim.length_seconds from its OWN release time,
+    # and the earliest is released at the start of the earliest release window.
+    schedule_sim_start = min(rel.release_time for rel in all_releases) - timedelta(
+        seconds=sim.length_seconds
+    )
     _validate_meteorology_time_coverage(reader, cfg, schedule_release_end, schedule_sim_start)
 
     # Source cadence drives the met bracketing, the cache key and the convection
@@ -1369,15 +1404,19 @@ def _run(
             footprint_store_created = True
 
         # Per-batch cursor bounds: walk from the latest window-end down to the
-        # earliest window-end minus sim.length_seconds. This gives every release
-        # in the batch its own full backward integration window. For a
-        # single-release batch this collapses to today's [release_end, sim_start]
-        # bounds — preserving the stage 4 bit-equivalence guarantee.
+        # earliest particle release time minus sim.length_seconds. Each particle is
+        # active for sim.length_seconds from its own release time (`active_mask`), and
+        # the earliest is released at the START of the earliest release window, so
+        # stopping one length before a window's END cut short the particles released
+        # early in it, by up to the release duration, and made a release's lifetime
+        # depend on which releases shared its batch (VALIDATION-HANDOFF finding 1).
         batch_window_ends = [
             rel.release_time + timedelta(seconds=rel.duration_seconds) for rel in batch.releases
         ]
         batch_cursor_start = max(batch_window_ends)
-        batch_cursor_terminus = min(batch_window_ends) - timedelta(seconds=sim_length_s)
+        batch_cursor_terminus = min(rel.release_time for rel in batch.releases) - timedelta(
+            seconds=sim_length_s
+        )
 
         # Turbulence state is re-initialised per batch because the particle count
         # varies between batches (last batch may be smaller than the others).
@@ -1420,9 +1459,12 @@ def _run(
         while t_cursor > batch_cursor_terminus:
             if step_profiler is not None:
                 step_profiler.before_step()
-            delta_s = min(
-                float(sim.dt_seconds),
-                (t_cursor - batch_cursor_terminus).total_seconds(),
+            # A span that is not a whole number of steps takes its short step FIRST,
+            # at the top, where nothing has been released yet. A short LAST step would
+            # end each particle's final step early (a particle counts for a step when
+            # active at its upper end), costing it up to one dt of its lifetime.
+            delta_s = _backward_step_seconds(
+                (t_cursor - batch_cursor_terminus).total_seconds(), float(sim.dt_seconds)
             )
             t_prev = t_cursor - timedelta(seconds=delta_s)
 
@@ -1442,7 +1484,9 @@ def _run(
             #   dynamic - boolean-index the active subset (cheaper on CPU). Unchanged.
             if use_static:
                 with phase_timer.phase("met_fetch"):
-                    met_window, fetched_windows = prefetcher.get(t_cursor)
+                    met_window, fetched_windows = prefetcher.get(
+                        _step_window_time(t_cursor, delta_s)
+                    )
                 hour_windows += fetched_windows
                 if fetched_windows:
                     phase_timer.tick_fetch()
@@ -1518,7 +1562,9 @@ def _run(
                 if active_count > 0:
                     active_particles = particles[active_mask]
                     with phase_timer.phase("met_fetch"):
-                        met_window, fetched_windows = prefetcher.get(t_cursor)
+                        met_window, fetched_windows = prefetcher.get(
+                            _step_window_time(t_cursor, delta_s)
+                        )
                     hour_windows += fetched_windows
                     if fetched_windows:
                         phase_timer.tick_fetch()

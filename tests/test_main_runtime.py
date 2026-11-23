@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -26,6 +26,7 @@ from lpdm.met_reader import (
     MetFieldMetadata,
     MetReader,
 )
+from lpdm.turbulence.placeholder import PlaceholderConstantOU
 
 
 @dataclass
@@ -291,8 +292,8 @@ def test_constant_wind_advection_trajectory(tmp_path: Path) -> None:
     traj = pd.read_parquet(tmp_path / "out" / "trajectory_diagnostics.parquet")
     final_lon = float(traj.iloc[-1]["mean_lon"])
 
-    n_steps = cfg.simulation.length_seconds // cfg.simulation.dt_seconds
-    expected_disp_m = -u_const * (n_steps - 1) * cfg.simulation.dt_seconds
+    # Every particle is followed for the full simulation length from its release.
+    expected_disp_m = -u_const * cfg.simulation.length_seconds
     m_per_deg_lon = 111320.0
     expected_final_lon = cfg.release.lon + expected_disp_m / m_per_deg_lon
 
@@ -372,8 +373,8 @@ def test_hanna_constant_wind_preserves_mean_trajectory(
     traj = pd.read_parquet(tmp_path / "out" / "trajectory_diagnostics.parquet")
     final_lon = float(traj.iloc[-1]["mean_lon"])
 
-    n_steps = cfg.simulation.length_seconds // cfg.simulation.dt_seconds
-    expected_disp_m = -u_const * (n_steps - 1) * cfg.simulation.dt_seconds
+    # Every particle is followed for the full simulation length from its release.
+    expected_disp_m = -u_const * cfg.simulation.length_seconds
     m_per_deg_lon = 111320.0
     expected_final_lon = cfg.release.lon + expected_disp_m / m_per_deg_lon
 
@@ -1040,11 +1041,6 @@ def _make_periodic_config(
     start_time: datetime | None = None,
     seed: int | None = 42,
 ) -> RunConfig:
-    # Note: duration_seconds defaults to dt_seconds=300 so every release
-    # window-end lands exactly on the cursor grid. With a duration not a
-    # multiple of dt, the cursor skips the upper-boundary visit for the
-    # earliest release in each batch and that release loses one step's
-    # worth of mass — a real but small discrete-time effect.
     start_time = start_time or datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC)
     return RunConfig.model_validate(
         {
@@ -1315,13 +1311,11 @@ def test_periodic_release_footprint_mass_matches_active_particle_time(tmp_path: 
 
 
 def test_periodic_release_per_release_mass_near_expected(tmp_path: Path) -> None:
-    """Constant wind ⇒ each release accumulates ≈ sim_length × dt per particle.
+    """Constant wind ⇒ each release accumulates ≈ sim_length per particle.
 
-    Per-release totals are not exactly equal because the cursor loop excludes
-    its terminus value: the earliest release in each batch's reach-back loses
-    one cursor step's worth of mass at the lower boundary. With
-    sim_length=10800 s and dt=300 s that's ≈ 36 steps/release, so a 1-step
-    asymmetry is ~3%. The tolerance below is 5%.
+    Totals fall a little short because the placeholder scheme's σw carries some
+    particles above the footprint grid's top; the 5% tolerance allows for that.
+    The exact still-air check is `test_every_particle_followed_for_full_simulation_length`.
     """
 
     cfg = _make_periodic_config(
@@ -1331,7 +1325,7 @@ def test_periodic_release_per_release_mass_near_expected(tmp_path: Path) -> None
         duration_seconds=300,
         n_particles_per_release=256,
         simulation_length_seconds=10800,
-        max_releases_per_batch=24,  # single batch so only the earliest release pays the cost
+        max_releases_per_batch=24,
     )
     reader = _make_multi_release_reader(cfg, wind_fn=lambda _: (5.0, 0.0, 0.0))
 
@@ -1352,11 +1346,10 @@ def test_periodic_release_batch_chunking_preserves_shape_and_conserves_per_chunk
     mass conservation (footprint_total == sum(active_count*dt) / n_particles)
     must hold *within each chunking*.
 
-    Per-release totals do depend on chunking because the earliest release in
-    each batch pays a one-cursor-step boundary cost — so a 2-batch run of 4
-    releases has two boundary losses while a single-batch run has one. The
-    invariant is conservation against the diagnostic, not bit-equivalence
-    across chunkings.
+    Totals are not bit-identical across chunkings, because particles in different
+    batches draw different turbulence, so the invariant is conservation against
+    the diagnostic. That every release is followed for the full length whatever
+    its batch is checked in `test_every_particle_followed_for_full_simulation_length`.
     """
 
     def _run_and_check(out_path: Path, max_per_batch: int) -> tuple[tuple[int, ...], float]:
@@ -1388,8 +1381,7 @@ def test_periodic_release_batch_chunking_preserves_shape_and_conserves_per_chunk
 
     # Shapes must agree (same n_releases, same grid).
     assert shape_one == shape_two
-    # Totals can differ by one boundary-step per extra batch; just sanity-bound
-    # the difference to a few percent.
+    # Totals differ only through the turbulence draws; sanity-bound to a few percent.
     assert abs(total_one - total_two) / total_one < 5e-2
 
 
@@ -1913,3 +1905,118 @@ def test_met_cache_thrash_threshold_counts_windows_not_hours(caplog) -> None:
     with caplog.at_level(logging.WARNING):
         _warn_if_met_cache_thrashes(cfg, [b0, b1], sim_len, 10800)
     assert "cross-batch reuse threshold" not in caplog.text  # 144 >= ~56 windows
+
+
+# ---- VALIDATION-HANDOFF findings 1 and 2: release lifetime and the last window ----
+
+
+@pytest.mark.parametrize("max_per_batch", [1, 2])
+def test_every_particle_followed_for_full_simulation_length(
+    tmp_path: Path, max_per_batch: int, monkeypatch
+) -> None:
+    """Each particle is followed for simulation.length_seconds from its own release
+    time, so with hour-long release windows every release accumulates the full
+    length per particle, whatever releases share its batch.
+
+    Before the fix a batch stopped one length before its earliest window's END,
+    so particles released early in that window lost up to an hour: 8,735 s of
+    10,800 s for the first release, and the second's total depended on batching.
+    """
+
+    cfg = _make_periodic_config(
+        output_uri=str(tmp_path / "out"),
+        n_releases=2,
+        period_seconds=3600,
+        duration_seconds=3600,
+        n_particles_per_release=128,
+        simulation_length_seconds=10800,
+        max_releases_per_batch=max_per_batch,
+    )
+    # Still air, as in the review's probe: no particle leaves the footprint grid, so
+    # a release's total is exactly the time its particles were followed. One
+    # integrated time bin, so no age falls outside the time_ago axis.
+    monkeypatch.setattr(PlaceholderConstantOU, "sigma_w2", 0.0)
+    cfg = cfg.model_copy(
+        update={"output_grid": cfg.output_grid.model_copy(update={"n_time_bins": 1})}
+    )
+    reader = _make_multi_release_reader(cfg, wind_fn=lambda _: (0.0, 0.0, 0.0))
+
+    _run(cfg, reader=reader)
+
+    fp = xr.open_zarr(tmp_path / "out" / "footprints.zarr")["footprint"]
+    per_release = fp.sum(dim=("time_ago", "z_bin", "latitude", "longitude")).values
+    np.testing.assert_allclose(per_release, cfg.simulation.length_seconds, rtol=1e-3)
+
+
+@dataclass
+class _CoverageCheckingReader(AnalyticMetReader):
+    """Refuses, as a real store does, a window that reaches beyond its coverage."""
+
+    fetched_starts: list[datetime] = field(default_factory=list)
+
+    def fetch_hourly_window(self, request: BoundingBoxRequest) -> HourlyMetTensors:
+        if request.time.start < self.coverage_start or request.time.end > self.coverage_end:
+            raise KeyError(f"window {request.time.start}..{request.time.end} outside the store")
+        self.fetched_starts.append(request.time.start)
+        return super().fetch_hourly_window(request)
+
+
+@pytest.mark.parametrize("interval_seconds", [3600, 10800])
+def test_met_ending_exactly_at_release_end_is_enough(tmp_path: Path, interval_seconds: int) -> None:
+    """A store whose last time is the release end covers the run: the last backward
+    step ends there and lies in the window before it. Before the fix the preflight
+    asked for one more field, and the step ending on a met time read the window
+    starting there (held means and convection from the following period)."""
+
+    cfg = _make_run_config(
+        release_duration_seconds=interval_seconds,
+        simulation_length_seconds=21600,
+        dt_seconds=300,
+        n_particles=64,
+        release_seed=42,
+        output_uri=str(tmp_path / "out"),
+    )
+    release_end = cfg.simulation.start_time + timedelta(seconds=interval_seconds)
+    reader = _CoverageCheckingReader(
+        coverage_start=cfg.simulation.start_time
+        - timedelta(seconds=cfg.simulation.length_seconds + interval_seconds),
+        coverage_end=release_end,
+        wind_fn=lambda _: (5.0, 0.0, 0.0),
+        interval_seconds=interval_seconds,
+    )
+
+    metadata = _run(cfg, reader=reader)
+
+    assert metadata["runtime"]["status"] == "completed"
+    assert max(reader.fetched_starts) == release_end - timedelta(seconds=interval_seconds)
+
+
+def test_met_ending_before_release_end_still_rejected(tmp_path: Path) -> None:
+    cfg = _make_run_config(
+        release_duration_seconds=3600,
+        simulation_length_seconds=10800,
+        output_uri=str(tmp_path / "out"),
+    )
+    reader = AnalyticMetReader(
+        coverage_start=cfg.simulation.start_time - timedelta(hours=5),
+        coverage_end=cfg.simulation.start_time + timedelta(minutes=30),
+        wind_fn=lambda _: (0.0, 0.0, 0.0),
+    )
+    with pytest.raises(PreflightValidationError):
+        _run(cfg, reader=reader)
+
+
+def test_step_window_time_is_the_step_midpoint() -> None:
+    from lpdm.main import _step_window_time
+
+    t = datetime(2024, 1, 1, 13, 0, tzinfo=UTC)
+    assert _step_window_time(t, 300.0) == datetime(2024, 1, 1, 12, 57, 30, tzinfo=UTC)
+
+
+def test_backward_step_takes_the_short_step_first() -> None:
+    from lpdm.main import _backward_step_seconds
+
+    assert _backward_step_seconds(3660.0, 300.0) == pytest.approx(60.0)
+    assert _backward_step_seconds(3600.0, 300.0) == 300.0
+    assert _backward_step_seconds(120.0, 300.0) == pytest.approx(120.0)
+    assert _backward_step_seconds(300.0000001, 300.0) == 300.0
