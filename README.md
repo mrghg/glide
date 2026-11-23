@@ -211,7 +211,7 @@ Written under `io.output_uri`:
 
 | File | Contents |
 | --- | --- |
-| `footprints.zarr` | the 5-D footprint store, streamed one batch at a time |
+| `footprints.zarr` | the 5-D footprint store, streamed one batch at a time. Time-ago bins are `output_grid.time_bin_seconds` wide (default 1 h), counted back from each release window's end; `n_time_bins` of them must cover the simulation length unless `output_grid.drop_older_ages: true`, and the axis adds bins for the release window. `time_ago_start_hours` / `time_ago_end_hours` give each bin's edges |
 | `endpoint_particles.parquet` | final particle states |
 | `trajectory_diagnostics.parquet` | per-run diagnostics |
 | `run_metadata.json` | provenance, config echo, timings, guard report |

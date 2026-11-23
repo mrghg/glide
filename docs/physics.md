@@ -549,17 +549,22 @@ convention, a mixed-layer bin, and a free-troposphere bin. Accumulating *directl
 into a bin that matches the reference's surface layer makes the downstream unit
 conversion exact rather than a depth-weighted approximation.
 
-Time-ago bins are one hour wide and are measured from each particle's **own**
-release window end, so a multi-release batch produces correctly-aged footprints
-for every release from one sweep, and bin *k* of a release covers the same
-absolute hour for all its particles. Every particle is followed for
+Time-ago bins are `output_grid.time_bin_seconds` wide (default 3,600 s, one
+hour; decision 0016) and are measured from each particle's **own** release
+window end, so a multi-release batch produces correctly-aged footprints for
+every release from one sweep, and bin *k* of a release covers the same absolute
+interval for all its particles. Every particle is followed for
 `simulation.length_seconds` from its own release time, so one released at the
 start of its window reaches an age of the length plus the window's duration.
-`n_time_bins` counts the hours of travel to resolve, and the `time_ago` axis adds
-one bin per started hour of the longest release window, so those hours stay on
-the axis. With `n_time_bins: 1` all ages collapse into one bin, giving the
-time-integrated footprint the FLEXPART comparison uses; with more bins, ages past
-the last bin are dropped rather than clamped, so the axis label stays honest.
+`n_time_bins` counts the bins of travel to resolve, and the `time_ago` axis adds
+one bin per started bin width of the longest release window, so that travel
+stays on the axis. `time_ago_start_hours` and `time_ago_end_hours` give each
+bin's edges. With `n_time_bins: 1` all ages collapse into one bin, giving the
+time-integrated footprint the FLEXPART comparison uses. With more bins,
+`n_time_bins × time_bin_seconds` must cover the simulation length; a
+configuration that does not is refused unless it sets
+`output_grid.drop_older_ages: true`, and then ages past the last bin are
+dropped rather than clamped, so the axis labels stay honest.
 
 Particles outside the grid horizontally, vertically, in time-ago, or in release
 index contribute nothing.

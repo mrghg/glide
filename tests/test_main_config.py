@@ -45,7 +45,7 @@ def _base_dict(**section_overrides: dict[str, object]) -> dict[str, object]:
             "n_x": 24,
             "n_y": 24,
             "z_edges_m": [0.0, 1000.0, 2000.0, 3000.0, 4000.0, 5000.0],
-            "n_time_bins": 2,
+            "n_time_bins": 3,
         },
         "met_domain": {
             "lon_bounds": [-3.0, 5.0],
@@ -482,6 +482,7 @@ def test_validate_meteorology_time_coverage_rejects_insufficient_history() -> No
         _base_dict(
             simulation={"start_time": "2024-01-01T06:00:00Z", "length_seconds": 36000},
             release={"duration_seconds": 3600},
+            output_grid={"n_time_bins": 1},
         )
     )
     release_end = cfg.simulation.start_time + timedelta(seconds=cfg.release.duration_seconds)
@@ -577,3 +578,10 @@ def test_met_domain_vertical_levels_rejects_bad_grids(levels, match: str) -> Non
                 }
             )
         )
+
+
+def test_footprint_time_bin_index_uses_the_bin_width() -> None:
+    end = datetime(2024, 1, 1, 12, tzinfo=UTC)
+    assert _footprint_time_bin_index(end, end - timedelta(hours=5), 3, 7200.0) == 2
+    assert _footprint_time_bin_index(end, end - timedelta(hours=3, minutes=59), 3, 7200.0) == 1
+    assert _footprint_time_bin_index(end, end - timedelta(days=1, hours=1), 2, 86400.0) == 1

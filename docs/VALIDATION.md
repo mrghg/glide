@@ -239,12 +239,12 @@ import xarray as xr
 from lpdm.comparison import to_stilt_surface_footprint
 
 fp = xr.open_zarr("outputs/mhd-202401-hourly/footprints.zarr")["footprint"]
-one = fp.isel(release=0)        # or .sel() on the release coords
+one = fp.isel(release=0)  # or .sel() on the release coords
 
 stilt = to_stilt_surface_footprint(
     one,
-    surface_layer_depth_m=40.0,   # must equal the bottom z-bin you ran with
-    air_density_kg_m3=1.225,      # or a 2-D field from surface_air_density_from_met
+    surface_layer_depth_m=40.0,  # must equal the bottom z-bin you ran with
+    air_density_kg_m3=1.225,  # or a 2-D field from surface_air_density_from_met
     integrate_time=True,
 )
 ```
