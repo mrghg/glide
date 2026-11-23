@@ -29,27 +29,30 @@ never download data._
 
 | Path | Domain | Period | Levels | Cadence | Size | Use |
 | --- | --- | --- | --- | --- | --- | --- |
-| _to fill_ | | | | | | smoke tests |
-| _to fill_ | | | | | | reference multi-site benchmark |
-| `era5-model/EUR_19941023-19941028_ml.zarr` | EUR (30° W–40° E, 32–72° N) | 1994-10-23 00:00 – 1994-10-28 00:00 | model, 137 | 1 h | 13 GB | ETEX-1 (B10, A11) |
-| `era5-model/EUR_19941114-19941119_ml.zarr` | EUR (30° W–40° E, 32–72° N) | 1994-11-14 00:00 – 1994-11-19 00:00 | model, 137 | 1 h | 13 GB | ETEX-2 (B10, A11) |
-| `era5-model/NAM_19800708-19800712_ml.zarr` | NAM (120–55° W, 22–58° N) | 1980-07-08 00:00 – 1980-07-12 00:00 | model, 137 | 1 h | 8.3 GB | OKC80 (B12) |
-| `era5-model/NAM_19830918-19830922_ml.zarr` | NAM (120–55° W, 22–58° N) | 1983-09-18 00:00 – 1983-09-22 00:00 | model, 137 | 1 h | 8.3 GB | CAPTEX-1 (B10, A11) |
-| `era5-model/NAM_19830925-19830929_ml.zarr` | NAM (120–55° W, 22–58° N) | 1983-09-25 00:00 – 1983-09-29 00:00 | model, 137 | 1 h | 8.3 GB | CAPTEX-2 (B10, A11) |
-| `era5-model/NAM_19831002-19831006_ml.zarr` | NAM (120–55° W, 22–58° N) | 1983-10-02 00:00 – 1983-10-06 00:00 | model, 137 | 1 h | 8.3 GB | CAPTEX-3 (B10, A11) |
-| `era5-model/NAM_19831014-19831017_ml.zarr` | NAM (120–55° W, 22–58° N) | 1983-10-14 00:00 – 1983-10-17 00:00 | model, 137 | 1 h | 6.3 GB | CAPTEX-4 (B10, A11) |
-| `era5-model/NAM_19831026-19831101_ml.zarr` | NAM (120–55° W, 22–58° N) | 1983-10-26 00:00 – 1983-11-01 00:00 | model, 137 | 1 h | 13 GB | CAPTEX-5 to 7 (B10, A11) |
-| `era5-model/EUR_20181222-20190115_ml.zarr` | EUR (30° W–40° E, 32–72° N) | 2018-12-22 00:00 – 2019-01-15 00:00 | model, 137 | 1 h | 59 GB | Block EUR-Jan (A01 onward, A8a, A10); one heat-flux value filled, see `glide_filled_values` |
-  | `era5-model/EUR_20190621-20190715_ml.zarr` | EUR (30° W–40° E, 32–72° N) | 2019-06-21 00:00 – 2019-07-15 00:00 | model, 137 | 1 h | 58 GB | Block EUR-Jul (A8a, A10) |
-  | `era5-model/NAM_20181222-20190115_ml.zarr` | NAM (120–55° W, 22–58° N) | 2018-12-22 00:00 – 2019-01-15 00:00 | model, 137 | 1 h | 49 GB |Block NAM-Jan (A8a, A10) |
-  | `era5-model/NAM_20190621-20190715_ml.zarr` | NAM (120–55° W, 22–58° N) | 2019-06-21 00:00 – 2019-07-15 00:00 | model, 137 | 1 h | 50 GB | Block NAM-Jul (A8a, A10) |
-  | `era5-model/NAM_19870105-19870118_ml.zarr` | NAM (120–55° W, 22–58° N) | 1987-01-05 00:00 – 1987-01-18 00:00 | model, 137 | 1 h | 27 GB | ANATEX (B10, A11) |
-| `era5-model/EUROPE_20231201-20231231_ml.zarr` | EUROPE (98° W–39.5° E, 10.6–79.2° N) | 2023-12-01 00:00 – 2023-12-31 23:00 | model, 137 | 1 h | 244 GB | Reference config, model levels (A01 onward); same grid and times as `EUROPE_202312.zarr` |
-| `era5-model/EUROPE_20240101-20240131_ml.zarr` | EUROPE (98° W–39.5° E, 10.6–79.2° N) | 2024-01-01 00:00 – 2024-01-31 23:00 | model, 137 | 1 h | 245 GB | Reference config, model levels (A01 onward); same grid and times as `EUROPE_202401.zarr` |
+| `era5-pressure/EUROPE_202312.zarr` | EUROPE (98° W–39.5° E, 10.6–79.2° N) | 2023-12-01 00:00 – 2023-12-31 23:00 | pressure, 37 | 1 h | 69 GB | Reference config on pressure levels: A01's before-and-after comparison only |
+| `era5-pressure/EUROPE_202401.zarr` | EUROPE | 2024-01-01 00:00 – 2024-01-31 23:00 | pressure, 37 | 1 h | 69 GB | Reference config on pressure levels: A01's before-and-after comparison only |
+| `era5-model/EUROPE_20231201-20231231_ml.zarr` | EUROPE (98° W–39.5° E, 10.6–79.2° N) | 2023-12-01 00:00 – 2023-12-31 23:00 | model, 137 | 1 h | 244 GB | GLIDE's own download; for B1's equivalence check only; delete after B1|
+| `era5-model/EUROPE_20240101-20240131_ml.zarr` | EUROPE (98° W–39.5° E, 10.6–79.2° N) | 2024-01-01 00:00 – 2024-01-31 23:00 | model, 137 | 1 h | 245 GB | GLIDE's own download; for B1's equivalence check only; delete after B1 |
 | `um-mk10/EUR_20181222-20190115_UMG-Mk10.zarr` | EUR, UM grid (429 × 499) | 2018-12-22 00:00 – 2019-01-15 00:00 | UM theta levels, 59 | 3 h | 19 GB | Block EUR-Jan on Met Office meteorology (Tier 2); met-bazarr v0.2.0, validation input |
 | `um-mk10/EUR_20190621-20190715_UMG-Mk10.zarr` | EUR, UM grid (429 × 499) | 2019-06-21 00:00 – 2019-07-15 00:00 | UM theta levels, 59 | 3 h | 19 GB | Block EUR-Jul on Met Office meteorology (Tier 2); met-bazarr v0.2.0, validation input |
 | `um-mk10/NAM_20181222-20190115_UMG-Mk10.zarr` | NAM, UM grid (386 × 464) | 2018-12-22 00:00 – 2019-01-15 00:00 | UM theta levels, 59 | 3 h | 16 GB | Block NAM-Jan on Met Office meteorology (Tier 2); met-bazarr v0.2.0, validation input |
 | `um-mk10/NAM_20190621-20190715_UMG-Mk10.zarr` | NAM, UM grid (386 × 464) | 2019-06-21 00:00 – 2019-07-15 00:00 | UM theta levels, 59 | 3 h | 17 GB | Block NAM-Jul on Met Office meteorology (Tier 2); met-bazarr v0.2.0, validation input |
+| `era5-arco/EUR_20181222-20190115_ERA5-ARCO.zarr` | EUR (30° W–40° E, 32–72° N) | 2018-12-22 00:00 – 2019-01-15 00:00 | model, 137 | 1 h | 51 GB | Block EUR-Jan; validation input (met-bazarr v0.3.0); one heat-flux value filled |
+| `era5-arco/EUR_20190621-20190715_ERA5-ARCO.zarr` | EUR | 2019-06-21 00:00 – 2019-07-15 00:00 | model, 137 | 1 h | 50 GB | Block EUR-Jul; validation input (v0.3.0) |
+| `era5-arco/NAM_20181222-20190115_ERA5-ARCO.zarr` | NAM (120–55° W, 22–58° N) | 2018-12-22 00:00 – 2019-01-15 00:00 | model, 137 | 1 h | 43 GB | Block NAM-Jan; validation input (v0.3.0) |
+| `era5-arco/NAM_20190621-20190715_ERA5-ARCO.zarr` | NAM | 2019-06-21 00:00 – 2019-07-15 00:00 | model, 137 | 1 h | 43 GB | Block NAM-Jul; validation input (v0.3.0) |
+| `era5-arco/EUR_19941023-19941028_ERA5-ARCO.zarr` | EUR | 1994-10-23 00:00 – 1994-10-28 00:00 | model, 137 | 1 h | 11 GB | ETEX-1; validation input (v0.3.0) |
+| `era5-arco/EUR_19941114-19941119_ERA5-ARCO.zarr` | EUR | 1994-11-14 00:00 – 1994-11-19 00:00 | model, 137 | 1 h | 11 GB | ETEX-2; validation input (v0.3.0) |
+| `era5-arco/NAM_19830918-19830922_ERA5-ARCO.zarr` | NAM | 1983-09-18 00:00 – 1983-09-22 00:00 | model, 137 | 1 h | 7.2 GB | CAPTEX-1; validation input (v0.3.0) |
+| `era5-arco/NAM_19830925-19830929_ERA5-ARCO.zarr` | NAM | 1983-09-25 00:00 – 1983-09-29 00:00 | model, 137 | 1 h | 7.2 GB | CAPTEX-2; validation input (v0.3.0) |
+| `era5-arco/NAM_19831002-19831006_ERA5-ARCO.zarr` | NAM | 1983-10-02 00:00 – 1983-10-06 00:00 | model, 137 | 1 h | 7.2 GB | CAPTEX-3; validation input (v0.3.0) |
+| `era5-arco/NAM_19831014-19831017_ERA5-ARCO.zarr` | NAM | 1983-10-14 00:00 – 1983-10-17 00:00 | model, 137 | 1 h | 5.5 GB | CAPTEX-4; validation input (v0.3.0) |
+| `era5-arco/NAM_19831026-19831101_ERA5-ARCO.zarr` | NAM | 1983-10-26 00:00 – 1983-11-01 00:00 | model, 137 | 1 h | 11 GB | CAPTEX-5 to 7; validation input (v0.3.0) |
+| `era5-arco/NAM_19870105-19870118_ERA5-ARCO.zarr` | NAM | 1987-01-05 00:00 – 1987-01-18 00:00 | model, 137 | 1 h | 24 GB | ANATEX; validation input (v0.3.0) |
+| `era5-arco/NAM_19800708-19800712_ERA5-ARCO.zarr` | NAM (full box) | 1980-07-08 00:00 – 1980-07-12 00:00 | model, 137 | 1 h | 7.2 GB | OKC80 (B12); validation input (v0.3.0) |
+| `era5-arco/EUROPE_20231201-20231231_ERA5-ARCO.zarr` | EUROPE (98° W–39.5° E, 10.6–79.2° N) | 2023-12-01 00:00 – 2023-12-31 23:00 | model, 137 | 1 h | 214 GB | Reference config, model levels: A01 onward, benchmarks and GPU smoke tests.|
+| `era5-arco/EUROPE_20240101-20240131_ERA5-ARCO.zarr` | EUROPE | 2024-01-01 00:00 – 2024-01-31 23:00 | model, 137 | 1 h | 214 GB | Reference config, model levels: A01 onward, benchmarks and GPU smoke tests. |
+| `era5-arco/EUR_20190108-20190108_ERA5-ARCO.zarr` | EUR | 2019-01-08 00:00 – 23:00 | model, 137 | 1 h | 2.2 GB | met-bazarr build check only: inside the validation period, not for GLIDE development runs. |
 
 ## Reference data outside the repository
 
