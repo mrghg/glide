@@ -1913,3 +1913,12 @@ def test_met_cache_thrash_threshold_counts_windows_not_hours(caplog) -> None:
     with caplog.at_level(logging.WARNING):
         _warn_if_met_cache_thrashes(cfg, [b0, b1], sim_len, 10800)
     assert "cross-batch reuse threshold" not in caplog.text  # 144 >= ~56 windows
+
+
+def test_run_metadata_lists_met_stores(tmp_path: Path) -> None:
+    """Task B1: run_metadata.json records each meteorology store's provenance;
+    a reader with no stores (the analytic one) gives an empty list."""
+
+    cfg = _make_run_config(output_uri=str(tmp_path / "out"))
+    metadata = _run(cfg, reader=_make_reader(cfg, wind_fn=lambda _: (5.0, 0.0, 0.0)))
+    assert metadata["runtime"]["met_stores"] == []
