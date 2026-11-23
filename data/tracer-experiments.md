@@ -422,7 +422,7 @@ archives that skip when `$GLIDE_DATEM` or `$GLIDE_ETEX` is unset).
    `model_zero` (`-y`), `plume_only` (`-p`), `averaging` (`-at`, `-as`),
    `bootstrap` with a required `seed` (`-b`), and `contingency_level` (`-l`).
    It works in single precision with sequential sums, as `statmain` does;
-   in double precision four of the twelve files differed in one printed
+   in double precision six of the twelve files differed in one printed
    digit (factor-of-5 counts at ratio boundaries, averages in `-at`).
    - **Verified** (`python -m tracers verify-datem`): on DATEM's HYSPLIT
      predictions with `run_stat.sh`'s options it reproduces every printed
