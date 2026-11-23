@@ -212,9 +212,19 @@ Written under `io.output_uri`:
 | File | Contents |
 | --- | --- |
 | `footprints.zarr` | the 5-D footprint store, streamed one batch at a time. Time-ago bins are `output_grid.time_bin_seconds` wide (default 1 h), counted back from each release window's end; `n_time_bins` of them must cover the simulation length unless `output_grid.drop_older_ages: true`, and the axis adds bins for the release window. `time_ago_start_hours` / `time_ago_end_hours` give each bin's edges |
+| `footprints_sparse.zarr` | only with `output_grid.footprint_sparse: true`: the same footprint as non-zero cells per release (COO); load with `lpdm.comparison.load_sparse_footprint` |
 | `endpoint_particles.parquet` | final particle states |
 | `trajectory_diagnostics.parquet` | per-run diagnostics |
 | `run_metadata.json` | provenance, config echo, timings, guard report |
+
+**Footprint storage** (all off by default, so output is unchanged unless set):
+`output_grid.footprint_zstd_level` compresses the footprint with zstd (lossless);
+`output_grid.footprint_keep_mantissa_bits` first rounds each value to that many
+of float32's 23 mantissa bits (lossy: relative error at most 2^-(bits+1); not
+for validation output). On a 72-release, 5-day EUROPE run (task B2) the default
+store is 7.7 MB; zstd level 9 gives 6.1 MB, 10 bits + zstd 4.8 MB, 7 bits + zstd
+3.9 MB. The sparse copy is 6.0 MB there (8.6% of cells non-zero); it pays off
+for time-resolved footprints, where far more cells are empty.
 
 ---
 

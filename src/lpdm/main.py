@@ -1455,6 +1455,8 @@ def _run(
                 shape=(total_releases, gridder.n_t, gridder.n_z, gridder.n_y, gridder.n_x),
                 coords=footprint_coords,
                 attrs=footprint_attrs,
+                keep_mantissa_bits=out_grid.footprint_keep_mantissa_bits,
+                zstd_level=out_grid.footprint_zstd_level,
             )
             footprint_store_created = True
 
@@ -1828,6 +1830,20 @@ def _run(
         outputs.trajectory_diagnostics, step_seconds=sim.dt_seconds, rows=diag_rows
     )
 
+    # Task B2: optional sparse copy of the footprint, converted release by release.
+    sparse_path = None
+    if cfg.output_grid.footprint_sparse:
+        from lpdm.sparse_footprint import write_sparse_footprints
+
+        sparse_path = outputs.footprints.replace("footprints.zarr", "footprints_sparse.zarr")
+        counts = write_sparse_footprints(outputs.footprints, sparse_path)
+        LOGGER.info(
+            "sparse footprint: %d of %d cells non-zero -> %s",
+            counts["nonzero"],
+            counts["cells"],
+            sparse_path,
+        )
+
     metadata = {
         "config": _config_metadata(cfg, schedule_release_end, schedule_sim_start),
         "runtime": _runtime_metadata(
@@ -1863,6 +1879,7 @@ def _run(
             "trajectory_diagnostics": outputs.trajectory_diagnostics,
             "footprints": outputs.footprints,
             "metadata": outputs.metadata,
+            **({"footprints_sparse": sparse_path} if sparse_path else {}),
         },
         "footprint_units": FOOTPRINT_UNITS_DOC,
     }

@@ -374,6 +374,16 @@ class OutputGridConfig(_Frozen):
     # length, or residence older than the axis is dropped. Dropping it must be
     # asked for (decision 0016).
     drop_older_ages: bool = False
+    # Footprint storage (task B2). Both None (default) keep the store's default
+    # encoding, so existing output is unchanged. `footprint_keep_mantissa_bits`
+    # rounds each value to that many float32 mantissa bits before compression
+    # (relative error <= 2**-(bits+1); lossy, so off by default and never for
+    # validation output); `footprint_zstd_level` compresses with zstd.
+    footprint_keep_mantissa_bits: int | None = Field(None, ge=1, le=23)
+    footprint_zstd_level: int | None = Field(None, ge=1, le=22)
+    # Also write `footprints_sparse.zarr`, the footprint as COO per release
+    # (lpdm.sparse_footprint; loader `comparison.load_sparse_footprint`).
+    footprint_sparse: bool = False
 
     @field_validator("z_edges_m")
     @classmethod

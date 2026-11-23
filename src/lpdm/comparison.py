@@ -39,6 +39,9 @@ R_DRY_AIR_J_KG_K = 287.05
 # ---------------------------------------------------------------------------
 
 
+from lpdm.sparse_footprint import load_sparse_footprint  # noqa: E402,F401  (task B2 loader)
+
+
 def to_stilt_surface_footprint(
     raw_footprint: xr.DataArray,
     *,

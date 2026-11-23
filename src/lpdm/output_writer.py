@@ -32,6 +32,29 @@ def _is_remote_path(path: str) -> bool:
     return "://" in path
 
 
+def footprint_encoding(
+    keep_mantissa_bits: int | None, zstd_level: int | None
+) -> dict[str, dict[str, Any]] | None:
+    """Zarr encoding for the footprint variable (task B2), or None for the default.
+
+    Bit-rounding (a lossy filter) keeps ``keep_mantissa_bits`` of float32's 23
+    mantissa bits, so trailing bits become zero and compress well; zstd is the
+    compressor. Both are recorded in the array's own codec metadata.
+    """
+
+    if keep_mantissa_bits is None and zstd_level is None:
+        return None
+    from zarr.codecs import ZstdCodec
+
+    enc: dict[str, Any] = {}
+    if keep_mantissa_bits is not None:
+        from zarr.codecs.numcodecs import BitRound
+
+        enc["filters"] = [BitRound(keepbits=int(keep_mantissa_bits))]
+    enc["compressors"] = [ZstdCodec(level=int(zstd_level) if zstd_level is not None else 3)]
+    return {"footprint": enc}
+
+
 def _ensure_parent_dir(path: str) -> None:
     """Create local parent directories when writing local files."""
 
@@ -183,6 +206,8 @@ class OutputWriter:
         dims: tuple[str, str, str, str, str] = FOOTPRINT_DIMS,
         coords: Mapping[str, Any] | None = None,
         attrs: Mapping[str, Any] | None = None,
+        keep_mantissa_bits: int | None = None,
+        zstd_level: int | None = None,
     ) -> None:
         """Create an empty 5D footprint Zarr store sized for the whole schedule.
 
@@ -210,7 +235,12 @@ class OutputWriter:
         if not _is_remote_path(path):
             Path(path).mkdir(parents=True, exist_ok=True)
 
-        ds.to_zarr(store=path, mode="w", compute=False)
+        ds.to_zarr(
+            store=path,
+            mode="w",
+            compute=False,
+            encoding=footprint_encoding(keep_mantissa_bits, zstd_level),
+        )
 
     def write_footprint_region(
         self,
