@@ -1915,6 +1915,28 @@ def test_met_cache_thrash_threshold_counts_windows_not_hours(caplog) -> None:
     assert "cross-batch reuse threshold" not in caplog.text  # 144 >= ~56 windows
 
 
+def test_seeded_runs_are_reproducible(tmp_path: Path) -> None:
+    """Decision 0021: the release seed seeds torch's default generators, so the
+    turbulence noise (not just the release positions) repeats exactly. Disturbing
+    the global generator between runs must not matter; another seed must."""
+
+    import xarray as xr
+
+    def footprint(name: str, seed: int) -> np.ndarray:
+        cfg = _make_run_config(output_uri=str(tmp_path / name), release_seed=seed)
+        meta = _run(cfg, reader=_make_reader(cfg, wind_fn=lambda _: (5.0, 0.0, 0.0)))
+        assert meta["runtime"]["rng_seed"] == seed
+        return xr.open_zarr(tmp_path / name / "footprints.zarr")["footprint"].values
+
+    a = footprint("a", 42)
+    torch.manual_seed(7)  # disturb the global state: the run must re-seed it
+    torch.rand(1000)
+    b = footprint("b", 42)
+    c = footprint("c", 43)
+    assert np.array_equal(a, b)
+    assert not np.array_equal(a, c)
+
+
 def test_run_metadata_lists_met_stores(tmp_path: Path) -> None:
     """Task B1: run_metadata.json records each meteorology store's provenance;
     a reader with no stores (the analytic one) gives an empty list."""

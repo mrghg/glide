@@ -1164,6 +1164,27 @@ def _maybe_dump_mem_snapshot(batch_idx: int, device: torch.device) -> None:
 
 
 @torch.no_grad()
+def _seed_global_generators(cfg: RunConfig) -> int | None:
+    """Seed torch's default generators (CPU and every CUDA device) from the
+    release seed, so a run with a seed is reproducible (decision 0021).
+
+    The release seed already fixes the particles' starting positions, through
+    its own generator. The turbulence and convection noise is drawn from torch's
+    default generators, inside the captured CUDA graph, where only the default
+    generators are safe to use; seeding them here, once per run before any
+    particle moves, makes that noise reproducible too. With no seed, nothing is
+    seeded and runs differ, as before.
+    """
+
+    seed = getattr(cfg.release, "seed", None)
+    if seed is None:
+        LOGGER.info("rng: no release seed; turbulence noise is not reproducible")
+        return None
+    torch.manual_seed(int(seed))  # seeds the CPU and all CUDA default generators
+    LOGGER.info("rng: torch default generators seeded with %d", int(seed))
+    return int(seed)
+
+
 def _run(
     cfg: RunConfig,
     *,
@@ -1230,6 +1251,7 @@ def _run(
             int((_agl <= 1500.0).sum()),
             float(_agl[1]) if _agl.size > 1 else 0.0,
         )
+    run_seed = _seed_global_generators(cfg)
     engine = GPUEngine(device=device_str)
     writer = OutputWriter()
     device = torch.device(device_str)
@@ -1744,6 +1766,8 @@ def _run(
             # 0020), with their cell_methods and period: how the surface forcing
             # was placed in time is part of what a run used.
             met_period_channels=dict(getattr(reader, "period_details", {}) or {}),
+            # The seed of torch's default generators (decision 0021), or None.
+            rng_seed=run_seed,
             # Each meteorology store's provenance (format version, producer,
             # source, recipe...): which inputs a run used (task B1).
             met_stores=(reader.store_provenance() if hasattr(reader, "store_provenance") else []),
