@@ -1935,3 +1935,12 @@ def test_seeded_runs_are_reproducible(tmp_path: Path) -> None:
     c = footprint("c", 43)
     assert np.array_equal(a, b)
     assert not np.array_equal(a, c)
+
+
+def test_run_metadata_lists_met_stores(tmp_path: Path) -> None:
+    """Task B1: run_metadata.json records each meteorology store's provenance;
+    a reader with no stores (the analytic one) gives an empty list."""
+
+    cfg = _make_run_config(output_uri=str(tmp_path / "out"))
+    metadata = _run(cfg, reader=_make_reader(cfg, wind_fn=lambda _: (5.0, 0.0, 0.0)))
+    assert metadata["runtime"]["met_stores"] == []

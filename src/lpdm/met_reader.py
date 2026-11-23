@@ -1046,6 +1046,50 @@ class ArcoEra5ZarrReader(MetReader):
         tensor_agl = torch.as_tensor(arr_agl, dtype=self.dtype, device=self.device)
         return tensor_agl, np.asarray(agl_levels, dtype="float64"), pressure_level_hpa
 
+    #: Store attributes copied into run_metadata.json (met format 2.0,
+    #: "Provenance attributes"; task B1). Absent ones are left out.
+    PROVENANCE_ATTRS = (
+        "glide_format",
+        "glide_format_version",
+        "glide_format_definition",
+        "glide_vertical_coordinate",
+        "glide_flux_accumulation_seconds",
+        "glide_flux_averaging_seconds",
+        "glide_filled_values",
+        "source_dataset",
+        "source_access",
+        "producer",
+        "producer_version",
+        "producer_commit",
+        "processing",
+        "compression",
+        "domain",
+        "recipe",
+        "recipe_text",
+    )
+
+    def store_provenance(self) -> list[dict[str, object]]:
+        """Provenance attributes of each store this reader reads, in order.
+
+        Reads store-level metadata only (consolidated), never data. A store
+        whose metadata cannot be read is listed with the error, so a run's
+        record says so rather than failing.
+        """
+
+        out: list[dict[str, object]] = []
+        for store in self.zarr_stores:
+            entry: dict[str, object] = {"store": str(store)}
+            try:
+                opts = {"token": "anon"} if str(store).startswith("gs://") else None
+                attrs = xr.open_zarr(
+                    store, consolidated=True, chunks=None, storage_options=opts
+                ).attrs
+                entry.update({k: attrs[k] for k in self.PROVENANCE_ATTRS if k in attrs})
+            except Exception as exc:  # noqa: BLE001 - recorded, not raised
+                entry["error"] = f"{type(exc).__name__}: {exc}"
+            out.append(entry)
+        return out
+
     def get_time_coverage(self) -> tuple[datetime, datetime]:
         """Return the first and last timestamps available in the dataset."""
 

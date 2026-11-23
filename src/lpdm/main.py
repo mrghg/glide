@@ -1768,6 +1768,9 @@ def _run(
             met_period_channels=dict(getattr(reader, "period_details", {}) or {}),
             # The seed of torch's default generators (decision 0021), or None.
             rng_seed=run_seed,
+            # Each meteorology store's provenance (format version, producer,
+            # source, recipe...): which inputs a run used (task B1).
+            met_stores=(reader.store_provenance() if hasattr(reader, "store_provenance") else []),
         ),
         "schedule": {
             "n_batches": len(batches),
