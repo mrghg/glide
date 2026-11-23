@@ -265,11 +265,12 @@ def test_zero_filter(etex_files):
 
 def test_atmes2_perfect_and_biased():
     m = np.array([0.0, 0.05, 0.2, 1.0, 3.0, 0.0])
-    s = atmes2.atmes2_statistics(m, m)
+    s = atmes2.atmes2_statistics(m, m, fa_zeros="floor")
     assert s["mg"] == pytest.approx(1.0)
     assert s["vg"] == pytest.approx(1.0)
     assert s["nmse"] == pytest.approx(0.0)
     assert s["fa2"] == 100.0 and s["ks_d"] == 0.0 and s["foex"] == -50.0
+    assert atmes2.atmes2_statistics(m, m)["fa2"] == pytest.approx(100 * 4 / 6)
     s = atmes2.atmes2_statistics(m, 2 * m)
     assert s["mg"] > 1.0 and s["bias"] > 0
     assert s["ks_count"] == pytest.approx(s["ks_d"] * len(m))
@@ -287,7 +288,25 @@ def test_fms_space():
 
 def test_datem_to_jrc_code():
     pre = sorted(
-        ["A", "B", "BG", "CH", "CR", "D", "DK", "F", "H", "N", "NL", "PL", "R", "S", "SF", "SR", "UK"],
+        [
+            "A",
+            "B",
+            "BG",
+            "CH",
+            "CR",
+            "D",
+            "DK",
+            "F",
+            "H",
+            "N",
+            "NL",
+            "PL",
+            "R",
+            "S",
+            "SF",
+            "SR",
+            "UK",
+        ],
     )
     assert etex.datem_to_jrc_code(1001, pre) == "A01"
     assert etex.datem_to_jrc_code(6013, pre) == "D13"

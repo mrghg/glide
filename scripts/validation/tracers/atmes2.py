@@ -17,8 +17,13 @@ argument, so the pre-registration can fix it):
   (0.01 ng m-3). MG is ``exp(<ln P> - <ln M>)``: the published signs show it
   (model 117 under-predicts, FOEX -41, and has MG 0.315; model 101
   over-predicts, FOEX +12, and has MG 1.258).
-- **FA2 and FA5** use the same floor, so a pair of zeros counts as within a
-  factor of 2.
+- **FA2 and FA5**: a pair with a zero (measured or predicted) counts as
+  outside both factors but stays in the denominator, as in DATEM, by
+  default (``fa_zeros="outside"``). With ``fa_zeros="floor"`` the zeros
+  take the floor value instead, so a pair of zeros counts as within a
+  factor of 2. Which reading ATMES-II used is not settled: for DATEM's
+  HYSPLIT example on the filtered pairs they give 7% and 52%, and the four
+  published models 28–37%. Check against EUR 17756 EN.
 - **KS.** The published values (72–365) exceed 100, so they are not the
   percentage DATEM uses. :func:`atmes2_statistics` returns the maximum
   difference between the two empirical cumulative distributions as a
@@ -75,7 +80,7 @@ def ks_statistic(meas: np.ndarray, pred: np.ndarray) -> float:
     return float(np.max(np.abs(fm - fp)))
 
 
-def atmes2_statistics(meas, pred, *, log_floor: float = 0.01) -> dict:
+def atmes2_statistics(meas, pred, *, log_floor: float = 0.01, fa_zeros: str = "outside") -> dict:
     """Global ATMES-II statistics on filtered pairs (ng m-3)."""
     m = np.asarray(meas, dtype=float)
     p = np.asarray(pred, dtype=float)
@@ -85,7 +90,13 @@ def atmes2_statistics(meas, pred, *, log_floor: float = 0.01) -> dict:
     d = p - m
     lo, hi = _ci95_mean(d)
     lm, lp = np.log(np.maximum(m, log_floor)), np.log(np.maximum(p, log_floor))
-    ratio = np.maximum(p, log_floor) / np.maximum(m, log_floor)
+    if fa_zeros == "floor":
+        ratio = np.maximum(p, log_floor) / np.maximum(m, log_floor)
+    elif fa_zeros == "outside":
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ratio = np.where((m > 0) & (p > 0), p / np.where(m > 0, m, 1.0), np.inf)
+    else:
+        raise ValueError("fa_zeros must be 'outside' or 'floor'")
     ks_d = ks_statistic(m, p)
     return dict(
         n_pairs=n,
@@ -108,6 +119,46 @@ def atmes2_statistics(meas, pred, *, log_floor: float = 0.01) -> dict:
 # ---------------------------------------------------------------------------
 # figure of merit in space from interpolated contours
 # ---------------------------------------------------------------------------
+
+
+def score_against_jrc(
+    jrc: pd.DataFrame, pred_ng: pd.Series, *, margin: int = 2, threshold: float = 0.1
+) -> dict:
+    """ATMES-II statistics for predictions on the JRC samples.
+
+    ``pred_ng`` is indexed like ``jrc`` (ng m-3, NaN when not predicted).
+    Returns the global statistics on the filtered pairs, the FMS at 0.1
+    ng m-3 at 12, 24, …, 72 h after the release start (the 3-hour interval
+    containing that time; all valid samples, no zero filter), and the dose
+    FMS at 1 ng m-3 h over all intervals.
+    """
+    keep = zero_filter(jrc, margin=margin) & pred_ng.notna()
+    out = atmes2_statistics(jrc.loc[keep, "conc_raw"], pred_ng[keep])
+    valid = (jrc["conc_raw"] >= 0) & pred_ng.notna()
+    t0 = pd.Timestamp("1994-10-23 16:00")
+    for h in (12, 24, 36, 48, 60, 72):
+        t = t0 + pd.Timedelta(hours=h)
+        sel = valid & (jrc["start"] <= t) & (jrc["end"] > t)
+        out[f"fms_{h}h"] = fms_space(
+            jrc.loc[sel, "lat"],
+            jrc.loc[sel, "lon"],
+            jrc.loc[sel, "conc_raw"],
+            pred_ng[sel],
+            threshold=threshold,
+        )
+    # dose: both summed over the intervals with a valid measurement and prediction
+    d = pd.DataFrame(
+        {
+            "site": jrc["site"],
+            "m": jrc["conc_raw"].where(valid) * 3.0,
+            "p": pred_ng.where(valid) * 3.0,
+        }
+    )
+    g = d.groupby("site")
+    dose = g[["m", "p"]].sum()[g["m"].count() > 0]
+    loc = jrc.groupby("site")[["lat", "lon"]].first().loc[dose.index]
+    out["fms_dose"] = fms_space(loc["lat"], loc["lon"], dose["m"], dose["p"], threshold=1.0)
+    return out
 
 
 def _laea(lat, lon, lat0=50.0, lon0=10.0):

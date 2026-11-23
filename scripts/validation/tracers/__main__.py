@@ -8,6 +8,7 @@ Run from ``scripts/validation``::
     python -m tracers export-samples OUTDIR   # sample list and receptors for A11
     python -m tracers etex-match              # JRC vs DATEM ETEX-1, sample by sample
     python -m tracers atmes2-filter           # ATMES-II zero filter on the JRC file
+    python -m tracers atmes2-hysplit          # ATMES-II statistics of DATEM's HYSPLIT example
     python -m tracers score MEAS PRED [opts]  # score any DATEM-format pair of files
 
 Data paths come from ``$GLIDE_DATEM`` and ``$GLIDE_ETEX``.
@@ -77,6 +78,7 @@ def main(argv=None) -> int:
     e = sub.add_parser("export-samples")
     e.add_argument("outdir", type=Path)
     sub.add_parser("etex-match")
+    sub.add_parser("atmes2-hysplit")
     f = sub.add_parser("atmes2-filter")
     f.add_argument("--margin", type=int, default=2)
     f.add_argument("--last-interval", type=int, default=30)
@@ -143,6 +145,22 @@ def main(argv=None) -> int:
         k = atmes2.zero_filter(j, margin=args.margin, last_interval=args.last_interval)
         z = int((k & (j["conc_raw"] == 0)).sum())
         print(f"{int(k.sum())} pairs, {100 * z / k.sum():.1f}% measured zeros")
+        return 0
+
+    if args.cmd == "atmes2-hysplit":
+        # DATEM's HYSPLIT example predictions on the JRC samples: a check of the
+        # pipeline, not a reference value (a different HYSPLIT run from ATMES-II's).
+        j = read_etex_samples(1)
+        p = read_datem_meas(datem_root() / "mdl_data" / "etex" / "ct1_000.txt", experiment="etex")
+        prefixes = sorted({s.rstrip("0123456789") for s in j["site"].unique()})
+        p["jrc_site"] = [etex.datem_to_jrc_code(s, prefixes) for s in p["site_num"]]
+        key = p.set_index(["jrc_site", "start"])["conc_raw"] / 1000.0
+        pred = pd.Series(
+            key.reindex(pd.MultiIndex.from_arrays([j["site"], j["start"]])).to_numpy(),
+            index=j.index,
+        )
+        for k, v in atmes2.score_against_jrc(j, pred).items():
+            print(f"{k:20s} {v:.4g}")
         return 0
 
     if args.cmd == "score":
