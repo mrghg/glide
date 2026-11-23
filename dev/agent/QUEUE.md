@@ -208,6 +208,71 @@ Model: Opus 5.5, high effort. Run strictly in order unless a task is BLOCKED.
   stopping rule reported in the progress file.
 - **Runtime.** Minutes, plus one 10-day run for part 2.
 
+### A04 — Divide each particle by the dry-air density as it is counted (decision 0022)
+
+- **Size:** S–M. **Depends on:** A01 (the model-level met path, which reads
+  specific humidity). Must merge before A0 and the freeze, because it changes
+  every footprint. **Decision record:** 0022 (adopted); read it first.
+- **Why.** The reference footprint (`docs/reference-runs.md` §6) divides each
+  particle by the air density at the moment it is counted. GLIDE counts plain
+  seconds, and `to_stilt_surface_footprint` (`src/lpdm/comparison.py`) divides
+  the sum by one density per cell. Near the surface, residence and density vary
+  together (more time in the layer at night, in denser air), so dividing
+  afterwards is biased (validation review of 21 Nov 2026, finding 3). Both
+  reference models divide while counting; decision 0022 gives the evidence.
+- **Scope.**
+  - **The weighting.** Add `output_grid.density_weighting: dry_air | none`.
+    With `dry_air`, each particle's contribution to the gridder is divided by
+    ρ_d = (p − e) / (R_d T), with R_d = 287.05 J kg⁻¹ K⁻¹ and e the vapour
+    pressure from specific humidity, e = q p / (0.622 + 0.378 q). Evaluate it
+    at the position where the particle is counted, in the step's met window
+    and with the step's time weight (`_step_window_time`): T and q
+    interpolated from the model levels to the particle's height, and p from
+    the surface pressure at that height (the hydrostatic pressure GLIDE
+    already reconstructs, decision 0010). Both step paths; on the static path
+    as tensor operations inside the captured step, with no host sync and no
+    per-step Python scalar (decision 0004).
+  - **Default.** `dry_air` for the validation configurations. Decide the
+    shipped default in the PR (decision 0022 proposes `dry_air`) and say
+    which shipped configurations change.
+  - **Output contract.** With `dry_air`, the raw footprint is in s m³ kg⁻¹ of
+    dry air; record the weighting, its formula and the units in the footprint
+    store attributes and `run_metadata.json`. M_air / h then gives
+    m² s mol⁻¹ with no further density. This additive change is authorised by
+    this spec; document it in README "Outputs" and `docs/physics.md` §7.
+  - **The helper refuses to divide twice.** `to_stilt_surface_footprint`
+    reads the weighting from the footprint's attributes: for a weighted
+    footprint it applies M_air / h only, and raises if given an air density.
+    Mark `surface_air_density_from_met` as for unweighted footprints only.
+  - **Reference-model conversions**, in the comparison code, for A8a and A10:
+    - FLEXPART: native s m³ kg⁻¹ (moist air, p / (R_d T_v)), summed over
+      output times, × M_air / h, × p / ((p − e)(1 + 0.608 q)) per cell;
+    - NAME: Mixing Ratio in ppm s (per cell, p / (R_d T)),
+      × 10⁻⁶ × cell area ÷ 3,600 s, × p / (p − e) per cell;
+    - each correction factor averaged over the footprint's period from that
+      model's own meteorology, passed in as a field (the functions take the
+      fields; they never read restricted data themselves).
+- **Acceptance.** Tests:
+  - the review's two cases, one cell, a 40 m layer, densities 1.0 and
+    1.2 kg m⁻³, residence 90/10 and 10/90 s: 0.071218 and 0.061561
+    m² s mol⁻¹ (`0.02897 / 40 × (s₁/ρ₁ + s₂/ρ₂)`), through the gridder and
+    the conversion, on both step paths;
+  - uniform met: the weighted footprint equals the unweighted one divided by
+    ρ_d, to float32 rounding;
+  - humidity: with q > 0, ρ_d is smaller than p / (R_d T) by the factor
+    (p − e) / p;
+  - `density_weighting: none` is bit-identical to today on CPU; graph capture
+    intact on CUDA with `dry_air`;
+  - the helper raises when asked to divide a weighted footprint again;
+  - the FLEXPART and NAME conversions on synthetic inputs with known answers.
+- **Measure the real error.** On standard case 3 (stable night, CBW-20) and
+  case 4 (convective afternoon, LEF), compare the new footprint, converted
+  with M_air / h, against the old one converted with the helper and a mean
+  surface density. Report the change in total sensitivity and its map in the
+  progress file. This is the size of the error the review found, for the
+  paper.
+- **Runtime.** Tests, plus two single-release runs.
+
 ### A0 — Golden fixtures, comparison and benchmark harness
 
 - **Roadmap:** enabler for everything. **Size:** S. **Depends on:** A01.
@@ -454,7 +519,7 @@ Model: Opus 5.5, high effort. Run strictly in order unless a task is BLOCKED.
 
 ### A8 — Physics freeze preparation and audit table (1a, 1c)
 
-- **Size:** S. **Depends on:** A00–A7 merged, including A02 and A03, except
+- **Size:** S. **Depends on:** A00–A7 merged, including A02, A03 and A04, except
   the parts deferred to after v1: A2's Gaussian kernel, A5's bandwidth sweep
   and A7's parameter groups (A01
   validates the model-level met path).
@@ -530,6 +595,9 @@ Model: Opus 5.5, high effort. Run strictly in order unless a task is BLOCKED.
   - compute the Tier 2 noise floors from the spread across FLEXPART's
     repeat-seed runs;
   - compute the NAME noise floor the same way, from NAME's repeat-seed runs;
+  - convert NAME's and FLEXPART's footprints to the dry-air footprint of
+    reference-runs §6 with A04's functions (decision 0022), before any noise
+    floor or ceiling is computed;
   - compute the Tier 2 ceilings from NAME against FLEXPART: for each metric,
     receptor and block, the median and 90th percentile of the differences,
     with the same metric code A10 will use (write it here if A10 has not, under
@@ -649,6 +717,9 @@ Model: Opus 5.5, high effort. Run strictly in order unless a task is BLOCKED.
   validation-plan Tier 2 ("NAME and Met Office meteorology"): GLIDE against
   FLEXPART on ERA5, GLIDE against NAME on Met Office meteorology (needs
   B14's stores), NAME against FLEXPART, and GLIDE on the two meteorologies.
+  Every footprint is compared as the dry-air footprint of reference-runs §6:
+  GLIDE's with `density_weighting: dry_air`, NAME's and FLEXPART's converted
+  with A04's functions (decision 0022).
   A reader for NAME's footprint and particle output. GLIDE's own runs follow
   `docs/reference-runs.md` (§2–§6) exactly: the same particle domain and
   output grid, release points and heights, particle numbers, the 0–40 m

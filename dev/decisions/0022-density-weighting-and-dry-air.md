@@ -149,5 +149,6 @@ release, to measure the real size of the error. The comparison code gains
 the NAME and FLEXPART dry-air corrections. §6 of `docs/reference-runs.md` is
 updated with this record.
 
-**Status.** Proposed 2026-11-23, from finding 3 of the validation review of
-21 Nov 2026 (`VALIDATION-HANDOFF.md`). Docs: [docs/reference-runs.md](../../docs/reference-runs.md) §6.
+**Status.** Adopted 2026-11-23 (GLIDE PR #42), from finding 3 of the
+validation review of 21 Nov 2026 (`VALIDATION-HANDOFF.md`). Implemented by
+queue task A04. Docs: [docs/reference-runs.md](../../docs/reference-runs.md) §6.
