@@ -52,6 +52,12 @@ _DEFAULT_AGL_LEVELS_M: tuple[float, ...] = (
     15000.0,
 )
 
+# Number of stretched levels in the built-in ladder, used when
+# `met_domain.vertical_levels` is unset (decision 0017; interim, A5 sets the
+# converged value). Before task A01 the default was `_DEFAULT_AGL_LEVELS_M`
+# (23 levels), still available explicitly via `default_agl_levels`.
+DEFAULT_VERTICAL_LEVEL_COUNT = 40
+
 # Local metres per degree (spherical-earth approximation, matches gpu_engine).
 _M_PER_DEG_LAT = 110540.0
 _M_PER_DEG_LON_EQ = 111320.0
