@@ -273,7 +273,7 @@ be long enough to cover the travel time from the plant to the furthest site
 | ETEX-1 | 1994-10-23 to 1994-10-27 | Europe |
 | ETEX-2 | 1994-11-14 to 1994-11-18 | Europe |
 | CAPTEX | 1983-09-18 to 1983-10-30 | eastern US and SE Canada, including Dayton and Sudbury |
-| ANATEX | 1987-01-05 to 1987-03-29 | most of the US and southern Canada, including Glasgow MT |
+| ANATEX | 1987-01-05 to 1987-01-18 for v1 (the ten scored releases); the full experiment, to 1987-03-29, in v1.x | most of the US and southern Canada, including Glasgow MT |
 | ACURATE (v1.x) | 1982-03-01 to 1983-09-30 | south-eastern US, from Georgia to New Jersey |
 | OKC80 (benchmark test) | 1980-07-08 to 1980-07-12 | Oklahoma to Missouri, about 34–42° N, 99–90° W |
 

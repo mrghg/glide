@@ -183,6 +183,16 @@ transcriptions would only show that they agree with each other.
   stops changing, and reports that converged state; the number of
   iterations is recorded.
 
+  The comparison only tests the scheme if the scheme acts, and a deep
+  afternoon boundary layer does not show that it does. So the columns are
+  chosen by a fixed rule from FLEXPART's own output (task A8a), among the
+  ERA5 columns at the case-library receptors and release hours:
+  - an **active** column: the one in which FLEXPART's matrix moves the
+    largest fraction of boundary-layer air above 5 km, which must be at
+    least **1%**;
+  - an **inactive** control: a column in which FLEXPART's scheme does not
+    trigger. GLIDE's must not trigger there either.
+
 **What has been checked (2026-11-05, FLEXPART v11.1, commit 71b7119).**
 FLEXPART's `hanna` routine compiles with gfortran together with the seven
 modules it depends on (`par_mod`, `com_mod`, `qvsat_mod`, `random_mod`,
@@ -800,7 +810,8 @@ human before this plan was merged. They are fixed at the pre-registration.
     set, §4). GLIDE is run with the same number of particles per release as
     the reference, so that its sampling noise is the same size. The noise,
     expressed against particle count and footprint size, is applied to the
-    full set.
+    full set: the point sets' noise to point releases, the column set's to
+    column releases.
   - *Ceiling* (for "consistent"): the differences between NAME on Met Office
     meteorology and FLEXPART on ERA5, for the same releases. This is the
     disagreement between two established models with their shared settings
@@ -823,6 +834,24 @@ human before this plan was merged. They are fixed at the pre-registration.
   - *Declared expected differences* (§1, Tier 2) may fall outside the noise
     floor, but must stay within the ceiling, and should have the registered
     direction.
+  - *Empty maps and zeros.* The log correlation uses only cells where both
+    footprints are non-zero. A release with fewer than **10** such cells has
+    no log correlation, and the spatial overlap is undefined when both maps
+    are empty (it is 0 when only one is). A release with an undefined metric
+    is left out of that metric's distribution, for the noise floor and the
+    ceiling as for GLIDE, and the number left out is reported for every
+    comparison.
+  - *The rule is tried before it is registered* (task A8a), on comparisons
+    built from reference data alone, with the ceiling and grading exactly as
+    above: one FLEXPART repeat-seed run against another, which should be
+    graded "indistinguishable"; and FLEXPART's footprints against copies of
+    themselves shifted by 1, 2 and 4 cells and scaled by 1.1, 1.25 and 2. For
+    each metric, A8a reports the smallest shift and the smallest scaling that
+    are graded "outside". If a doubled footprint is still "consistent", the
+    ceiling is too loose for that metric, and the human decides, before
+    registering, whether the rule changes; the reason is recorded. The
+    smallest detectable change is also reported in the paper, as what Tier 2
+    can and cannot see.
 - **Tier 3.**
   - *CAPTEX and ANATEX:* "consistent" means GLIDE's mean DATEM rank over the
     eight experiments (§2, Tier 3) is at least the lowest mean published
@@ -835,6 +864,11 @@ human before this plan was merged. They are fixed at the pre-registration.
     runs alone). Each experiment's rank is also shown against the published
     range for reanalysis-driven and for WRF-driven runs, but these are not
     graded.
+  - *Reported beside the graded mean, from the same predictions:* the mean
+    rank over the six CAPTEX experiments and over the two ANATEX experiments
+    separately (six of the eight terms are CAPTEX), the four terms of every
+    score, and the signed correlation, since the rank uses R², which does not
+    show a negative correlation. Not graded.
   - *ETEX-1:* "consistent" means GLIDE's DATEM rank on DATEM's copy of
     ETEX-1, scored with DATEM's default options over all 3,105 pairs, is at
     least **1.96**: HYSPLIT's rank on the 1994 ECMWF analyses, the
@@ -1114,9 +1148,18 @@ may start before the block.
 - *Averaging kernels:* a version with one release per retrieval layer,
   weighted afterwards, is added only if B5 needs it.
 
-**Repeat-seed runs** for the noise floors (§3): the first five days of
-EUR-Jan (1–5 January) at MHD, JFJ and CBW 20 m, five times each in FLEXPART
-and in NAME. NAME cannot be given a numbered seed, so its five runs use its
+**Repeat-seed runs** for the noise floors (§3), five times each in FLEXPART
+and in NAME, over the first five days of a block (120 releases per receptor):
+- EUR-Jan, 1–5 January, at MHD, JFJ and CBW 20 m: winter, point releases;
+- NAM-Jul, 1–5 July, at LEF: summer, a point release in the other domain;
+- NAM-Jul, 1–5 July, at SGP: the column release.
+
+The July sets were added on 23 Nov 2026, after the validation review of
+21 Nov, so that the noise floor applied to summer, North American and column
+releases is not extrapolated from European winter point releases. GLIDE is
+run five times on the same releases with different seeds, to check that its
+noise matches the references' at the same particle count; this is reported,
+not graded. NAME cannot be given a numbered seed, so its five runs use its
 `Random` setting and cannot be repeated; their output is kept
 ([reference-runs.md](reference-runs.md), §9).
 
@@ -1205,7 +1248,7 @@ The standard cases (§4) are used throughout.
 
 **Tier 2**
 - Snapshots of the particle cloud at 6, 24, 72 and 120 hours, as a map and a
-  vertical cross-section, GLIDE beside FLEXPART, plus an animation.
+  vertical cross-section, GLIDE beside FLEXPART.
 - The cloud statistics from §2 against time, with one line per model and a
   noise band in each panel.
 - For each case, three panels: GLIDE's footprint, FLEXPART's footprint and the
