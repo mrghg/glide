@@ -151,7 +151,20 @@ Particle aggregation (roadmap 6b) and convection refinements (6c) are after v1.
 
 ## Known follow-ups
 
-These are documented approximations rather than bugs; each is stated in the
+**Fixed: longitudes on 0..360 NAM stores (found 2026-11-24 by task B12, fixed
+by PR #56).** The reader used to keep an ascending 0..360 store that does not
+cross Greenwich (every NAM store) in 0..360, and the engine clamped a particle
+at a negative longitude to the grid's western edge, so a configuration written
+in −180..180 advected every particle with the winds at the domain's western
+edge, with no error. The reader now relabels such stores −180..180
+(`_ensure_monotonic_longitude`), and the preflight refuses a met domain outside
+the grid (`_validate_meteorology_space_coverage`). Give longitudes on NAM
+stores in −180..180; the tracer benchmark takes the extent from the reader
+(`get_lon_lat_coverage`). Anything run on a NAM store before #56 with negative
+longitudes is invalid; B12's branch-local OKC80 numbers (with a 0..360
+workaround) are superseded by the rerun on the merged code.
+
+The rest are documented approximations rather than bugs; each is stated in the
 relevant docs page with its consequence.
 
 - **Per-column vertical interpolation.** Uses the bounding-box mean. Convection

@@ -517,4 +517,166 @@ archives that skip when `$GLIDE_DATEM` or `$GLIDE_ETEX` is unset).
 5. **The benchmark command** (task B12) wraps steps 2–3. Given a GLIDE
    configuration and a meteorology store, it runs the backward releases for
    the chosen experiments, scores them, and writes a scorecard beside the
-   published values. How to run it: _to be written by B12_.
+   published values. It is `tracers/benchmark.py`, run from
+   `scripts/validation` as `python -m tracers.benchmark <command>`; tests in
+   `tests/test_tracer_benchmark.py` and `tests/test_sample_release.py`.
+   See "Running the benchmark" below.
+
+### Running the benchmark
+
+**Before the pre-registration, run it on OKC80 only.** `run` refuses CAPTEX,
+ANATEX and ETEX unless `--registration-record` names a pre-registration
+record whose `**Registration.**` line is filled in (validation-plan Tier 3);
+`plan` prints sizes for any experiment and writes nothing. The experiments are
+`OKC80` (PMCH, DATEM tracer 1), `OKC80-PDCH` (tracer 2, sampled at the same
+windows, so the same footprints serve both), and the eight published ones
+(`CAPTEX-1` … `CAPTEX-7`, `ANATEX-GGW`, `ANATEX-STC`, with B10's adopted
+sample rule). ETEX is not wired in yet: its source coordinates are not in the
+files (step 1).
+
+From `scripts/validation`, with `PYTHONPATH` pointing at the GLIDE `src` to
+use and, on a GPU node, `scripts/gpu_env.sh` sourced:
+
+```bash
+python -m tracers.benchmark plan --experiments OKC80 OKC80-PDCH
+python -m tracers.benchmark run --experiments OKC80 OKC80-PDCH \
+    --met "$GLIDE_DATA/era5-arco/NAM_19800708-19800712_ERA5-ARCO.zarr" --out RUN_DIR
+```
+
+**What `run` does.**
+
+- **Releases.** One backward release per unique sample window (location,
+  start, end), release kind `samples`: particles uniform over the sampling
+  period and between the ground and 100 m (`--receptor-layer 0 100`, the
+  layer the published forward runs averaged over; give e.g. `10 10` for
+  receptors at sampler height). `--particles` per window (default 2,000),
+  `--seed` for the releases (per window: seed + index).
+- **GLIDE runs.** One footprint grid per source site: 3 × 3 cells of
+  `--source-deg` (default 0.25°; 1° is Hegarty et al.'s backward set-up)
+  centred on the source, and one layer, the lowest 40 m (`--source-layer-m`,
+  the registered footprint layer). Every particle is followed for one length
+  from its own release, so the windows are split into GLIDE runs whose starts
+  span at most `--max-span-h` (24 h), each with the length its latest window
+  needs to reach back to the first emission, and each needing meteorology no
+  earlier than the store's start. Age bins are the widest width (≤ 1 h) that
+  every sample and emission time is a multiple of (5 minutes for OKC80), so
+  the emission windows fall on bin edges.
+- **Physics** comes from `tracers/benchmark_base.yaml` (the reference
+  configuration's physics: Hanna turbulence with meander 0.16, reduced
+  Emanuel convection, 60 s steps), or from `--config`, with any value
+  changed by `--set key.path=value`. The horizontal met domain defaults to
+  the store's extent less 0.5°.
+- **Predictions** (`tracers/concentration.py`). For a source emitting mass M
+  uniformly over [E₀, E₁] (rate Q) into the source box of volume V (area ×
+  40 m), the predicted value for a sample is
+  Q / V × (M_air / V_m) × Σₖ φₖ τₖ / ρₖ: τₖ is the residence time in the box
+  in age bin k (from the end of the sample window), φₖ the fraction of the
+  bin's absolute interval inside [E₀, E₁], and ρₖ the dry-air density at the
+  source. This is the dry-air mole fraction converted with the observations'
+  fixed factor M / V_m (decision 0022; V_m = 22.40 L mol⁻¹, assumed also for
+  OKC80), not the ambient mass concentration (`--basis ambient`, Q / V ×
+  Σₖ φₖ τₖ), which is 10–15% lower in warm air. GLIDE's default footprint is
+  density-weighted (`output_grid.density_weighting: dry_air`, task A04,
+  decision 0022: s m³ kg⁻¹, already τ/ρ per particle), which the "stp" basis
+  uses as it is; the benchmark reads the store's `density_weighting` and
+  `units` attributes, never assumes them. An ambient run needs plain seconds:
+  `run ... --basis ambient --set output_grid.density_weighting=none` (`run`
+  refuses the ambient basis on a weighted configuration before GLIDE starts).
+  On a `none` store the "stp" basis divides by ρₖ read from the meteorology at
+  the grid point nearest the source (surface pressure, and temperature and
+  humidity on the lowest model level), interpolated to each bin's centre. The
+  derivation is in the module's docstring.
+- **Scoring.** Predictions are written in DATEM format
+  (`predictions/<experiment>.txt`, pg m⁻³, the measurement keys unchanged)
+  and scored with `datem_stats` under the published protocol: `-z0`,
+  zero–zero pairs kept, unaveraged, R² from `-b` with `--bootstrap-seed`;
+  the rank with the plain correlation is reported too. These options are
+  provisional until the pre-registration fixes them.
+- **Scorecard.** `scorecard.md`, `scorecard.csv` and `scorecard.json`: rank
+  and its four terms per experiment, the published values for the same
+  experiment grouped by class of meteorology
+  (`docs/published-tracer-scores.csv`), the mean over the eight published
+  experiments when all are scored, DATEM's own HYSPLIT example scored on the
+  same samples and options where the archive has one, and the provenance:
+  physics tag, GLIDE commit, scoring-code commit, configuration hash (physics
+  and numerics only), the overrides, the meteorology store and its
+  met-bazarr attributes, and the seeds.
+
+**Rerunning.**
+
+- *With a changed parameter:* `run ... --out RUN_B --set
+  turbulence.meander.coefficient=0.3`, then `python -m tracers.benchmark
+  compare RUN_A RUN_B`. `compare` lists the settings that differ, every
+  score and term side by side with the differences from the first run, and
+  whether the predictions are identical.
+- *With another meteorology store:* `run ... --met OTHER.zarr --out RUN_C`.
+  The store must cover the samples and reach back to a few hours before the
+  first emission; the scorecard records its met-bazarr version and commit.
+- *On a parameter ensemble (A7):* one `run` per member, each with its own
+  `--set` values and `--out`, then `compare` over all of them. Keep the
+  release and bootstrap seeds fixed across members so that only the
+  parameters differ.
+- *Another bootstrap seed, or the other concentration basis where the store
+  allows it, without rerunning GLIDE:* `python -m tracers.benchmark score
+  RUN_DIR --bootstrap-seed 1 --out RUN_DIR_B1`. A `dry_air` store serves only
+  "stp"; a `none` store serves both. Scoring is written to a temporary
+  directory and published (metadata, predictions and scorecard together) only
+  when it succeeds, so a refused rescoring leaves the run's record unchanged;
+  an existing `--out` must already link to the same run.
+
+**Longitudes.** The benchmark takes the meteorology's extent from GLIDE's
+reader (`ArcoEra5ZarrReader.get_lon_lat_coverage`, after its normalisation:
+NAM stores, ascending 0..360 on disk, are read as −120..−55) and writes every
+longitude inside it, so the configuration uses the convention the runtime sees
+and passes its preflight. (Before PR #56 the reader kept such stores in 0..360
+and clamped negative longitudes to the western edge; STATUS.md.)
+
+A rerun with the same seeds reproduces the scorecard (checked on OKC80, see
+below). Every run before the pre-registration is exploratory and belongs in
+its development history.
+
+### OKC80 (exploratory, 2026-11-24, task B12)
+
+Not a graded experiment; run before the pre-registration to test the
+benchmark, and to be listed as exploratory in the pre-registration's
+development history. Run on the code merged with `main` (PRs #56 and #57:
+longitudes as the reader presents them, −180..180, with no 0..360
+workaround; footprints dry-air weighted per particle, s m³ kg⁻¹).
+Configuration: `benchmark_base.yaml` unchanged, 2,000 particles per window,
+release seed 42, bootstrap seed 0, receptors 0–100 m, 0.25° source box,
+lowest 40 m, basis "stp", on `era5-arco/NAM_19800708-19800712_ERA5-ARCO.zarr`
+(met-bazarr 0.3.0, surface-geopotential repair by met-bazarr 0.4.0 recorded
+in its attributes). 700 sample windows in four GLIDE runs on one GH200,
+321 s of GLIDE wall time in all.
+
+| Experiment | Pairs | Rank | R² | 1−\|FB/2\| | FMS/100 | 1−KS/100 | Rank, plain R | Mean meas. | Mean calc. (pg m⁻³) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| OKC80 (PMCH) | 697 | 1.641 | 0.091 | 0.905 | 0.124 | 0.520 | 1.637 | 1,106 | 914 |
+| OKC80-PDCH | 683 | 2.215 | 0.107 | 0.960 | 0.237 | 0.910 | 2.210 | 987 | 911 |
+| DATEM's HYSPLIT example, PMCH, same options | 697 | 1.942 | 0.068 | 0.962 | 0.262 | 0.650 | | | |
+
+- These supersede the branch-local numbers recorded before the merge (ranks
+  1.63 and 2.21, means 907 and 905 pg m⁻³, run with 0..360 longitudes and the
+  density applied afterwards at the source). The 0.8% rise in the means is
+  the per-particle density (decision 0022) against one density at the source.
+- A second run with the same seeds gave identical particle trajectories
+  (`endpoint_particles.parquet`) and an identical scorecard, but footprints
+  that differ in the last bit (at most 5 × 10⁻⁷ relative, in under 1% of cells):
+  CUDA's `scatter_add_` accumulates particles in a nondeterministic order,
+  which is invisible when every particle adds the same amount (`none`) and
+  shows once each adds its own density weight (`dry_air`). Two runs with
+  `--set output_grid.density_weighting=none` were bit-identical.
+- On the ambient basis (`run --basis ambient --set
+  output_grid.density_weighting=none`) the means are 759 and 757 pg m⁻³ (17%
+  lower) and the ranks 1.549 and 2.122: the ratio of the dry-air density to
+  the 1.293 kg m⁻³ behind DATEM's conversion.
+- Before the merge, with the meander coefficient doubled (`--set
+  turbulence.meander.coefficient=0.32`), `compare` shows the ranks moving
+  by +0.010 (PMCH) and −0.010 (PDCH), with R² down 0.006 in both: changes
+  of the size the published studies call not meaningful. (That run's
+  scorecard flags the tree as modified, because a doc file was being edited
+  while it ran; the check now looks only at `src` and the scoring package.)
+- The PMCH and PDCH scores differ mostly in KS and FMS, although the same
+  footprints predict both: 56% of DATEM's PMCH samples are non-zero (185 of
+  them below 10 pg m⁻³, which looks like background), against 17% for PDCH.
+  GLIDE predicts tracer in 8% of the samples. Not investigated further.

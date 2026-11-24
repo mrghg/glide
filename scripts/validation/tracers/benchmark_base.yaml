@@ -1,0 +1,41 @@
+# Base GLIDE configuration for the tracer benchmark (queue task B12).
+#
+# The physics and numerics of the reference configuration
+# (configs/example_multisite_january.yaml), without paths, releases or an
+# output grid: `python -m tracers.benchmark run` fills in `io`,
+# `simulation.start_time` and `length_seconds`, the `samples` release, the
+# footprint grid around the source and, when not set here, the horizontal
+# `met_domain` (the meteorology store's extent less half a degree).
+# Override any value with `--set key.path=value`, or pass another base with
+# `--config`. This is not the registered configuration; task A8b fixes that.
+
+simulation:
+  dt_seconds: 60
+  device: auto
+
+turbulence:
+  scheme: hanna_1982
+  max_substeps: 6
+  meander:
+    enabled: true
+    coefficient: 0.16
+
+convection:
+  scheme: emanuel_reduced
+  emanuel:
+    closure_c: 0.03
+
+met_domain:
+  alt_max_m: 15000.0
+
+batch:
+  max_releases_per_batch: 400
+
+memory:
+  met_cache_max_hours: 120
+  met_cache_on_host: true
+  met_prefetch: true
+  log_every_steps: 500
+  gc_every_steps: 50
+  guard_check_every_steps: 10
+  guard_max_rss_gib: 40.0

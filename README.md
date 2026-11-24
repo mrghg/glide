@@ -162,6 +162,13 @@ The `release` block is a discriminated union on `kind`:
 - `point_schedule` — an explicit list of release times from one site.
 - `multi_point_periodic` — `n_releases` evenly spaced releases from **multiple
   sites simultaneously**.
+- `samples` — an explicit list of releases, each with its own `name`, `lon`,
+  `lat`, `start_time`, `duration_seconds` and height range (`alt_min_agl_m` to
+  `alt_max_agl_m`; particles start uniformly between them, or at one height
+  when the two are equal). One backward release per measured sample, as the
+  tracer benchmark uses (`scripts/validation/tracers/benchmark.py`). The
+  footprint store then also carries `release_alt_top_agl_m`, and `site` holds
+  each sample's name.
 
 That last one is how you scale across a network. Sites share one release
 schedule, so they share meteorology windows: each fetch, each convection matrix,
