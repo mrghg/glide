@@ -130,9 +130,25 @@ comparison.
   Tier 2 comparison is meant to resolve, and correctable at almost no cost.
 
 **Open before registration.**
-- *The tracer observations.* Whether the CAPTEX, ANATEX, ETEX and OKC80
-  samples are reported relative to dry or ambient air. If ambient, the Tier 3
-  comparison needs the opposite correction for those experiments (B10).
+- *The tracer observations* (settled 23 Nov 2026, from the sources below; no
+  primary source states a dry or moist basis, so part of this is inference).
+  All four experiments measured volume ratios in fL/L (parts per 10¹⁵). For
+  ETEX and ANATEX the sampled volume was normalised by a background
+  perfluorocarbon (ptPDCH) taken as constant, which makes the values ratios to
+  a long-lived background gas, in effect dry-air mole fractions. For CAPTEX
+  and OKC80 the volumes were pumped ambient air, with no correction stated;
+  humidity would change them by 0.3–2.5%, below the measurement uncertainty.
+  The pg m⁻³ and ng m⁻³ values in DATEM and the JRC files are the fL/L values
+  times one fixed factor, not an ambient density: for CAPTEX and ANATEX
+  pg m⁻³ = fL/L × M / 22.40 L mol⁻¹ (15.624 for PMCH), and for ETEX
+  ng m⁻³ = fL/L × 0.015. **So GLIDE's dry-air mole fraction is compared
+  directly, converted with the same fixed factors** (B10, B12), never with
+  the model's air density, which would add a spurious 5–15%. No humidity
+  correction. Sources: NOAA ARL READY tutorial on CAPTEX units
+  (ready2.arl.noaa.gov, "chem_ratio"); ANATEX Vol. IV (EML 1991, OSTI 6100709,
+  pp. 9, 15–17); the JRC ETEX pages (remon.jrc.ec.europa.eu, ETEX site pages
+  24, 54, 55); EPA-600/7-81-006 for OKC80. Not read: the CAPTEX final report
+  (Ferber et al. 1986) and the ANATEX archive report (ARL-167).
 - *Test NAME's density treatment.* The per-cell, per-sample division comes
   from reading NAME's code. A short NAME run against a hand calculation would
   confirm it (NAME agent).
@@ -151,4 +167,14 @@ updated with this record.
 
 **Status.** Adopted 2026-11-23 (GLIDE PR #42), from finding 3 of the
 validation review of 21 Nov 2026 (`VALIDATION-HANDOFF.md`). Implemented by
-queue task A04. Docs: [docs/reference-runs.md](../../docs/reference-runs.md) §6.
+queue task A04 (2026-11-24): `output_grid.density_weighting: dry_air | none`,
+default `dry_air`; the pressure at the particle is the surface pressure carried
+up hypsometrically with the virtual temperature at half the particle's height.
+Measured on standard cases 3 and 4 against the old recipe (plain seconds
+divided afterwards by the 240-hour mean surface density): −3.4% (CBW-20,
+winter night) and +2.0% (LEF, summer afternoon) in total 0–40 m sensitivity.
+Against the same recipe with a dry-air mean density, which leaves the pairing
+of residence and density, the changes are −4.2% and +0.3%; the moist-to-dry
+step is +0.8% and +1.7% (`dev/agent/progress/A04.md`). Docs:
+[docs/reference-runs.md](../../docs/reference-runs.md) §6,
+[docs/physics.md](../../docs/physics.md) §7.

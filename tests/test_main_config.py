@@ -4,6 +4,7 @@ import textwrap
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import numpy as np
 import pytest
 from pydantic import ValidationError
 
@@ -499,12 +500,23 @@ def test_validate_meteorology_time_coverage_rejects_insufficient_history() -> No
 # --- met_domain.vertical_levels (configurable internal AGL grid) -------------
 
 
-def test_met_domain_vertical_levels_defaults_to_builtin_ladder() -> None:
-    """Unset => None, i.e. the reader's built-in 23-level default (back-compat)."""
+def test_met_domain_default_ladder_is_40_stretched_levels() -> None:
+    """Task A01, decision 0017: unset => 40 stretched levels from first_layer_m,
+    spanning alt_max_m. The pre-A01 23-level ladder can still be pinned explicitly."""
+
+    from lpdm.vertical_grid import default_agl_levels
 
     cfg = RunConfig.model_validate(_base_dict())
-    assert cfg.met_domain.vertical_levels is None
-    assert cfg.met_domain.resolve_agl_levels() is None
+    md = cfg.met_domain
+    assert md.vertical_levels is None
+    levels = md.resolve_agl_levels()
+    assert len(levels) == 40
+    assert levels[0] == 0.0 and levels[-1] >= md.alt_max_m
+    assert levels[1] == pytest.approx(md.first_layer_m)
+
+    legacy = list(default_agl_levels(md.alt_max_m))
+    pinned = RunConfig.model_validate(_base_dict(met_domain={"vertical_levels": legacy}))
+    np.testing.assert_array_equal(pinned.met_domain.resolve_agl_levels(), legacy)
 
 
 def test_met_domain_vertical_levels_count_generates_stretched_grid() -> None:
@@ -585,3 +597,31 @@ def test_footprint_time_bin_index_uses_the_bin_width() -> None:
     assert _footprint_time_bin_index(end, end - timedelta(hours=5), 3, 7200.0) == 2
     assert _footprint_time_bin_index(end, end - timedelta(hours=3, minutes=59), 3, 7200.0) == 1
     assert _footprint_time_bin_index(end, end - timedelta(days=1, hours=1), 2, 86400.0) == 1
+
+
+def test_preflight_refuses_met_domain_outside_the_grid() -> None:
+    """A met domain in -180..180 over a grid left in 0..360 ran silently with
+    the grid edge's winds (task B12); the preflight now refuses it."""
+
+    from lpdm.main import PreflightValidationError, _validate_meteorology_space_coverage
+
+    class _Grid:
+        def __init__(self, coverage):
+            self._c = coverage
+
+        def get_lon_lat_coverage(self):
+            return self._c
+
+    cfg = RunConfig.model_validate(_base_dict())
+    md = cfg.met_domain
+    inside = (
+        md.lon_bounds[0] - 1,
+        md.lon_bounds[1] + 1,
+        md.lat_bounds[0] - 1,
+        md.lat_bounds[1] + 1,
+    )
+    _validate_meteorology_space_coverage(_Grid(inside), cfg)
+    _validate_meteorology_space_coverage(_Grid(None), cfg)  # reader cannot say: no check
+    shifted = (inside[0] + 360.0, inside[1] + 360.0, inside[2], inside[3])
+    with pytest.raises(PreflightValidationError, match="longitude convention"):
+        _validate_meteorology_space_coverage(_Grid(shifted), cfg)

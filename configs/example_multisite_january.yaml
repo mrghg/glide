@@ -15,7 +15,7 @@
 #   .venv/bin/python -m lpdm.main --config configs/example_multisite_january.yaml
 
 io:
-  zarr_store: data/era5/EUROPE_*.zarr
+  zarr_store: data/era5-arco/EUROPE_*_ERA5-ARCO.zarr
   output_uri: outputs/decc-multisite-202401-hourly
 
 simulation:

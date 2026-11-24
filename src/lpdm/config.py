@@ -23,7 +23,7 @@ import numpy as np
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from lpdm.vertical_grid import stretched_agl_levels
+from lpdm.vertical_grid import DEFAULT_VERTICAL_LEVEL_COUNT, stretched_agl_levels
 
 
 def _parse_datetime_utc(value: datetime | str) -> datetime:
@@ -374,6 +374,11 @@ class OutputGridConfig(_Frozen):
     # length, or residence older than the axis is dropped. Dropping it must be
     # asked for (decision 0016).
     drop_older_ages: bool = False
+    # What each counted particle-second is divided by (decision 0022). `dry_air`:
+    # the dry-air density at the particle, (p - e) / (R_d T), at the step's met
+    # time; the footprint is in s m3 kg-1 of dry air, and M_air / h gives
+    # m2 s mol-1 with no further density. `none`: plain residence seconds.
+    density_weighting: Literal["dry_air", "none"] = "dry_air"
     # Footprint storage (task B2). Both None (default) keep the store's default
     # encoding, so existing output is unchanged. `footprint_keep_mantissa_bits`
     # rounds each value to that many float32 mantissa bits before compression
@@ -415,7 +420,9 @@ class MetDomainConfig(_Frozen):
     #   - an int  -> that many geometrically stretched levels (see
     #     `vertical_grid.stretched_agl_levels`); the user-friendly form, and
     #   - a list  -> explicit ascending AGL heights in metres, for full control.
-    # None (default) keeps the fixed 23-level built-in ladder.
+    # None (default) -> DEFAULT_VERTICAL_LEVEL_COUNT (40) stretched levels from
+    # `first_layer_m` (decision 0017). The pre-A01 23-level ladder is
+    # `list(vertical_grid.default_agl_levels(alt_max_m))`.
     #
     # This grid, NOT the met source, sets the vertical resolution the physics sees:
     # the default resolves ~13 levels below 1.5 km, which under-uses a model-level
@@ -462,10 +469,15 @@ class MetDomainConfig(_Frozen):
         return self
 
     def resolve_agl_levels(self) -> np.ndarray | None:
-        """The explicit AGL height grid for this config, or None for the built-in default."""
+        """The AGL height grid for this config.
+
+        Unset -> ``DEFAULT_VERTICAL_LEVEL_COUNT`` stretched levels (decision 0017).
+        """
 
         if self.vertical_levels is None:
-            return None
+            return stretched_agl_levels(
+                DEFAULT_VERTICAL_LEVEL_COUNT, self.alt_max_m, first_layer_m=self.first_layer_m
+            )
         if isinstance(self.vertical_levels, int):
             return stretched_agl_levels(
                 self.vertical_levels, self.alt_max_m, first_layer_m=self.first_layer_m

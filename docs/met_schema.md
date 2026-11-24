@@ -56,7 +56,7 @@ for the gaps you will most likely have to close yourself.
 | --- | --- | --- |
 | Time | `time` | `datetime64`, **UTC**, any *uniform* cadence. Must cover the run's backward window. |
 | Latitude | `latitude` | Degrees north. Ascending or descending both accepted. |
-| Longitude | `longitude` | Degrees east. Either $-180..180$ or $0..360$; GLIDE detects and normalises. |
+| Longitude | `longitude` | Degrees east. Either $-180..180$ or $0..360$; GLIDE reads the grid in $-180..180$ whenever it stays one ascending run there (a box crossing 0° E, or one west of it such as NAM, $240..305$ in the store). A box crossing 180° E stays in $0..360$, and its configuration (`met_domain`, `output_grid`, release points) must then be written in $0..360$ too; the preflight refuses a `met_domain` outside the grid in either convention. A global domain (wrapping round) is not supported. |
 | Vertical | `level` | 1-D. Its *meaning* depends on the vertical mode below. |
 
 **One grid for every field.** All variables share one set of `latitude` and
@@ -276,13 +276,13 @@ Two modes, distinguished only by what the level coordinate *means*. Both require
 3-D `geopotential` and `geopotential_at_surface`; height always comes from
 geopotential, so both share the same AGL machinery.
 
-### Pressure levels (default)
+### Pressure levels
 
 The level coordinate holds **pressure**. Units come from its `units` attribute —
 `hPa` (or `mbar`/`millibar`) or `Pa`. With no units attribute, values ≤ 2000 are
 assumed hPa, otherwise Pa. Any ordering and any number of levels.
 
-### Model / hybrid levels
+### Model / hybrid levels (the default, decision 0017)
 
 The level coordinate is a **level index**. Per-level heights come directly from
 the 3-D `geopotential` field, exactly as on pressure levels — but pressure has to
@@ -305,6 +305,29 @@ model levels. See
 
 Model levels require the terrain-following path (`terrain_following=True`, the
 default).
+
+**On model levels, the level and surface geopotentials must describe the same
+ground: no model level lies below `geopotential_at_surface`.** Heights above
+ground are (`geopotential` − `geopotential_at_surface`) / g, so a surface field
+that disagrees with the levels shifts the whole terrain-following grid in that
+column, and with it the height every wind and temperature is placed at. A
+producer that takes the two fields from different sources must make them
+consistent. This is a product-neutral rule; how each source meets it is the
+producer's business, not GLIDE's:
+
+- **ERA5** (met-bazarr ≥ v0.4.0, decision 0009 there): ARCO's surface
+  geopotential disagrees with its model-level geopotential by up to ~130 m in
+  steep terrain, so met-bazarr derives the surface from the lowest level by the
+  IFS's own relation (level 137 sits ~10 m above the ground). Stores built
+  earlier are brought up to the rule by `metbazarr repair`, recorded in their
+  `glide_repairs` attribute.
+- **Met Office UM** (met-bazarr decision 0003): consistent by construction; both
+  fields come from the same orography, and the lowest level lies 12–20 m above
+  the surface.
+
+met-bazarr's validator makes a violation an error for validation inputs
+(`--validation-input`) and a warning otherwise. On **pressure levels** the rule
+does not apply: levels below the ground are normal there (see above).
 
 **Tag your model-level cubes.** GLIDE **refuses** to read a store as pressure
 levels when the vertical coordinate does not look like pressures — when it is
@@ -329,9 +352,11 @@ ladder is what makes the vertical interpolation cheap enough for the per-step ho
 path.) So the *source's* level count does not set the model's effective vertical
 resolution — this grid does, and it also sets the meteorology cache size.
 
-The default is 23 levels, 13 of them below 1.5 km. That suits 37 pressure levels
-(~5 below 1.5 km) but **under-uses a model-level source**, which carries ~20
-there. Raise it:
+The default is 40 levels stretched from `first_layer_m` (decision 0017, task
+A01; interim until the convergence study, A5), which roughly matches the
+near-surface density of ERA5's model levels (~20 below 1.5 km). Before A01 the
+default was a fixed 23-level ladder, 13 below 1.5 km; pin it explicitly with
+`vertical_levels: <list>` to reproduce older runs. To set the grid yourself:
 
 ```yaml
 met_domain:
@@ -343,13 +368,15 @@ met_domain:
 `vertical_levels` accepts either a **count** (layers stretch geometrically from
 `first_layer_m` to `alt_max_m`, concentrating resolution near the surface, with
 the ratio solved so they span the domain exactly) or an **explicit ascending
-list** of AGL heights in metres. Omit it for the built-in default.
+list** of AGL heights in metres. Omit it for the 40-level default.
 
 Guidance: ~40 levels roughly matches ERA5 model levels' near-surface density (~23
 below 1.5 km); beyond that you are interpolating rather than resolving new
 structure. **The host meteorology cache scales linearly with the level count** —
-at 192 cached hours on the EUROPE domain, 23 levels is ≈52 GiB but 40 levels is
-≈90 GiB, so raise SLURM `--mem` accordingly.
+measured on the EUROPE domain (task A01, GH200), about 0.15 GiB per cached hour
+at 23 levels and 0.26 GiB at 40, so 192 cached hours need ≈32 GiB and ≈56 GiB
+plus a few GiB of base, within a 115 GB one-GPU allocation. Size SLURM `--mem`
+accordingly; `make_multisite_config.py`'s estimate is deliberately higher.
 `make_multisite_config.py --vertical-levels N` does this arithmetic for you.
 
 ---

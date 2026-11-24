@@ -18,9 +18,9 @@ _Last updated: 2026-11-20._
 | --- | --- |
 | **Core backward LPDM** | RK2 advection, exact-OU Langevin turbulence with the full Thomson well-mixed drift and Stohl–Thomson density correction, ground reflection, per-particle adaptive sub-stepping. Mass-conserving. ([docs/physics.md](docs/physics.md)) |
 | **Turbulence** | Hanna (1982) in three regimes, aligned to FLEXPART v11; gradient-Richardson free-troposphere closure; Maryon meander. Behind a swappable `TurbulenceScheme` interface. ([docs/turbulence.md](docs/turbulence.md)) |
-| **Convection** | Reduced Emanuel mass-flux scheme, non-divergent matrix, once per meteorology window. ([docs/convection.md](docs/convection.md)) |
+| **Convection** | Reduced Emanuel mass-flux scheme, non-divergent matrix, in each meteorology column, once per meteorology interval. ([docs/convection.md](docs/convection.md)) |
 | **Terrain-following vertical coordinate** | Meteorology resampled onto a fixed AGL grid per window, with slope-corrected vertical velocity. Fixed the zero-surface-footprint problem over high terrain. |
-| **Model-level meteorology** | Reader auto-detects hybrid model levels and reconstructs per-level pressure hydrostatically. **Plumbing complete; not yet validated.** Becomes the default in task A01 ([decision 0017](dev/decisions/0017-model-levels-default.md)); the model-level cubes A01 needs (EUROPE, Dec 2023 and Jan 2024, matching the pressure-level reference cubes) are downloaded. |
+| **Model-level meteorology** | Reader auto-detects hybrid model levels and reconstructs per-level pressure hydrostatically. **Validated and the default** (task A01, [decision 0017](dev/decisions/0017-model-levels-default.md)): runs end to end on a GH200 with graph capture intact; the hydrostatic pressure matches ECMWF's L137 a/b to under 1 Pa near the surface where the surface geopotential is consistent (not in steep terrain on ARCO stores: see A01's progress file); with the same surface fields, 0–40 m sensitivity changes by +0.5 to +3.5% against pressure levels. Built-in grid: 40 stretched levels. |
 | **Meteorology input** | Met format 2.0 ([docs/met_schema.md](docs/met_schema.md); decisions [0019](dev/decisions/0019-met-format-versioning.md), [0020](dev/decisions/0020-time-meaning-of-period-fields.md)): provenance attributes, a fill rule for isolated missing source values, and per-variable labels for means and accumulations, which the reader holds through the window they average (as NAME does). Where no grid point lies on a `met_domain` bound, the reader also reads the first point beyond it. u\* comes from the surface stresses. Stores are prepared by [met-bazarr](https://github.com/mrghg/met-bazarr) `v0.2.0` ([decision 0018](dev/decisions/0018-met-bazarr.md)): ERA5 from the ARCO copy (bit-identical to GLIDE's own downloader apart from u\*) and the Met Office UM analyses NAME runs on. ERA5 straight from ECMWF is a separate, later source. |
 | **Multi-site releases** | `multi_point_periodic` — sites share meteorology windows, so per-window costs amortise across the whole network. |
 | **Streaming output** | `footprints.zarr` (5-D), `endpoint_particles.parquet`, `trajectory_diagnostics.parquet`, `run_metadata.json`, written per batch. |
@@ -90,11 +90,10 @@ wall. What remains:
   diagnostic, mask/liveness bookkeeping, per-batch particle generation and output
   writes, and Python loop overhead. This, not more graph work, is the next lever.
   First step is to sub-time it to see what is actually in it (task A1).
-- **Convection needs re-profiling.** The A/B that flagged it as a co-frontier at
-  ~250 ms/window ran *before* the parcel lift was vectorised; that change removed
-  a per-level loop and ~1,100 host synchronisations per window, so convection
-  should now be far cheaper. How much is unmeasured. Re-profile before treating
-  it as a top consumer again.
+- **Convection is not a top consumer.** Re-profiled in task A02 on the A01
+  comparison config (GH200, 72 releases, EUROPE domain of ~151,000 columns):
+  63 ms per met window with the old bbox-mean column, 78 ms with every column
+  diagnosed (about 1% of wall either way; meteorology fetch is ~82%).
 
 ---
 
@@ -155,8 +154,8 @@ Particle aggregation (roadmap 6b) and convection refinements (6c) are after v1.
 These are documented approximations rather than bugs; each is stated in the
 relevant docs page with its consequence.
 
-- **Per-column vertical interpolation and convection profiles.** Both currently
-  use the bounding-box mean. Same 3-D refactor for both.
+- **Per-column vertical interpolation.** Uses the bounding-box mean. Convection
+  now works column by column (task A02, decision 0023).
 - **Per-sub-step $\sigma$ re-evaluation.** FLEXPART re-evaluates $\sigma$ and
   $T_L$ every sub-step; GLIDE holds them at the outer-step value (the
   velocity-dependent part of the drift *is* re-evaluated).

@@ -5,7 +5,9 @@ Output units convention: each cell of the footprint tensor accumulates
 is the per-particle weight set by the release generator (typically `1/n_particles`
 for uniform releases). The raw value therefore has dimensionality
 `(dimensionless mass fraction) × seconds`, i.e. residence time per unit released
-mass.
+mass. With density weighting `dry_air` (the default, decision 0022) each term is
+also divided by the dry-air density at the particle, so the value is in
+s m³ kg⁻¹, and M_air / h converts the 0–h m layer to m² s mol⁻¹ directly.
 
 Conversion to a physical sensitivity (e.g. ppm per (μmol/m²/s) emission flux)
 requires additional factors not applied here: cell volume, mixed-layer thickness,
@@ -122,6 +124,7 @@ class FootprintGridder:
         t_idx: torch.Tensor,
         release_idx: torch.Tensor,
         dt_seconds: float,
+        inv_density: torch.Tensor | None = None,
     ) -> None:
         """Accumulate weighted residence time into the 5D footprint grid.
 
@@ -146,6 +149,12 @@ class FootprintGridder:
                 release_idx: int64 tensor [N] of per-particle release indices
                         in [0, n_releases). Out-of-range values are filtered.
                 dt_seconds: timestep length over which `weights` apply.
+                inv_density: optional float tensor [N], 1 / (dry-air density) at
+                        each particle (m3 kg-1), from `lpdm.air_density` (decision
+                        0022). When given, each contribution is divided by the
+                        density, and the footprint is in s m3 kg-1. None (density
+                        weighting `none`) keeps plain residence seconds, with the
+                        same arithmetic as before the option existed.
         """
         # Fully vectorised, SYNC-FREE accumulation: operate on the WHOLE particle
         # buffer with no boolean indexing (particles[active_mask]) and no torch.any
@@ -193,5 +202,12 @@ class FootprintGridder:
         stride_z = self.n_y * self.n_x
         flat_idx = r_c * stride_r + t_c * stride_t + z_c * stride_z + y_c * self.n_x + x_c
 
-        w_eff = weights * valid.to(weights.dtype) * dt_seconds
+        if inv_density is None:
+            w_eff = weights * valid.to(weights.dtype) * dt_seconds
+        else:
+            # `where`, not a multiply by `valid`: an inactive particle's density
+            # may be meaningless, and 0 * inf would put a NaN in the grid.
+            w_eff = torch.where(
+                valid, weights * dt_seconds * inv_density, torch.zeros_like(weights)
+            )
         self.tensor.view(-1).scatter_add_(0, flat_idx, w_eff)
