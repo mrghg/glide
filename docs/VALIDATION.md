@@ -349,45 +349,69 @@ changes the numerics states its own tolerance in its spec.
 
 ### The fixtures
 
-Made on 24 Nov 2026 on a GH200 (Isambard AI), torch 2.14.1+cu126, CUDA 12.6,
-ERA5-ARCO EUROPE stores built by met-bazarr (surface geopotential repaired by
-v0.4.0), at `src/` identical to `main` after PR #59.
+Regenerated on 24 Nov 2026 for decision 0025 (Hanna density and potential
+temperature from each column's own pressure, not the met domain's area mean
+per level), on a GH200 (Isambard AI), torch 2.14.1+cu126, CUDA 12.6, ERA5-ARCO
+EUROPE stores built by met-bazarr (surface geopotential repaired by v0.4.0), at
+`src/` of commit 663ac5e (branch `agent/hanna-column-pressure`). The first
+fixtures (A0, `src/` of `main` after PR #59) are superseded; what the change
+did to them:
+
+| fixture | new code vs old fixture |
+| --- | --- |
+| smoke CPU | release total +2.2e-5 relative; 0–40 m total +0.03%; 850 cells differ |
+| smoke CUDA | release total +6.2e-5 relative; 836 cells differ |
+| reference CUDA | release totals: median +3e-4 (MHD), −8e-5 (RGL), +8e-5 (TAC), largest 3.2e-3; 0–40 m totals per release up to 2.5% (median −0.04%, −0.20%, −0.18%), summed over each site's 48 releases −0.03%, −0.29%, −0.18% |
+
+The three reference sites are low-lying, so the change is small there and the
+per-cell differences are mostly the particles' trajectories diverging. Over
+high ground it is not small: one release from the Jungfraujoch site (1,000 m
+above ground, 5 days back) lost 18% of its 0–40 m sensitivity, against 0.5%
+seed-to-seed (decision 0025).
 
 | fixture | config | where | size | repeat run vs fixture |
 | --- | --- | --- | --- | --- |
 | `smoke_mhd_single_release/cpu` | smoke: MHD, 1 release, 20,000 particles, 1 day back | committed | 0.37 MB | bit-identical (footprint and endpoints) |
-| `smoke_mhd_single_release/cuda` | the same, CUDA static path, compiled | committed | 0.37 MB | max cell \|a−b\|/bound 0.32, max rel 3.2e-6, total 6.9e-8; endpoints identical |
-| `ab_multisite_perf/cuda` | MHD, RGL, TAC × 48 hourly releases, 20,000 particles, 5 days back, 2 batches | data under `outputs/golden/ab_multisite_perf/cuda` (57 MB); manifest committed | — | max cell \|a−b\|/bound 0.42, max rel 4.3e-6, total 3.1e-8 (all 144 releases); endpoints identical |
+| `smoke_mhd_single_release/cuda` | the same, CUDA static path, compiled | committed | 0.37 MB | max cell \|a−b\|/bound 0.28, max rel 2.9e-6, total 3.5e-8; endpoints identical |
+| `ab_multisite_perf/cuda` | MHD, RGL, TAC × 48 hourly releases, 20,000 particles, 5 days back, 2 batches | data under `outputs/golden/ab_multisite_perf/cuda` (57 MB; backup in `/projects/u6za/glide-data/golden-fixtures/ab_multisite_perf/cuda`; the superseded A0 data are kept beside both as `cuda-A0-superseded`); manifest committed | — | max cell \|a−b\|/bound 0.44, max rel 4.5e-6, total 4.2e-8 (all 144 releases); endpoints identical |
 
 The CPU and CUDA smoke fixtures are not expected to agree with each other bit
-for bit (their totals differ by 3e-4 relative); static/dynamic parity is
+for bit (their totals differ by 2.4e-4 relative); static/dynamic parity is
 checked by the runtime tests, not by the fixtures.
 
 ### Benchmark baseline
 
 `benchmark.py` on `configs/ab_multisite_perf.yaml`, GH200, `GLIDE_COMPILE=1`,
-192 h met cache on the host, the GPU otherwise idle (two CPU-only jobs shared
-the node), 24 Nov 2026:
+192 h met cache on the host, the GPU otherwise idle, 24 Nov 2026, at `src/` of
+663ac5e (decision 0025; regenerated with the fixtures):
 
 | quantity | value |
 | --- | --- |
 | device | cuda |
 | releases (footprints) | 144 in 2 batch(es), 20000 particles each |
 | model steps | 17280 |
-| process wall time | 1217.7 s |
-| **footprints per second** | **0.1183** |
-| peak host RSS | 53.3 GB |
-| peak GPU allocated / reserved | 0.69 / 1.63 GiB |
+| process wall time | 1149.9 s |
+| **footprints per second** | **0.1252** |
+| peak host RSS | 53.7 GB |
+| peak GPU allocated / reserved | 0.69 / 1.65 GiB |
 
-Phase timers: total wall 1202.8 s, 168 met fetches (no CUDA sync: GPU phases under-counted).
+Phase timers: total wall 1134.9 s, 168 met fetches (no CUDA sync: GPU phases under-counted).
 
 | phase | total (s) | % wall | calls | ms/call |
 | --- | ---: | ---: | ---: | ---: |
-| met_fetch | 943.31 | 78.4 | 17280 | 54.590 |
-| gridder | 75.69 | 6.3 | 17280 | 4.380 |
-| step | 65.61 | 5.5 | 17280 | 3.797 |
-| convection | 14.61 | 1.2 | 288 | 50.728 |
-| (residual/untimed) | 103.60 | 8.6 |  |  |
+| met_fetch | 893.94 | 78.8 | 17280 | 51.732 |
+| gridder | 71.78 | 6.3 | 17280 | 4.154 |
+| step | 56.25 | 5.0 | 17280 | 3.255 |
+| convection | 14.56 | 1.3 | 288 | 50.552 |
+| (residual/untimed) | 98.40 | 8.7 |  |  |
+
+The previous baseline (A0, before decision 0025) was 1,217.7 s, 0.1183
+footprints/s, step 3.797 ms/call. The change itself does not make the model
+faster per step beyond removing a host-to-device copy of the level pressures
+that the density and free-troposphere fields made on every step (they are now
+built inside the once-per-window cache); most of the 6% difference is met
+fetch time (51.7 vs 54.6 ms/call), which depends on the shared file system and
+on what else ran on the node (two CPU-only jobs during the A0 run).
 
 This run is also the run the reference fixture was made from (the phase timers do not change the output). Met fetch dominates. The phase timers do not synchronise the GPU, so the step
 and gridder times are under-counted and the residual holds the rest. Compare
