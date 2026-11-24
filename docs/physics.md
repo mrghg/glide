@@ -656,7 +656,7 @@ the surface layer being integrated over — 40 m by convention, and **not** the
 boundary-layer depth $h$ of §2 — and $m_{\mathrm{air}} = 0.02897\ \mathrm{kg\ mol^{-1}}$
 is the molar mass of dry air. For a `none` footprint (plain seconds) the density
 is applied afterwards, as in Lin et al. (2003) Eq. 5, dividing by a surface air
-density $\bar\rho$ (a scalar, or a 2-D field from `surface_air_density_from_met`);
+density $\bar\rho$ (a scalar, or a 2-D field from `surface_air_density_from_met`, on pressure- or model-level stores);
 that is biased where residence and density vary together (decision 0022).
 `to_stilt_surface_footprint` reads the footprint's `density_weighting`
 attribute, applies the matching formula, and refuses a density for a `dry_air`
