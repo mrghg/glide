@@ -960,6 +960,138 @@ def test_convection_fires_in_the_unstable_column_only() -> None:
     assert float((out[: n // 2, 2] - particles[: n // 2, 2]).mean()) < -200.0
 
 
+def _wide_firing_box(n_lat: int = 6, n_lon: int = 10, seed: int = 7) -> HourlyMetTensors:
+    """An n_lat x n_lon box of the convective sounding, each column warmed or
+    cooled and moistened or dried near the surface by its own random amount, so
+    most columns fire, with different LCL, LNB and M_b."""
+
+    from dataclasses import replace
+
+    base = _build_convective_met_window()
+    n_ch, n_lev = base.hour_start.shape[:2]
+    gen = torch.Generator().manual_seed(seed)
+    column = base.hour_start[:, :, :1, :1]
+    fields = column.expand(n_ch, n_lev, n_lat, n_lon).clone()
+    t_idx, q_idx = base.channel_names.index("t"), base.channel_names.index("q")
+    decay = torch.exp(-torch.arange(n_lev, dtype=torch.float32) / 3.0).view(n_lev, 1, 1)
+    dt = torch.empty(n_lat, n_lon).uniform_(-0.5, 2.5, generator=gen)
+    dq = torch.empty(n_lat, n_lon).uniform_(0.95, 1.2, generator=gen)
+    fields[t_idx] = fields[t_idx] + dt * decay
+    fields[q_idx] = fields[q_idx] * (1.0 + (dq - 1.0) * decay)
+    metadata = replace(
+        base.metadata,
+        lon=np.linspace(0.0, n_lon - 1.0, n_lon),
+        lat=np.linspace(40.0, 40.0 + n_lat - 1.0, n_lat),
+    )
+    height = base.height_agl_m[:, :1, :1].expand(n_lev, n_lat, n_lon).contiguous()
+    return HourlyMetTensors(
+        hour_start=fields,
+        hour_end=fields,
+        metadata=metadata,
+        channel_names=base.channel_names,
+        height_agl_m=height,
+    )
+
+
+def _convect_with_every_firing_column(scheme, particles, met, active, generator):
+    """The step as first written in A02: a matrix for every firing column, then
+    each particle's column looked up. The reference for the occupied-column path."""
+
+    dtype = torch.float32
+    cols = scheme.column_state(met, t_alpha=0.5, device=torch.device("cpu"), dtype=dtype)
+    fire_idx = cols.fires.nonzero().squeeze(1)
+    fmass = emanuel_module.compute_mass_flux_matrices(
+        cols.pressure_pa[fire_idx],
+        cols.i_lcl[fire_idx],
+        cols.i_lnb[fire_idx],
+        (cols.m_b[fire_idx] * cols.interval_s).to(dtype),
+    )
+    layer_mass = _layer_masses_per_area(cols.pressure_pa[fire_idx]).clamp(min=1e-6)
+    prob = emanuel_module.backward_transition_matrices(fmass, layer_mass)
+    col_slot = torch.full((cols.fires.numel(),), -1, dtype=torch.long)
+    col_slot[fire_idx] = torch.arange(int(fire_idx.numel()))
+    particle_col = emanuel_module.nearest_column_index(
+        particles[:, 0], particles[:, 1], met.metadata.lon, met.metadata.lat
+    )
+    particle_slot = col_slot[particle_col]
+    out, _ = scheme._redistribute_particles(
+        particles=particles,
+        eligible=active & (particle_slot >= 0),
+        particle_col=particle_col,
+        particle_slot=particle_slot,
+        height_col=cols.height_m,
+        prob=prob,
+        generator=generator,
+        device=torch.device("cpu"),
+        dtype=dtype,
+    )
+    return out, cols
+
+
+def test_matrices_only_for_occupied_columns_give_identical_positions() -> None:
+    """PR #54 review: matrices are built only for firing columns that hold an
+    active particle. On a box where most columns fire but particles occupy few
+    (and inactive particles sit in other firing columns), every particle ends at
+    the same position, bit for bit, as when every firing column's matrix is built."""
+
+    from lpdm.gpu_engine import GPUEngine
+
+    met = _wide_firing_box()
+    scheme = EmanuelReducedConvection(closure_c=0.1, trigger_dtv_k=0.1)
+    n = 3000
+    gen = torch.Generator().manual_seed(11)
+    particles = torch.zeros(n, 4)
+    # Three occupied columns among 60; inactive particles in four other columns.
+    lon_occ = torch.tensor([1.0, 4.0, 8.0])[torch.randint(0, 3, (n,), generator=gen)]
+    lat_occ = torch.tensor([41.0, 43.0, 45.0])[torch.randint(0, 3, (n,), generator=gen)]
+    particles[:, 0] = lon_occ + torch.empty(n).uniform_(-0.4, 0.4, generator=gen)
+    particles[:, 1] = lat_occ + torch.empty(n).uniform_(-0.4, 0.4, generator=gen)
+    particles[:, 2] = torch.empty(n).uniform_(0.0, 9000.0, generator=gen)
+    particles[:, 3] = 1.0 / n
+    active = torch.ones(n, dtype=torch.bool)
+    active[-200:] = False
+    particles[-200:, 0] = torch.tensor([0.0, 2.0, 6.0, 9.0]).repeat(50)
+    particles[-200:, 1] = 44.0
+
+    ref, cols = _convect_with_every_firing_column(
+        scheme, particles, met, active, torch.Generator().manual_seed(99)
+    )
+    n_fire = int(cols.fires.sum())
+    assert n_fire >= 40, f"most of the 60 columns should fire, got {n_fire}"
+
+    built: list[int] = []
+    real = emanuel_module.compute_mass_flux_matrices
+
+    def spy(pressure_pa, *args):
+        built.append(int(pressure_pa.shape[0]))
+        return real(pressure_pa, *args)
+
+    emanuel_module.compute_mass_flux_matrices = spy
+    try:
+        out, _ = scheme.maybe_convect(
+            particles,
+            scheme.initialize_state(n, device=torch.device("cpu"), dtype=torch.float32),
+            met,
+            t_alpha=0.5,
+            dt_seconds=300.0,
+            active_mask=active,
+            engine=GPUEngine(device="cpu"),
+            generator=torch.Generator().manual_seed(99),
+        )
+    finally:
+        emanuel_module.compute_mass_flux_matrices = real
+
+    particle_col = emanuel_module.nearest_column_index(
+        particles[:, 0], particles[:, 1], met.metadata.lon, met.metadata.lat
+    )
+    n_occupied_firing = int(cols.fires[particle_col[active].unique()].sum())
+    assert built == [n_occupied_firing]
+    assert 0 < n_occupied_firing <= 9 < n_fire
+    assert int((out[:, 2] != particles[:, 2]).sum()) > 100, "convection must move particles"
+    assert torch.equal(out, ref)
+    assert torch.equal(out[~active], particles[~active])
+
+
 def test_nearest_column_index_handles_descending_latitude() -> None:
     lon = np.array([-10.0, -9.75, -9.5])
     lat = np.array([54.0, 53.75])  # descending, as ERA5 stores it

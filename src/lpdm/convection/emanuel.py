@@ -931,7 +931,7 @@ class EmanuelReducedConvection(ConvectionScheme):
     def column_mass_flux_matrices(self, cols: ColumnConvection) -> torch.Tensor:
         """The mass-flux matrix of every column, [C, Z, Z] (zeros where no
         convection fires). For diagnostics and tests; the runtime builds only
-        the firing columns'."""
+        the columns that fire and hold active particles."""
 
         return compute_mass_flux_matrices(
             cols.pressure_pa,
@@ -963,25 +963,42 @@ class EmanuelReducedConvection(ConvectionScheme):
         if n_fire == 0:
             return particles, state
 
-        # 4) Mass-flux matrices of the firing columns only (kg/m² per event: the
-        # flux times the met interval, which follows the store's cadence).
-        fmass = compute_mass_flux_matrices(
-            cols.pressure_pa[fire_idx],
-            cols.i_lcl[fire_idx],
-            cols.i_lnb[fire_idx],
-            (cols.m_b[fire_idx] * cols.interval_s).to(dtype),
-        )
-        layer_mass = _layer_masses_per_area(cols.pressure_pa[fire_idx]).clamp(min=1e-6)
-        prob = backward_transition_matrices(fmass, layer_mass)  # [F, Z, Z]
-        del fmass, layer_mass
-
-        # 5) Each particle is moved with the matrix of the column it is in.
+        # 4) The columns the active particles are in. Matrices are built only for
+        # columns that fire and hold at least one active particle: a matrix is
+        # [Z, Z] (137 x 137 on ERA5 model levels), so building one for every
+        # firing column of a summer EUROPE window (~150,000 columns) would take
+        # tens of GB for columns no particle uses. Each particle's matrix is the
+        # same as when every firing column's was built (the construction is
+        # column by column).
         n_col = cols.fires.numel()
-        col_slot = torch.full((n_col,), -1, dtype=torch.long, device=device)
-        col_slot[fire_idx] = torch.arange(n_fire, device=device)
         particle_col = nearest_column_index(
             particles[:, 0], particles[:, 1], met_window.metadata.lon, met_window.metadata.lat
         )
+        occupied = torch.zeros(n_col, dtype=torch.bool, device=device)
+        occupied[particle_col[active_mask]] = True
+        use_idx = (cols.fires & occupied).nonzero().squeeze(1)
+        n_use = int(use_idx.numel())
+
+        # 5) Mass-flux matrices of the occupied firing columns (kg/m² per event:
+        # the flux times the met interval, which follows the store's cadence).
+        if n_use > 0:
+            fmass = compute_mass_flux_matrices(
+                cols.pressure_pa[use_idx],
+                cols.i_lcl[use_idx],
+                cols.i_lnb[use_idx],
+                (cols.m_b[use_idx] * cols.interval_s).to(dtype),
+            )
+            layer_mass = _layer_masses_per_area(cols.pressure_pa[use_idx]).clamp(min=1e-6)
+            prob = backward_transition_matrices(fmass, layer_mass)  # [U, Z, Z]
+            del fmass, layer_mass
+        else:
+            # No active particle under convection: nothing moves, and (as when
+            # no particle is eligible) no random number is drawn.
+            prob = torch.zeros((0, 0, 0), dtype=dtype, device=device)
+
+        # 6) Each particle is moved with the matrix of the column it is in.
+        col_slot = torch.full((n_col,), -1, dtype=torch.long, device=device)
+        col_slot[use_idx] = torch.arange(n_use, device=device)
         particle_slot = col_slot[particle_col]
         particles_out, n_displaced = self._redistribute_particles(
             particles=particles,
@@ -999,8 +1016,8 @@ class EmanuelReducedConvection(ConvectionScheme):
             fired_cape = cols.cape[fire_idx]
             LOGGER.info(
                 "Emanuel convection at %s: fires in %d / %d columns "
-                "(CAPE median %.0f, max %.0f J/kg; M_b max %.3f kg/m²/s; interval %.0f s). "
-                "Displaced %d / %d active particles.",
+                "(CAPE median %.0f, max %.0f J/kg; M_b max %.3f kg/m²/s; interval %.0f s); "
+                "%d hold active particles. Displaced %d / %d active particles.",
                 met_window.metadata.time_start,
                 n_fire,
                 n_col,
@@ -1008,6 +1025,7 @@ class EmanuelReducedConvection(ConvectionScheme):
                 float(fired_cape.max()),
                 float(cols.m_b.max()),
                 cols.interval_s,
+                n_use,
                 n_displaced,
                 int(active_mask.sum().item()),
             )
@@ -1040,7 +1058,7 @@ class EmanuelReducedConvection(ConvectionScheme):
         changes; lon/lat/weight are untouched.
 
         ``eligible`` marks active particles in a firing column; ``particle_slot``
-        maps each particle to its firing column's index in ``prob`` (-1: none);
+        maps each particle to its column's index in ``prob`` (-1: no matrix);
         ``height_col`` is [C, Z], ascending.
         """
 

@@ -61,8 +61,13 @@ event, and the parcel lift, the trigger and the closure are evaluated for all
 columns together, with no Python loop over columns or levels. A column's profile
 is its own temperature, humidity, height above ground and pressure on the
 terrain-following levels (the reader supplies the per-column pressure; synthetic
-windows without it use the level-mean pressure). Matrices are built only for the
-columns that fire. A particle belongs to the column of the nearest meteorology
+windows without it use the level-mean pressure). Matrices ([Z, Z] each) are built
+only for the columns that fire **and** hold at least one active particle, so the
+matrix memory scales with the occupied columns, not with the firing area. On a
+synthetic EUROPE window with 90% of columns firing and particles in 1,808 of them,
+the event's GPU peak fell from 3.6 to 0.5 GB on the default 40-level grid and from
+41.2 to 1.7 GB on 137 levels (PR #54 review).
+A particle belongs to the column of the nearest meteorology
 grid point, and its host layer is that column's level nearest its height.
 
 The only meteorology this scheme needs beyond the baseline is specific humidity:

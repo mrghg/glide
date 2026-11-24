@@ -20,7 +20,9 @@ the mean column never fires, while a few hundred tropical and warm-sector column
   `cloud_base_mass_flux_columns`, `compute_mass_flux_matrices`) do the same
   element-by-element arithmetic as the single-column ones, with no Python loop
   over columns or levels. Matrices ([F, Z, Z]) are built only for the F columns
-  that fire.
+  that fire and hold at least one active particle (PR #54 review: building them
+  for every firing column first would cost tens of GB in widespread summer
+  convection).
 - **A particle belongs to the column of the nearest meteorology grid point**, and
   its host layer is that column's level nearest its height. It draws its
   destination from its own column's backward transition matrix (FLEXPART
@@ -53,8 +55,9 @@ for each particle.
 - Computing the per-particle transition rows directly from the per-column
   entrainment and detrainment vectors without forming [F, Z, Z]: less memory, but
   it hides the matrix the tests and docs are written around. Memory is bounded by
-  the firing columns (worst case every column of the EUROPE domain, ~1 GB in
-  float32 on the GPU).
+  the occupied firing columns (worst case one particle in every column of the
+  EUROPE domain: ~1 GB per [F, Z, Z] float32 copy on the default 40 levels,
+  ~11 GB on 137).
 - Carrying pressure by hydrostatic integration from surface pressure inside the
   scheme: duplicates what the reader already computes (decision 0010).
 
