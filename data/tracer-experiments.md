@@ -614,6 +614,46 @@ python -m tracers.benchmark run --experiments OKC80 OKC80-PDCH \
   rerunning GLIDE:* `python -m tracers.benchmark score RUN_DIR --basis
   ambient --out RUN_DIR_AMBIENT`.
 
+**Longitudes.** GLIDE's reader keeps an ascending 0..360 store (every NAM
+store) in 0..360, and the engine clamps a particle at a negative longitude to
+the grid's western edge without an error (STATUS.md, "Known follow-ups"). The
+benchmark therefore writes every longitude in the convention the reader keeps
+(`benchmark.glide_lon_convention`); a hand-written configuration on a NAM
+store must do the same until GLIDE is fixed.
+
 A rerun with the same seeds reproduces the scorecard (checked on OKC80, see
 below). Every run before the pre-registration is exploratory and belongs in
 its development history.
+
+### OKC80 (exploratory, 2026-11-24, task B12)
+
+Not a graded experiment; run before the pre-registration to test the
+benchmark, and to be listed as exploratory in the pre-registration's
+development history. Configuration: `benchmark_base.yaml` unchanged, 2,000
+particles per window, release seed 42, bootstrap seed 0, receptors 0–100 m,
+0.25° source box, lowest 40 m, basis "stp", on
+`era5-arco/NAM_19800708-19800712_ERA5-ARCO.zarr` (met-bazarr 0.3.0, with
+the surface-geopotential repair recorded in its attributes). 700 sample windows in four GLIDE
+runs on one GH200, 424 s of GLIDE wall time in all.
+
+| Experiment | Pairs | Rank | R² | 1−\|FB/2\| | FMS/100 | 1−KS/100 | Rank, plain R | Mean meas. | Mean calc. (pg m⁻³) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| OKC80 (PMCH) | 697 | 1.63 | 0.09 | 0.90 | 0.12 | 0.52 | 1.62 | 1,106 | 907 |
+| OKC80-PDCH | 683 | 2.21 | 0.10 | 0.96 | 0.24 | 0.91 | 2.21 | 987 | 905 |
+| DATEM's HYSPLIT example, PMCH, same options | 697 | 1.94 | 0.07 | 0.96 | 0.26 | 0.65 | | | |
+
+- A second run with the same seeds gave bit-identical footprints, predictions
+  and scorecard.
+- On the ambient basis (`score --basis ambient`) the means fall by 17%, to
+  753 pg m⁻³, and the ranks to 1.54 and 2.12: the ratio of the source's
+  dry-air density to the 1.293 kg m⁻³ behind DATEM's conversion.
+- With the meander coefficient doubled (`--set
+  turbulence.meander.coefficient=0.32`), `compare` shows the ranks moving
+  by +0.010 (PMCH) and −0.010 (PDCH), with R² down 0.006 in both: changes
+  of the size the published studies call not meaningful. (That run's
+  scorecard flags the tree as modified, because a doc file was being edited
+  while it ran; the check now looks only at `src` and the scoring package.)
+- The PMCH and PDCH scores differ mostly in KS and FMS, although the same
+  footprints predict both: 56% of DATEM's PMCH samples are non-zero (185 of
+  them below 10 pg m⁻³, which looks like background), against 17% for PDCH.
+  GLIDE predicts tracer in 8% of the samples. Not investigated further.

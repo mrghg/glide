@@ -618,7 +618,16 @@ def provenance(cfg: dict, met: str, met_box: dict, args_dict: dict) -> dict:
 
     lpdm_root = Path(lpdm.__file__).resolve().parents[2]
     tag = _git("describe", "--tags", "--match", "v*-physics", "--abbrev=0", cwd=lpdm_root)
-    dirty = _git("status", "--porcelain", "--untracked-files=no", cwd=lpdm_root)
+    # Only the code that makes the numbers counts: the model source and the scoring package.
+    dirty = _git(
+        "status",
+        "--porcelain",
+        "--untracked-files=no",
+        "--",
+        "src",
+        "scripts/validation/tracers",
+        cwd=lpdm_root,
+    )
     return dict(
         physics_tag=tag if tag != "unknown" else "none (pre-freeze)",
         glide_commit=_git("rev-parse", "HEAD", cwd=lpdm_root),
