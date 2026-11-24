@@ -1023,10 +1023,13 @@ dependency is listed; run in the listed order by default.
     predicts far too low gets a near-perfect KS term. GLIDE copies it (scores
     must match the published protocol); the four terms are reported
     separately (validation-plan §3, Tier 3) so the effect is visible.
-  - **ATMES-II definitions**, only if JRC report EUR 17756 EN has been obtained
-    (`$GLIDE_ETEX/docs/` or as the human says): check KS, FA and the zero
-    filter against it and correct the code and docs. If not obtained, leave
-    the hypothesis recorded and say so.
+  - **ATMES-II definitions: the JRC report (EUR 17756 EN) could not be
+    obtained** (Matt, 24 Nov 2026). Keep B10's definitions of KS, FA and the
+    zero filter, and state in `docs/published-tracer-scores.md` §6 and in the
+    output of the ATMES-II statistics that they follow Mosca et al. (1998) as
+    summarised there and are not checked against the full report. They are
+    reported, not graded (validation-plan §3, Tier 3), so nothing depends on
+    them.
   - Nits: drop `_bootstrap_r2`'s unused arguments; name the "6h" duration rule
     for what it keeps (CAPTEX 6-hour and ANATEX 24-hour samples); check that
     releases are in time order before `searchsorted`.
