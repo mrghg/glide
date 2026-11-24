@@ -439,6 +439,123 @@ def test_name_conversion_known_answer() -> None:
     assert s.attrs["units"] == "m**2 s mol**-1"
 
 
+def _fp_factor(p: float, q: float) -> float:
+    e = q * p / (0.622 + 0.378 * q)
+    return p / ((p - e) * (1.0 + 0.608 * q))
+
+
+def test_flexpart_time_resolved_factor_corrects_each_interval() -> None:
+    """Two hourly intervals, unequal residence and humidity: sum_t F_t x factor_t.
+
+    Cell 0 has 3 s m3 kg-1 in a dry hour (q = 2 g/kg) and 1 in a humid hour
+    (q = 18 g/kg); cell 1 the reverse. The exact answer weights each hour's
+    factor by its own residence; the mean factor does not.
+    """
+
+    times = np.array(["2019-07-13T19:00", "2019-07-13T20:00"], dtype="datetime64[ns]")
+    p = xr.DataArray(
+        [[100000.0, 100000.0], [99000.0, 99000.0]], dims=("time", "x"), coords={"time": times}
+    )
+    q = xr.DataArray([[0.002, 0.002], [0.018, 0.018]], dims=("time", "x"), coords={"time": times})
+    native = xr.DataArray([[3.0, 1.0], [1.0, 3.0]], dims=("time", "x"), coords={"time": times})
+    f_dry, f_humid = _fp_factor(100000.0, 0.002), _fp_factor(99000.0, 0.018)
+
+    factor_t = flexpart_dry_air_factor(p, q, time_dim=None)
+    assert factor_t.dims == ("time", "x")
+    s = flexpart_to_dry_air_footprint(native, dry_air_factor=factor_t)
+    assert s.dims == ("x",)  # no spurious time dimension
+    expected = np.array([3.0 * f_dry + 1.0 * f_humid, 1.0 * f_dry + 3.0 * f_humid]) * M_AIR / 40.0
+    np.testing.assert_allclose(s.values, expected, rtol=1e-12)
+    assert "exact" in s.attrs["dry_air_factor_form"]
+
+    # The time-mean path is unchanged: (sum F) x mean factor, the same for both
+    # cells here, and different from the exact answer where residence and
+    # humidity covary.
+    s_mean = flexpart_to_dry_air_footprint(native, dry_air_factor=flexpart_dry_air_factor(p, q))
+    expected_mean = np.array([4.0, 4.0]) * M_AIR / 40.0 * (f_dry + f_humid) / 2.0
+    np.testing.assert_allclose(s_mean.values, expected_mean, rtol=1e-12)
+    assert "approximate" in s_mean.attrs["dry_air_factor_form"]
+    assert s.values[0] < s_mean.values[0]
+    assert s_mean.values[1] < s.values[1]
+    # A scalar factor on a time-resolved footprint: sum, then multiply.
+    s_scalar = flexpart_to_dry_air_footprint(native, dry_air_factor=1.01)
+    np.testing.assert_allclose(s_scalar.values, np.array([4.0, 4.0]) * M_AIR / 40.0 * 1.01)
+
+
+def test_flexpart_conversion_refuses_mismatched_factor() -> None:
+    """A factor that would broadcast against the footprint is an error, not a result."""
+
+    times = np.array(["2019-07-13T19:00", "2019-07-13T20:00"], dtype="datetime64[ns]")
+    native_t = xr.DataArray(np.ones((2, 3)), dims=("time", "x"), coords={"time": times})
+    native_int = native_t.sum("time")
+    factor_t = xr.DataArray(np.full((2, 3), 1.01), dims=("time", "x"), coords={"time": times})
+
+    # Time-resolved factor, time-integrated footprint.
+    with pytest.raises(ValueError, match="time dimension"):
+        flexpart_to_dry_air_footprint(native_int, dry_air_factor=factor_t)
+    # Wrong number of output times.
+    with pytest.raises(ValueError, match="1 'time' values"):
+        flexpart_to_dry_air_footprint(native_t, dry_air_factor=factor_t.isel(time=[0]))
+    # Same length, different times.
+    shifted = factor_t.assign_coords(time=times + np.timedelta64(1, "h"))
+    with pytest.raises(ValueError, match="coordinate differs"):
+        flexpart_to_dry_air_footprint(native_t, dry_air_factor=shifted)
+    # Only one side has time coordinates: cannot check alignment.
+    with pytest.raises(ValueError, match="only one of"):
+        flexpart_to_dry_air_footprint(native_t, dry_air_factor=factor_t.drop_vars("time"))
+    # A factor dimension the footprint lacks, on either path.
+    extra = xr.DataArray(np.full((2, 3, 2), 1.01), dims=("time", "x", "member"))
+    with pytest.raises(ValueError, match="member"):
+        flexpart_to_dry_air_footprint(native_t.drop_vars("time"), dry_air_factor=extra)
+    with pytest.raises(ValueError, match="member"):
+        flexpart_to_dry_air_footprint(native_t, dry_air_factor=extra.isel(time=0))
+
+
+def test_name_conversion_refuses_time_resolved_factor() -> None:
+    """NAME output is time-integrated: an unreduced factor is refused, a mean accepted."""
+
+    p = xr.DataArray([[100000.0, 100000.0], [99000.0, 99000.0]], dims=("time", "x"))
+    q = xr.DataArray([[0.002, 0.002], [0.018, 0.018]], dims=("time", "x"))
+    ppm_s = xr.DataArray([360.0, 720.0], dims=("x",))
+    with pytest.raises(ValueError, match="time"):
+        name_to_dry_air_footprint(
+            ppm_s, cell_area_m2=1.0e8, dry_air_factor=name_dry_air_factor(p, q, time_dim=None)
+        )
+    factor = name_dry_air_factor(p, q)
+    s = name_to_dry_air_footprint(ppm_s, cell_area_m2=1.0e8, dry_air_factor=factor)
+    assert s.dims == ("x",)
+    np.testing.assert_allclose(
+        s.values, ppm_s.values * 1e-6 * 1.0e8 / 3600.0 * factor.values, rtol=1e-12
+    )
+
+
+def test_mean_factor_approximation_bound() -> None:
+    """The bound stated in docs/reference-runs.md §6 and the conversion docstrings.
+
+    Hourly output over 240 h at 1013 hPa; diurnal q = 12 +- 2 g/kg (peak at
+    15 h); residence only at night (20-06 h) or only by day. The mean-factor
+    result differs from the exact one by at most 0.12% (FLEXPART), and always
+    lies within [min, max] of factor / mean factor.
+    """
+
+    hours = np.arange(240)
+    hod = hours % 24
+    times = np.datetime64("2019-07-01T00:00", "ns") + hours * np.timedelta64(1, "h")
+    q = 0.012 + 0.002 * np.cos(2.0 * np.pi * (hod - 15) / 24.0)
+    night = ((hod >= 20) | (hod < 6)).astype(float)
+    qa = xr.DataArray(q, dims=("time",), coords={"time": times})
+    pa = xr.full_like(qa, 101325.0)
+    factor_t = flexpart_dry_air_factor(pa, qa, time_dim=None)
+    ratio_range = (factor_t.min() / factor_t.mean(), factor_t.max() / factor_t.mean())
+    for residence in (night, 1.0 - night):
+        native = xr.DataArray(residence, dims=("time",), coords={"time": times})
+        exact = float(flexpart_to_dry_air_footprint(native, dry_air_factor=factor_t))
+        approx = float(flexpart_to_dry_air_footprint(native, dry_air_factor=factor_t.mean("time")))
+        rel = approx / exact - 1.0
+        assert 0.0005 < abs(rel) < 0.0012  # measurable, and within the stated bound
+        assert float(ratio_range[0]) <= exact / approx <= float(ratio_range[1])
+
+
 def test_gridder_without_density_keeps_plain_seconds() -> None:
     """inv_density=None is the pre-0022 arithmetic; ones give the same bits."""
 

@@ -290,7 +290,10 @@ def name_dry_air_factor(pressure_pa, specific_humidity, *, time_dim: str | None 
     NAME divides by p / (R_d T), with no humidity term, so its footprint is
     relative to moist air (decision 0022). Pass the surface-layer pressure and
     specific humidity of NAME's own (UM) meteorology; with a ``time_dim`` the
-    factor is computed at each time and averaged over the footprint's period.
+    factor is computed at each time and averaged over the footprint's period
+    (NAME's reference output is time-integrated, so only a mean factor can be
+    applied; see :func:`name_to_dry_air_footprint`). ``time_dim=None`` returns
+    the factor unreduced.
     """
 
     factor = pressure_pa / (pressure_pa - _vapour_pressure(pressure_pa, specific_humidity))
@@ -301,9 +304,12 @@ def flexpart_dry_air_factor(pressure_pa, specific_humidity, *, time_dim: str | N
     """FLEXPART's footprint to dry air: p / ((p - e)(1 + 0.608 q)), per cell.
 
     FLEXPART divides each particle by the moist-air density p / (R_d T_v),
-    T_v = T (1 + 0.608 q) (decision 0022). Pass FLEXPART's own meteorology;
-    with a ``time_dim`` the factor is computed at each time and averaged over
-    the footprint's period.
+    T_v = T (1 + 0.608 q) (decision 0022). Pass FLEXPART's own meteorology.
+    With a ``time_dim`` the factor is computed at each time and averaged over
+    the footprint's period (for time-integrated output). With
+    ``time_dim=None`` it is returned per time; if its time dimension matches
+    the native output's, :func:`flexpart_to_dry_air_footprint` then applies it
+    interval by interval, which is exact.
     """
 
     q = specific_humidity
@@ -311,6 +317,20 @@ def flexpart_dry_air_factor(pressure_pa, specific_humidity, *, time_dim: str | N
         (pressure_pa - _vapour_pressure(pressure_pa, q)) * (1.0 + FLEXPART_TV_COEFF * q)
     )
     return _mean_over(factor, time_dim)
+
+
+def _check_factor_dims(factor, allowed_dims, *, what: str, hint: str) -> None:
+    """Refuse a factor with a dimension the footprint lacks (it would broadcast)."""
+
+    if not isinstance(factor, xr.DataArray):
+        return
+    extra = [d for d in factor.dims if d not in allowed_dims]
+    if extra:
+        raise ValueError(
+            f"dry_air_factor has dimension(s) {extra} that the {what} lacks "
+            f"(dims {tuple(allowed_dims)}); multiplying would broadcast them into a "
+            f"spurious result. {hint}"
+        )
 
 
 def flexpart_to_dry_air_footprint(
@@ -324,26 +344,100 @@ def flexpart_to_dry_air_footprint(
     """FLEXPART backward footprint to m2 s mol-1 of dry air.
 
     Input: native output with ``IND_SOURCE = 1``, ``IND_RECEPTOR = 2`` in
-    s m3 kg-1 for the 0-h layer, per output time. Output:
+    s m3 kg-1 for the 0-h layer, per output time (hourly in the reference
+    runs, `docs/reference-runs.md` §7). ``dry_air_factor`` is
+    :func:`flexpart_dry_air_factor` from FLEXPART's own meteorology. Two
+    forms are accepted:
 
-        S = (sum over output times) x M_air / h x p / ((p - e)(1 + 0.608 q))
+    - **Time-resolved** (exact): the footprint and the factor both have
+      ``time_dim``, with the same length and coordinates. Each interval is
+      corrected before summing:
 
-    ``dry_air_factor`` is :func:`flexpart_dry_air_factor` from FLEXPART's own
-    meteorology over the footprint's period (scalar or a per-cell field). The
-    function takes fields; it never reads restricted data itself.
+          S = sum_t (F_t x factor_t) x M_air / h
+
+    - **Time-mean or scalar** (approximate): the factor has no ``time_dim``
+      (``flexpart_dry_air_factor`` with its default ``time_dim``, or a
+      scalar). The footprint is summed first:
+
+          S = (sum_t F_t) x M_air / h x mean_t(factor)
+
+      This is the only form for time-integrated output.
+
+    **The mean factor is an approximation.** The exact correction is per
+    interval, sum_t F_t x factor_t; a factor averaged over the period gives
+    (sum_t F_t) x mean_t(factor_t), which differs where residence and humidity
+    covary. The ratio of the two always lies between min_t(factor) /
+    mean_t(factor) and max_t(factor) / mean_t(factor) for each cell. Measured
+    on synthetic hourly series over 240 h at 1013 hPa (`docs/reference-runs.md`
+    §6): a diurnal cycle q = 12 +- 2 g/kg with residence only at night or only
+    by day gives at most 0.12% (FLEXPART factor) and 0.19% (NAME factor); with
+    q = 12 +- 4 g/kg, 0.17% and 0.27%; a synoptic change from 16 to 6 g/kg with
+    all residence in the humid first day, 0.50% and 0.80%.
+
+    Any other combination raises ``ValueError``: a factor with ``time_dim``
+    when the footprint has none, mismatched time coordinates, or any factor
+    dimension the footprint lacks. The function takes fields; it never reads
+    restricted data itself.
     """
 
     if surface_layer_depth_m <= 0:
         raise ValueError("surface_layer_depth_m must be > 0")
-    summed = native_s_m3_kg
-    if time_dim is not None and time_dim in summed.dims:
-        summed = summed.sum(dim=time_dim)
-    result = summed * (m_air_kg_per_mol / float(surface_layer_depth_m)) * dry_air_factor
+    native_dims = tuple(native_s_m3_kg.dims)
+    has_time = time_dim is not None and time_dim in native_dims
+    factor_has_time = (
+        time_dim is not None
+        and isinstance(dry_air_factor, xr.DataArray)
+        and time_dim in dry_air_factor.dims
+    )
+    if factor_has_time:
+        if not has_time:
+            raise ValueError(
+                f"dry_air_factor has the time dimension {time_dim!r} but the footprint does "
+                f"not (dims {native_dims}); for time-integrated output pass the time-mean "
+                f"factor (flexpart_dry_air_factor(..., time_dim={time_dim!r}))."
+            )
+        _check_factor_dims(
+            dry_air_factor,
+            native_dims,
+            what="footprint",
+            hint="Give the factor on the footprint's grid.",
+        )
+        n_fp, n_fac = native_s_m3_kg.sizes[time_dim], dry_air_factor.sizes[time_dim]
+        if n_fp != n_fac:
+            raise ValueError(
+                f"dry_air_factor has {n_fac} {time_dim!r} values, the footprint {n_fp}; "
+                "a time-resolved factor must be on the footprint's output times."
+            )
+        if time_dim in native_s_m3_kg.coords and time_dim in dry_air_factor.coords:
+            if not np.array_equal(native_s_m3_kg[time_dim].values, dry_air_factor[time_dim].values):
+                raise ValueError(
+                    f"dry_air_factor's {time_dim!r} coordinate differs from the footprint's; "
+                    "a time-resolved factor must be on the footprint's output times."
+                )
+        elif time_dim in native_s_m3_kg.coords or time_dim in dry_air_factor.coords:
+            raise ValueError(
+                f"only one of the footprint and dry_air_factor has a {time_dim!r} "
+                "coordinate; cannot check that their output times match."
+            )
+        corrected = native_s_m3_kg * dry_air_factor
+        result = corrected.sum(dim=time_dim) * (m_air_kg_per_mol / float(surface_layer_depth_m))
+        factor_form = "per output time, applied before summing (exact)"
+    else:
+        summed = native_s_m3_kg.sum(dim=time_dim) if has_time else native_s_m3_kg
+        _check_factor_dims(
+            dry_air_factor,
+            summed.dims,
+            what="time-summed footprint",
+            hint="Give the factor on the footprint's grid.",
+        )
+        result = summed * (m_air_kg_per_mol / float(surface_layer_depth_m)) * dry_air_factor
+        factor_form = "time-mean or scalar, applied after summing (approximate)"
     result.attrs = dict(native_s_m3_kg.attrs)
     result.attrs.update(
         units="m**2 s mol**-1",
         density_weighting="dry_air",
         conversion="FLEXPART s m3 kg-1 (moist air) x M_air / h x p / ((p - e)(1 + 0.608 q))",
+        dry_air_factor_form=factor_form,
         surface_layer_depth_m=float(surface_layer_depth_m),
         m_air_kg_per_mol=float(m_air_kg_per_mol),
     )
@@ -367,11 +461,35 @@ def name_to_dry_air_footprint(
 
     ``release_seconds`` is the NAME runner's source normalisation (3,600 s,
     the release hour). ``dry_air_factor`` is :func:`name_dry_air_factor` from
-    the UM fields NAME used, over the footprint's period.
+    the UM fields NAME used, averaged over the footprint's period (its default
+    ``time_dim``), or a scalar. NAME's reference output is time-integrated, so
+    no per-interval correction is possible; a factor with any dimension the
+    footprint lacks (such as an unreduced time dimension) is refused rather
+    than broadcast.
+
+    **The mean factor is an approximation.** The exact correction is per
+    interval, sum_t F_t x factor_t; a factor averaged over the period gives
+    (sum_t F_t) x mean_t(factor_t), which differs where residence and humidity
+    covary. The ratio of the two always lies between min_t(factor) /
+    mean_t(factor) and max_t(factor) / mean_t(factor) for each cell. Measured
+    on synthetic hourly series over 240 h at 1013 hPa (`docs/reference-runs.md`
+    §6): a diurnal cycle q = 12 +- 2 g/kg with residence only at night or only
+    by day gives at most 0.12% (FLEXPART factor) and 0.19% (NAME factor); with
+    q = 12 +- 4 g/kg, 0.17% and 0.27%; a synoptic change from 16 to 6 g/kg with
+    all residence in the humid first day, 0.50% and 0.80%.
     """
 
     if release_seconds <= 0:
         raise ValueError("release_seconds must be > 0")
+    _check_factor_dims(
+        dry_air_factor,
+        tuple(mixing_ratio_ppm_s.dims),
+        what="time-integrated NAME footprint",
+        hint=(
+            "Average a time-resolved factor over the footprint's period first "
+            "(name_dry_air_factor(..., time_dim='time'))."
+        ),
+    )
     result = mixing_ratio_ppm_s * (1.0e-6 / float(release_seconds)) * cell_area_m2
     result = result * dry_air_factor
     result.attrs = dict(mixing_ratio_ppm_s.attrs)
@@ -379,6 +497,7 @@ def name_to_dry_air_footprint(
         units="m**2 s mol**-1",
         density_weighting="dry_air",
         conversion="NAME ppm s (moist air) x 1e-6 x cell area / release_seconds x p / (p - e)",
+        dry_air_factor_form="time-mean or scalar (approximate; NAME output is time-integrated)",
         release_seconds=float(release_seconds),
     )
     result.name = "footprint_dry_air"
