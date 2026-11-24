@@ -66,11 +66,21 @@ def _period_densities(store: str, fp: xr.DataArray) -> tuple[xr.DataArray, xr.Da
     lowest = int(met["hybrid"].argmax())
     met = met[["surface_pressure", "temperature", "specific_humidity"]].isel(hybrid=[lowest])
     met = met.rename({"hybrid": "level"})
-    near = dict(latitude=fp["latitude"], longitude=fp["longitude"], method="nearest")
-    rho_moist = surface_air_density_from_met(met).sel(**near).load()
+    # The store may hold longitudes in 0-360; select on its convention, then
+    # label with the footprint's.
+    lon = fp["longitude"].values
+    if float(met["longitude"].max()) > 180.0:
+        lon = lon % 360.0
+    near = dict(latitude=fp["latitude"].values, longitude=lon, method="nearest")
+
+    def on_grid(field: xr.DataArray) -> xr.DataArray:
+        out = field.sel(**near).load()
+        return out.assign_coords(latitude=fp["latitude"].values, longitude=fp["longitude"].values)
+
+    rho_moist = on_grid(surface_air_density_from_met(met))
     t = met["temperature"].isel(level=0)
     q = met["specific_humidity"].isel(level=0)
-    rho_dry = dry_air_density_kg_m3(met["surface_pressure"], t, q).mean("time").sel(**near).load()
+    rho_dry = on_grid(dry_air_density_kg_m3(met["surface_pressure"], t, q).mean("time"))
     return rho_moist, rho_dry
 
 

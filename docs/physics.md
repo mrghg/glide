@@ -595,7 +595,7 @@ $$
 with the layer-mean virtual temperature $\bar T_v$ taken at $z/2$. This is the
 hypsometric relation GLIDE already uses to reconstruct model-level pressure
 from the surface pressure (decision 0010), applied from the ground to the
-particle; the midpoint rule's error is far below 10⁻⁵ in $p$ over the 40 m
+particle; the midpoint rule's error is below 10⁻⁷ in $p$ over the 40 m
 layer. The fields move to the device once per met window; each step is tensor
 operations on the whole particle buffer, with no host synchronisation
 (decision 0004). Dividing while counting captures the pairing of residence and

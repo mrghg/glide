@@ -20,9 +20,10 @@ with the layer-mean virtual temperature Tv_bar taken at z/2 (midpoint rule).
 This is the same hydrostatic relation, with the same constants, that GLIDE uses
 to reconstruct model-level pressure from the surface pressure (decision 0010,
 `vertical_grid.model_level_pressure_pa`), applied from the ground to the
-particle instead of level to level. Over the 40 m footprint layer the
-temperature-profile error of the midpoint rule is far below 1e-5 in p; at
-1 km it is about 1e-4.
+particle instead of level to level. The midpoint rule's error in p is below
+1e-7 over the 40 m footprint layer, even in a strong surface inversion, and
+about 1e-5 at 1 km for a standard lapse rate. Below the lowest level of the
+AGL grid (10 m by default) T and q are held at that level's values.
 
 The three fields are sampled from one [6, Z, Y, X] stack (T, q, p_s at the
 window's start and end; p_s is z-broadcast like every surface channel) with

@@ -167,4 +167,14 @@ updated with this record.
 
 **Status.** Adopted 2026-11-23 (GLIDE PR #42), from finding 3 of the
 validation review of 21 Nov 2026 (`VALIDATION-HANDOFF.md`). Implemented by
-queue task A04. Docs: [docs/reference-runs.md](../../docs/reference-runs.md) §6.
+queue task A04 (2026-11-24): `output_grid.density_weighting: dry_air | none`,
+default `dry_air`; the pressure at the particle is the surface pressure carried
+up hypsometrically with the virtual temperature at half the particle's height.
+Measured on standard cases 3 and 4 against the old recipe (plain seconds
+divided afterwards by the 240-hour mean surface density): −3.4% (CBW-20,
+winter night) and +6.4% (LEF, summer afternoon) in total 0–40 m sensitivity.
+Against the same recipe with a dry-air mean density, which leaves the pairing
+of residence and density, the changes are −4.2% and +4.4%; the moist-to-dry
+step is +0.8% and +2.0% (`dev/agent/progress/A04.md`). Docs:
+[docs/reference-runs.md](../../docs/reference-runs.md) §6,
+[docs/physics.md](../../docs/physics.md) §7.
