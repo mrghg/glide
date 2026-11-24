@@ -435,6 +435,10 @@ def test_scheme_kwargs_forwards_meander_only_for_hanna() -> None:
         # (T_L floors on, legacy surface-layer override off).
         "flexpart_tl_floors": True,
         "surface_layer_override": False,
+        # Boundary-layer depth limits default to the long-standing 50 m floor and
+        # no ceiling (A03, decision 0024).
+        "blh_min_m": 50.0,
+        "blh_max_m": None,
     }
 
     # Non-Hanna schemes take no kwargs (would reject meander), so forward nothing.
@@ -597,3 +601,49 @@ def test_footprint_time_bin_index_uses_the_bin_width() -> None:
     assert _footprint_time_bin_index(end, end - timedelta(hours=5), 3, 7200.0) == 2
     assert _footprint_time_bin_index(end, end - timedelta(hours=3, minutes=59), 3, 7200.0) == 1
     assert _footprint_time_bin_index(end, end - timedelta(days=1, hours=1), 2, 86400.0) == 1
+
+
+# ---- A03: boundary-layer depth limits and the meander timescale (decision 0024) ----
+
+
+def test_boundary_layer_depth_limits_default_and_forwarded() -> None:
+    """Defaults keep the long-standing 50 m floor and no ceiling; set values (the
+    validation runs' 100 m and 4,500 m) reach the Hanna scheme; an unset meander
+    timescale is not forwarded, so the scheme takes half the met interval."""
+
+    from lpdm.main import _scheme_kwargs
+    from lpdm.turbulence import get_scheme
+
+    default = RunConfig.model_validate(_base_dict(turbulence={"scheme": "hanna_1982"}))
+    assert default.turbulence.boundary_layer_depth_min_m == 50.0
+    assert default.turbulence.boundary_layer_depth_max_m is None
+    assert "meander_timescale_seconds" not in _scheme_kwargs(default)
+
+    cfg = RunConfig.model_validate(
+        _base_dict(
+            turbulence={
+                "scheme": "hanna_1982",
+                "boundary_layer_depth_min_m": 100.0,
+                "boundary_layer_depth_max_m": 4500.0,
+            }
+        )
+    )
+    kw = _scheme_kwargs(cfg)
+    assert kw["blh_min_m"] == 100.0
+    assert kw["blh_max_m"] == 4500.0
+    scheme = get_scheme("hanna_1982", **kw)
+    assert (scheme.blh_min_m, scheme.blh_max_m) == (100.0, 4500.0)
+
+
+@pytest.mark.parametrize(
+    "limits",
+    [
+        {"boundary_layer_depth_min_m": 0.0},
+        {"boundary_layer_depth_max_m": 0.0},
+        {"boundary_layer_depth_min_m": 100.0, "boundary_layer_depth_max_m": 100.0},
+        {"boundary_layer_depth_min_m": 500.0, "boundary_layer_depth_max_m": 400.0},
+    ],
+)
+def test_boundary_layer_depth_limits_rejected_when_invalid(limits) -> None:
+    with pytest.raises(ValidationError):
+        RunConfig.model_validate(_base_dict(turbulence={"scheme": "hanna_1982", **limits}))

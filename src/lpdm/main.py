@@ -1109,7 +1109,11 @@ def _scheme_kwargs(cfg: RunConfig) -> dict[str, object]:
         "max_substeps": cfg.turbulence.max_substeps,
         "flexpart_tl_floors": cfg.turbulence.flexpart_tl_floors,
         "surface_layer_override": cfg.turbulence.surface_layer_override,
+        "blh_min_m": cfg.turbulence.boundary_layer_depth_min_m,
+        "blh_max_m": cfg.turbulence.boundary_layer_depth_max_m,
     }
+    # Unset => the scheme takes half the met interval, bound in `_run` once the
+    # reader has measured the store (decision 0024).
     if m.timescale_seconds is not None:
         kwargs["meander_timescale_seconds"] = m.timescale_seconds
     return kwargs
@@ -1359,6 +1363,17 @@ def _run(
     # output otherwise, and it changes how much wall time a run spends on met I/O.
     met_interval_s = reader.met_interval_seconds
     LOGGER.info("met cadence: %.0f s (%.2f h) per window", met_interval_s, met_interval_s / 3600.0)
+    # Settings that follow the met interval are fixed here, once, before any step
+    # (the meander timescale, when unset; decision 0024).
+    scheme.bind_met_interval(met_interval_s)
+    if getattr(scheme, "meander_enabled", False):
+        LOGGER.info(
+            "meander: timescale %.0f s (%s)",
+            scheme.meander_timescale_seconds,
+            "configured"
+            if cfg.turbulence.meander.timescale_seconds is not None
+            else "half the met interval",
+        )
     if met_interval_s > 3600:
         LOGGER.warning(
             "met cadence is %.1f h. GLIDE interpolates the wind linearly across a window, so "

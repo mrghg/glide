@@ -281,7 +281,7 @@ class MeanderConfig(_Frozen):
     timescale_seconds: float | None = Field(
         None,
         gt=0,
-        description="Lagrangian timescale of the meander process. None → scheme default (1800 s). Set to half the source met interval if not running hourly met: meander parameterises the mesoscale motion the met does not resolve.",
+        description="Lagrangian timescale of the meander process. None → half the interval between the store's meteorological fields (1800 s on hourly ERA5), measured from the store at run start.",
     )
 
 
@@ -316,6 +316,31 @@ class TurbulenceConfig(_Frozen):
         False,
         description="Enable the legacy GLIDE-only Monin-Obukhov surface-layer override below 0.1·BLH (FLEXPART has no such override).",
     )
+    # Limits on the boundary-layer depth h from the meteorology (decision 0024).
+    # Applied wherever the turbulence scheme uses h. The defaults keep GLIDE's
+    # long-standing behaviour (50 m floor, no ceiling); the validation runs set
+    # 100 and 4500, the values FLEXPART (`hmixmin`, `hmixmax`) and NAME use.
+    # Hanna-only.
+    boundary_layer_depth_min_m: float = Field(
+        50.0,
+        gt=0,
+        description="Lower limit on the boundary-layer depth (m) used by the turbulence scheme.",
+    )
+    boundary_layer_depth_max_m: float | None = Field(
+        None,
+        gt=0,
+        description="Upper limit on the boundary-layer depth (m); null for none.",
+    )
+
+    @model_validator(mode="after")
+    def _check_boundary_layer_depth_limits(self) -> TurbulenceConfig:
+        hi = self.boundary_layer_depth_max_m
+        if hi is not None and hi <= self.boundary_layer_depth_min_m:
+            raise ValueError(
+                f"turbulence.boundary_layer_depth_max_m ({hi}) must be greater than "
+                f"boundary_layer_depth_min_m ({self.boundary_layer_depth_min_m})"
+            )
+        return self
 
 
 class EmanuelConvectionConfig(_Frozen):

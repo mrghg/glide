@@ -1064,3 +1064,217 @@ def test_period_channels_held_at_window_end_in_both_paths() -> None:
         for name, want in (("shf", shf_want), ("ustar", ustar_want), ("blh", 1250.0)):
             got = HannaScheme._interp_surface_field(window, name, alpha, lon, lat, dev, dtp)
             assert torch.allclose(got, torch.tensor(want)), name
+
+
+# ---- A03: boundary-layer depth limits, meander timescale, meander Tier 0 (decision 0024) ----
+
+
+def _window_with(t0, **channel_values: float):
+    """The small test window with some channels set to a uniform value."""
+
+    import dataclasses
+
+    met = _make_meander_test_window(t0, 0.0, 0.0)
+    names = met.channel_names
+    hs, he = met.hour_start.clone(), met.hour_end.clone()
+    for name, value in channel_values.items():
+        hs[names.index(name)] = value
+        he[names.index(name)] = value
+    return dataclasses.replace(met, hour_start=hs, hour_end=he)
+
+
+def _run_steps(scheme: HannaScheme, met, n_steps: int, n: int = 300, seed: int = 11):
+    from lpdm.gpu_engine import GPUEngine
+
+    engine = GPUEngine(device="cpu")
+    torch.manual_seed(seed)
+    particles = torch.zeros(n, 4, dtype=torch.float32)
+    particles[:, 2] = torch.linspace(5.0, 3900.0, n)
+    particles[:, 3] = 1.0 / n
+    state = scheme.initialize_state(n, device=torch.device("cpu"), dtype=torch.float32)
+    active = torch.ones(n, dtype=torch.bool)
+    for _ in range(n_steps):
+        particles, state = scheme.step(
+            particles=particles,
+            state=state,
+            met_window=met,
+            t_alpha=0.5,
+            dt_seconds=60.0,
+            active_mask=active,
+            engine=engine,
+        )
+    return particles
+
+
+@pytest.mark.parametrize("static", [False, True], ids=["dynamic", "static"])
+def test_boundary_layer_depth_limits_apply_on_both_paths(static: bool) -> None:
+    """The configured limits replace the depth everywhere the scheme uses it: a
+    depth below the minimum gives exactly the run at the minimum, and one above
+    the maximum exactly the run at the maximum. Without the limits the same
+    depths give different runs, so the equalities are not vacuous."""
+
+    from datetime import datetime
+
+    t0 = datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC)
+
+    def run(blh: float, shf: float, **limits) -> torch.Tensor:
+        scheme = HannaScheme(static_substeps=static, max_substeps=6, **limits)
+        return _run_steps(scheme, _window_with(t0, blh=blh, shf=shf), n_steps=4)
+
+    # Pairs of depths on the same side of a limit: both are replaced by the limit
+    # itself, exactly. (Comparing against a field AT the limit would not be exact:
+    # interpolating a uniform field can move it by a rounding error.)
+    # In a stable (shf < 0) and a convective (shf > 0, w* uses h) layer.
+    for shf in (-30.0, 150.0):
+        # Minimum.
+        assert torch.equal(run(20.0, shf, blh_min_m=100.0), run(70.0, shf, blh_min_m=100.0))
+        assert not torch.equal(run(20.0, shf), run(70.0, shf))
+        # Default: the long-standing 50 m floor, no ceiling.
+        assert torch.equal(run(20.0, shf), run(40.0, shf))
+        # Maximum.
+        assert torch.equal(run(6000.0, shf, blh_max_m=4500.0), run(5000.0, shf, blh_max_m=4500.0))
+        assert not torch.equal(run(6000.0, shf), run(5000.0, shf))
+
+
+def test_boundary_layer_depth_limits_validated() -> None:
+    with pytest.raises(ValueError):
+        HannaScheme(blh_min_m=0.0)
+    with pytest.raises(ValueError):
+        HannaScheme(blh_min_m=100.0, blh_max_m=100.0)
+
+
+def test_convective_velocity_uses_the_given_floor() -> None:
+    shf = torch.tensor([200.0])
+    t = torch.tensor([290.0])
+    sp = torch.tensor([101325.0])
+    shallow = torch.tensor([10.0])
+    assert torch.equal(
+        convective_velocity(shallow, shf, t, sp),
+        convective_velocity(torch.tensor([50.0]), shf, t, sp),
+    )
+    assert torch.equal(
+        convective_velocity(shallow, shf, t, sp, blh_min_m=100.0),
+        convective_velocity(torch.tensor([100.0]), shf, t, sp),
+    )
+
+
+def test_meander_timescale_is_half_the_met_interval_unless_set() -> None:
+    """Unset, the timescale is half the met interval the runtime binds (1800 s on
+    hourly ERA5, 5400 s on a 3-hourly store); a configured value is never changed."""
+
+    unset = HannaScheme(meander_enabled=True)
+    assert unset.meander_timescale_seconds == 1800.0  # before binding: the hourly value
+    unset.bind_met_interval(3600)
+    assert unset.meander_timescale_seconds == 1800.0
+    unset.bind_met_interval(10800)
+    assert unset.meander_timescale_seconds == 5400.0
+
+    fixed = HannaScheme(meander_enabled=True, meander_timescale_seconds=900.0)
+    fixed.bind_met_interval(10800)
+    assert fixed.meander_timescale_seconds == 900.0
+    with pytest.raises(ValueError):
+        unset.bind_met_interval(0)
+
+
+def _ou_displacement_variance_exact(sigma: float, tau: float, t: float) -> float:
+    """Var X(t) for X(t) = ∫_0^t u, du = -u/τ dt + (2σ²/τ)^½ dW, u(0) = 0.
+
+    Var X(t) = 2σ²τ² [ t/τ − 2(1 − e^{−t/τ}) + ½(1 − e^{−2t/τ}) ]
+    -> 2σ²t³/(3τ) for t ≪ τ;  2σ²τt − 3σ²τ² for t ≫ τ.
+    """
+
+    r = t / tau
+    return (
+        2.0 * sigma**2 * tau**2 * (r - 2.0 * (1.0 - math.exp(-r)) + 0.5 * (1.0 - math.exp(-2 * r)))
+    )
+
+
+def _ou_displacement_variance_discrete(sigma: float, tau: float, dt: float, n: int) -> float:
+    """The same for GLIDE's discrete scheme after n steps of Δt.
+
+    u_k = a u_{k−1} + σ(1 − a²)^½ η_k with a = e^{−Δt/τ} (exact for the velocity),
+    x_k = x_{k−1} + u_k Δt. Then X_n = Δt σ(1−a²)^½ Σ_j η_j (1 − a^{n−j+1})/(1 − a), so
+    Var X_n = Δt² σ² (1 − a²)/(1 − a)² Σ_{m=1}^{n} (1 − a^m)².
+    """
+
+    a = math.exp(-dt / tau)
+    m = np.arange(1, n + 1, dtype=np.float64)
+    return dt**2 * sigma**2 * (1 - a * a) / (1 - a) ** 2 * float(np.sum((1 - a**m) ** 2))
+
+
+@pytest.mark.parametrize("static", [False, True], ids=["dynamic", "static"])
+def test_meander_alone_gives_the_exact_ou_displacement_variance(static: bool, monkeypatch) -> None:
+    """Tier 0 meander test, part 1 (validation plan; docs/turbulence.md §7).
+
+    Uniform wind, a fixed meander velocity scale σ and timescale τ, everything else
+    off (the small-scale turbulence integrator replaced by the identity). From rest,
+    the horizontal variance of the cloud is that of an Ornstein–Uhlenbeck
+    displacement:
+
+        Var X(t) = 2σ²τ² [ t/τ − 2(1 − e^{−t/τ}) + ½(1 − e^{−2t/τ}) ]
+
+    GLIDE's discrete form (exact velocity update, displacement u_k Δt) has the exact
+    variance of `_ou_displacement_variance_discrete`, which differs from the formula
+    above by less than 2Δt/t. The model must match the discrete value to within
+    sampling noise at every time, from t = τ/6 to t = 12τ.
+    """
+
+    from datetime import datetime
+
+    from lpdm.gpu_engine import GPUEngine
+
+    sigma, tau, dt, n = 1.0, 1800.0, 60.0, 20000
+    t0 = datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC)
+    met = _window_with(t0, u=5.0, v=0.0, w=0.0)
+    scheme = HannaScheme(
+        meander_enabled=True, meander_timescale_seconds=tau, static_substeps=static
+    )
+
+    const_sigma = torch.full((2, *met.hour_start.shape[1:]), sigma, dtype=torch.float32)
+    monkeypatch.setattr(
+        scheme,
+        "_meander_sigma_fields",
+        lambda met_window, device, dtype: (const_sigma, HannaScheme._grid_bounds(met_window)),
+    )
+
+    def _no_small_scale_turbulence(*, active_xyz, u_prime_in, v_prime_in, w_prime_in, **_):
+        return active_xyz, u_prime_in, v_prime_in, w_prime_in
+
+    monkeypatch.setattr(scheme, "_integrate_vertical_substeps", _no_small_scale_turbulence)
+    monkeypatch.setattr(scheme, "_integrate_vertical_substeps_static", _no_small_scale_turbulence)
+
+    engine = GPUEngine(device="cpu")
+    torch.manual_seed(2024)
+    particles = torch.zeros(n, 4, dtype=torch.float32)
+    particles[:, 0] = 1.0  # backward advection at 5 m/s carries the cloud west, inside the grid
+    particles[:, 2] = 500.0
+    particles[:, 3] = 1.0 / n
+    state = scheme.initialize_state(n, device=torch.device("cpu"), dtype=torch.float32)
+    active = torch.ones(n, dtype=torch.bool)
+
+    checks = {5: None, 15: None, 30: None, 60: None, 180: None, 360: None}
+    for k in range(1, max(checks) + 1):
+        particles, state = scheme.step(
+            particles=particles,
+            state=state,
+            met_window=met,
+            t_alpha=0.5,
+            dt_seconds=dt,
+            active_mask=active,
+            engine=engine,
+        )
+        if k in checks:
+            lon = particles[:, 0].double()
+            lat = particles[:, 1].double()
+            x = (lon - lon.mean()) * 111320.0 * torch.cos(torch.deg2rad(lat)).abs()
+            y = (lat - lat.mean()) * 110540.0
+            checks[k] = 0.5 * (float(x.var()) + float(y.var()))
+
+    assert torch.all(particles[:, 2] == 500.0)  # nothing vertical ran
+    noise = 4.0 / math.sqrt(n)  # 4 standard errors of the pooled variance (Gaussian)
+    for k, var_model in checks.items():
+        t = k * dt
+        disc = _ou_displacement_variance_discrete(sigma, tau, dt, k)
+        exact = _ou_displacement_variance_exact(sigma, tau, t)
+        assert abs(disc / exact - 1.0) < 2.0 * dt / t, (t, disc, exact)
+        assert abs(var_model / disc - 1.0) < noise, (t, var_model, disc)

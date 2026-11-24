@@ -1296,6 +1296,22 @@ def test_three_hourly_store_brackets_on_three_hours() -> None:
     assert result.metadata.time_end == datetime(2024, 1, 1, 3, 0, tzinfo=UTC)
 
 
+@pytest.mark.parametrize(("step_hours", "expected_s"), [(1, 1800.0), (3, 5400.0)])
+def test_meander_timescale_from_hourly_and_three_hourly_store(step_hours, expected_s) -> None:
+    """A03 / decision 0024: an unset meander timescale is half the interval the
+    reader measures from the store's time coordinate: unchanged (1800 s) on an
+    hourly store, 5400 s on a 3-hourly one."""
+
+    from lpdm.turbulence import HannaScheme
+
+    reader = _InMemoryArcoReader(_retimed_mock_dataset("2024-01-01T00:00:00", step_hours))
+    scheme = HannaScheme(meander_enabled=True)
+    scheme.bind_met_interval(reader.met_interval_seconds)
+
+    assert reader.met_interval_seconds == step_hours * 3600
+    assert scheme.meander_timescale_seconds == expected_s
+
+
 def test_window_grid_is_anchored_on_the_stores_own_first_timestamp() -> None:
     """A store sampled at :30 past has windows at :30, not on the hour. Flooring to
     the wall-clock hour would ask for a timestamp the store does not have."""
