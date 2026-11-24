@@ -1,13 +1,13 @@
 {
   "fixture": "smoke_mhd_single_release/cpu",
-  "created_utc": "2026-11-24T14:37:39Z",
+  "created_utc": "2026-11-24T16:13:00Z",
   "config": "configs/smoke_mhd_single_release.yaml",
   "config_file_sha256": "4854399c60c97580afdc333c9bc91a4fe0e4adc649240132e94a3833c26ee212",
   "resolved_config_sha256": "ee2cd495fa321c17b9c2914d51ce4e33cd5c74466b25dc18da035420d6a76632",
   "device": "cpu",
   "runtime_device": "cpu",
   "seed": 42,
-  "git_rev": "3cc2d70c22a3fc7de0e21886cc9530b3a8a6dbb5",
+  "git_rev": "b38464b183867581a9b1a7d09613210b17e9d669",
   "src_dirty": false,
   "torch_version": "2.14.1+cu126",
   "torch_num_threads": 72,
@@ -15,16 +15,16 @@
   "data_location": ".",
   "files": {
     "footprint.npz": {
-      "sha256": "2aba0b30853fd6d60af41f51da241ec2b04400f980dcac66d40482fcb9057240",
-      "bytes": 5615
+      "sha256": "69e2a6a112be28f40877dbd6d1d1e2048a6fdbaad0a6221c6fc627ab884da220",
+      "bytes": 5544
     },
     "endpoint_particles.parquet": {
-      "sha256": "1b2b6eac9d9b87941b9cf3ede0485ace259a7744bd0cc2dafebff8872d0dd62b",
-      "bytes": 353567
+      "sha256": "2baff305ea97edd1e84f4f76744423062fc41c820f7211087d42802c3e3edb8e",
+      "bytes": 353711
     },
     "run_metadata.json": {
-      "sha256": "e7291517d4563431b634c914e4095b1e1390b41578d1adb5bb4c2b8c2b42a8ba",
-      "bytes": 11541
+      "sha256": "726217e76544f5217d885965deb5e1e49dc7ac33d9eac6537f3068933c76b198",
+      "bytes": 12046
     }
   },
   "footprint": {
@@ -43,10 +43,10 @@
       "longitude"
     ],
     "dtype": "float32",
-    "nonzero_cells": 831,
-    "total": 81773.78375440883,
-    "per_release_total_min": 81773.78375440883,
-    "per_release_total_max": 81773.78375440883,
+    "nonzero_cells": 816,
+    "total": 81775.58311134786,
+    "per_release_total_min": 81775.58311134786,
+    "per_release_total_max": 81775.58311134786,
     "units": "s m3 kg-1",
     "density_weighting": "dry_air"
   },
@@ -79,8 +79,8 @@
     }
   ],
   "run": {
-    "wall_seconds": 271.9,
-    "max_rss_kb": 7189760,
+    "wall_seconds": 177.3,
+    "max_rss_kb": 7027072,
     "env": {},
     "peak_device_allocated_bytes": 0,
     "peak_device_reserved_bytes": 0,

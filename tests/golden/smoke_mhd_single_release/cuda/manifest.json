@@ -1,13 +1,13 @@
 {
   "fixture": "smoke_mhd_single_release/cuda",
-  "created_utc": "2026-11-24T14:36:41Z",
+  "created_utc": "2026-11-24T16:39:51Z",
   "config": "configs/smoke_mhd_single_release.yaml",
   "config_file_sha256": "4854399c60c97580afdc333c9bc91a4fe0e4adc649240132e94a3833c26ee212",
   "resolved_config_sha256": "ee2cd495fa321c17b9c2914d51ce4e33cd5c74466b25dc18da035420d6a76632",
   "device": "cuda",
   "runtime_device": "cuda",
   "seed": 42,
-  "git_rev": "3cc2d70c22a3fc7de0e21886cc9530b3a8a6dbb5",
+  "git_rev": "392816c1ef1cefd80dbd9150134b879878c03f72",
   "src_dirty": false,
   "torch_version": "2.14.1+cu126",
   "torch_num_threads": 72,
@@ -17,16 +17,16 @@
   "data_location": ".",
   "files": {
     "footprint.npz": {
-      "sha256": "7f0dab1fe347598eb07766944629e4a32c3ef373999ba9bfe50174383ec75398",
-      "bytes": 5607
+      "sha256": "81b011143a7595077a4058201a9b90663566c6d6000a43338d08de4502aac54c",
+      "bytes": 5594
     },
     "endpoint_particles.parquet": {
-      "sha256": "60c668af4633744bef12872b914240bfcf3bef1cf6b4517bbb2e37fcaec70a43",
-      "bytes": 353527
+      "sha256": "1847050c70f43f3cc1d5737981155d433b88ee957b25d1fe29d6018f05be62e8",
+      "bytes": 353583
     },
     "run_metadata.json": {
-      "sha256": "a4fabe69060a18cb7e9a0929aa9018a26f26138bce0f5e213303221d729d2a48",
-      "bytes": 11560
+      "sha256": "70a125559379060b6bcddb942d618d97f4f8ce5b093234a9f29d8285f2856c23",
+      "bytes": 12070
     }
   },
   "footprint": {
@@ -45,10 +45,10 @@
       "longitude"
     ],
     "dtype": "float32",
-    "nonzero_cells": 828,
-    "total": 81800.67629773449,
-    "per_release_total_min": 81800.67629773449,
-    "per_release_total_max": 81800.67629773449,
+    "nonzero_cells": 825,
+    "total": 81795.57347180555,
+    "per_release_total_min": 81795.57347180555,
+    "per_release_total_max": 81795.57347180555,
     "units": "s m3 kg-1",
     "density_weighting": "dry_air"
   },
@@ -81,14 +81,14 @@
     }
   ],
   "run": {
-    "wall_seconds": 210.4,
-    "max_rss_kb": 8884416,
+    "wall_seconds": 144.8,
+    "max_rss_kb": 8263360,
     "env": {
       "GLIDE_COMPILE": "1",
       "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"
     },
     "peak_device_allocated_bytes": 498540032,
-    "peak_device_reserved_bytes": 1077936128,
+    "peak_device_reserved_bytes": 1098907648,
     "steps": 1500
   }
 }

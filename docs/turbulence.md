@@ -318,9 +318,25 @@ guarantees the free troposphere is never fully still.
 
 The vertical gradients are central differences over the model levels using the
 **true 3-D geopotential heights**, not the bounding-box-mean level array — so
-they are correct per column even where the terrain varies sharply. The resulting
+they are correct per column even where the terrain varies sharply. The pressure
+$p$ in $\theta$ is likewise **each column's own** pressure at each level
+(`HourlyMetTensors.pressure_hpa`: on model levels the hydrostatic
+reconstruction of decision 0010; on pressure levels the level pressure,
+regridded with the column onto the AGL levels), at the window midpoint like
+$T$. Until decision 0025 it was the met domain's area-mean pressure of each AGL
+level, which over high ground put the wrong pressure into $\theta$. Because $N^2$
+is a small difference of $\partial_z \ln T$ and $\kappa\,\partial_z \ln p$, that
+mattered: $N^2$ was 5–55% too low between 0.5 and 10 km over the Jungfraujoch
+(31 Dec 2023 12 UTC), and a release there lost 18% of its 0–40 m sensitivity
+when it was corrected (seed-to-seed noise 0.5%; decision 0025). The resulting
 $\sigma/T_L$ fields are built once per meteorology hour on the grid, then
 interpolated trilinearly to each particle above the boundary layer.
+
+The air density of the well-mixed density drift ([physics.md §3](physics.md)),
+$\rho = p/(R_d T)$, and its vertical gradient are built the same way: once per
+window on the grid, from each column's own pressure and the local $T$, with
+$\partial\rho/\partial z$ differenced on the true per-column heights
+(`HannaScheme._density_fields`, decision 0025).
 
 ---
 

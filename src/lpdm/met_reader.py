@@ -1071,11 +1071,12 @@ class ArcoEra5ZarrReader(MetReader):
                 float(agl_levels[-1]),
             )
 
-        # Bbox-mean pressure per AGL level (hPa) — Hanna-FT / Emanuel read this as a
-        # per-level (horizontally-uniform) pressure, so the AGL-grid mean is the same
-        # class of approximation they already make on the pressure grid. On model
-        # levels the 3-D pressure is the hydrostatic reconstruction; on pressure
-        # levels it is the level coordinate broadcast (identical to before).
+        # Per-column pressure on the AGL grid (hPa) and its bbox mean per level. On
+        # model levels the 3-D pressure is the hydrostatic reconstruction; on
+        # pressure levels it is the level coordinate broadcast, so after the AGL
+        # regrid each column has its own pressure at each AGL height. Hanna's
+        # density and θ (decision 0025) and Emanuel convection (A02) use the
+        # per-column field; the mean is metadata only.
         pressure_p_hpa = np.ascontiguousarray(self._column_pressure_pa(ds_hour) / 100.0)
         pressure_agl = apply_agl_regrid(pressure_p_hpa[None], weights)[0]
         pressure_level_hpa = pressure_agl.mean(axis=(1, 2))  # already hPa

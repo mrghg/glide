@@ -1,15 +1,14 @@
 {
   "fixture": "ab_multisite_perf/cuda",
-  "created_utc": "2026-11-24T14:32:53Z",
+  "created_utc": "2026-11-24T17:01:54Z",
   "config": "configs/ab_multisite_perf.yaml",
   "config_file_sha256": "d3146a0867a3be39cbbcb4912ecf992e769f88fab8bacdc03133afdaab4a42a3",
   "resolved_config_sha256": "a808c5150dd8f1264095846230a3c4f2d19b7ac26e7e059dd004f90b3b11652d",
   "device": "cuda",
   "runtime_device": "cuda",
   "seed": 42,
-  "git_rev": "957ea3f7cbc2f7ef2ab9f67ef8ac9a810e04199f",
+  "git_rev": "392816c1ef1cefd80dbd9150134b879878c03f72",
   "src_dirty": false,
-  "git_rev_fixed_at": "3cc2d70c22a3fc7de0e21886cc9530b3a8a6dbb5",
   "torch_version": "2.14.1+cu126",
   "torch_num_threads": 72,
   "cuda_version": "12.6",
@@ -18,16 +17,16 @@
   "data_location": "outputs/golden/ab_multisite_perf/cuda",
   "files": {
     "footprint.npz": {
-      "sha256": "b4b97c7de180b1af5a2a379dff41cd7d070530382fd7fb667509ef6994efd1ae",
-      "bytes": 17102894
+      "sha256": "98936661945d03753361589cf1462d2775eb470b2387dfa1604ff826f12fc3ad",
+      "bytes": 17084534
     },
     "endpoint_particles.parquet": {
-      "sha256": "7f7625bede9fd1d8e1a06c110d2712a769884899db1b10fbbd9ae7dce2837950",
-      "bytes": 39617568
+      "sha256": "ad1fb7d199138bd2474d46ef7cc9025e138cd7e73bf29f26ce907b6fd7fb5b03",
+      "bytes": 39615237
     },
     "run_metadata.json": {
-      "sha256": "33dea54331ee3dd83e7be5e323fd7db37a3082c1d1a230bed2c78b708f9a8a2e",
-      "bytes": 16934
+      "sha256": "f57b3eb47ca5d90e8e0431d654b81aae7585e7136e33350eceab0d7491f120ce",
+      "bytes": 16894
     }
   },
   "footprint": {
@@ -46,10 +45,10 @@
       "longitude"
     ],
     "dtype": "float32",
-    "nonzero_cells": 4290968,
-    "total": 59491651.17588624,
-    "per_release_total_min": 288211.0607889865,
-    "per_release_total_max": 459676.1056224932,
+    "nonzero_cells": 4286835,
+    "total": 59499270.021651074,
+    "per_release_total_min": 287656.259807369,
+    "per_release_total_max": 459989.15277893445,
     "units": "s m3 kg-1",
     "density_weighting": "dry_air"
   },
@@ -82,13 +81,13 @@
     }
   ],
   "run": {
-    "from_output": "outputs/golden-runs/ab_multisite_perf-cuda-run1",
+    "from_output": "outputs/golden-runs/hanna-colp-ref-run1",
     "env_when_fixed": {
       "GLIDE_COMPILE": "1",
       "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"
     },
     "peak_device_allocated_bytes": 745583616,
-    "peak_device_reserved_bytes": 1755316224,
+    "peak_device_reserved_bytes": 1776287744,
     "steps": 17280
   }
 }
