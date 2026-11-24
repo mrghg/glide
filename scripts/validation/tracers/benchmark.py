@@ -386,6 +386,60 @@ def met_extent(store: str) -> dict:
     )
 
 
+def met_repairs(prov: dict) -> list[dict]:
+    """The repairs recorded on a meteorology store: its ``glide_repairs`` attribute
+    (a JSON list of entries with ``repair``, ``producer_version``,
+    ``producer_commit``, ``date``, ``change_m``...), parsed. Empty when the store
+    records none. An attribute that is not such a list gives one entry
+    ``{"repair": "unreadable", "raw": ...}`` rather than being dropped."""
+
+    raw = prov.get("glide_repairs")
+    if raw is None:
+        return []
+    try:
+        entries = json.loads(raw) if isinstance(raw, str) else raw
+    except json.JSONDecodeError:
+        entries = None
+    if isinstance(entries, dict):
+        entries = [entries]
+    if not isinstance(entries, list) or not all(isinstance(e, dict) for e in entries):
+        return [{"repair": "unreadable", "raw": str(raw)}]
+    return entries
+
+
+def met_summary(prov: dict) -> str:
+    """One line for a store's producer and repairs, e.g. ``met-bazarr 0.3.0,
+    repaired 0.4.0 (era5-surface-geopotential)``. Repairs are grouped by the
+    producer version that made them, in the order recorded."""
+
+    head = f"{prov.get('producer', 'unknown producer')} {prov.get('producer_version', '?')}"
+    repairs = met_repairs(prov)
+    if not repairs:
+        return f"{head}, no repairs recorded"
+    groups: dict[str, list[str]] = {}
+    for r in repairs:
+        groups.setdefault(str(r.get("producer_version", "?")), []).append(str(r.get("repair", "?")))
+    return f"{head}, repaired " + "; ".join(f"{v} ({', '.join(n)})" for v, n in groups.items())
+
+
+def _repair_line(r: dict, producer: str) -> str:
+    """One repair entry for the scorecard's provenance table; ``producer`` is the
+    store's (repair entries name only the producer's version)."""
+
+    if r.get("repair") == "unreadable":
+        return f"unreadable `glide_repairs` attribute: `{r.get('raw')}`"
+    head = f"`{r.get('repair', '?')}`: {producer} {r.get('producer_version', '?')}"
+    if r.get("producer_commit"):
+        head += f" (`{str(r['producer_commit'])[:12]}`)"
+    parts = [head]
+    if r.get("date"):
+        parts.append(str(r["date"]))
+    ch = r.get("change_m")
+    if isinstance(ch, dict) and ch:
+        parts.append("change " + ", ".join(f"{k} {v} m" for k, v in ch.items()))
+    return "; ".join(parts)
+
+
 def lon_in_extent(lon: float, extent: tuple[float, float]) -> float:
     """``lon`` written the way it falls inside the reader's longitude ``extent``
     (as given, or shifted by 360 degrees); a point outside it is returned as
@@ -667,6 +721,8 @@ def provenance(cfg: dict, met: str, met_box: dict, args_dict: dict) -> dict:
         config_hash=config_hash(cfg),
         met_store=str(met),
         met_provenance=met_box["provenance"],
+        met_summary=met_summary(met_box["provenance"]),
+        met_repairs=met_repairs(met_box["provenance"]),
         **args_dict,
     )
 
@@ -728,6 +784,9 @@ def build_scorecard(
                         )
                     )
     table.to_csv(out / "scorecard.csv", index=False)
+    # The store's producer and repairs, also for metadata written before they were recorded.
+    prov = meta.get("met_provenance", {})
+    meta = dict(meta, met_summary=met_summary(prov), met_repairs=met_repairs(prov))
     (out / "scorecard.json").write_text(
         json.dumps(
             dict(version=SCORECARD_VERSION, meta=meta, scores=scores, references=refs, means=means),
@@ -767,9 +826,11 @@ def build_scorecard(
     for k, v in meta.get("met_provenance", {}).items():
         if k in ("producer", "producer_version", "producer_commit", "compression", "recipe"):
             L.append(f"| met {k} | `{v}` |")
-    L.append(
-        f"| met repairs | `{'yes' if 'glide_repairs' in meta.get('met_provenance', {}) else 'none recorded'}` |"
-    )
+    L.append(f"| met | {meta['met_summary']} |")
+    if not meta["met_repairs"]:
+        L.append("| met repairs | none recorded |")
+    for i, r in enumerate(meta["met_repairs"], 1):
+        L.append(f"| met repair {i} | {_repair_line(r, prov.get('producer', '?'))} |")
     L += [
         "",
         "## Scores",
@@ -1068,8 +1129,15 @@ def compare_runs(runs: list[Path]) -> str:
     L = ["# Tracer benchmark comparison", ""]
     L += ["| Run | Directory |", "| --- | --- |"]
     L += [f"| {lab} | `{r}` |" for lab, r in zip(labels, runs, strict=True)]
+    L += ["", "## Meteorology", ""]
+    L += ["| Run | Store | Producer and repairs |", "| --- | --- | --- |"]
+    for lab, c in zip(labels, cards, strict=True):
+        prov = c["meta"].get("met_provenance", {})
+        L.append(f"| {lab} | `{c['meta'].get('met_store')}` | {met_summary(prov)} |")
+    # Shown above; their source, met_provenance, is still listed below when it differs.
     keys = sorted(
-        {k for c in cards for k in c["meta"]} - {"created", "glide_wall_seconds", "sites"}
+        {k for c in cards for k in c["meta"]}
+        - {"created", "glide_wall_seconds", "sites", "met_summary", "met_repairs"}
     )
     diff = [
         k

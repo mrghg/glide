@@ -11,8 +11,10 @@ external references (FLEXPART, NAME, STILT). Three pieces:
   density, applied afterwards.
 
 - `surface_air_density_from_met`: build a spatially-varying surface air-density
-  field `ρ(lat, lon)` from a met store (`sp` and `t`) for use as the
-  `air_density_kg_m3` argument above, for **unweighted footprints only**.
+  field `ρ(lat, lon)` from a met store, pressure or model levels (`sp` and `t`
+  at the lowest level; on model levels the hydrostatic pressure there), for
+  use as the `air_density_kg_m3` argument above, for **unweighted footprints
+  only**.
 
 - `flexpart_to_dry_air_footprint`, `name_to_dry_air_footprint`: the reference
   models' footprints in the same dry-air units (decision 0022,
@@ -197,28 +199,52 @@ def to_stilt_surface_footprint(
 # ---------------------------------------------------------------------------
 
 
+#: Names a model-level store gives its vertical dimension (docs/met_schema.md).
+_MODEL_LEVEL_DIMS = ("hybrid", "model_level")
+
+
 def surface_air_density_from_met(
     met_ds: xr.Dataset,
     *,
     sp_var: str = "surface_pressure",
     t_var: str = "temperature",
+    z_var: str = "geopotential",
+    zs_var: str = "geopotential_at_surface",
+    q_var: str = "specific_humidity",
     t_lowest_level_kwargs: dict | None = None,
     time_reduce: str | None = "mean",
 ) -> xr.DataArray:
-    """Build a spatially-varying surface air-density field `ρ(lat, lon)` from a
-    met store, for use as ``air_density_kg_m3`` in :func:`to_stilt_surface_footprint`.
+    """Build a spatially-varying near-surface air-density field `ρ(lat, lon)` from
+    a met store, for use as ``air_density_kg_m3`` in :func:`to_stilt_surface_footprint`.
 
     **For unweighted footprints only** (``density_weighting: none``). A GLIDE
     footprint weighted while counting (``dry_air``, the default, decision 0022)
     takes no density afterwards; dividing afterwards is biased where residence
     and density co-vary.
 
-    Implements ``ρ = sp / (R_d · T_surface)`` using the ideal gas law. Temperature
-    is sampled at the lowest model level (or by the `t_lowest_level_kwargs`
-    override) as a surface proxy. The result is a 2D field on the met's
-    `(latitude, longitude)` grid; if the met has a time dim it's reduced by
-    `time_reduce` (default `"mean"`), since the footprint conversion is normally
-    a single-time operation. Set `time_reduce=None` to preserve time.
+    ``ρ = p / (R_d · T)`` (ideal gas, dry-air gas constant, no humidity term) at
+    the store's lowest level, on either kind of store:
+
+    - **Pressure levels** (vertical dimension ``level``, in hPa): ``p`` is the
+      surface pressure and ``T`` the temperature at the highest-pressure level,
+      as a surface proxy (``formula`` attribute ``sp / (R_d · T_lowest_level)``).
+    - **Model levels** (vertical dimension ``hybrid`` or ``model_level``, or a
+      store whose ``glide_vertical_coordinate`` attribute is ``model_level``):
+      ``T`` at the lowest model level (the largest level index, ERA5's level
+      137, about 10 m above the ground; checked against the geopotential) and
+      ``p`` the pressure at that level by the hydrostatic reconstruction GLIDE
+      uses, :func:`lpdm.vertical_grid.model_level_pressure_pa`: integrated from
+      the surface pressure over the geopotential thickness from the surface
+      (``zs_var``) to the level, with the virtual temperature when ``q_var`` is
+      present. That ``p`` is within about 0.1% of the surface pressure.
+
+    The result's ``vertical_coordinate`` attribute says which was used.
+    ``t_lowest_level_kwargs`` overrides the level choice (``isel`` kwargs on
+    the vertical dimension; on model levels applied to every 3-D field). The
+    result is on the met's `(latitude, longitude)` grid; if the met has a time
+    dim it's reduced by `time_reduce` (default `"mean"`), since the footprint
+    conversion is normally a single-time operation. Set `time_reduce=None` to
+    preserve time.
 
     Per Seibert & Frank (2004) Eq. 8 the source-receptor footprint is
     density-weighted at the source cell; using a scalar ρ in
@@ -227,14 +253,19 @@ def surface_air_density_from_met(
     2026-05-30 physics audit.)
 
     Args:
-            met_ds: xarray Dataset opened from an ARCO ERA5 Zarr store (or any
-                    store with surface-pressure and 3D temperature variables on
-                    `(latitude, longitude)` and optionally `(level, time)`).
-            sp_var: surface-pressure variable name. Default matches ARCO ERA5.
-            t_var: temperature variable name (must have a `level` dim).
+            met_ds: xarray Dataset opened from a GLIDE met store, pressure or model
+                    levels, with surface-pressure and 3-D temperature variables on
+                    `(latitude, longitude)` and optionally `time`.
+            sp_var: surface-pressure variable name (Pa). Default matches ARCO ERA5.
+            t_var: temperature variable name (with a `level`, `hybrid` or
+                    `model_level` dim).
+            z_var: geopotential variable name (model levels only).
+            zs_var: surface-geopotential variable name (model levels only).
+            q_var: specific-humidity variable name (model levels; if absent, the
+                    hydrostatic pressure uses ``T`` for the virtual temperature).
             t_lowest_level_kwargs: optional `xr.DataArray.isel(...)` kwargs to pick
-                    a specific temperature level (e.g. `{"level": -1}`). Default selects
-                    the lowest level present in the dataset.
+                    a specific level (e.g. `{"level": -1}`). Default selects the
+                    lowest level present in the dataset.
             time_reduce: `"mean"` (default) reduces the `time` dim by averaging;
                     `None` preserves it.
 
@@ -247,30 +278,106 @@ def surface_air_density_from_met(
         raise KeyError(f"met_ds missing surface-pressure variable {sp_var!r}")
     if t_var not in met_ds.variables:
         raise KeyError(f"met_ds missing temperature variable {t_var!r}")
+    if time_reduce is not None and time_reduce != "mean":
+        raise ValueError(f"time_reduce must be 'mean' or None; got {time_reduce!r}")
 
     sp = met_ds[sp_var]  # Pa (or kPa — let units validation happen at use)
     t_field = met_ds[t_var]
-    if "level" not in t_field.dims:
-        raise ValueError(f"{t_var!r} must have a 'level' dim for the lowest-level selection")
-    if t_lowest_level_kwargs is None:
-        # Pick the lowest level (largest pressure ≈ surface). In ARCO ERA5 the
-        # level coord is in hPa and stored in descending altitude order (so
-        # the lowest altitude is at the *end* of the level array).
-        t_surface = t_field.isel(level=int(t_field["level"].argmax()))
-    else:
-        t_surface = t_field.isel(**t_lowest_level_kwargs)
+    vdims = [d for d in ("level", *_MODEL_LEVEL_DIMS) if d in t_field.dims]
+    if len(vdims) != 1:
+        raise ValueError(
+            f"{t_var!r} must have one vertical dim ('level', 'hybrid' or 'model_level') "
+            f"for the lowest-level selection; has {t_field.dims}"
+        )
+    vdim = vdims[0]
+    model_levels = (
+        vdim in _MODEL_LEVEL_DIMS or met_ds.attrs.get("glide_vertical_coordinate") == "model_level"
+    )
 
-    rho = sp / (R_DRY_AIR_J_KG_K * t_surface)
+    if model_levels:
+        rho = _model_level_surface_density(
+            met_ds, sp, t_field, vdim, z_var, zs_var, q_var, t_lowest_level_kwargs
+        )
+        formula = (
+            "p_lowest / (R_d · T_lowest_level), p_lowest hydrostatic from sp "
+            "(vertical_grid.model_level_pressure_pa)"
+        )
+    else:
+        if t_lowest_level_kwargs is None:
+            # Pick the lowest level (largest pressure ≈ surface). In ARCO ERA5 the
+            # level coord is in hPa and stored in descending altitude order (so
+            # the lowest altitude is at the *end* of the level array).
+            t_surface = t_field.isel({vdim: int(np.argmax(t_field[vdim].values))})
+        else:
+            t_surface = t_field.isel(**t_lowest_level_kwargs)
+        rho = sp / (R_DRY_AIR_J_KG_K * t_surface)
+        formula = "sp / (R_d · T_lowest_level)"
+
     rho.name = "air_density_kg_m3"
-    rho.attrs["units"] = "kg m**-3"
-    rho.attrs["formula"] = "sp / (R_d · T_lowest_level)"
-    rho.attrs["R_d_J_kg_K"] = float(R_DRY_AIR_J_KG_K)
+    rho.attrs = {
+        "units": "kg m**-3",
+        "formula": formula,
+        "R_d_J_kg_K": float(R_DRY_AIR_J_KG_K),
+        "vertical_coordinate": "model_level" if model_levels else "pressure_level",
+    }
     if time_reduce == "mean" and "time" in rho.dims:
-        rho = rho.mean(dim="time")
+        rho = rho.mean(dim="time", keep_attrs=True)
         rho.attrs["time_reduce"] = "mean"
-    elif time_reduce is not None and time_reduce != "mean":
-        raise ValueError(f"time_reduce must be 'mean' or None; got {time_reduce!r}")
     return rho
+
+
+def _model_level_surface_density(
+    met_ds: xr.Dataset,
+    sp: xr.DataArray,
+    t_field: xr.DataArray,
+    vdim: str,
+    z_var: str,
+    zs_var: str,
+    q_var: str,
+    level_kwargs: dict | None,
+) -> xr.DataArray:
+    """``p / (R_d T)`` at the lowest model level, ``p`` from
+    :func:`lpdm.vertical_grid.model_level_pressure_pa` (see
+    :func:`surface_air_density_from_met`)."""
+
+    from .vertical_grid import model_level_pressure_pa
+
+    for name in (z_var, zs_var):
+        if name not in met_ds.variables:
+            raise KeyError(
+                f"met_ds missing {name!r}, needed for the hydrostatic pressure on model levels"
+            )
+    phi = met_ds[z_var]
+    if level_kwargs is None:
+        # ERA5 numbers its levels from the top (1) to the ground (137). Check that
+        # the largest index is the lower on one time slice, reading two levels only.
+        lo, hi = int(np.argmax(t_field[vdim].values)), int(np.argmin(t_field[vdim].values))
+        probe = phi.isel(time=0) if "time" in phi.dims else phi
+        if lo != hi and float(probe.isel({vdim: lo}).mean()) > float(probe.isel({vdim: hi}).mean()):
+            lo = hi
+        level_kwargs = {vdim: lo}
+
+    def pick(da: xr.DataArray) -> xr.DataArray:
+        return da.isel(**level_kwargs) if vdim in da.dims else da
+
+    t_low = pick(t_field)
+    phi_low = pick(phi)
+    if vdim in t_low.dims or vdim in phi_low.dims:
+        raise ValueError(f"the level selection {level_kwargs} must pick a single {vdim!r} level")
+    q_low = pick(met_ds[q_var]) if q_var in met_ds.variables else None
+
+    def _pressure(*fields):
+        # One level is pointwise: lay any block out as a [1, 1, N] column set.
+        arrs = np.broadcast_arrays(*fields)
+        shape = arrs[0].shape
+        flat = [np.asarray(a, dtype=np.float64).reshape(1, 1, -1) for a in arrs]
+        phi3, phis3, ps3, t3 = flat[:4]
+        q3 = flat[4] if len(flat) > 4 else None
+        return model_level_pressure_pa(phi3, phis3[0], ps3[0], t3, q3).reshape(shape)
+
+    args = [phi_low, met_ds[zs_var], sp, t_low] + ([q_low] if q_low is not None else [])
+    p_low = xr.apply_ufunc(_pressure, *args, dask="parallelized", output_dtypes=[np.float64])
+    return p_low / (R_DRY_AIR_J_KG_K * t_low)
 
 
 # ---------------------------------------------------------------------------

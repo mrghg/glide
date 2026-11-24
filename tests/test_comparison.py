@@ -404,3 +404,128 @@ def test_surface_air_density_feeds_to_stilt_surface_footprint() -> None:
     )
     assert stilt.attrs["stilt_air_density_kg_m3"] == "DataArray"
     assert stilt.dims == ("latitude", "longitude")
+
+
+G = 9.80665
+
+
+def _make_model_level_met(n_time: int = 2, top_first: bool = True) -> xr.Dataset:
+    """A model-level store like met-bazarr's ERA5 ones: vertical dim ``hybrid``
+    (level 1 at the top), time, terrain, and the lowest level 10-20 m up."""
+
+    n_lat, n_lon = 3, 4
+    lat = np.linspace(50.0, 45.0, n_lat)
+    lon = np.linspace(-2.0, 2.0, n_lon)
+    hybrid = np.array([135.0, 136.0, 137.0]) if top_first else np.array([137.0, 136.0, 135.0])
+    rng = np.random.default_rng(0)
+    terrain = rng.uniform(0.0, 2000.0, (n_lat, n_lon))
+    heights_agl = np.array([60.0, 30.0, 10.0])  # for 135, 136, 137
+    if not top_first:
+        heights_agl = heights_agl[::-1]
+    shape = (n_time, 3, n_lat, n_lon)
+    z = np.empty(shape)
+    for k in range(3):
+        z[:, k] = (terrain + heights_agl[k] + rng.uniform(0, 10, (n_time, n_lat, n_lon))) * G
+    t = rng.uniform(260.0, 290.0, shape)
+    q = rng.uniform(0.001, 0.01, shape)
+    sp = 101325.0 * np.exp(-terrain / 8000.0) * rng.uniform(0.98, 1.02, (n_time, n_lat, n_lon))
+    zs = np.broadcast_to(terrain * G, (n_time, n_lat, n_lon)).copy()
+    dims3 = ("time", "hybrid", "latitude", "longitude")
+    dims2 = ("time", "latitude", "longitude")
+    return xr.Dataset(
+        {
+            "surface_pressure": (dims2, sp, {"units": "Pa"}),
+            "geopotential_at_surface": (dims2, zs),
+            "temperature": (dims3, t, {"units": "K"}),
+            "geopotential": (dims3, z),
+            "specific_humidity": (dims3, q),
+        },
+        coords={
+            "time": np.array(["2024-01-01T00", "2024-01-01T01"][:n_time], dtype="datetime64[ns]"),
+            "hybrid": hybrid,
+            "latitude": lat,
+            "longitude": lon,
+        },
+        attrs={"glide_vertical_coordinate": "model_level"},
+    )
+
+
+def _expected_model_level_rho(met: xr.Dataset) -> np.ndarray:
+    """By hand: the hypsometric relation from the surface to level 137, with the
+    level's virtual temperature, then p / (R_d T) there; per time."""
+
+    low = met.sel(hybrid=137.0)
+    t = low["temperature"].values
+    tv = t * (1.0 + 0.6077 * low["specific_humidity"].values)
+    dphi = low["geopotential"].values - met["geopotential_at_surface"].values
+    p = met["surface_pressure"].values * np.exp(-dphi / (287.05 * tv))
+    return p / (R_DRY_AIR_J_KG_K * t)
+
+
+def test_surface_air_density_on_model_levels_by_hand(tmp_path) -> None:
+    """A04 follow-up: model-level stores (dim ``hybrid``) work, with the
+    hydrostatic pressure at the lowest model level, on an in-memory dataset and
+    on a lazily opened Zarr store, whichever way the levels are ordered."""
+
+    met = _make_model_level_met()
+    expected = _expected_model_level_rho(met)
+
+    rho_t = surface_air_density_from_met(met, time_reduce=None)
+    assert rho_t.dims == ("time", "latitude", "longitude")
+    np.testing.assert_allclose(rho_t.values, expected, rtol=1e-12)
+    assert rho_t.attrs["vertical_coordinate"] == "model_level"
+    assert "model_level_pressure_pa" in rho_t.attrs["formula"]
+    # The level pressure is a little below the surface pressure, not equal to it.
+    naive = met["surface_pressure"] / (R_DRY_AIR_J_KG_K * met["temperature"].sel(hybrid=137.0))
+    ratio = rho_t.values / naive.values
+    assert np.all(ratio < 1.0) and np.all(ratio > 0.997)
+
+    rho = surface_air_density_from_met(met)
+    assert rho.dims == ("latitude", "longitude")
+    np.testing.assert_allclose(rho.values, expected.mean(axis=0), rtol=1e-12)
+    assert rho.attrs["time_reduce"] == "mean" and rho.attrs["units"] == "kg m**-3"
+
+    # Levels stored ground-first: the lowest is still found from the geopotential.
+    flipped = _make_model_level_met(top_first=False)
+    np.testing.assert_allclose(
+        surface_air_density_from_met(flipped, time_reduce=None).values,
+        _expected_model_level_rho(flipped),
+        rtol=1e-12,
+    )
+
+    # Lazily, as opened from a store (dask arrays, several chunks per dimension).
+    met.chunk({"time": 1, "latitude": 2, "longitude": 2}).to_zarr(tmp_path / "ml.zarr")
+    lazy = xr.open_zarr(tmp_path / "ml.zarr")
+    np.testing.assert_allclose(
+        surface_air_density_from_met(lazy).values, expected.mean(axis=0), rtol=1e-6
+    )
+
+    # Without humidity: the virtual temperature is T.
+    dry = met.drop_vars("specific_humidity")
+    low = met.sel(hybrid=137.0)
+    dphi = low["geopotential"].values - met["geopotential_at_surface"].values
+    p = met["surface_pressure"].values * np.exp(-dphi / (287.05 * low["temperature"].values))
+    np.testing.assert_allclose(
+        surface_air_density_from_met(dry, time_reduce=None).values,
+        p / (R_DRY_AIR_J_KG_K * low["temperature"].values),
+        rtol=1e-12,
+    )
+
+    with pytest.raises(KeyError, match="geopotential_at_surface"):
+        surface_air_density_from_met(met.drop_vars("geopotential_at_surface"))
+
+
+def test_surface_air_density_on_pressure_levels_is_unchanged() -> None:
+    """The pressure-level path is the old one: sp over T at the highest-pressure
+    level, per time and averaged, and labelled as such."""
+
+    base = _make_minimal_met(sp_pa=100000.0, t_lowest_k=280.0)
+    met = xr.concat([base, base.assign(temperature=base["temperature"] + 10.0)], dim="time")
+    rho_t = surface_air_density_from_met(met, time_reduce=None)
+    assert rho_t.dims == ("time", "latitude", "longitude")
+    np.testing.assert_allclose(rho_t.values[0], 100000.0 / (R_DRY_AIR_J_KG_K * 280.0))
+    np.testing.assert_allclose(rho_t.values[1], 100000.0 / (R_DRY_AIR_J_KG_K * 290.0))
+    assert rho_t.attrs["vertical_coordinate"] == "pressure_level"
+    assert rho_t.attrs["formula"] == "sp / (R_d · T_lowest_level)"
+    rho = surface_air_density_from_met(met)
+    np.testing.assert_allclose(rho.values, rho_t.values.mean(axis=0))
