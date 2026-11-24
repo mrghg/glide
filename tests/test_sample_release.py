@@ -59,7 +59,9 @@ def test_samples_expand_one_release_per_sample_in_order() -> None:
 
 def test_samples_batches_follow_max_releases_per_batch() -> None:
     cfg = _samples_config([_sample(f"s{i}", minutes=10 * i) for i in range(5)])
-    cfg = cfg.model_copy(update={"batch": cfg.batch.model_copy(update={"max_releases_per_batch": 2})})
+    cfg = cfg.model_copy(
+        update={"batch": cfg.batch.model_copy(update={"max_releases_per_batch": 2})}
+    )
     assert [len(b.releases) for b in cfg.expand_to_batches()] == [2, 2, 1]
 
 
@@ -146,9 +148,7 @@ def test_point_samples_give_the_same_footprint_as_a_point_schedule(tmp_path: Pat
     samp = _make_run_config(output_uri=str(tmp_path / "samp"), **common).model_dump(mode="json")
     samp["release"] = {
         "kind": "samples",
-        "samples": [
-            _sample(f"s{i}", minutes=20 * i, lo=30.0, hi=30.0) for i in range(len(times))
-        ],
+        "samples": [_sample(f"s{i}", minutes=20 * i, lo=30.0, hi=30.0) for i in range(len(times))],
         "n_particles_per_release": 256,
         "seed": 5,
     }
