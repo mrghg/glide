@@ -3,16 +3,21 @@
 Post-processing helpers for putting GLIDE footprints onto common ground with
 external references (FLEXPART, NAME, STILT). Three pieces:
 
-- `to_stilt_surface_footprint`: convert raw GLIDE residence-time footprint
-  (units of `s` per cell, see `src/lpdm/footprint_gridder.py`) to STILT-style
+- `to_stilt_surface_footprint`: convert a raw GLIDE footprint to STILT-style
   surface sensitivity in `m**2 s mol**-1`, equivalent to `(mol/mol)/(mol/m**2/s)`,
-  per Lin et al. 2003 Eq. 5.
+  per Lin et al. 2003 Eq. 5. It reads the footprint's declared
+  `density_weighting` (decision 0022): a `dry_air` footprint (s m3 kg-1, the
+  default) needs M_air / h only; a `none` footprint (plain seconds) needs a
+  density, applied afterwards.
 
 - `surface_air_density_from_met`: build a spatially-varying surface air-density
   field `ρ(lat, lon)` from a met store (`sp` and `t`) for use as the
-  `air_density_kg_m3` argument above. The S&F 2004 Eq. 8 footprint is
-  density-weighted at the source cell; using a scalar `ρ` is biased by ~few %
-  for deep-PBL receptors. (F10 in the 2026-05-30 physics audit.)
+  `air_density_kg_m3` argument above, for **unweighted footprints only**.
+
+- `flexpart_to_dry_air_footprint`, `name_to_dry_air_footprint`: the reference
+  models' footprints in the same dry-air units (decision 0022,
+  `docs/reference-runs.md` §6), with the per-cell humidity corrections
+  `flexpart_dry_air_factor` and `name_dry_air_factor`.
 
 - `regrid_conservative`: area-weighted mass-conservative regridding between
   rectangular lat/lon grids using `(sin(lat_top) - sin(lat_bottom)) × dlon`
@@ -32,6 +37,15 @@ import xarray as xr
 DRY_AIR_M_KG_MOL = 0.02897
 # Dry-air gas constant (J/(kg·K)) — for the ideal-gas density helper.
 R_DRY_AIR_J_KG_K = 287.05
+# FLEXPART's virtual-temperature coefficient (Tv = T (1 + 0.608 q)).
+FLEXPART_TV_COEFF = 0.608
+
+
+def _density_weighting(raw_footprint: xr.DataArray) -> str:
+    """The footprint's declared density weighting; stores written before
+    decision 0022 carry none and hold plain seconds."""
+
+    return str(raw_footprint.attrs.get("density_weighting", "none"))
 
 
 # ---------------------------------------------------------------------------
@@ -43,20 +57,32 @@ def to_stilt_surface_footprint(
     raw_footprint: xr.DataArray,
     *,
     surface_layer_depth_m: float,
-    air_density_kg_m3: float | xr.DataArray,
+    air_density_kg_m3: float | xr.DataArray | None = None,
     m_air_kg_per_mol: float = DRY_AIR_M_KG_MOL,
     integrate_time: bool = True,
 ) -> xr.DataArray:
     """Convert raw GLIDE residence-time footprint to STILT-style surface sensitivity.
 
-    Per Lin et al. 2003 Eq. 5, the surface footprint is
+    The footprint declares its weighting in ``attrs["density_weighting"]``
+    (decision 0022):
 
-        f_STILT(y, x) = m_air / (h * rho_bar) * sum_{t, z in surface_layer} F[t, z, y, x]
+    - ``dry_air`` (GLIDE's default): each particle was divided by the dry-air
+      density as it was counted, so `F` is in s m3 kg-1 and
 
-    where `F` is GLIDE's raw residence-time × particle-weight accumulator (units
-    `s` per cell for unit-normalised weights), `h` is the surface-layer depth used
-    for the integration (typical FLEXPART / NAME convention: 0-40 m), and `rho_bar`
-    is the local surface air density.
+          f_STILT(y, x) = m_air / h * sum_{t, z in surface_layer} F[t, z, y, x]
+
+      Passing ``air_density_kg_m3`` for such a footprint raises: it would divide
+      by the density twice.
+    - ``none`` (or no attribute: stores written before decision 0022): `F` is
+      plain residence seconds, and per Lin et al. 2003 Eq. 5
+
+          f_STILT(y, x) = m_air / (h * rho_bar) * sum_{t, z in surface_layer} F[t, z, y, x]
+
+      with ``rho_bar`` the given air density. Dividing afterwards is biased
+      where residence and density co-vary (decision 0022).
+
+    `h` is the surface-layer depth used for the integration (typical FLEXPART /
+    NAME convention: 0-40 m).
 
     Bins partially overlapping the chosen surface layer are credited by their
     overlap fraction (depth-weighted). For exact comparison, configure the runtime
@@ -73,9 +99,9 @@ def to_stilt_surface_footprint(
                     before passing in.
             surface_layer_depth_m: Depth of the surface layer for sensitivity
                     integration (m). Match the reference dataset's convention.
-            air_density_kg_m3: Surface air density. Scalar (e.g. 1.225 for standard
-                    conditions) or 2D `DataArray` on `(latitude, longitude)` for spatial
-                    variation derived from local met.
+            air_density_kg_m3: For an unweighted (``none``) footprint only, and then
+                    required: surface air density, scalar or 2D `DataArray` on
+                    `(latitude, longitude)`. Must be None for a ``dry_air`` footprint.
             m_air_kg_per_mol: Dry-air mean molar mass; default 0.02897 kg/mol.
             integrate_time: If True (default), sum across `time_ago` to return
                     `[latitude, longitude]`. Otherwise return `[time_ago, latitude, longitude]`.
@@ -100,6 +126,23 @@ def to_stilt_surface_footprint(
     if surface_layer_depth_m <= 0:
         raise ValueError("surface_layer_depth_m must be > 0")
 
+    weighting = _density_weighting(raw_footprint)
+    if weighting == "dry_air":
+        if air_density_kg_m3 is not None:
+            raise ValueError(
+                "raw_footprint is already divided by the dry-air density at each particle "
+                "(attrs density_weighting='dry_air', decision 0022); pass no "
+                "air_density_kg_m3, or it is divided twice."
+            )
+    elif weighting == "none":
+        if air_density_kg_m3 is None:
+            raise ValueError(
+                "raw_footprint holds plain residence seconds (density_weighting='none'); "
+                "air_density_kg_m3 is required."
+            )
+    else:
+        raise ValueError(f"unknown density_weighting {weighting!r} on raw_footprint")
+
     # Per-bin overlap fraction with [0, surface_layer_depth_m].
     z_bot = raw_footprint.coords["z_bottom_m"]
     z_top = raw_footprint.coords["z_top_m"]
@@ -113,16 +156,22 @@ def to_stilt_surface_footprint(
     if integrate_time:
         surface_integrated = surface_integrated.sum(dim="time_ago")
 
-    conversion = m_air_kg_per_mol / (float(surface_layer_depth_m) * air_density_kg_m3)
+    if weighting == "dry_air":
+        conversion = m_air_kg_per_mol / float(surface_layer_depth_m)
+    else:
+        conversion = m_air_kg_per_mol / (float(surface_layer_depth_m) * air_density_kg_m3)
     result = surface_integrated * conversion
 
     result.attrs = dict(raw_footprint.attrs)
     result.attrs["units"] = "m**2 s mol**-1"
     result.attrs["stilt_surface_layer_depth_m"] = float(surface_layer_depth_m)
     result.attrs["stilt_m_air_kg_per_mol"] = float(m_air_kg_per_mol)
-    result.attrs["stilt_air_density_kg_m3"] = (
-        float(air_density_kg_m3) if isinstance(air_density_kg_m3, (int, float)) else "DataArray"
-    )
+    if weighting == "dry_air":
+        result.attrs["stilt_air_density_kg_m3"] = "per particle, while counting (dry air)"
+    else:
+        result.attrs["stilt_air_density_kg_m3"] = (
+            float(air_density_kg_m3) if isinstance(air_density_kg_m3, (int, float)) else "DataArray"
+        )
     result.attrs["conversion_reference"] = "Lin et al. 2003 J. Geophys. Res. Eq. 5"
     result.name = "footprint_stilt"
     return result
@@ -143,6 +192,11 @@ def surface_air_density_from_met(
 ) -> xr.DataArray:
     """Build a spatially-varying surface air-density field `ρ(lat, lon)` from a
     met store, for use as ``air_density_kg_m3`` in :func:`to_stilt_surface_footprint`.
+
+    **For unweighted footprints only** (``density_weighting: none``). A GLIDE
+    footprint weighted while counting (``dry_air``, the default, decision 0022)
+    takes no density afterwards; dividing afterwards is biased where residence
+    and density co-vary.
 
     Implements ``ρ = sp / (R_d · T_surface)`` using the ideal gas law. Temperature
     is sampled at the lowest model level (or by the `t_lowest_level_kwargs`
@@ -202,6 +256,122 @@ def surface_air_density_from_met(
     elif time_reduce is not None and time_reduce != "mean":
         raise ValueError(f"time_reduce must be 'mean' or None; got {time_reduce!r}")
     return rho
+
+
+# ---------------------------------------------------------------------------
+# (b2) Reference models' footprints in dry-air units (decision 0022)
+# ---------------------------------------------------------------------------
+
+
+def _vapour_pressure(p, q):
+    return q * p / (0.622 + 0.378 * q)
+
+
+def _mean_over(field, time_dim: str | None):
+    if time_dim is not None and isinstance(field, xr.DataArray) and time_dim in field.dims:
+        return field.mean(dim=time_dim)
+    return field
+
+
+def name_dry_air_factor(pressure_pa, specific_humidity, *, time_dim: str | None = "time"):
+    """NAME's moist-air footprint to dry air: p / (p - e), per cell.
+
+    NAME divides by p / (R_d T), with no humidity term, so its footprint is
+    relative to moist air (decision 0022). Pass the surface-layer pressure and
+    specific humidity of NAME's own (UM) meteorology; with a ``time_dim`` the
+    factor is computed at each time and averaged over the footprint's period.
+    """
+
+    factor = pressure_pa / (pressure_pa - _vapour_pressure(pressure_pa, specific_humidity))
+    return _mean_over(factor, time_dim)
+
+
+def flexpart_dry_air_factor(pressure_pa, specific_humidity, *, time_dim: str | None = "time"):
+    """FLEXPART's footprint to dry air: p / ((p - e)(1 + 0.608 q)), per cell.
+
+    FLEXPART divides each particle by the moist-air density p / (R_d T_v),
+    T_v = T (1 + 0.608 q) (decision 0022). Pass FLEXPART's own meteorology;
+    with a ``time_dim`` the factor is computed at each time and averaged over
+    the footprint's period.
+    """
+
+    q = specific_humidity
+    factor = pressure_pa / (
+        (pressure_pa - _vapour_pressure(pressure_pa, q)) * (1.0 + FLEXPART_TV_COEFF * q)
+    )
+    return _mean_over(factor, time_dim)
+
+
+def flexpart_to_dry_air_footprint(
+    native_s_m3_kg: xr.DataArray,
+    *,
+    dry_air_factor: float | xr.DataArray,
+    surface_layer_depth_m: float = 40.0,
+    m_air_kg_per_mol: float = DRY_AIR_M_KG_MOL,
+    time_dim: str | None = "time",
+) -> xr.DataArray:
+    """FLEXPART backward footprint to m2 s mol-1 of dry air.
+
+    Input: native output with ``IND_SOURCE = 1``, ``IND_RECEPTOR = 2`` in
+    s m3 kg-1 for the 0-h layer, per output time. Output:
+
+        S = (sum over output times) x M_air / h x p / ((p - e)(1 + 0.608 q))
+
+    ``dry_air_factor`` is :func:`flexpart_dry_air_factor` from FLEXPART's own
+    meteorology over the footprint's period (scalar or a per-cell field). The
+    function takes fields; it never reads restricted data itself.
+    """
+
+    if surface_layer_depth_m <= 0:
+        raise ValueError("surface_layer_depth_m must be > 0")
+    summed = native_s_m3_kg
+    if time_dim is not None and time_dim in summed.dims:
+        summed = summed.sum(dim=time_dim)
+    result = summed * (m_air_kg_per_mol / float(surface_layer_depth_m)) * dry_air_factor
+    result.attrs = dict(native_s_m3_kg.attrs)
+    result.attrs.update(
+        units="m**2 s mol**-1",
+        density_weighting="dry_air",
+        conversion="FLEXPART s m3 kg-1 (moist air) x M_air / h x p / ((p - e)(1 + 0.608 q))",
+        surface_layer_depth_m=float(surface_layer_depth_m),
+        m_air_kg_per_mol=float(m_air_kg_per_mol),
+    )
+    result.name = "footprint_dry_air"
+    return result
+
+
+def name_to_dry_air_footprint(
+    mixing_ratio_ppm_s: xr.DataArray,
+    *,
+    cell_area_m2: float | xr.DataArray,
+    dry_air_factor: float | xr.DataArray,
+    release_seconds: float = 3600.0,
+) -> xr.DataArray:
+    """NAME's footprint to m2 s mol-1 of dry air (`docs/reference-runs.md` §6).
+
+    Input: time-integrated Mixing Ratio in ppm s for the 0-40 m layer, per cell.
+    Output:
+
+        S = ppm s x 1e-6 x cell area / release_seconds x p / (p - e)
+
+    ``release_seconds`` is the NAME runner's source normalisation (3,600 s,
+    the release hour). ``dry_air_factor`` is :func:`name_dry_air_factor` from
+    the UM fields NAME used, over the footprint's period.
+    """
+
+    if release_seconds <= 0:
+        raise ValueError("release_seconds must be > 0")
+    result = mixing_ratio_ppm_s * (1.0e-6 / float(release_seconds)) * cell_area_m2
+    result = result * dry_air_factor
+    result.attrs = dict(mixing_ratio_ppm_s.attrs)
+    result.attrs.update(
+        units="m**2 s mol**-1",
+        density_weighting="dry_air",
+        conversion="NAME ppm s (moist air) x 1e-6 x cell area / release_seconds x p / (p - e)",
+        release_seconds=float(release_seconds),
+    )
+    result.name = "footprint_dry_air"
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -355,6 +525,11 @@ def _conservative_weights_1d(
 
 __all__ = [
     "DRY_AIR_M_KG_MOL",
+    "flexpart_dry_air_factor",
+    "flexpart_to_dry_air_footprint",
+    "name_dry_air_factor",
+    "name_to_dry_air_footprint",
     "regrid_conservative",
+    "surface_air_density_from_met",
     "to_stilt_surface_footprint",
 ]

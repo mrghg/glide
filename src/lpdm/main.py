@@ -29,6 +29,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from lpdm.air_density import DENSITY_WEIGHTING_ATTRS, ParticleDryAirDensity
 from lpdm.config import ConcreteRelease, RunConfig
 from lpdm.convection import (
     ConvectionScheme,
@@ -312,6 +313,32 @@ class PreflightValidationError(ValueError):
     """Raised when run inputs are invalid before stepping begins."""
 
 
+def _density_weighting_met_keys(cfg: RunConfig) -> tuple[str, ...]:
+    """Met channels the footprint's density weighting reads (decision 0022)."""
+
+    if cfg.output_grid.density_weighting == "dry_air":
+        return ParticleDryAirDensity.CHANNELS
+    return ()
+
+
+def _footprint_units_doc(cfg: RunConfig) -> dict[str, object]:
+    """`footprint_units` block of run_metadata.json for the run's weighting."""
+
+    weighting = cfg.output_grid.density_weighting
+    doc: dict[str, object] = dict(FOOTPRINT_UNITS_DOC)
+    doc.update(DENSITY_WEIGHTING_ATTRS[weighting])
+    if weighting == "dry_air":
+        doc["value"] = (
+            "Σ over active particles in cell of (weight_i × dt_step_seconds / rho_d,i), "
+            "rho_d,i the dry-air density at particle i as it is counted"
+        )
+        doc["value_dimensionality"] = (
+            "(dimensionless mass fraction) × s m3 kg-1 — residence time per unit released "
+            "mass, divided by the dry-air density"
+        )
+    return doc
+
+
 def _resolve_device(name: str) -> str:
     """Resolve a config device string ('auto', 'cpu', 'cuda', 'mps', 'cuda:N') to a concrete torch device."""
 
@@ -510,7 +537,9 @@ def _build_footprint_dataset_metadata(
     # `site` label only when present (multi-site); single-location runs omit it.
     if any(r.label is not None for r in releases):
         coords["site"] = ("release", np.array([r.label or "" for r in releases]))
-    return coords, {}
+    # The weighting and units of the values (decision 0022), for downstream code
+    # (e.g. `comparison.to_stilt_surface_footprint`) to read, not assume.
+    return coords, dict(DENSITY_WEIGHTING_ATTRS[cfg.output_grid.density_weighting])
 
 
 def _validate_meteorology_time_coverage(
@@ -675,7 +704,7 @@ def _write_memory_guard_metadata(
                 "footprints": outputs.footprints,
                 "metadata": outputs.metadata,
             },
-            "footprint_units": FOOTPRINT_UNITS_DOC,
+            "footprint_units": _footprint_units_doc(cfg),
         },
     )
 
@@ -1279,6 +1308,7 @@ def _run(
                     "sp",
                     *scheme.required_met_keys(),
                     *convection_scheme.required_met_keys(),
+                    *_density_weighting_met_keys(cfg),
                 )
             )
         )
@@ -1324,6 +1354,21 @@ def _run(
     # CPU). Auto: static on CUDA, dynamic elsewhere; `GLIDE_STATIC_SUBSTEPS`
     # overrides (used to exercise the static path on CPU in tests).
     use_static = use_static_step_path(device)
+    # Dry-air density at each counted particle (decision 0022), or None for
+    # plain residence seconds.
+    particle_density: ParticleDryAirDensity | None = None
+    if cfg.output_grid.density_weighting == "dry_air":
+        reader_channels = getattr(reader, "channel_names", None)
+        if reader_channels is not None:
+            missing = [k for k in ParticleDryAirDensity.CHANNELS if k not in reader_channels]
+            if missing:
+                raise PreflightValidationError(
+                    "output_grid.density_weighting 'dry_air' needs met channels "
+                    f"{list(ParticleDryAirDensity.CHANNELS)}; the reader lacks {missing}. "
+                    "Use density_weighting: none for plain residence seconds."
+                )
+        particle_density = ParticleDryAirDensity(device, dtype=torch.float32)
+    LOGGER.info("footprint density weighting: %s", cfg.output_grid.density_weighting)
     if use_static:
         LOGGER.info("runtime: static-shape per-step path (full-set, mask-gated)")
     _start_mem_history(device)
@@ -1599,6 +1644,13 @@ def _run(
                 if gridder.n_t == 1:
                     t_idx.clamp_(max=0)
                 with phase_timer.phase("gridder"):
+                    inv_density = (
+                        None
+                        if particle_density is None
+                        else particle_density.inverse_density(
+                            particles[:, :3], met_window, t_alpha, engine
+                        )
+                    )
                     gridder.accumulate(
                         particles=particles[:, :3],
                         active_mask=active_mask,
@@ -1606,6 +1658,7 @@ def _run(
                         t_idx=t_idx,
                         release_idx=release_idx_local,
                         dt_seconds=delta_s,
+                        inv_density=inv_density,
                     )
                 newly_escaped = active_mask & ~_within_met_domain(particles, cfg)
                 alive = alive & ~newly_escaped
@@ -1674,6 +1727,13 @@ def _run(
                     # (clamping them into the last bin would contradict time_ago_end_hours).
                     if gridder.n_t == 1:
                         t_idx.clamp_(max=0)
+                    inv_density = (
+                        None
+                        if particle_density is None
+                        else particle_density.inverse_density(
+                            particles[:, :3], met_window, t_alpha, engine
+                        )
+                    )
                     gridder.accumulate(
                         particles=particles[:, :3],
                         active_mask=active_mask,
@@ -1681,6 +1741,7 @@ def _run(
                         t_idx=t_idx,
                         release_idx=release_idx_local,
                         dt_seconds=delta_s,
+                        inv_density=inv_density,
                     )
 
                 # Kill particles that left met_domain this step (drop-and-count). They
@@ -1863,7 +1924,7 @@ def _run(
             "footprints": outputs.footprints,
             "metadata": outputs.metadata,
         },
-        "footprint_units": FOOTPRINT_UNITS_DOC,
+        "footprint_units": _footprint_units_doc(cfg),
     }
     writer.write_metadata_json(outputs.metadata, metadata)
 
