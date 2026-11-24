@@ -49,11 +49,12 @@ Documented departures from full Emanuel:
   rather than Emanuel's full quasi-equilibrium closure. Calibrated against
   Forster (2007)'s order-of-magnitude values for typical deep-convection
   cases (M_b ≈ 0.01–0.1 kg/m²/s).
-- We use the bbox-mean met column (`metadata.level`) for the parcel lift,
-  rather than per-(lon,lat) columns. Convection then triggers/doesn't fire
-  uniformly across the bbox — a strong approximation for large domains.
-  Advection's vertical interpolation makes the same approximation; both are
-  open follow-ups in STATUS.md.
+
+Columns (task A02, decision 0023): every (lon, lat) column of the met window is
+diagnosed at once (`compute_lcl_lnb_cape_columns`, `compute_mass_flux_matrices`,
+[columns, levels] tensors), and each particle is moved with the matrix of its
+nearest column. The single-column functions (`compute_lcl_lnb_cape`,
+`compute_mass_flux_matrix`) are the reference the batched ones are tested against.
 """
 
 from __future__ import annotations

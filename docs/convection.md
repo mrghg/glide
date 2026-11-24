@@ -13,7 +13,11 @@ GLIDE's `emanuel_reduced` scheme is a reduced port of the Emanuel &
 Živković-Rothman (1999) mass-flux scheme as FLEXPART implements it (Forster,
 Stohl & Seibert 2007), written at a higher level of abstraction than the ~3000
 lines of `convect43c.f`. It is off by default (`convection.scheme: none`) and
-enabled in the shipped example configs.
+enabled in the shipped example configs. Like FLEXPART's, it works column by
+column: every (longitude, latitude) column of the meteorology gets its own parcel
+lift, trigger and mass-flux matrix, and each particle is moved with the matrix of
+the column it is in (since task A02; before that one bounding-box-mean column
+stood for the whole domain).
 
 **Contents**
 
@@ -45,7 +49,21 @@ reasons:
   every internal timestep (Stohl et al. 2005 §4.6).
 
 The runtime tracks the current meteorology bracket's start time and fires
-convection exactly once whenever the cursor crosses into a new bracket.
+convection exactly once whenever the cursor crosses into a new bracket. A
+bracket is one time step of the meteorology store (`reader.met_interval_seconds`,
+measured from the store's time coordinate): 3,600 s on hourly ERA5, 10,800 s on a
+3-hourly source. The mass flux is scaled by that interval (§4), so the scheme
+follows the store's cadence.
+
+**Columns.** Each event works on every column of the meteorology window at once:
+the profiles are tensors of shape [columns, levels], interpolated in time to the
+event, and the parcel lift, the trigger and the closure are evaluated for all
+columns together, with no Python loop over columns or levels. A column's profile
+is its own temperature, humidity, height above ground and pressure on the
+terrain-following levels (the reader supplies the per-column pressure; synthetic
+windows without it use the level-mean pressure). Matrices are built only for the
+columns that fire. A particle belongs to the column of the nearest meteorology
+grid point, and its host layer is that column's level nearest its height.
 
 The only meteorology this scheme needs beyond the baseline is specific humidity:
 
@@ -131,7 +149,8 @@ Convection fires only when **all** of the following hold:
 | $\Delta T_v\big\vert_{\mathrm{LCL}+1} \ge 0.9\ \mathrm{K}$ | Forster (2007) Eq. 34 buoyancy threshold (`trigger_dtv_k`) |
 | cloud depth $\ge 500\ \mathrm{m}$ | deep convection only (`min_cloud_depth_m`) — shallow cumulus is the boundary-layer scheme's job |
 
-If any check fails the scheme is a no-op for this meteorology update. A negative
+The checks are made in each column separately. A column where any check fails
+has no convection in this meteorology update, and its particles are untouched. A negative
 control test asserts it does **not** fire on a stable winter sounding
 (`test_emanuel_does_not_fire_on_winter_inversion_column`).
 
@@ -145,7 +164,10 @@ w_{\text{buoy}} = \min\left(\sqrt{2\ \mathrm{CAPE}},\ 5\ \mathrm{m\ s^{-1}}\righ
 M_b = c_{\text{closure}} \  \rho_{\mathrm{LCL}} \  w_{\text{buoy}}
 $$
 
-with $c_{\text{closure}} = 0.03$ by default.
+with $c_{\text{closure}} = 0.03$ by default, evaluated in each column with that
+column's CAPE and its environmental temperature and pressure at the LCL level. One
+event moves $M_b\,\Delta t_{\mathrm{met}}$ per unit area, where
+$\Delta t_{\mathrm{met}}$ is the meteorology interval (§1).
 
 The cap on $w_{\text{buoy}}$ is not decoration. Without it,
 $\mathrm{CAPE} > 500\ \mathrm{J\ kg^{-1}}$ gives
@@ -242,8 +264,8 @@ forward updraft: forward convection lofts boundary-layer air to cloud top, so th
 backward (footprint) operator traces a particle that is aloft *now* down to the
 boundary-layer air it came from.
 
-Sampling is a uniform draw and a cumulative-sum search over the row of $P$; a
-particle whose sampled destination is its own layer keeps its position, and a
+Each particle uses $P$ of its own column (§1). Sampling is a uniform draw and a
+cumulative-sum search over the row of $P$; a particle whose sampled destination is its own layer keeps its position, and a
 mover is placed at a uniformly random height within the destination layer. Only
 altitude changes — longitude, latitude and weight are untouched, so the particle
 count and total mass are exactly conserved.
@@ -259,7 +281,9 @@ $$
 An initially well-mixed (mass-proportional) ensemble therefore stays well-mixed
 after a convection event, in either time direction. This is asserted
 deterministically in the tests, not just checked statistically
-(`test_convection_transition_preserves_mass_distribution_both_directions`). The
+(`test_convection_transition_preserves_mass_distribution_both_directions`, and
+for every column of a box whose columns differ,
+`test_mass_is_conserved_in_every_column`). The
 matrix that preceded it had an updraft but no subsidence, was divergent, and
 violated the well-mixed criterion; no ad-hoc move-probability clamp is needed
 once the matrix is built correctly.
@@ -270,13 +294,15 @@ once the matrix is built correctly.
 
 Each of these is a deliberate simplification, listed with what it costs.
 
-1. **One bounding-box-mean column, not per-(lon, lat) columns.** The full scheme
-   processes every grid column independently; GLIDE uses the domain-mean profile
-   for the parcel lift, so convection fires or does not fire uniformly across the
-   meteorology domain. Fine for a small domain; for something the size of
-   continental Europe it can over- or under-trigger relative to FLEXPART. Fixing
-   this is the same 3-D refactor as the per-column vertical-interpolation
-   follow-up.
+1. **Resolved (task A02): each column is now treated on its own**, as in the
+   full scheme. Until A02 GLIDE lifted one parcel in the bounding-box-mean
+   profile, so convection fired everywhere or nowhere: over a continental domain
+   the mean column almost never fired in winter, while hundreds of tropical and
+   warm-sector columns would have. What remains different from FLEXPART is the
+   column assignment: GLIDE uses the nearest grid column, on the
+   terrain-following levels the rest of the model uses, rather than FLEXPART's
+   own convection grid. Decision
+   [0023](../dev/decisions/0023-convection-per-column.md).
 
 2. **Linear detrainment profile**, not Emanuel's buoyancy-sorting spectrum
    (Forster 2007 Eqs. 35–36). This sets only *where* the updraft deposits mass —
@@ -299,8 +325,11 @@ Each of these is a deliberate simplification, listed with what it costs.
    velocity.
 
 6. **Convection fires once per met window**, and scales the mass flux by that
-   window's own duration, read from the window metadata. It therefore follows
-   whatever cadence the meteorology has rather than assuming an hour.
+   window's own duration, which the reader sets to the store's time step
+   (`reader.met_interval_seconds`). It therefore follows whatever cadence the
+   meteorology has rather than assuming an hour (since September 2026; the
+   acceptance tests of A02 pin 3,600 s for hourly and 10,800 s for a 3-hourly
+   store).
 
 ---
 

@@ -112,7 +112,7 @@ RunConfig (YAML)
                advection                 ─┐
                turbulence                 ├─ one combined operation on the GPU
                ground reflection         ─┘
-               convection                   once per meteorology hour
+               convection                   once per meteorology interval, every column
                accumulate the footprint
                retire particles that have left the domain
          │
@@ -141,7 +141,7 @@ fp.set_index(release=["site", "release_time"]).unstack("release")
 every site releases on the same schedule, so all their particles need the same
 meteorology hours at the same time. Everything that costs the same regardless of
 how many particles are involved — fetching and regridding the meteorology,
-building the convection matrix, constructing the turbulence support fields, the
+building the convection matrices, constructing the turbulence support fields, the
 per-step bookkeeping — is then paid **once for the whole network** instead of
 once per site. This is the intended way to scale a run across a station network,
 and it is why the run behind the README's feature image does 56 sites × 720
