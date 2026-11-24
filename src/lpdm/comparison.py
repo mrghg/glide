@@ -171,6 +171,7 @@ def to_stilt_surface_footprint(
         conversion = m_air_kg_per_mol / float(surface_layer_depth_m)
     else:
         conversion = m_air_kg_per_mol / (float(surface_layer_depth_m) * air_density_kg_m3)
+    _require_aligned(surface_integrated, conversion, what="to_stilt_surface_footprint")
     result = surface_integrated * conversion
 
     result.attrs = dict(raw_footprint.attrs)
@@ -272,6 +273,27 @@ def surface_air_density_from_met(
 # ---------------------------------------------------------------------------
 # (b2) Reference models' footprints in dry-air units (decision 0022)
 # ---------------------------------------------------------------------------
+
+
+def _require_aligned(*fields, what: str) -> None:
+    """Refuse fields whose shared coordinates differ, before they are combined.
+
+    xarray's arithmetic keeps only the coordinate values two arrays share, so a
+    correction field on a shifted or cropped grid would silently shrink or move
+    the footprint (external review of PR #57, 24 Nov 2026). Scalars pass.
+    """
+
+    arrays = [f for f in fields if isinstance(f, xr.DataArray)]
+    if len(arrays) < 2:
+        return
+    try:
+        xr.align(*arrays, join="exact")
+    except ValueError as exc:
+        raise ValueError(
+            f"{what}: the fields' shared coordinates differ, so combining them would "
+            "drop or misplace cells. Put them on exactly the same grid (and times) "
+            f"first. ({exc})"
+        ) from exc
 
 
 def _vapour_pressure(p, q):
@@ -419,6 +441,7 @@ def flexpart_to_dry_air_footprint(
                 f"only one of the footprint and dry_air_factor has a {time_dim!r} "
                 "coordinate; cannot check that their output times match."
             )
+        _require_aligned(native_s_m3_kg, dry_air_factor, what="flexpart_to_dry_air_footprint")
         corrected = native_s_m3_kg * dry_air_factor
         result = corrected.sum(dim=time_dim) * (m_air_kg_per_mol / float(surface_layer_depth_m))
         factor_form = "per output time, applied before summing (exact)"
@@ -430,6 +453,7 @@ def flexpart_to_dry_air_footprint(
             what="time-summed footprint",
             hint="Give the factor on the footprint's grid.",
         )
+        _require_aligned(summed, dry_air_factor, what="flexpart_to_dry_air_footprint")
         result = summed * (m_air_kg_per_mol / float(surface_layer_depth_m)) * dry_air_factor
         factor_form = "time-mean or scalar, applied after summing (approximate)"
     result.attrs = dict(native_s_m3_kg.attrs)
@@ -489,6 +513,9 @@ def name_to_dry_air_footprint(
             "Average a time-resolved factor over the footprint's period first "
             "(name_dry_air_factor(..., time_dim='time'))."
         ),
+    )
+    _require_aligned(
+        mixing_ratio_ppm_s, cell_area_m2, dry_air_factor, what="name_to_dry_air_footprint"
     )
     result = mixing_ratio_ppm_s * (1.0e-6 / float(release_seconds)) * cell_area_m2
     result = result * dry_air_factor

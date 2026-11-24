@@ -620,3 +620,57 @@ def test_density_core_traces_as_one_graph_and_does_not_recompile() -> None:
         torch._dynamo.config.suppress_errors = prev_sup
         torch._dynamo.config.error_on_recompile = prev_rec
         torch._dynamo.reset()
+
+
+def test_conversions_refuse_misaligned_grids() -> None:
+    """External review of PR #57: xarray keeps only shared coordinate values, so
+    a footprint at longitudes [0, 1] times a field at [1, 2] silently became one
+    cell at [1]. Every conversion now refuses fields whose shared coordinates
+    differ, and accepts identical ones."""
+
+    from lpdm.comparison import (
+        flexpart_to_dry_air_footprint,
+        name_to_dry_air_footprint,
+        to_stilt_surface_footprint,
+    )
+
+    lon_a, lon_b = [0.0, 1.0], [1.0, 2.0]
+    fp = xr.DataArray(
+        np.ones((2, 2)), dims=("time", "longitude"), coords={"time": [0, 1], "longitude": lon_a}
+    )
+    good = xr.DataArray(np.full(2, 1.01), dims=("longitude",), coords={"longitude": lon_a})
+    bad = xr.DataArray(np.full(2, 1.01), dims=("longitude",), coords={"longitude": lon_b})
+
+    out = flexpart_to_dry_air_footprint(fp, dry_air_factor=good)
+    assert list(out.longitude.values) == lon_a
+    with pytest.raises(ValueError, match="shared coordinates differ"):
+        flexpart_to_dry_air_footprint(fp, dry_air_factor=bad)
+    fp_t = fp.expand_dims(lat=[50.0]).transpose("time", "lat", "longitude")
+    bad_t = xr.DataArray(
+        np.full((2, 1, 2), 1.01),
+        dims=("time", "lat", "longitude"),
+        coords={"time": [0, 1], "lat": [50.0], "longitude": lon_b},
+    )
+    with pytest.raises(ValueError, match="shared coordinates differ"):
+        flexpart_to_dry_air_footprint(fp_t, dry_air_factor=bad_t)
+
+    ppm_s = fp.isel(time=0, drop=True)
+    area = xr.DataArray(np.full(2, 7.0e8), dims=("longitude",), coords={"longitude": lon_a})
+    name_to_dry_air_footprint(ppm_s, cell_area_m2=area, dry_air_factor=good)
+    with pytest.raises(ValueError, match="shared coordinates differ"):
+        name_to_dry_air_footprint(ppm_s, cell_area_m2=area, dry_air_factor=bad)
+
+    raw = xr.DataArray(
+        np.ones((1, 1, 1, 2)),
+        dims=("time_ago", "z_bin", "latitude", "longitude"),
+        coords={
+            "z_bin": [20.0],
+            "z_bottom_m": ("z_bin", [0.0]),
+            "z_top_m": ("z_bin", [40.0]),
+            "longitude": lon_a,
+        },
+        attrs={"density_weighting": "none"},
+    )
+    rho_bad = xr.DataArray(np.full(2, 1.2), dims=("longitude",), coords={"longitude": lon_b})
+    with pytest.raises(ValueError, match="shared coordinates differ"):
+        to_stilt_surface_footprint(raw, surface_layer_depth_m=40.0, air_density_kg_m3=rho_bad)
