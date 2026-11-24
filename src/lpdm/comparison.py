@@ -30,6 +30,8 @@ notebooks and validation scripts.
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import xarray as xr
 
@@ -45,6 +47,15 @@ def _density_weighting(raw_footprint: xr.DataArray) -> str:
     """The footprint's declared density weighting; stores written before
     decision 0022 carry none and hold plain seconds."""
 
+    if "density_weighting" not in raw_footprint.attrs:
+        warnings.warn(
+            "raw_footprint declares no density_weighting; treating it as plain residence "
+            "seconds (a store written before decision 0022). If it came from a newer store, "
+            "its attributes were dropped (xarray reductions need keep_attrs=True) and a "
+            "density given here would divide it twice.",
+            UserWarning,
+            stacklevel=3,
+        )
     return str(raw_footprint.attrs.get("density_weighting", "none"))
 
 

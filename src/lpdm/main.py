@@ -1367,7 +1367,12 @@ def _run(
                     f"{list(ParticleDryAirDensity.CHANNELS)}; the reader lacks {missing}. "
                     "Use density_weighting: none for plain residence seconds."
                 )
-        particle_density = ParticleDryAirDensity(device, dtype=torch.float32)
+        particle_density = ParticleDryAirDensity(
+            device,
+            dtype=torch.float32,
+            # Same switch as the scheme's whole-step compile (GLIDE_COMPILE).
+            compile_core=use_static and bool(getattr(engine, "_compile_requested", False)),
+        )
     LOGGER.info("footprint density weighting: %s", cfg.output_grid.density_weighting)
     if use_static:
         LOGGER.info("runtime: static-shape per-step path (full-set, mask-gated)")

@@ -100,10 +100,24 @@ class ParticleDryAirDensity:
     """
 
     CHANNELS: tuple[str, ...] = ("t", "q", "sp")
+    # Surface channels: the same value at every level of the window.
+    SURFACE_CHANNELS: frozenset[str] = frozenset({"sp"})
 
-    def __init__(self, device: torch.device | str, dtype: torch.dtype = torch.float32) -> None:
+    def __init__(
+        self,
+        device: torch.device | str,
+        dtype: torch.dtype = torch.float32,
+        *,
+        compile_core: bool = False,
+    ) -> None:
         self.device = torch.device(device)
         self.dtype = dtype
+        # On CUDA with GLIDE_COMPILE, fuse the ~60 small per-step kernels of the
+        # core into a few (the static path is launch-bound, decision 0004). Every
+        # per-step and per-window value enters as a tensor, so it compiles once.
+        self._core = self.inverse_density_from_stack
+        if compile_core and self.device.type == "cuda":
+            self._core = torch.compile(self.inverse_density_from_stack, dynamic=False)
         self._window_key = None
         self._stack: torch.Tensor | None = None
         self._level_arr: torch.Tensor | None = None
@@ -117,8 +131,22 @@ class ParticleDryAirDensity:
         key = met_window.metadata.time_start
         if self._window_key == key and self._stack is not None:
             return
-        start, end = met_window.channels(*self.CHANNELS)
-        self._stack = torch.cat([start, end], dim=0).to(device=self.device, dtype=self.dtype)
+        # Copy each channel slice straight to the device (no host-side gather or
+        # concatenation of the window; the met cache usually lives on the host).
+        # Surface channels are z-broadcast in the window, so only their lowest
+        # level crosses, and is broadcast again on the device.
+        n_ch = len(self.CHANNELS)
+        first = met_window.channel(self.CHANNELS[0])[0]
+        shape = (2 * n_ch, *first.shape)
+        if self._stack is None or tuple(self._stack.shape) != shape:
+            self._stack = torch.empty(shape, device=self.device, dtype=self.dtype)
+        for i, name in enumerate(self.CHANNELS):
+            for j, half in enumerate(met_window.channel(name)):
+                dst = self._stack[i + j * n_ch]
+                if name in self.SURFACE_CHANNELS:
+                    dst.copy_(half[0].to(device=self.device, dtype=self.dtype).expand_as(dst))
+                else:
+                    dst.copy_(half)
         level = np.asarray(met_window.metadata.level, dtype=np.float64)
         self._level_arr = torch.as_tensor(level, device=self.device, dtype=self.dtype)
         self._ascending = bool(level[-1] > level[0])
@@ -155,7 +183,7 @@ class ParticleDryAirDensity:
         self._refresh(met_window)
         # fill_ with a host scalar launches a fill; it does not sync the device.
         self._alpha.fill_(float(t_alpha))
-        return self.inverse_density_from_stack(
+        return self._core(
             particles_xyz,
             self._stack,
             self._alpha,

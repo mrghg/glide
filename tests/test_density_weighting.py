@@ -383,6 +383,14 @@ def test_helper_needs_a_density_for_an_unweighted_footprint() -> None:
         np.testing.assert_allclose(out.values, 10.0 * M_AIR / (40.0 * 1.25))
 
 
+def test_helper_warns_when_the_weighting_is_not_declared() -> None:
+    """A footprint whose attrs were dropped (e.g. `.sum()` without keep_attrs) is
+    treated as plain seconds, with a warning that it may be divided twice."""
+
+    with pytest.warns(UserWarning, match="keep_attrs"):
+        to_stilt_surface_footprint(_raw(None), surface_layer_depth_m=40.0, air_density_kg_m3=1.2)
+
+
 # ---------------------------------------------------------------------------
 # Reference models to dry air
 # ---------------------------------------------------------------------------
@@ -450,3 +458,48 @@ def test_gridder_without_density_keeps_plain_seconds() -> None:
     idx = ((xyz[:, 1] + 1) / 2 * 2).floor().long() * 2 + ((xyz[:, 0] + 1) / 2 * 2).floor().long()
     expected.index_add_(0, idx[valid], (w * 7.0)[valid])
     torch.testing.assert_close(g1.tensor.view(-1), expected)
+
+
+def test_density_core_traces_as_one_graph_and_does_not_recompile() -> None:
+    """The density core is compiled on CUDA with GLIDE_COMPILE (decision 0004): it must
+    trace without graph breaks and must not recompile as the time weight, the met values
+    or the per-window level heights change. Checked on CPU with the eager backend."""
+
+    import torch._dynamo
+
+    torch._dynamo.reset()
+    prev_sup = torch._dynamo.config.suppress_errors
+    prev_rec = torch._dynamo.config.error_on_recompile
+    torch._dynamo.config.suppress_errors = False
+    torch._dynamo.config.error_on_recompile = True
+    try:
+        engine = GPUEngine(device="cpu", compile_hot_paths=False)
+        dens = ParticleDryAirDensity("cpu")
+        dens._core = torch.compile(dens.inverse_density_from_stack, fullgraph=True, backend="eager")
+        xyz = torch.stack([torch.zeros(32), torch.zeros(32), torch.rand(32) * 900.0], dim=1)
+        win_a = _window(280.0, 282.0, 0.004, 0.005, 100000.0)
+        md = win_a.metadata
+        win_b = HourlyMetTensors(
+            hour_start=win_a.hour_start.float() * 1.01,
+            hour_end=win_a.hour_end.float(),
+            metadata=MetFieldMetadata(
+                lon=md.lon,
+                lat=md.lat,
+                level=np.array([0.0, 120.0, 1100.0, 5200.0]),
+                pressure_level_hpa=md.pressure_level_hpa,
+                time_start=md.time_end,
+                time_end=md.time_end + timedelta(hours=1),
+                variable_units={},
+            ),
+            channel_names=win_a.channel_names,
+        )
+        out = [
+            dens.inverse_density(xyz, win_a, 0.2, engine),
+            dens.inverse_density(xyz, win_a, 0.7, engine),
+            dens.inverse_density(xyz, win_b, 0.4, engine),
+        ]
+        assert all(torch.isfinite(o).all() for o in out)
+    finally:
+        torch._dynamo.config.suppress_errors = prev_sup
+        torch._dynamo.config.error_on_recompile = prev_rec
+        torch._dynamo.reset()
