@@ -1,6 +1,6 @@
 """Task A04: the size of the error from dividing by density after counting.
 
-    .venv/bin/python scripts/validation/a04/compare.py [outputs-dir]
+    .venv/bin/python scripts/validation/a04/compare.py [outputs-dir] [case=run ...]
 
 For standard cases 3 (CBW-20) and 4 (LEF), compares the 0-40 m footprint
 weighted by the dry-air density while counting (`density_weighting: dry_air`,
@@ -130,11 +130,12 @@ def _map(path: Path, ratio: xr.DataArray, case: str, receptor) -> None:
     plt.close(fig)
 
 
-def main(out: Path) -> None:
+def main(out: Path, runs: dict[str, str]) -> None:
     summary = {}
     for case, info in CASES.items():
-        weighted = _raw(out, case, "dry_air")
-        plain = _raw(out, case, "none")
+        run = runs.get(case, case)
+        weighted = _raw(out, run, "dry_air")
+        plain = _raw(out, run, "none")
         rho_moist, rho_dry = _period_densities(info["store"], plain)
         new = to_stilt_surface_footprint(weighted, surface_layer_depth_m=H)
         old = to_stilt_surface_footprint(
@@ -145,6 +146,8 @@ def main(out: Path) -> None:
         )
         lon, lat = new["longitude"].values, new["latitude"].values
         rec = info["receptor"]
+        if float(lon.max()) > 180.0:  # a run configured in 0-360 longitudes
+            rec = (rec[0] % 360.0, rec[1])
         summary[case] = {
             "new_vs_old": _compare(new.values, old.values, lon, lat, rec),
             "new_vs_old_dry": _compare(new.values, old_dry.values, lon, lat, rec),
@@ -159,4 +162,7 @@ def main(out: Path) -> None:
 
 
 if __name__ == "__main__":
-    main(Path(sys.argv[1]) if len(sys.argv) > 1 else Path("outputs"))
+    # Optional CASE=RUN arguments name a differently tagged run for a case, e.g.
+    # case4-lef=case4-lef360 for a NAM run configured in 0-360 longitudes.
+    out_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("outputs")
+    main(out_dir, dict(a.split("=", 1) for a in sys.argv[2:]))

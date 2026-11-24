@@ -172,9 +172,9 @@ default `dry_air`; the pressure at the particle is the surface pressure carried
 up hypsometrically with the virtual temperature at half the particle's height.
 Measured on standard cases 3 and 4 against the old recipe (plain seconds
 divided afterwards by the 240-hour mean surface density): −3.4% (CBW-20,
-winter night) and +6.4% (LEF, summer afternoon) in total 0–40 m sensitivity.
+winter night) and +2.0% (LEF, summer afternoon) in total 0–40 m sensitivity.
 Against the same recipe with a dry-air mean density, which leaves the pairing
-of residence and density, the changes are −4.2% and +4.4%; the moist-to-dry
-step is +0.8% and +2.0% (`dev/agent/progress/A04.md`). Docs:
+of residence and density, the changes are −4.2% and +0.3%; the moist-to-dry
+step is +0.8% and +1.7% (`dev/agent/progress/A04.md`). Docs:
 [docs/reference-runs.md](../../docs/reference-runs.md) §6,
 [docs/physics.md](../../docs/physics.md) §7.

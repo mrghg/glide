@@ -3,6 +3,11 @@
 # plain seconds (none), same seed, one GPU run at a time:
 #   bash scripts/validation/a04/run.sh
 # Then: .venv/bin/python scripts/validation/a04/compare.py outputs
+# NAM stores: until the reader relabels their 0-360 longitudes (PR #56), a NAM
+# run configured in -180..180 is driven by the winds at the grid's western edge.
+# A04's measurement therefore ran case 4 from a 0-360 twin of case4-lef.yaml
+# (lon bounds 240..305 and 240.125..304.875, release lon 269.7268), tagged
+# case4-lef360: compare.py outputs case4-lef=case4-lef360
 set -euo pipefail
 source scripts/gpu_env.sh
 mkdir -p outputs
