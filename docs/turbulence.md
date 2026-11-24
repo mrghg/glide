@@ -95,6 +95,19 @@ dependent control flow it replaces, and it is a prerequisite for graph capture.
 The sampling height is $z_{\mathrm{eval}} = \max(z, 2\ \mathrm{m})$ — the
 unresolved basal layer described in [physics.md §5](physics.md#5-boundary-conditions).
 
+**The boundary-layer depth is held within limits.** The depth $h$ interpolated
+from the meteorology is replaced by
+$\min(\max(h, h_{\min}), h_{\max})$ before anything uses it: the regime
+selection ($h/L$), $w_\ast$, every profile and timescale, and the test
+$z > h$ for the free troposphere. $h_{\min}$ and $h_{\max}$ are
+`turbulence.boundary_layer_depth_min_m` and `_max_m`, fixed when the scheme is
+built (the same constants on both step paths, and to the compiled step). The
+defaults, 50 m and no maximum, are GLIDE's long-standing behaviour. The
+validation runs set 100 m and 4,500 m, the values FLEXPART (`hmixmin`,
+`hmixmax`) and NAME (`Min B L Depth`, `Max B L Depth`) use in the reference
+runs ([reference-runs.md](reference-runs.md) §7;
+[decision 0024](../dev/decisions/0024-boundary-layer-depth-limits-and-meander-timescale.md)).
+
 ---
 
 ## 3. Stability classification
@@ -330,7 +343,7 @@ validation plan (Tier 2) sets out how the term is tested given that.
 $$
 \sigma_{m,i} = C_m \cdot \mathrm{std}_{\text{local}}(U_i), \quad i \in \lbrace u, v\rbrace
 \qquad
-\tau_m = \tfrac{1}{2}\ \Delta t_{\text{met}} \approx 1800\ \mathrm{s}
+\tau_m = \tfrac{1}{2}\ \Delta t_{\text{met}}
 $$
 
 $\mathrm{std}_{\text{local}}$ is the standard deviation of the grid-scale wind
@@ -340,7 +353,37 @@ assumption is that grid-scale wind variability carries information about the
 sub-grid variability. $C_m$ is FLEXPART's `turbmesoscale`, default 0.16. The
 timescale is half the input-field interval, on the reasoning that linear
 interpolation between fields already recovers about half of the sub-interval
-variability.
+variability. Unless `timescale_seconds` is set, GLIDE takes $\Delta t_{\text{met}}$
+from the store (the spacing of its time coordinate) when the run starts and fixes
+$\tau_m$ for the run: 1800 s on hourly ERA5, 5400 s on 3-hourly fields such as
+the UM's
+([decision 0024](../dev/decisions/0024-boundary-layer-depth-limits-and-meander-timescale.md)).
+
+**The exact answer it is tested against.** With a uniform $\sigma_m$ and $\tau_m$
+and nothing else moving the particles, each horizontal displacement $X$ is the
+integral of an Ornstein–Uhlenbeck velocity. From rest ($u_m = 0$ at $t = 0$):
+
+$$
+\mathrm{Var}\ X(t) = 2\sigma_m^2\tau_m^2\left[\frac{t}{\tau_m}
+- 2\left(1 - e^{-t/\tau_m}\right) + \frac{1}{2}\left(1 - e^{-2t/\tau_m}\right)\right]
+$$
+
+which grows as $2\sigma_m^2 t^3/(3\tau_m)$ for $t \ll \tau_m$ and as
+$2\sigma_m^2\tau_m t - 3\sigma_m^2\tau_m^2$ (diffusion with
+$K = \sigma_m^2\tau_m$) for $t \gg \tau_m$. GLIDE's step updates the velocity
+exactly, $u_k = a\ u_{k-1} + \sigma_m\sqrt{1 - a^2}\ \eta_k$ with
+$a = e^{-\Delta t/\tau_m}$, then moves by $u_k\Delta t$, so after $n$ steps
+
+$$
+\mathrm{Var}\ X_n = \Delta t^2\sigma_m^2\ \frac{1 - a^2}{(1 - a)^2}\sum_{m=1}^{n}\left(1 - a^m\right)^2
+$$
+
+which differs from the continuous form by less than $2\Delta t/t$. The Tier 0
+test (`test_meander_alone_gives_the_exact_ou_displacement_variance`,
+`tests/test_hanna.py`) runs the scheme's step on both paths with a fixed
+$\sigma_m = 1\ \mathrm{m\ s^{-1}}$, $\tau_m = 1800$ s, $\Delta t = 60$ s and
+everything else off, and matches the discrete form to sampling noise
+(20,000 particles) from $t = \tau_m/6$ to $12\tau_m$.
 
 Resolution dependence falls out for free: a finer meteorology grid has smaller
 wind differences between neighbouring cells, hence a smaller $\sigma_m$, because
@@ -351,8 +394,30 @@ per-resolution constant.
 The process has **no drift term** and symmetric forcing, so unlike the vertical
 drift it needs no backward sign flip. Leaving out the drift is an approximation:
 $\sigma_m$ varies in the horizontal, and without a correction particles can
-slowly collect where it is small. The size of that effect is measured in the
-Tier 0 meander test (task A03). State $(u_m, v_m)$ starts at zero.
+slowly collect where it is small. State $(u_m, v_m)$ starts at zero.
+
+**How large that effect is (Tier 0 meander test, part 2; task A03).** Particles
+spread evenly in area over the EUR box (30° W – 40° E, 32 – 72° N) at 50 m,
+1 km and 5 km, moved by nothing but the meander term for 10 days backward from
+2 January 2019 00 UTC on hourly ERA5 (`scripts/validation/a03/meander_evenness.py`,
+GH200, 49 million particles, 3 min). Two replicas with independent positions and
+draws separate the systematic unevenness (what they share) from particle noise
+(what they do not). Over interior cells, as the standard deviation of
+final/initial count − 1:
+
+| Height | $\sigma_m$ mean (99th pct.) | 0.25° cells, 183 particles: systematic / noise | 1° cells, 2,925 particles: systematic / noise |
+| --- | --- | --- | --- |
+| 50 m | 0.087 (0.24) m s⁻¹ | 1.9% / 5.9% | 0.75% / 0.86% |
+| 1 km | 0.099 (0.24) m s⁻¹ | 1.7% / 6.2% | 0.57% / 0.91% |
+| 5 km | 0.096 (0.18) m s⁻¹ | 0.8% / 6.2% | 0.35% / 0.90% |
+
+The systematic part is real and is the missing drift: its pattern matches the
+diffusion-limit prediction $\delta\rho/\rho \approx t\ \nabla^2 \bar K$ with
+$K = \sigma_m^2\tau_m$ (regression slope 0.7–0.9). At these particle densities it
+is below the particle noise everywhere; it would equal the noise at about 1,800
+particles per 0.25° cell at 50 m. The term itself is small in this field: with
+$\sigma_m \approx 0.09\ \mathrm{m\ s^{-1}}$ the 10-day RMS meander displacement is
+about 5 km.
 
 Meander is **off by default** in code so existing baselines stay bit-identical,
 and **on** in every shipped example config.
@@ -401,11 +466,13 @@ turbulence:
   max_substeps: 6             # cap on per-particle sub-steps per outer step
   flexpart_tl_floors: true    # §5 — leave on
   surface_layer_override: false   # §8 — leave off
+  boundary_layer_depth_min_m: 50    # §2; validation runs: 100
+  boundary_layer_depth_max_m: null  # §2; null = no maximum; validation runs: 4500
   meander:
     enabled: true             # §7
     coefficient: 0.16         # C_m, FLEXPART `turbmesoscale`
     stencil_radius: 1         # 3×3 neighbourhood
-    timescale_seconds: null   # null → half the met interval (1800 s)
+    timescale_seconds: null   # null → half the store's met interval (1800 s hourly)
 ```
 
 `max_substeps` is a genuine performance/accuracy knob. On the GPU graph path it
