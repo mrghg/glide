@@ -220,9 +220,19 @@ Written under `io.output_uri`:
 | File | Contents |
 | --- | --- |
 | `footprints.zarr` | the 5-D footprint store, streamed one batch at a time. Time-ago bins are `output_grid.time_bin_seconds` wide (default 1 h), counted back from each release window's end; `n_time_bins` of them must cover the simulation length unless `output_grid.drop_older_ages: true`, and the axis adds bins for the release window. `time_ago_start_hours` / `time_ago_end_hours` give each bin's edges. Values depend on `output_grid.density_weighting` (decision 0022): `dry_air` (default) divides each counted particle-second by the dry-air density at the particle, giving s m³ kg⁻¹, which `M_air / h` (0.02897 kg mol⁻¹ / 40 m) turns into m² s mol⁻¹ of dry air with no further density; `none` gives plain residence seconds. The store's attributes (on the dataset and the `footprint` variable) declare `density_weighting`, `units` and `density_formula`: read them rather than assume, as `lpdm.comparison.to_stilt_surface_footprint` does |
+| `footprints_sparse.zarr` | only with `output_grid.footprint_sparse: true`: the same footprint as non-zero cells per release (COO); load with `lpdm.comparison.load_sparse_footprint` |
 | `endpoint_particles.parquet` | final particle states |
 | `trajectory_diagnostics.parquet` | per-run diagnostics |
 | `run_metadata.json` | provenance, config echo, timings, guard report; `footprint_units` repeats the footprint's weighting and units |
+
+**Footprint storage** (all off by default, so output is unchanged unless set):
+`output_grid.footprint_zstd_level` compresses the footprint with zstd (lossless);
+`output_grid.footprint_keep_mantissa_bits` first rounds each value to that many
+of float32's 23 mantissa bits (lossy: relative error at most 2^-(bits+1); not
+for validation output). On a 72-release, 5-day EUROPE run (task B2) the default
+store is 7.7 MB; zstd level 9 gives 6.1 MB, 10 bits + zstd 4.8 MB, 7 bits + zstd
+3.9 MB. The sparse copy is 6.0 MB there (8.6% of cells non-zero); it pays off
+for time-resolved footprints, where far more cells are empty.
 
 ---
 

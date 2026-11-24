@@ -404,6 +404,16 @@ class OutputGridConfig(_Frozen):
     # time; the footprint is in s m3 kg-1 of dry air, and M_air / h gives
     # m2 s mol-1 with no further density. `none`: plain residence seconds.
     density_weighting: Literal["dry_air", "none"] = "dry_air"
+    # Footprint storage (task B2). Both None (default) keep the store's default
+    # encoding, so existing output is unchanged. `footprint_keep_mantissa_bits`
+    # rounds each value to that many float32 mantissa bits before compression
+    # (relative error <= 2**-(bits+1); lossy, so off by default and never for
+    # validation output); `footprint_zstd_level` compresses with zstd.
+    footprint_keep_mantissa_bits: int | None = Field(None, ge=1, le=23)
+    footprint_zstd_level: int | None = Field(None, ge=1, le=22)
+    # Also write `footprints_sparse.zarr`, the footprint as COO per release
+    # (lpdm.sparse_footprint; loader `comparison.load_sparse_footprint`).
+    footprint_sparse: bool = False
 
     @field_validator("z_edges_m")
     @classmethod
