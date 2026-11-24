@@ -20,7 +20,8 @@ comparison against another model yourself.
 5. [GPU-capture guards that run on CPU](#5-gpu-capture-guards-that-run-on-cpu)
 6. [What is not validated](#6-what-is-not-validated)
 7. [Comparing against FLEXPART, NAME and STILT](#7-comparing-against-flexpart-name-and-stilt)
-8. [Adding a physics test](#8-adding-a-physics-test)
+8. [Golden fixtures](#8-golden-fixtures)
+9. [Adding a physics test](#9-adding-a-physics-test)
 
 ---
 
@@ -300,7 +301,101 @@ with this repository — see [../data/README.md](../data/README.md).
 
 ---
 
-## 8. Adding a physics test
+## 8. Golden fixtures
+
+A golden fixture freezes the output of a named configuration at one git rev, on
+one device, with the configuration's fixed seed. Any later change is compared
+with it: a change that should not alter the output must reproduce it, and a
+change that should alter it must say by how much (task A0;
+[dev/agent/INSTRUCTIONS.md](../dev/agent/INSTRUCTIONS.md) §3). The fixtures
+need the ERA5 stores the configurations read, so they are run by hand or by an
+agent on the GPU node, not by `pytest`.
+
+### The scripts
+
+All three live in `scripts/agent/` and run the model as a subprocess
+(`python -m lpdm.main`) from the checkout they sit in, under `/usr/bin/time -v`.
+Source `scripts/gpu_env.sh` first for a CUDA run.
+
+| script | what it does |
+| --- | --- |
+| `make_golden.py --config <yaml> --device cpu\|cuda [--large]` | runs the config and stores `footprint.npz` (the dense footprint [release, time_ago, z_bin, lat, lon], float32, compressed, with the release times), `endpoint_particles.parquet`, `run_metadata.json` and `manifest.json` in `tests/golden/<config>/<device>/`. With `--large` only the manifest goes there and the data go to `<outputs>/golden/<config>/<device>/` (`$GLIDE_AGENT_OUTPUTS`, or the main checkout's `outputs/`). `--from-output <run>` builds the fixture from a finished run instead. |
+| `compare_golden.py <fixture dir> [--output <run>]` | runs the fixture's config on its device at the current checkout (or takes a finished run), checks the fixture's checksums, and prints for every release the maximum absolute and relative footprint differences and the difference of the integrated sensitivity (the release's total), the largest value of each criterion, and PASS or FAIL (exit status 0 or 1). |
+| `benchmark.py --config <yaml> --device cuda` | runs with `GLIDE_PHASE_TIMERS=1` and prints, in Markdown, footprints per second (releases ÷ process wall time, start-up, compilation and writing included), the phase table, peak host RSS and peak GPU memory. `--from-log <run>.log` re-reports a finished run. |
+
+The manifest records the git rev (and whether `src/` was modified), the SHA-256
+of the YAML file and of the resolved configuration (paths and device left out),
+device, seed, torch version, CUDA version and GPU name, the met stores'
+provenance from `run_metadata.json` (producer, version, commit, recipe, format,
+processing), `GLIDE_COMPILE`, the run's wall time and peak memory, and the
+checksum and size of each data file. `compare_golden.py` notes any difference
+in configuration hash, torch version, met provenance or device before it
+compares.
+
+### Tolerances
+
+| fixture | criterion (defaults) |
+| --- | --- |
+| CPU (eager) | footprint and endpoint particles bit-identical |
+| CUDA (static path) | per footprint cell \|a − b\| ≤ 1e-5 \|b\| + 1e-7 max\|b\| (max over the release), and each release's total within 1e-6 relative; endpoint particles reported, not judged |
+
+CUDA's `scatter_add_` adds the dry-air-weighted contributions (decision 0022)
+in an order that varies from run to run, so two same-seed GPU runs differ in
+the last bits of the footprint. This was accepted rather than made
+deterministic (24 Nov 2026; QUEUE.md A0). Particle positions are not affected:
+the endpoint particles of repeated CUDA runs were identical. `--exact`, or
+`--rtol`, `--atol-frac` and `--total-rtol`, override the defaults; a task that
+changes the numerics states its own tolerance in its spec.
+
+### The fixtures
+
+Made on 24 Nov 2026 on a GH200 (Isambard AI), torch 2.14.1+cu126, CUDA 12.6,
+ERA5-ARCO EUROPE stores built by met-bazarr (surface geopotential repaired by
+v0.4.0), at `src/` identical to `main` after PR #59.
+
+| fixture | config | where | size | repeat run vs fixture |
+| --- | --- | --- | --- | --- |
+| `smoke_mhd_single_release/cpu` | smoke: MHD, 1 release, 20,000 particles, 1 day back | committed | 0.37 MB | bit-identical (footprint and endpoints) |
+| `smoke_mhd_single_release/cuda` | the same, CUDA static path, compiled | committed | 0.37 MB | max cell \|a−b\|/bound 0.32, max rel 3.2e-6, total 6.9e-8; endpoints identical |
+| `ab_multisite_perf/cuda` | MHD, RGL, TAC × 48 hourly releases, 20,000 particles, 5 days back, 2 batches | data under `outputs/golden/ab_multisite_perf/cuda` (57 MB); manifest committed | — | max cell \|a−b\|/bound 0.42, max rel 4.3e-6, total 3.1e-8 (all 144 releases); endpoints identical |
+
+The CPU and CUDA smoke fixtures are not expected to agree with each other bit
+for bit (their totals differ by 3e-4 relative); static/dynamic parity is
+checked by the runtime tests, not by the fixtures.
+
+### Benchmark baseline
+
+`benchmark.py` on `configs/ab_multisite_perf.yaml`, GH200, `GLIDE_COMPILE=1`,
+192 h met cache on the host, the GPU otherwise idle (two CPU-only jobs shared
+the node), 24 Nov 2026:
+
+| quantity | value |
+| --- | --- |
+| device | cuda |
+| releases (footprints) | 144 in 2 batch(es), 20000 particles each |
+| model steps | 17280 |
+| process wall time | 1217.7 s |
+| **footprints per second** | **0.1183** |
+| peak host RSS | 53.3 GB |
+| peak GPU allocated / reserved | 0.69 / 1.63 GiB |
+
+Phase timers: total wall 1202.8 s, 168 met fetches (no CUDA sync: GPU phases under-counted).
+
+| phase | total (s) | % wall | calls | ms/call |
+| --- | ---: | ---: | ---: | ---: |
+| met_fetch | 943.31 | 78.4 | 17280 | 54.590 |
+| gridder | 75.69 | 6.3 | 17280 | 4.380 |
+| step | 65.61 | 5.5 | 17280 | 3.797 |
+| convection | 14.61 | 1.2 | 288 | 50.728 |
+| (residual/untimed) | 103.60 | 8.6 |  |  |
+
+This run is also the run the reference fixture was made from (the phase timers do not change the output). Met fetch dominates. The phase timers do not synchronise the GPU, so the step
+and gridder times are under-counted and the residual holds the rest. Compare
+like with like: same node type, same cache settings, nothing else on the GPU.
+
+---
+
+## 9. Adding a physics test
 
 When changing `gpu_engine.py`, the runtime loop, a scheme, or the footprint
 accumulator:
@@ -314,6 +409,9 @@ accumulator:
    against a well-mixed test** (§4) — that is the gate that catches this class of
    bug.
 4. Run the full suite and update the tolerance/seed entries on this page.
+5. On the GPU node, compare with the golden fixtures (§8). A change that should
+   not alter the output must pass at the default tolerances; one that should
+   must report the differences `compare_golden.py` prints.
 
 Tests must not depend on the restricted validation data; the synthetic fixtures
 have to be sufficient.

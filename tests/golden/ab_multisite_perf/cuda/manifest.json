@@ -1,0 +1,94 @@
+{
+  "fixture": "ab_multisite_perf/cuda",
+  "created_utc": "2026-11-24T14:32:53Z",
+  "config": "configs/ab_multisite_perf.yaml",
+  "config_file_sha256": "d3146a0867a3be39cbbcb4912ecf992e769f88fab8bacdc03133afdaab4a42a3",
+  "resolved_config_sha256": "a808c5150dd8f1264095846230a3c4f2d19b7ac26e7e059dd004f90b3b11652d",
+  "device": "cuda",
+  "runtime_device": "cuda",
+  "seed": 42,
+  "git_rev": "957ea3f7cbc2f7ef2ab9f67ef8ac9a810e04199f",
+  "src_dirty": false,
+  "git_rev_fixed_at": "3cc2d70c22a3fc7de0e21886cc9530b3a8a6dbb5",
+  "torch_version": "2.14.1+cu126",
+  "torch_num_threads": 72,
+  "cuda_version": "12.6",
+  "gpu_name": "NVIDIA GH200 120GB",
+  "python": "3.11.17",
+  "data_location": "outputs/golden/ab_multisite_perf/cuda",
+  "files": {
+    "footprint.npz": {
+      "sha256": "b4b97c7de180b1af5a2a379dff41cd7d070530382fd7fb667509ef6994efd1ae",
+      "bytes": 17102894
+    },
+    "endpoint_particles.parquet": {
+      "sha256": "7f7625bede9fd1d8e1a06c110d2712a769884899db1b10fbbd9ae7dce2837950",
+      "bytes": 39617568
+    },
+    "run_metadata.json": {
+      "sha256": "33dea54331ee3dd83e7be5e323fd7db37a3082c1d1a230bed2c78b708f9a8a2e",
+      "bytes": 16934
+    }
+  },
+  "footprint": {
+    "shape": [
+      144,
+      1,
+      3,
+      293,
+      391
+    ],
+    "dims": [
+      "release",
+      "time_ago",
+      "z_bin",
+      "latitude",
+      "longitude"
+    ],
+    "dtype": "float32",
+    "nonzero_cells": 4290968,
+    "total": 59491651.17588624,
+    "per_release_total_min": 288211.0607889865,
+    "per_release_total_max": 459676.1056224932,
+    "units": "s m3 kg-1",
+    "density_weighting": "dry_air"
+  },
+  "n_releases": 144,
+  "n_particles_per_release": 20000,
+  "met_stores": [
+    {
+      "domain": "EUROPE",
+      "producer": "met-bazarr",
+      "producer_version": "0.3.0",
+      "producer_commit": "98598db02e45fa4bc12acdc30d36accb304390f6",
+      "recipe": "EUROPE-202312.yaml",
+      "glide_format": "glide",
+      "glide_format_version": "2.0",
+      "glide_vertical_coordinate": "model_level",
+      "compression": "lossless: Blosc zstd level 5 with byte shuffle on float32 (Zarr v3); no scale/offset, no bit-rounding",
+      "processing": "(1) Read anonymously from ARCO ERA5 on Google Cloud Storage: 3-D fields from the model-level store, surface fields from the unified pressure-level/surface store. | (2) Cropped to the ERA5 grid points inside the domain box (edges included). Latitude kept north to south as in ARCO; longitude kept in 0..360 unless the box crosses 0 E, then given in -180..180 and ascending. | (3) u_component_of_wind, v_component_of_wind, vertical_velocity (omega, Pa s-1), temperature, specific_humidity, geopotential (time-varying), boundary_layer_height, surface_pressure, geopotential_at_surface: unchanged. | (4) surface_sensible_heat_flux: ERA5's accumulation over the hour ending at the timestamp (J m-2, positive down), unchanged; labelled cell_methods 'time: sum', glide_period_seconds 3600. | (5) friction_velocity = sqrt(|tau|/rho), not ERA5's zust: tau = hypot(ewss, nsss) / 3600 s, the mean surface stress over the hour ending at the timestamp; rho = surface_pressure / (287.05 * T * (1 + 0.6077 q)) with T, q on the lowest model level (hybrid 137) at the timestamp. Labelled cell_methods 'time: mean', glide_period_seconds 3600. | (6) Computed in float64 where derived, stored as float32. No interpolation in time or space. | (7) repair era5-surface-geopotential, met-bazarr 0.4.0: geopotential_at_surface replaced by geopotential at hybrid 137 - alpha * 287.0597 * T * (1 + 0.6078 q) at hybrid 137 (alpha = 1 - b/(1-b) ln(1/b), b = 0.997630), so the surface lies under the model levels (met-bazarr decision 0009)"
+    },
+    {
+      "domain": "EUROPE",
+      "producer": "met-bazarr",
+      "producer_version": "0.3.0",
+      "producer_commit": "98598db02e45fa4bc12acdc30d36accb304390f6",
+      "recipe": "EUROPE-202401.yaml",
+      "glide_format": "glide",
+      "glide_format_version": "2.0",
+      "glide_vertical_coordinate": "model_level",
+      "compression": "lossless: Blosc zstd level 5 with byte shuffle on float32 (Zarr v3); no scale/offset, no bit-rounding",
+      "processing": "(1) Read anonymously from ARCO ERA5 on Google Cloud Storage: 3-D fields from the model-level store, surface fields from the unified pressure-level/surface store. | (2) Cropped to the ERA5 grid points inside the domain box (edges included). Latitude kept north to south as in ARCO; longitude kept in 0..360 unless the box crosses 0 E, then given in -180..180 and ascending. | (3) u_component_of_wind, v_component_of_wind, vertical_velocity (omega, Pa s-1), temperature, specific_humidity, geopotential (time-varying), boundary_layer_height, surface_pressure, geopotential_at_surface: unchanged. | (4) surface_sensible_heat_flux: ERA5's accumulation over the hour ending at the timestamp (J m-2, positive down), unchanged; labelled cell_methods 'time: sum', glide_period_seconds 3600. | (5) friction_velocity = sqrt(|tau|/rho), not ERA5's zust: tau = hypot(ewss, nsss) / 3600 s, the mean surface stress over the hour ending at the timestamp; rho = surface_pressure / (287.05 * T * (1 + 0.6077 q)) with T, q on the lowest model level (hybrid 137) at the timestamp. Labelled cell_methods 'time: mean', glide_period_seconds 3600. | (6) Computed in float64 where derived, stored as float32. No interpolation in time or space. | (7) repair era5-surface-geopotential, met-bazarr 0.4.0: geopotential_at_surface replaced by geopotential at hybrid 137 - alpha * 287.0597 * T * (1 + 0.6078 q) at hybrid 137 (alpha = 1 - b/(1-b) ln(1/b), b = 0.997630), so the surface lies under the model levels (met-bazarr decision 0009)"
+    }
+  ],
+  "run": {
+    "from_output": "outputs/golden-runs/ab_multisite_perf-cuda-run1",
+    "env_when_fixed": {
+      "GLIDE_COMPILE": "1",
+      "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"
+    },
+    "peak_device_allocated_bytes": 745583616,
+    "peak_device_reserved_bytes": 1755316224,
+    "steps": 17280
+  }
+}

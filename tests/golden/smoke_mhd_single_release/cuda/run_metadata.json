@@ -1,0 +1,194 @@
+{
+  "config": {
+    "batch": {
+      "max_releases_per_batch": 1
+    },
+    "convection": {
+      "emanuel": {
+        "closure_c": 0.03,
+        "min_cape_j_kg": 50.0,
+        "min_cloud_depth_m": 500.0,
+        "trigger_dtv_k": 0.9
+      },
+      "scheme": "emanuel_reduced"
+    },
+    "io": {
+      "output_uri": "outputs/golden-runs/smoke-cuda-fixture",
+      "zarr_store": "data/era5-arco/EUROPE_*_ERA5-ARCO.zarr"
+    },
+    "memory": {
+      "gc_every_steps": 50,
+      "guard_check_every_steps": 10,
+      "guard_max_device_allocated_gib": null,
+      "guard_max_device_reserved_gib": null,
+      "guard_max_rss_gib": null,
+      "log_every_steps": 100,
+      "met_cache_max_hours": 2,
+      "met_cache_on_host": true,
+      "met_prefetch": true
+    },
+    "met_domain": {
+      "alt_max_m": 15000.0,
+      "first_layer_m": 10.0,
+      "lat_bounds": [
+        10.75,
+        79.0
+      ],
+      "lon_bounds": [
+        -98.0,
+        39.5
+      ],
+      "vertical_levels": null
+    },
+    "output_grid": {
+      "density_weighting": "dry_air",
+      "drop_older_ages": false,
+      "footprint_keep_mantissa_bits": null,
+      "footprint_sparse": false,
+      "footprint_zstd_level": null,
+      "lat_bounds": [
+        10.612,
+        79.174
+      ],
+      "lon_bounds": [
+        -98.076,
+        39.556
+      ],
+      "n_time_bins": 1,
+      "n_x": 391,
+      "n_y": 293,
+      "time_bin_seconds": 3600,
+      "z_edges_m": [
+        0.0,
+        40.0,
+        1000.0,
+        5000.0
+      ]
+    },
+    "release": {
+      "duration_seconds": 3600,
+      "kind": "periodic_point",
+      "n_particles_per_release": 20000,
+      "n_releases": 1,
+      "period_seconds": 3600,
+      "point": {
+        "alt_agl_m": 10.0,
+        "lat": 53.3267,
+        "lon": -9.9046
+      },
+      "seed": 42,
+      "start_time": "2024-01-01T00:00:00Z"
+    },
+    "release_end_time": "2024-01-01T01:00:00+00:00",
+    "simulation": {
+      "device": "cuda",
+      "dt_seconds": 60,
+      "length_seconds": 86400,
+      "start_time": "2024-01-01T00:00:00Z"
+    },
+    "simulation_start_time": "2023-12-31T00:00:00+00:00",
+    "turbulence": {
+      "boundary_layer_depth_max_m": null,
+      "boundary_layer_depth_min_m": 50.0,
+      "flexpart_tl_floors": true,
+      "max_substeps": 6,
+      "meander": {
+        "coefficient": 0.16,
+        "enabled": true,
+        "stencil_radius": 1,
+        "timescale_seconds": null
+      },
+      "scheme": "hanna_1982",
+      "substep_c": 0.5,
+      "surface_layer_override": false
+    }
+  },
+  "footprint_units": {
+    "density_formula": "rho_d = (p - e) / (R_d T), e = q p / (0.622 + 0.378 q), R_d = 287.05 J kg-1 K-1; p = p_s exp(-g z / (R_d Tv(z/2))), Tv = T (1 + 0.6077 q); T, q, p_s interpolated to the particle in the step's met window and time weight",
+    "density_weighting": "dry_air",
+    "notes": "Raw residence-time accumulator; downstream code is responsible for converting to a physical sensitivity (e.g. ppm per emission flux), which requires cell volume, mixed-layer thickness, air density, and molar-mass conversions. See Lin et al. 2003 (STILT) or Seibert & Frank 2004 for standard recipes.",
+    "particle_weight_convention": "1/n_particles for uniform releases; each particle represents 1/N of the total released mass",
+    "to_surface_sensitivity": "M_air / h x (sum over the 0-h m layer) gives m2 s mol-1 of dry air (M_air = 0.02897 kg mol-1); apply no further density",
+    "units": "s m3 kg-1",
+    "units_long": "particle weight x residence seconds / dry-air density at the particle (s m3 kg-1 of dry air per unit released mass)",
+    "value": "\u03a3 over active particles in cell of (weight_i \u00d7 dt_step_seconds / rho_d,i), rho_d,i the dry-air density at particle i as it is counted",
+    "value_dimensionality": "(dimensionless mass fraction) \u00d7 s m3 kg-1 \u2014 residence time per unit released mass, divided by the dry-air density"
+  },
+  "outputs": {
+    "endpoint_particles": "outputs/golden-runs/smoke-cuda-fixture/endpoint_particles.parquet",
+    "footprints": "outputs/golden-runs/smoke-cuda-fixture/footprints.zarr",
+    "metadata": "outputs/golden-runs/smoke-cuda-fixture/run_metadata.json",
+    "trajectory_diagnostics": "outputs/golden-runs/smoke-cuda-fixture/trajectory_diagnostics.parquet"
+  },
+  "runtime": {
+    "device": "cuda",
+    "flux_accumulation_seconds": 3600,
+    "hour_windows": 25,
+    "met_cache_max_hours": 2,
+    "met_period_channels": {
+      "shf": {
+        "cell_methods": "time: sum",
+        "period_seconds": 3600,
+        "variable": "surface_sensible_heat_flux"
+      },
+      "ustar": {
+        "cell_methods": "time: mean",
+        "period_seconds": 3600,
+        "variable": "friction_velocity"
+      }
+    },
+    "met_stores": [
+      {
+        "compression": "lossless: Blosc zstd level 5 with byte shuffle on float32 (Zarr v3); no scale/offset, no bit-rounding",
+        "domain": "EUROPE",
+        "glide_flux_accumulation_seconds": "3600",
+        "glide_format": "glide",
+        "glide_format_definition": "mrghg/glide docs/met_schema.md at commit b21f58602ef8660e9aa20eb104cce3336f5ebf28",
+        "glide_format_version": "2.0",
+        "glide_vertical_coordinate": "model_level",
+        "processing": "(1) Read anonymously from ARCO ERA5 on Google Cloud Storage: 3-D fields from the model-level store, surface fields from the unified pressure-level/surface store. | (2) Cropped to the ERA5 grid points inside the domain box (edges included). Latitude kept north to south as in ARCO; longitude kept in 0..360 unless the box crosses 0 E, then given in -180..180 and ascending. | (3) u_component_of_wind, v_component_of_wind, vertical_velocity (omega, Pa s-1), temperature, specific_humidity, geopotential (time-varying), boundary_layer_height, surface_pressure, geopotential_at_surface: unchanged. | (4) surface_sensible_heat_flux: ERA5's accumulation over the hour ending at the timestamp (J m-2, positive down), unchanged; labelled cell_methods 'time: sum', glide_period_seconds 3600. | (5) friction_velocity = sqrt(|tau|/rho), not ERA5's zust: tau = hypot(ewss, nsss) / 3600 s, the mean surface stress over the hour ending at the timestamp; rho = surface_pressure / (287.05 * T * (1 + 0.6077 q)) with T, q on the lowest model level (hybrid 137) at the timestamp. Labelled cell_methods 'time: mean', glide_period_seconds 3600. | (6) Computed in float64 where derived, stored as float32. No interpolation in time or space. | (7) repair era5-surface-geopotential, met-bazarr 0.4.0: geopotential_at_surface replaced by geopotential at hybrid 137 - alpha * 287.0597 * T * (1 + 0.6078 q) at hybrid 137 (alpha = 1 - b/(1-b) ln(1/b), b = 0.997630), so the surface lies under the model levels (met-bazarr decision 0009)",
+        "producer": "met-bazarr",
+        "producer_commit": "98598db02e45fa4bc12acdc30d36accb304390f6",
+        "producer_version": "0.3.0",
+        "recipe": "EUROPE-202312.yaml",
+        "recipe_text": "# GLIDE development domain, reference configuration (task A01). ERA5 from ARCO on Google Cloud (met-bazarr decision 0006).\n# Domain: GLIDE docs/validation-plan.md \u00a74 (EUR, NAM) or the development domain (EUROPE).\nformat: glide\noutput: $METBAZARR_OUT/EUROPE_20231201-20231231_ERA5-ARCO.zarr\ndomain: {name: EUROPE, lon_min: -98, lon_max: 39.5, lat_min: 10.6, lat_max: 79.2}\nperiod: {start: \"2023-12-01T00:00\", end: \"2023-12-31T23:00\"}\nsource: {type: era5_arco}\ncompression: {codec: zstd, level: 5}\nchunks: {tile: 128}\n",
+        "source_access": "anonymous read via gcsfs 2026.10.1 on nid010243; xarray 2026.7.0; store created 2026-11-20T18:06:12Z",
+        "source_dataset": "ERA5 hourly reanalysis (ECMWF), ARCO copy on Google Cloud: 137 model levels from gs://gcp-public-data-arco-era5/ar/model-level-1h-0p25deg.zarr-v1; surface fields from gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3",
+        "store": "data/era5-arco/EUROPE_20231201-20231231_ERA5-ARCO.zarr"
+      },
+      {
+        "compression": "lossless: Blosc zstd level 5 with byte shuffle on float32 (Zarr v3); no scale/offset, no bit-rounding",
+        "domain": "EUROPE",
+        "glide_flux_accumulation_seconds": "3600",
+        "glide_format": "glide",
+        "glide_format_definition": "mrghg/glide docs/met_schema.md at commit b21f58602ef8660e9aa20eb104cce3336f5ebf28",
+        "glide_format_version": "2.0",
+        "glide_vertical_coordinate": "model_level",
+        "processing": "(1) Read anonymously from ARCO ERA5 on Google Cloud Storage: 3-D fields from the model-level store, surface fields from the unified pressure-level/surface store. | (2) Cropped to the ERA5 grid points inside the domain box (edges included). Latitude kept north to south as in ARCO; longitude kept in 0..360 unless the box crosses 0 E, then given in -180..180 and ascending. | (3) u_component_of_wind, v_component_of_wind, vertical_velocity (omega, Pa s-1), temperature, specific_humidity, geopotential (time-varying), boundary_layer_height, surface_pressure, geopotential_at_surface: unchanged. | (4) surface_sensible_heat_flux: ERA5's accumulation over the hour ending at the timestamp (J m-2, positive down), unchanged; labelled cell_methods 'time: sum', glide_period_seconds 3600. | (5) friction_velocity = sqrt(|tau|/rho), not ERA5's zust: tau = hypot(ewss, nsss) / 3600 s, the mean surface stress over the hour ending at the timestamp; rho = surface_pressure / (287.05 * T * (1 + 0.6077 q)) with T, q on the lowest model level (hybrid 137) at the timestamp. Labelled cell_methods 'time: mean', glide_period_seconds 3600. | (6) Computed in float64 where derived, stored as float32. No interpolation in time or space. | (7) repair era5-surface-geopotential, met-bazarr 0.4.0: geopotential_at_surface replaced by geopotential at hybrid 137 - alpha * 287.0597 * T * (1 + 0.6078 q) at hybrid 137 (alpha = 1 - b/(1-b) ln(1/b), b = 0.997630), so the surface lies under the model levels (met-bazarr decision 0009)",
+        "producer": "met-bazarr",
+        "producer_commit": "98598db02e45fa4bc12acdc30d36accb304390f6",
+        "producer_version": "0.3.0",
+        "recipe": "EUROPE-202401.yaml",
+        "recipe_text": "# GLIDE development domain, reference configuration (task A01). ERA5 from ARCO on Google Cloud (met-bazarr decision 0006).\n# Domain: GLIDE docs/validation-plan.md \u00a74 (EUR, NAM) or the development domain (EUROPE).\nformat: glide\noutput: $METBAZARR_OUT/EUROPE_20240101-20240131_ERA5-ARCO.zarr\ndomain: {name: EUROPE, lon_min: -98, lon_max: 39.5, lat_min: 10.6, lat_max: 79.2}\nperiod: {start: \"2024-01-01T00:00\", end: \"2024-01-31T23:00\"}\nsource: {type: era5_arco}\ncompression: {codec: zstd, level: 5}\nchunks: {tile: 128}\n",
+        "source_access": "anonymous read via gcsfs 2026.10.1 on nid010243; xarray 2026.7.0; store created 2026-11-20T18:55:42Z",
+        "source_dataset": "ERA5 hourly reanalysis (ECMWF), ARCO copy on Google Cloud: 137 model levels from gs://gcp-public-data-arco-era5/ar/model-level-1h-0p25deg.zarr-v1; surface fields from gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3",
+        "store": "data/era5-arco/EUROPE_20240101-20240131_ERA5-ARCO.zarr"
+      }
+    ],
+    "peak_device_allocated_bytes": 498540032,
+    "peak_device_reserved_bytes": 1077936128,
+    "peak_rss_bytes": 8403877888,
+    "rng_seed": 42,
+    "status": "completed",
+    "steps": 1500
+  },
+  "schedule": {
+    "escaped_met_domain_total": 0,
+    "max_releases_per_batch": 1,
+    "n_batches": 1,
+    "n_releases": 1,
+    "release_times": [
+      "2024-01-01T00:00:00+00:00"
+    ]
+  }
+}
