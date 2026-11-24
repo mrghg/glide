@@ -81,8 +81,11 @@ counts exactly. Counting DATEM's 6-hour CAPTEX samples, assigned to the most
 recent release, gives 347, 352, 356, 281, 318 and 177 against Hegarty's 354,
 365, 346, 299, 306 and 183. That is close, but not the same, so the exact
 sample selection (3-hour samples, release windows, sites) is not recoverable
-from the papers. Queue task B10 settles the selection rule from the data,
-before any GLIDE run.
+from the papers. Queue task B10 compared the plausible rules on the data,
+before any GLIDE run, and adopted this one for CAPTEX and, for ANATEX, the
+samples starting 5–13 January (577 and 570 pairs against 562 and 556); the
+rules and their counts are in
+[../data/tracer-experiments.md](../data/tracer-experiments.md) §5.
 
 ## 3. The meteorology behind each score
 

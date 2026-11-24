@@ -199,11 +199,27 @@ matter, because `ct1_000.txt` is complete: one prediction for each of the
 
 - there is no emissions file and no release 2;
 - concentrations are in pg m⁻³ rather than ng m⁻³, and the station codes are
-  numbers (`8002`) rather than letters (`A02`);
+  numbers (`1002`) rather than letters (`A02`): the country prefixes in
+  alphabetical order are `1`–`8` (A to F), `90` (H) and `91`–`98` (N to UK),
+  followed by the JRC station number, so `8002` is F02 and `9203` is NL03;
 - the JRC quality flags are dropped, and so are the samples marked `-.88`
   (detected but not quantifiable);
 - JRC has 3,104 valid samples, 939 of them non-zero; DATEM has 3,105, 941 of
-  them non-zero. The small difference suggests a different data version.
+  them non-zero.
+
+**Matched sample by sample** (B10, `python -m tracers etex-match`), the two
+files agree on 3,103 samples. Every difference is explained:
+
+| Station, interval | JRC (v1.1) | DATEM | Explanation |
+| --- | --- | --- | --- |
+| D10, 2 (23 Oct 18–21 UTC) | `-.88`, flag 41 | 1.76 ng m⁻³ | JRC changed this sample from 1.76 to `-.88` after 5 May 1996 (`pmch.readme`, "changes made"). DATEM's copy predates the change. |
+| D28, 3 (23 Oct 21–24 UTC) | 0.00, flag 01 | 0.60 ng m⁻³ | Not documented. Most likely an error in the ATMES-era file: the release began at 16 UTC in Brittany, and D28's next positive sample is 0.16 ng m⁻³ in interval 11. Treated as a reference issue. |
+| D13, F10 (locations) | 50.12 N 8.73 E; 49.52 N 1.50 W | 50.05 N 8.60 E; 49.63 N 1.62 W | The JRC station list (30 Jan 1995) records "D13: change of station" and "F10: corrected"; DATEM keeps the old locations. F27 differs by 0.02°, rounding. |
+
+The other JRC records absent from DATEM are the 1,566 not sampled (`-.99`)
+and the 369 not quantifiable (`-.88`). So DATEM's ETEX file is the ATMES
+version of the data (before v1.1), which is also what explains most of the
+ATMES-II pair count (§5).
 
 Use the JRC files as the ETEX observations. DATEM's version is kept for two
 reasons. Its HYSPLIT predictions and statistics (`mdl_data/etex/`,
@@ -321,11 +337,16 @@ recommends the same defaults: "use all the data and rely upon more robust
 statistical parameters".
 
 `-b` replaces the correlation with the root-mean-square of the correlations
-from N passes, each of which drops a random 20% of the pairs (N is the number
-of pairs). It was added to `statmain` in October 2012, for Hegarty et al. The
-program seeds it from the clock, so repeated runs differ in the second
-decimal place (three CAPTEX runs gave ranks of 2.25, 2.25 and 2.24, against
-2.23 without `-b`). GLIDE's version takes a seed.
+from N passes (N is the number of records), in each of which every pair is
+dropped independently with probability 0.2, so about 20% of the pairs. It was
+added to `statmain` in October 2012, for Hegarty et al. Repeated runs differ
+in the second decimal place (three CAPTEX runs gave ranks of 2.25, 2.25 and
+2.24, against 2.23 without `-b`). The comment in the code says it seeds the
+generator from the clock, but it does not: the clock value is stored in the
+variable that the first `RANDOM_NUMBER` call overwrites, and `RANDOM_SEED`
+is never called, so the sequence is whatever the compiler's default is
+(random per run with gfortran 7 and later; with some compilers, the same
+every run). B10's version takes a seed.
 
 For scale, HYSPLIT's ranks from two sources are below. They differ, and
 are not meant to agree: the DATEM description's Appendix D (2001, revised
@@ -374,21 +395,110 @@ Implemented by queue tasks B10 (readers and scoring), B12 (the benchmark
 runner) and A11 (the registered runs). Update this section with what was
 actually built.
 
-1. **Readers** for both formats into one table of releases (start, duration,
-   location, height, mass) and one of samples (start, duration, location,
-   height, concentration, site, quality flag), with units converted to SI.
-   The ETEX reader is checked by matching JRC's ETEX-1 against DATEM's,
-   sample by sample, and explaining every difference. The ACURATE reader reads
-   both `meas-t0.txt` and `meas-t1.txt`, and keeps track of which background
-   each uses.
-2. **Scoring** in Python: the DATEM statistics and ranking score, and the ATMES-II
-   statistics for ETEX. **Verify** against DATEM's own code: run on DATEM's
-   HYSPLIT predictions (`mdl_data/<exp>/ct?_000.txt`) with the options in each
-   `run_stat.sh`, and reproduce `statA?_000.txt` and `statT?_000.txt` to their
-   printed precision, for CAPTEX, both ANATEX tracers, ETEX-1 and ACURATE.
-   Then split the samples into the published experiments (per CAPTEX release;
-   ANATEX 5–16 January by site), choosing the assignment rule that comes
-   closest to Hegarty et al.'s pair counts, and record it.
+Steps 1 and 2 are built (B10), in the package `scripts/validation/tracers/`.
+Its command line runs from `scripts/validation` as `python -m tracers
+<command>`; the commands are listed in `tracers/__main__.py`. Tests:
+`tests/test_tracer_scoring.py` (synthetic files, and checks against the
+archives that skip when `$GLIDE_DATEM` or `$GLIDE_ETEX` is unset).
+
+1. **Readers** (`tracers/readers.py`) for both formats into one table of
+   releases (start, end, duration, location, height, mass) and one of samples
+   (ID, site, start, end, duration, location, height, concentration,
+   quality flag), in SI units: kg and kg m⁻³, or Bq and Bq m⁻³ for ACURATE's
+   Kr-85. The raw DATEM fields are kept, because `statmain` pairs predictions
+   with measurements on them. JRC station coordinates are degrees and
+   minutes and are converted. `read_acurate` reads `meas-t0.txt` and
+   `meas-t1.txt` and labels each record with its background (t0: the original
+   background analysis, arl-080; t1: the variable background from a global
+   model). `write_datem_predictions` writes predictions in the measurement
+   format with the measurement keys unchanged. The JRC files do not give the
+   source coordinates; the release table leaves them empty until they are
+   taken from the experiment documentation. The ETEX reader is checked by
+   matching JRC's ETEX-1 against DATEM's sample by sample (§2, "ETEX in
+   DATEM").
+2. **Scoring** (`tracers/datem_stats.py`) re-implements `statmain` routine by
+   routine, with every option the pre-registration must fix as an argument
+   of `StatOptions`: `zero_percentile` (`-z`), `exclude_zero_pairs` (`-x`),
+   `model_zero` (`-y`), `plume_only` (`-p`), `averaging` (`-at`, `-as`),
+   `bootstrap` with a required `seed` (`-b`), and `contingency_level` (`-l`).
+   It works in single precision with sequential sums, as `statmain` does;
+   in double precision six of the twelve files differed in one printed
+   digit (factor-of-5 counts at ratio boundaries, averages in `-at`).
+   - **Verified** (`python -m tracers verify-datem`): on DATEM's HYSPLIT
+     predictions with `run_stat.sh`'s options it reproduces every printed
+     value of all twelve posted files, `statA` and `statT` for CAPTEX, ANATEX
+     tracers 1 and 2, ETEX-1, ACURATE and OKC80 (ranks 2.23/3.03, 2.03/3.47,
+     1.73/2.48, 2.34/2.74, 1.96/3.44, 1.94/2.51).
+   - **Resampled correlation.** Over seeds 0–19, the mean rank with `-b` lies
+     inside the range of 20 runs of DATEM's own `statmain -b` (gfortran 7.5,
+     rank printed to five decimals) for every experiment:
+
+     | Experiment | B10, mean of 20 seeds | `statmain -b`, 20 runs |
+     | --- | --- | --- |
+     | CAPTEX | 2.2449 | 2.2424–2.2476 |
+     | ANATEX tracer 1 | 2.0818 | 2.0787–2.0833 |
+     | ANATEX tracer 2 | 1.7323 | 1.7323–1.7324 |
+     | ETEX-1 | 2.3366 | 2.3340–2.3393 |
+     | ACURATE | 1.9635 | 1.9627–1.9644 |
+
+   - **The published experiments** (`tracers/experiments.py`). Neither paper
+     says which samples belong to which release. The candidate rules and
+     their pair counts (`python -m tracers rules`; "6h" keeps only CAPTEX's
+     6-hour samples; ANATEX's are all 24 h):
+
+     | Rule | C1 | C2 | C3 | C4 | C5 | C7 | GGW | STC | Σ\|diff\| |
+     | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+     | Hegarty et al. (2013) | 354 | 365 | 346 | 299 | 306 | 183 | 562 | 556 | 0 |
+     | 6 h, most recent release | 347 | 352 | 356 | 281 | 318 | 177 | 813 | 800 | 561 |
+     | 6 h, start within 48 h of release | 341 | 315 | 344 | 279 | 318 | 176 | 676 | 668 | 330 |
+     | 6 h, start within 60 h | 346 | 347 | 354 | 281 | 318 | 177 | 813 | 800 | 565 |
+     | 6 h, whole sample within 60 h | 344 | 334 | 352 | 281 | 318 | 177 | 469 | 465 | 267 |
+     | 6 h, whole sample within 72 h | 347 | 352 | 356 | 281 | 318 | 177 | 676 | 668 | 292 |
+     | all, most recent release | 395 | 400 | 404 | 367 | 325 | 288 | 813 | 800 | 821 |
+     | all, start within 60 h | 394 | 395 | 402 | 367 | 325 | 288 | 813 | 800 | 813 |
+     | all, whole sample within 60 h | 392 | 382 | 400 | 367 | 318 | 288 | 469 | 465 | 478 |
+     | 6 h, most recent; ANATEX samples starting 5–12 Jan | 347 | 352 | 356 | 281 | 318 | 177 | 507 | 501 | 176 |
+     | **6 h, most recent; ANATEX samples starting 5–13 Jan** | **347** | **352** | **356** | **281** | **318** | **177** | **577** | **570** | **95** |
+     | 6 h, most recent; ANATEX samples starting 5–14 Jan | 347 | 352 | 356 | 281 | 318 | 177 | 646 | 638 | 232 |
+
+     **Adopted** (`experiments.ADOPTED_RULE`): for CAPTEX, the 6-hour
+     samples, each assigned to the most recent release (release 6's samples
+     are left out with it); for ANATEX, every 24-hour sample starting from
+     5 to 13 January inclusive, the last ending at 14 January 14 UTC. CAPTEX
+     is within 6–18 pairs of Hegarty et al. for every release, with no
+     consistent sign; no release-window rule does better. For ANATEX no
+     release-based rule comes near, because the five releases of each tracer
+     run to 15 January and Hegarty et al. have fewer pairs than samples in
+     that period; the date cut is empirical, and leaves 15 and 14 pairs more
+     than published (perhaps sites outside their 10 km WRF domain). The full
+     table, with 48- and 72-hour windows, is printed by `rules`.
+   - **The sample list for A11** (`python -m tracers export-samples DIR`)
+     writes `tracer_samples.csv` (experiment, assigned release, tracer,
+     sample ID, site, latitude, longitude, UTC start and end) and
+     `tracer_receptors.csv` (the unique receptor windows, with the
+     experiments each serves): 2,978 samples and 2,387 receptor windows,
+     because the two ANATEX tracers share 591 sites and times.
+   - **ATMES-II** (`tracers/atmes2.py`) on the JRC ETEX-1 file. The zero
+     filter, taking arrival and departure as each station's first and last
+     positive sample over all 30 intervals, keeping zeros up to two intervals
+     either side, and treating `-.88` as lost, gives **1,415 pairs, 33.6%
+     measured zeros**, against the published 1,423 and 34%. The difference is
+     the data version: with DATEM's (ATMES-era) values for D10 interval 2
+     and D28 interval 3 (§2), the same rule gives 1,424. Other rules are far
+     off (a 1-interval margin 1,240; 3 intervals 1,575; stopping at 72 h
+     1,209; `-.88` counted as tracer 1,522). The statistics: bias with a 95%
+     confidence interval, NMSE, MG = exp(⟨ln P⟩ − ⟨ln M⟩) (the published
+     signs fix the direction), VG, the correlation of the logarithms, FA2,
+     FA5, FOEX, KS, and FMS in space from log-linear interpolation on the
+     stations' Delaunay triangulation in an equal-area projection, at 12–72 h
+     and for the dose. **KS:** the published values (72–365) cannot be
+     percentages. The code returns the maximum difference D of the two
+     empirical distributions and D × N (on 1,423 pairs the published range
+     is D = 0.05–0.26), but this is a hypothesis: the definition is in the
+     JRC report EUR 17756 EN, not in the paper. The same holds for whether a
+     zero counts within a factor of 2 for FA2 (`fa_zeros`). `python -m
+     tracers atmes2-hysplit` runs the whole chain on DATEM's HYSPLIT
+     example, as a check of the plumbing only.
 3. **Receptor-oriented backward runs**: one backward release per measured
    sample, particles released uniformly over the sample period and between the
    ground and 100 m, the layer the published forward runs averaged over; a
