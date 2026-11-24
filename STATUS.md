@@ -90,11 +90,10 @@ wall. What remains:
   diagnostic, mask/liveness bookkeeping, per-batch particle generation and output
   writes, and Python loop overhead. This, not more graph work, is the next lever.
   First step is to sub-time it to see what is actually in it (task A1).
-- **Convection needs re-profiling.** The A/B that flagged it as a co-frontier at
-  ~250 ms/window ran *before* the parcel lift was vectorised; that change removed
-  a per-level loop and ~1,100 host synchronisations per window, so convection
-  should now be far cheaper. How much is unmeasured. Re-profile before treating
-  it as a top consumer again.
+- **Convection is not a top consumer.** Re-profiled in task A02 on the A01
+  comparison config (GH200, 72 releases, EUROPE domain of ~151,000 columns):
+  63 ms per met window with the old bbox-mean column, 78 ms with every column
+  diagnosed (about 1% of wall either way; meteorology fetch is ~82%).
 
 ---
 

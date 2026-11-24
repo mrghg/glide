@@ -37,7 +37,8 @@ the mean column never fires, while a few hundred tropical and warm-sector column
 **Rationale.** Column-by-column is what the full scheme and FLEXPART do; it is the
 only form in which "convection on" means the same thing in all three Tier 2
 models. Batching keeps it cheap: the lift is ~151,000 x 40 levels x 30 bisection
-steps per event, a few tens of milliseconds on the GH200, and it runs once per met
+steps per event, and the whole event took 78 ms on the GH200 against 63 ms for the
+bbox-mean scheme (about 1% of wall, task A02 benchmark); it runs once per met
 interval outside the captured step graph
 ([0004](0004-cuda-graph-static-step-path.md) is untouched). Nearest-column
 assignment needs no new interpolation and keeps the matrix exactly non-divergent
