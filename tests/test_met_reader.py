@@ -1516,3 +1516,60 @@ def test_store_provenance_lists_each_store(tmp_path) -> None:
     assert prov[0]["glide_flux_accumulation_seconds"] == "3600"
     assert "unrelated" not in prov[0]
     assert "error" in prov[1]
+
+
+# --- per-column pressure and the convection interval (task A02) ---------------
+
+
+def test_terrain_following_window_carries_per_column_pressure() -> None:
+    """Convection lifts each column's parcel on that column's pressures, so the
+    window carries them; their horizontal mean is the level pressure."""
+
+    reader = _InMemoryArcoReader(_build_mock_model_level_dataset(), terrain_following=True)
+    result = reader.fetch_hourly_window(_model_level_request())
+
+    assert result.pressure_hpa is not None
+    p_start, p_end = result.column_pressure_hpa()
+    assert p_start.shape == result.hour_start.shape[1:]
+    assert p_end.shape == result.hour_end.shape[1:]
+    np.testing.assert_allclose(
+        p_start.mean(dim=(1, 2)).numpy(), result.metadata.pressure_level_hpa, rtol=1e-12
+    )
+
+
+def test_window_without_per_column_pressure_falls_back_to_level_pressure() -> None:
+    reader = _InMemoryArcoReader(_build_mock_era5_dataset())  # pressure levels, no terrain
+    result = _fetch_mock_window(reader)
+
+    assert result.pressure_hpa is None
+    p_start, p_end = result.column_pressure_hpa()
+    assert p_start.shape == result.hour_start.shape[1:]
+    for k, level_hpa in enumerate(result.metadata.pressure_level_hpa):
+        assert torch.all(p_start[k] == float(level_hpa))
+        assert torch.all(p_end[k] == float(level_hpa))
+
+
+def _fetch_mock_window(reader, start=datetime(2024, 1, 1, 0, 20, tzinfo=UTC)):
+    return reader.fetch_hourly_window(
+        BoundingBoxRequest(
+            spatial=SpatialBounds(
+                lon_min=19.5, lon_max=21.5, lat_min=9.5, lat_max=11.5, z_min=850.0, z_max=1050.0
+            ),
+            time=TimeBounds(start=start, end=start),
+        )
+    )
+
+
+@pytest.mark.parametrize(("thin", "expected_s"), [(1, 3600.0), (3, 10800.0)])
+def test_convection_interval_is_the_stores_cadence(thin: int, expected_s: float) -> None:
+    """Acceptance (A02): on hourly ERA5 convection fires every 3,600 s and scales
+    its mass flux by 3,600 s; on the same store thinned to 3-hourly, 10,800 s."""
+
+    from lpdm.convection.emanuel import convection_interval_seconds
+
+    hourly = _retimed_mock_dataset("2024-01-01T00:00:00", step_hours=1, n_steps=7)
+    reader = _InMemoryArcoReader(hourly.isel(time=slice(None, None, thin)))
+
+    assert reader.met_interval_seconds == expected_s
+    window = _fetch_mock_window(reader, start=datetime(2024, 1, 1, 1, 20, tzinfo=UTC))
+    assert convection_interval_seconds(window) == expected_s

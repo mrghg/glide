@@ -62,7 +62,7 @@ inlets today, column and satellite releases on the roadmap.
 | **Transport** | First-order Lagrangian stochastic model (Thomson 1987). RK2 midpoint advection; exact-OU turbulent velocity update with the full well-mixed drift and the Stohl–Thomson density correction, sign-flipped for backward integration. |
 | **Vertical coordinate** | Geometric metres above ground, on a fixed terrain-following grid. Meteorology is resampled onto it once per hour and the vertical velocity is transformed into that frame. |
 | **Turbulence** | Hanna (1982) in three stability regimes, aligned to FLEXPART v11; gradient-Richardson closure above the boundary layer; optional Maryon (1998) unresolved-mesoscale meander. |
-| **Convection** | Reduced Emanuel & Živković-Rothman mass-flux scheme, once per meteorology window, with a non-divergent flux matrix sampled by its transpose in backward mode. |
+| **Convection** | Reduced Emanuel & Živković-Rothman mass-flux scheme, in each meteorology column, once per meteorology window, with a non-divergent flux matrix sampled by its transpose in backward mode. |
 | **Boundaries** | Smooth-wall ground reflection flipping both position and vertical velocity; constant-statistics basal layer; drop-and-count at the domain edge. |
 | **Output** | Streaming 5-D Zarr footprint store `(release × time_ago × z × lat × lon)`, plus endpoint particles, diagnostics, and run metadata. |
 
