@@ -162,6 +162,20 @@ def test_zero_pair_options_and_missing():
     assert s.n_pairs == 0  # one plume pair, fewer than three -> statmain reports 0
 
 
+def test_ks_quirk_copied_from_statmain():
+    # statmain's KSPARM counts a measured percentile only when some modelled
+    # percentile reaches it, so far too low a model scores KS = 0 (term 1),
+    # while the same error upwards is penalised. Copied on purpose: scores
+    # must follow the published protocol (B10b; published-tracer-scores.md).
+    rng = np.random.default_rng(0)
+    m = rng.lognormal(3.0, 1.5, 400).astype(np.float32)
+    m[:100] = 0.0
+    low = datem_stats.datem_statistics(m, m * 1e-3)
+    high = datem_stats.datem_statistics(m, m * 1e3)
+    assert low.ksp == 0.0 and low.rank_terms["ks"] == pytest.approx(1.0)
+    assert high.ksp > 50.0
+
+
 def test_zero_percentile():
     meas = np.arange(0.0, 101.0)
     calc = meas.copy()
@@ -192,6 +206,17 @@ def test_bootstrap_needs_seed_and_is_reproducible():
     assert a == pytest.approx(full, abs=0.05)
 
 
+@pytest.mark.parametrize("bad", [np.nan, np.inf, -np.inf])
+def test_prediction_writer_refuses_non_finite(datem_files, tmp_path, bad):
+    # Written as "nan", pairing would read the record as missing and drop it.
+    m = readers.read_datem_meas(datem_files / "meas-t1.txt")
+    pred = np.array([0.0, 12.5, bad, 80.0, 0.0])
+    out = tmp_path / "ct1_test.txt"
+    with pytest.raises(ValueError, match="non-finite"):
+        readers.write_datem_predictions(m, pred, out)
+    assert not out.exists()
+
+
 # ---------------------------------------------------------------------------
 # experiments split
 # ---------------------------------------------------------------------------
@@ -202,10 +227,45 @@ def test_assign_releases(datem_files):
     m = readers.read_datem_meas(datem_files / "meas-t1.txt")
     r = experiments.assign_releases(m, e, experiments.AssignmentRule("all", "recent"))
     assert r.tolist() == [1, 1, 1, 1, 2]
-    r = experiments.assign_releases(m, e, experiments.AssignmentRule("6h", "recent"))
+    r = experiments.assign_releases(m, e, experiments.AssignmentRule("6h_or_24h", "recent"))
     assert r.tolist() == [1, 1, 1, 0, 2]
     r = experiments.assign_releases(m, e, experiments.AssignmentRule("all", "window_end", 7.0))
     assert r.tolist() == [1, 1, 0, 0, 2]  # 7 h windows: samples ending inside them
+
+
+def test_assign_releases_needs_time_order(datem_files):
+    e = readers.read_datem_emit(datem_files / "emit-t1.txt")
+    m = readers.read_datem_meas(datem_files / "meas-t1.txt")
+    with pytest.raises(ValueError, match="time order"):
+        experiments.assign_releases(m, e.iloc[::-1], experiments.AssignmentRule("all", "recent"))
+
+
+def test_duration_rule_keeps_6h_and_24h_samples():
+    m = pd.DataFrame(
+        {
+            "start": pd.to_datetime(["1983-09-18 18:00"] * 3),
+            "end": pd.to_datetime(["1983-09-18 21:00", "1983-09-19 00:00", "1983-09-19 18:00"]),
+            "duration_s": [3 * 3600.0, 6 * 3600.0, 24 * 3600.0],
+        }
+    )
+    e = pd.DataFrame({"release": [1], "start": pd.to_datetime(["1983-09-18 17:00"])})
+    r = experiments.assign_releases(m, e, experiments.AssignmentRule("6h_or_24h", "recent"))
+    assert r.tolist() == [0, 1, 1]
+
+
+def test_anatex_wrf_grid():
+    g = experiments.ANATEX_WRF_D02
+    x, y = experiments.wrf_grid_xy([g["sync_lat"]], [g["sync_lon"]])
+    assert (x[0], y[0]) == pytest.approx((g["sync_x"], g["sync_y"]))
+    # Along the reference longitude, x does not change; 1 degree of latitude
+    # at a true latitude is 111.2 km on the 6371.2 km sphere, 11.12 cells.
+    x1, y1 = experiments.wrf_grid_xy([33.0, 34.0], [-100.0, -100.0])
+    assert x1[0] == pytest.approx(x1[1])
+    assert y1[1] - y1[0] == pytest.approx(6371.2 * np.pi / 180 / 10.0, rel=2e-3)
+    inside = experiments.inside_anatex_wrf_domain(
+        [41.2, 25.90, 53.30, 41.67], [-98.02, -97.43, -60.37, -69.97]
+    )
+    assert inside.tolist() == [True, False, False, False]
 
 
 # ---------------------------------------------------------------------------
@@ -252,6 +312,28 @@ def test_etex_reader(etex_files):
     assert a.loc[1, "lat"] == pytest.approx(47.5)  # 47°30'
     f = j[j["site"] == "F10"].iloc[0]
     assert f["lon"] == pytest.approx(-1.5)  # -01.30 is 1°30' W
+
+
+def test_etex_release_source():
+    r = readers.read_etex_release(1).iloc[0]
+    # Monterfil, 2 00'30" W, 48 03'30" N, 90 m asl, release at 8 m agl (JRC)
+    assert r["site"] == "Monterfil"
+    assert r["lat"] == pytest.approx(48.058333, abs=1e-6)
+    assert r["lon"] == pytest.approx(-2.008333, abs=1e-6)
+    assert r["site_alt_m"] == 90.0 and r["height_m"] == 8.0
+    assert r["mass"] == 340.0 and r["start"] == pd.Timestamp("1994-10-23 16:00")
+    # ETEX-2: the same site (JRC ETEX overview page)
+    r2 = readers.read_etex_release(2).iloc[0]
+    assert r2["site"] == "Monterfil"
+    assert (r2["lat"], r2["lon"], r2["site_alt_m"]) == (r["lat"], r["lon"], r["site_alt_m"])
+    assert r2["mass"] == 490.0 and r2["start"] == pd.Timestamp("1994-11-14 15:00")
+
+
+def test_atmes2_results_state_unverified_definitions():
+    m = np.array([0.0, 0.05, 0.2, 1.0])
+    s = atmes2.atmes2_statistics(m, m)
+    assert s["definitions"] == atmes2.DEFINITIONS_NOTE
+    assert "EUR 17756 EN" in s["definitions"] and "not checked" in s["definitions"]
 
 
 def test_zero_filter(etex_files):
@@ -367,6 +449,23 @@ def test_adopted_split_counts():
         "ANATEX-GGW": 577,
         "ANATEX-STC": 570,
     }
+
+
+@needs_datem
+def test_anatex_wrf_domain_cut_counts():
+    # B10b: the cut drops three sites (2601, 3007, 3052) and 26 pairs per
+    # tracer, more than the surplus over Hegarty et al. (15 and 14), so it is
+    # recorded but not adopted (data/tracer-experiments.md section 5).
+    rule = experiments.AssignmentRule(
+        "6h_or_24h", "recent", anatex_last_start="1987-01-13", anatex_wrf_domain=True
+    )
+    s = experiments.split_samples(rule, root=_datem_dir())
+    counts = s.groupby("experiment").size()
+    assert counts["ANATEX-GGW"] == 551 and counts["ANATEX-STC"] == 544
+    adopted = experiments.split_samples(root=_datem_dir())
+    a = adopted[adopted["experiment"].str.startswith("ANATEX")]
+    dropped = set(a["site"]) - set(s.loc[s["experiment"].str.startswith("ANATEX"), "site"])
+    assert dropped == {"2601", "3007", "3052"}
 
 
 @needs_etex

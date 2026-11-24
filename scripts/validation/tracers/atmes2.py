@@ -4,6 +4,14 @@ Summary of the method in ``docs/published-tracer-scores.md`` §6. Inputs
 are the JRC files (the filter needs the ``-.99`` and ``-.88`` codes, which
 DATEM's copy drops). Concentrations are in ng m-3 throughout.
 
+**Unverified definitions.** The JRC report that defines the ATMES-II
+statistics (Mosca et al., 1998, EUR 17756 EN) could not be obtained (Matt,
+24 Nov 2026). The KS and FA definitions and the zero filter below follow
+the journal paper (Mosca et al., 1998, Atmos. Environ. 32, 4307-4324) as
+summarised in ``docs/published-tracer-scores.md`` §6, and are not checked
+against the full report. The statistics are reported, not graded
+(validation-plan §3, Tier 3). Every result carries :data:`DEFINITIONS_NOTE`.
+
 Choices this module makes where the paper is not explicit (each is an
 argument, so the pre-registration can fix it):
 
@@ -43,6 +51,15 @@ import pandas as pd
 from scipy import stats as sps
 
 LOST = (-0.99, -0.88)
+
+#: Carried in every result of :func:`atmes2_statistics` and
+#: :func:`score_against_jrc` (key ``definitions``) and printed by the CLI.
+DEFINITIONS_NOTE = (
+    "ATMES-II definitions (KS, FA2/FA5 zeros, zero filter) follow Mosca et al. (1998, "
+    "Atmos. Environ. 32, 4307-4324) as summarised in docs/published-tracer-scores.md "
+    "section 6; not checked against the JRC report EUR 17756 EN, which could not be "
+    "obtained. Reported, not graded."
+)
 
 
 def zero_filter(samples: pd.DataFrame, *, margin: int = 2, last_interval: int = 30) -> pd.Series:
@@ -113,6 +130,7 @@ def atmes2_statistics(meas, pred, *, log_floor: float = 0.01, fa_zeros: str = "o
         foex=100.0 * (float((p > m).mean()) - 0.5),
         ks_d=ks_d,
         ks_count=ks_d * n,
+        definitions=DEFINITIONS_NOTE,
     )
 
 
@@ -158,6 +176,7 @@ def score_against_jrc(
     dose = g[["m", "p"]].sum()[g["m"].count() > 0]
     loc = jrc.groupby("site")[["lat", "lon"]].first().loc[dose.index]
     out["fms_dose"] = fms_space(loc["lat"], loc["lon"], dose["m"], dose["p"], threshold=1.0)
+    out["definitions"] = out.pop("definitions")  # last, after the numbers
     return out
 
 

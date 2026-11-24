@@ -85,7 +85,26 @@ from the papers. Queue task B10 compared the plausible rules on the data,
 before any GLIDE run, and adopted this one for CAPTEX and, for ANATEX, the
 samples starting 5–13 January (577 and 570 pairs against 562 and 556); the
 rules and their counts are in
-[../data/tracer-experiments.md](../data/tracer-experiments.md) §5.
+[../data/tracer-experiments.md](../data/tracer-experiments.md) §5. Sites
+outside Hegarty et al.'s 10 km WRF domain do not explain the ANATEX surplus:
+three sites lie outside it, and leaving them out removes 26 pairs per tracer
+(551 and 544), more than the 15 and 14 (B10b; same section).
+
+**DATEM's KS term rewards predictions that are far too low.** `statmain`'s
+`KSPARM` (`stat_pgm/statmain/statmain.f`, lines 1170–1199) walks the measured
+5th–95th percentiles and, for each, looks for the first modelled percentile
+that reaches it; the difference in percentile index counts towards KS only
+if one is found. When every modelled percentile is below the measured ones,
+none is found, KS stays 0 and the KS term is a perfect 1. On a synthetic case
+(400 log-normal measurements, a quarter zero) predictions 1,000 times too low
+score KS = 0 (term 1.00), while predictions 1,000 times too high score
+KS = 69 (term 0.31); predictions of zero everywhere also score KS = 0. The
+published scores were computed with this code, so GLIDE's scoring copies it
+(`tracers/datem_stats.py`; test `test_ks_quirk_copied_from_statmain`). The
+four rank terms are reported separately
+([validation-plan.md](validation-plan.md) §3, Tier 3), so a KS term near 1
+next to a strongly negative FB term shows the effect. Recorded as a
+reference issue by B10b.
 
 ## 3. The meteorology behind each score
 
@@ -233,8 +252,20 @@ computed separately, not as a ranking score:
 - Indices with logarithms set zeros to 0.01 ng m⁻³, the instrument's limit.
   The correlation (PCC) is computed on the logarithms of the concentrations.
 - The Kolmogorov–Smirnov values (72–365) are not percentages; the paper says
-  only that they are positive integers. Check the definition against the
-  report before comparing.
+  only that they are positive integers.
+
+**These definitions are not checked against the full report.** The JRC
+report EUR 17756 EN, which defines the ATMES-II statistics, could not be
+obtained (Matt, 24 Nov 2026). GLIDE's ATMES-II code (`tracers/atmes2.py`,
+queue task B10) keeps its definitions of KS (`ks_d`, the largest difference
+of the two empirical distributions, and `ks_count`, that times the number of
+pairs), of FA2 and FA5 with zeros (`fa_zeros`, zeros outside both factors by
+default) and of the zero filter above. They follow Mosca et al. (1998) as
+summarised here and are unverified; every result of the code says so (its
+`definitions` entry, and the `atmes2-filter` and `atmes2-hysplit` commands
+print it). The ATMES-II statistics are reported, not graded
+([validation-plan.md](validation-plan.md) §3, Tier 3), so nothing depends on
+them.
 - The figure of merit in space is computed from **interpolated contours**
   (logarithmic interpolation; an area-conserving projection is recommended)
   at 0.1 ng m⁻³ at fixed times, and for the time-integrated concentration
@@ -324,8 +355,8 @@ To add when the papers are to hand:
 
 - **The ATMES-II report, EUR 17756 EN:** the statistics for all 35 models,
   which models the numbers are, and the exact filter and KS definitions. It
-  is not online; ask the JRC (the ETEX site offers the final report on
-  request). Without it, ETEX-1 can only be compared with the four models in
+  is not online, and a request on 24 Nov 2026 did not obtain it; GLIDE's
+  definitions stay unverified (§6). Without it, ETEX-1 can only be compared with the four models in
   §6 and HYSPLIT.
 - **Stohl et al. (1998):** FLEXPART on ETEX, CAPTEX and ANATEX with ECMWF
   global analyses at 1°, the closest meteorology to ERA5 in the literature.
