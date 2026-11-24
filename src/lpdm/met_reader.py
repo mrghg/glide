@@ -229,6 +229,13 @@ class MetReader(ABC):
     def get_time_coverage(self) -> tuple[datetime, datetime]:
         """Return the dataset time coverage as UTC datetimes."""
 
+    def get_lon_lat_coverage(self) -> tuple[float, float, float, float] | None:
+        """(lon_min, lon_max, lat_min, lat_max) of the grid as the runtime sees
+        it, or None if the reader cannot say. Used by the preflight to refuse a
+        met domain outside the grid (or in another longitude convention)."""
+
+        return None
+
     @property
     def met_interval_seconds(self) -> int:
         """Spacing of the source's time coordinate, in seconds.
@@ -1090,6 +1097,14 @@ class ArcoEra5ZarrReader(MetReader):
             out.append(entry)
         return out
 
+    def get_lon_lat_coverage(self) -> tuple[float, float, float, float]:
+        """Grid extent after longitude normalisation (`_ensure_monotonic_longitude`)."""
+
+        ds = self._open_dataset()
+        lon = np.asarray(ds[self.lon_name].values, dtype=np.float64)
+        lat = np.asarray(ds[self.lat_name].values, dtype=np.float64)
+        return float(lon.min()), float(lon.max()), float(lat.min()), float(lat.max())
+
     def get_time_coverage(self) -> tuple[datetime, datetime]:
         """Return the first and last timestamps available in the dataset."""
 
@@ -1169,10 +1184,18 @@ class ArcoEra5ZarrReader(MetReader):
         if lon.size <= 1:
             return ds
 
-        if np.all(np.diff(lon) > 0):
-            return ds  # already strictly ascending
-
         new_lon = np.where(lon >= 180.0, lon - 360.0, lon)
+        if np.all(np.diff(lon) > 0):
+            # Already ascending. GLIDE's configurations give longitudes in
+            # -180..180, so an ascending 0..360 store that stays ascending in
+            # -180..180 (a box west of Greenwich, e.g. met-bazarr's NAM stores,
+            # 240..305) is relabelled to match. Without this the particles, at
+            # -120..-55, fell outside the met grid's 240..305 and were silently
+            # held at its western edge (task B12, 24 Nov 2026). A box straddling
+            # 180 E would not stay ascending and keeps 0..360.
+            if float(lon.max()) > 180.0 and np.all(np.diff(new_lon) > 0):
+                return ds.assign_coords({self.lon_name: new_lon})
+            return ds
         if np.all(np.diff(new_lon) > 0):
             return ds.assign_coords({self.lon_name: new_lon})
 

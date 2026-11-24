@@ -513,6 +513,33 @@ def _build_footprint_dataset_metadata(
     return coords, {}
 
 
+def _validate_meteorology_space_coverage(reader: MetReader, cfg: RunConfig) -> None:
+    """Refuse a met domain that the meteorology grid does not cover.
+
+    Particles outside the grid are not an error in the interpolation: they are
+    held at its edge. A met domain in one longitude convention over a grid in
+    the other (-120..-55 against 240..305) therefore ran silently with the
+    winds of the grid's edge (task B12, 24 Nov 2026). The reader normalises
+    longitudes; this check makes any remaining mismatch an error.
+    """
+
+    coverage = reader.get_lon_lat_coverage()
+    if coverage is None:
+        return
+    g_lon0, g_lon1, g_lat0, g_lat1 = coverage
+    md = cfg.met_domain
+    tol = 1e-3
+    lon_ok = md.lon_bounds[0] >= g_lon0 - tol and md.lon_bounds[1] <= g_lon1 + tol
+    lat_ok = md.lat_bounds[0] >= g_lat0 - tol and md.lat_bounds[1] <= g_lat1 + tol
+    if not (lon_ok and lat_ok):
+        raise PreflightValidationError(
+            "met_domain is not inside the meteorology grid: "
+            f"met_domain lon {tuple(md.lon_bounds)}, lat {tuple(md.lat_bounds)}; "
+            f"grid lon ({g_lon0}, {g_lon1}), lat ({g_lat0}, {g_lat1}). "
+            "Check the longitude convention (-180..180 vs 0..360) and the bounds."
+        )
+
+
 def _validate_meteorology_time_coverage(
     reader: MetReader,
     cfg: RunConfig,
@@ -1353,6 +1380,7 @@ def _run(
         seconds=sim.length_seconds
     )
     _validate_meteorology_time_coverage(reader, cfg, schedule_release_end, schedule_sim_start)
+    _validate_meteorology_space_coverage(reader, cfg)
 
     # Source cadence drives the met bracketing, the cache key and the convection
     # cadence, so log what was actually measured: it is not recoverable from the
