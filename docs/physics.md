@@ -357,7 +357,18 @@ straight into the inferred flux. Stohl & Thomson measured +5.5% mean (range
 +1–15%) on surface concentrations in their CAPTEX runs.
 
 $\rho = p/(R_d T)$ and $\partial\rho/\partial z$ are built on the meteorology
-grid once per window and sampled trilinearly per particle.
+grid once per window and sampled trilinearly per particle. $p$ is each
+column's own pressure at each level and $T$ the local temperature, both at the
+window midpoint, and $\partial\rho/\partial z$ is differenced on the column's
+own geopotential heights, so the density is the density of the particle's own
+column, as in FLEXPART (decision 0025). The column pressure is the one deep
+convection uses (`HourlyMetTensors.pressure_hpa`): on model levels the
+hydrostatic reconstruction from the surface pressure (decision 0010), on
+pressure levels the level pressure, both regridded with the column onto the
+terrain-following levels. Until decision 0025 the scheme used the met domain's
+area-mean pressure of each terrain-following level instead; over terrain above
+1,000 m that made $\rho$ too high by a median 24–31% (up to 56%) and the drift
+term wrong by a median 3–12% (up to 24% at 40 m; measured in PR #61).
 
 **Horizontal components carry no drift.** The inhomogeneity that the well-mixed
 correction addresses is vertical; FLEXPART likewise applies it to the vertical
@@ -678,7 +689,6 @@ Stated plainly, because they bound what the model can be trusted for.
 | Gaussian vertical velocity PDF everywhere — no skewed convective-boundary-layer PDF | Under-represents the updraft/downdraft asymmetry of a strongly convective BL. Thomson (1987, §5.2) found ground-level concentration relatively insensitive to skewness even where dispersion aloft is sensitive, so this is defensible for a surface-flux footprint model — but it is a modelling choice, not a free lunch. |
 | $\sigma$, $T_L$ and the profile gradients held fixed across the sub-steps of one outer step | FLEXPART re-evaluates per sub-step. The change in $\sigma$ across one 60 s outer step is moderate; the velocity-dependent part of the drift *is* re-evaluated. A documented follow-up. |
 | Turbulence support fields ($\rho$, free-troposphere $\sigma/T_L$, meander $\sigma$) built once per meteorology hour at the window midpoint | A met-cadence approximation (<1%/hr drift), matching how FLEXPART-class models refresh turbulence fields. Per-particle interpolation through those fields is unchanged. |
-| The density-correction drift's $\rho$ uses the met domain's area-mean pressure of each AGL level, not the column's own pressure: $\rho = \bar p(z)/(R_d T)$ with $\bar p$ = `metadata.pressure_level_hpa` and local $T$ (`HannaScheme._density_fields`, `src/lpdm/turbulence/hanna.py`; the free-troposphere closure's $\theta$ uses the same $\bar p$) | Over high ground $\rho$ itself is far off, but the drift uses only $\partial_z \ln\rho = \partial_z \ln \bar p - \partial_z \ln T$, so most of it cancels. Measured on the EUROPE model-level store (default whole-store met domain, windows 2024-01-03 00 UTC and 2024-01-15 12 UTC, 40 m–3 km AGL): over cells above 1,000 m, $\rho$ is too high by a median 24–31% (95th percentile 41–51%, up to 56% on Greenland); $\partial_z \ln\rho$, and so the drift term, is off by a median 3–12% (95th percentile 7–15%, max 24% at 40 m); over the Alps (43–48.5° N, 5–16.5° E, 223 cells) $\rho$ is off by 18–21% and the drift term by 1.4–4.7% (max 7%). The term is $\sim\sigma_w^2/8\,\text{km}$, about $10^{-4}$ m s⁻¹ for $\sigma_w = 1$ m s⁻¹, so the error is of order $10^{-5}$ m s⁻¹. Per-column pressure is in the window (`HourlyMetTensors.pressure_hpa`) and would remove it; a physics change, not made (A04 follow-up). |
 | Deep convection assigns each particle to the nearest meteorology column | Each (lon, lat) column has its own parcel lift, trigger and matrix (task A02), fired once per meteorology interval read from the store. A particle near a column boundary takes the nearest column's matrix rather than a blend. See [convection.md](convection.md) §1 and §7. |
 | Initial $u', v', w' = 0$ rather than sampled from the local $\sigma$ | Particles equilibrate within one $T_L$ (typically ~100 s), which is shorter than the release window. |
 | Virtual temperature approximated as $T$ in the Obukhov length | Humidity correction is small; deferred. |
