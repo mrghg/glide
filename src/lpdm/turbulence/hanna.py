@@ -1740,6 +1740,30 @@ class HannaScheme(TurbulenceScheme):
         start, end = met_window.channel(name)
         return 0.5 * (start.to(device=device, dtype=dtype) + end.to(device=device, dtype=dtype))
 
+    @staticmethod
+    def _column_pressure_pa_mid(
+        met_window: HourlyMetTensors,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        """Each column's own pressure on the window's levels, Pa, ``[Z, Y, X]``,
+        at the window midpoint (the same ``t_alpha = 0.5`` as ``_window_mid``).
+
+        Terrain-following windows carry it per column
+        (``HourlyMetTensors.pressure_hpa``: the hydrostatic reconstruction on
+        model levels, the level pressure regridded onto the AGL grid on pressure
+        levels). Without it (pressure-level grid without terrain following, and
+        synthetic readers) every column's pressure on a level is that level's
+        pressure, and ``column_pressure_hpa`` broadcasts
+        ``metadata.pressure_level_hpa``. Decision 0025: the density and θ used
+        to take the met domain's area-mean pressure per AGL level instead.
+        """
+
+        p_start, p_end = met_window.column_pressure_hpa()
+        p_start = p_start.to(device=device, dtype=dtype)
+        p_end = p_end.to(device=device, dtype=dtype)
+        return 0.5 * (p_start + p_end) * 100.0
+
     def _free_trop_fields(
         self,
         met_window: HourlyMetTensors,
@@ -1761,15 +1785,11 @@ class HannaScheme(TurbulenceScheme):
             )
 
         height = met_window.height_agl_m.to(device=device, dtype=dtype)  # [Z, Y, X]
-        pressure_pa = (
-            torch.as_tensor(
-                np.array(met_window.metadata.pressure_level_hpa), device=device, dtype=dtype
-            ).view(-1, 1, 1)
-            * 100.0
-        )
 
         def _build() -> torch.Tensor:
             # Grid-wide FT σ/T_L stack at the window midpoint; cached per window.
+            # θ from each column's own pressure (decision 0025).
+            pressure_pa = self._column_pressure_pa_mid(met_window, device, dtype)
             t_field = self._window_mid(met_window, "t", device, dtype)
             u_field = self._window_mid(met_window, "u", device, dtype)
             v_field = self._window_mid(met_window, "v", device, dtype)
@@ -1802,9 +1822,9 @@ class HannaScheme(TurbulenceScheme):
         """Stack `[ρ, ∂ρ/∂z]` on the met grid `[2, Z, Y, X]` for the
         Stohl-Thomson 1999 density-correction drift term (F2, audit 2026-05-30).
 
-        ρ = p / (R_d · T) per model level (the layer pressure varies with level
-        but is horizontally constant per ERA5's pressure-level convention; T
-        varies in all three dims). ∂ρ/∂z is a central finite difference of ρ
+        ρ = p / (R_d · T) on each grid level, with p the column's OWN pressure
+        at that level (`_column_pressure_pa_mid`, decision 0025) and T local, both
+        at the window midpoint. ∂ρ/∂z is a central finite difference of ρ
         using the true per-column geopotential heights — same machinery as the
         FT closure's wind/θ gradients. Returns the stack ready for trilinear
         sampling per-particle (`_interp_3d_field`) using the shared `_grid_bounds`.
@@ -1817,14 +1837,9 @@ class HannaScheme(TurbulenceScheme):
             )
 
         height = met_window.height_agl_m.to(device=device, dtype=dtype)  # [Z, Y, X]
-        pressure_pa = (
-            torch.as_tensor(
-                np.array(met_window.metadata.pressure_level_hpa), device=device, dtype=dtype
-            ).view(-1, 1, 1)
-            * 100.0
-        )
 
         def _build() -> torch.Tensor:
+            pressure_pa = self._column_pressure_pa_mid(met_window, device, dtype)
             t_field = self._window_mid(met_window, "t", device, dtype)
             rho = pressure_pa / (R_DRY_AIR_J_KG_K * t_field.clamp(min=1.0))
             drho_dz = self._vertical_gradient(rho, height)
