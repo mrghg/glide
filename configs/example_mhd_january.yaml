@@ -56,8 +56,8 @@ output_grid:
 # output grid so particles can drift over edges without truncating their wind
 # field. alt_max_m bounds the vertical fetch (z_min is implicitly 0 m AGL).
 met_domain:
-  lon_bounds: [-100.0, 40.0]
-  lat_bounds: [10.0, 80.0]
+  lon_bounds: [-98.0, 39.5]    # the EUROPE stores' extent
+  lat_bounds: [10.75, 79.0]    # (the preflight refuses a met_domain outside the grid)
   alt_max_m: 15000.0
 
 memory:

@@ -82,7 +82,8 @@ OUTPUT_GRID = {
     "z_edges_m": [0.0, 40.0, 1000.0, 5000.0],  # bottom bin matches FLEXPART surface layer
     "n_time_bins": 1,
 }
-MET_DOMAIN = {"lon_bounds": [-100.0, 40.0], "lat_bounds": [10.0, 80.0], "alt_max_m": 15000.0}
+# The EUROPE stores' extent: the preflight refuses a met_domain outside the grid.
+MET_DOMAIN = {"lon_bounds": [-98.0, 39.5], "lat_bounds": [10.75, 79.0], "alt_max_m": 15000.0}
 
 
 def _parse_header(csv_path: Path) -> dict[str, str]:
