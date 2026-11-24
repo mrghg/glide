@@ -1,0 +1,67 @@
+# Standard case case3-cbw20 (docs/reference-runs.md §9) for measuring met-bazarr decision 0009's
+# surface-geopotential repair: run before and after repairing the store. Reference
+# physics as configs/smoke_mhd_single_release.yaml; EUR output grid of reference-runs §2;
+# 21,600 particles, 240 h back.
+batch:
+  max_releases_per_batch: 1
+convection:
+  emanuel:
+    closure_c: 0.03
+  scheme: emanuel_reduced
+io:
+  zarr_store: data/era5-arco/EUR_20181222-20190115_ERA5-ARCO.zarr
+  output_uri: outputs/zs-repair-case3-cbw20
+memory:
+  gc_every_steps: 50
+  guard_check_every_steps: 10
+  guard_max_device_allocated_gib: null
+  guard_max_device_reserved_gib: null
+  guard_max_rss_gib: null
+  log_every_steps: 100
+  met_cache_max_hours: 4
+met_domain:
+  alt_max_m: 15000.0
+  lat_bounds:
+  - 32.0
+  - 72.0
+  lon_bounds:
+  - -30.0
+  - 40.0
+output_grid:
+  lat_bounds:
+  - 32.125
+  - 71.875
+  lon_bounds:
+  - -29.875
+  - 39.875
+  n_time_bins: 1
+  n_x: 279
+  n_y: 159
+  z_edges_m:
+  - 0.0
+  - 40.0
+  - 1000.0
+  - 5000.0
+release:
+  duration_seconds: 3600
+  kind: periodic_point
+  n_particles_per_release: 21600
+  n_releases: 1
+  period_seconds: 3600
+  point:
+    lon: 4.9264
+    lat: 51.9703
+    alt_agl_m: 20.0
+  seed: 42
+  start_time: '2019-01-07T02:00:00Z'
+simulation:
+  device: auto
+  dt_seconds: 60
+  length_seconds: 864000
+  start_time: '2019-01-07T02:00:00Z'
+turbulence:
+  max_substeps: 6
+  meander:
+    coefficient: 0.16
+    enabled: true
+  scheme: hanna_1982

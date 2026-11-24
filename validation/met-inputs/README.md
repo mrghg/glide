@@ -27,8 +27,18 @@ git -C ~/code/met-bazarr fetch --tags && git -C ~/code/met-bazarr checkout v0.3.
 ```
 
 Releases used: the UM stores from **v0.2.0** (19 Nov 2026); the ERA5 stores
-from **v0.3.0** (rebuilt 20 Nov 2026, after the v0.2.0 build stalled; no values
-differ between the two releases).
+built with **v0.3.0** (20 Nov 2026, after the v0.2.0 build stalled; no values
+differ between the two releases) and **repaired with v0.4.0** (24 Nov 2026):
+`metbazarr repair --fix era5-surface-geopotential` replaced each store's
+surface geopotential with one consistent with its model levels (met-bazarr
+decision 0009; GLIDE `docs/met_schema.md`). Each store records the repair in
+its `glide_repairs` attribute; logs are in `$GLIDE_DATA/era5-arco/logs-repair-v0.4.0/`.
+All 16 stores pass `metbazarr validate --quick --validation-input` afterwards. The repair's
+effect on standard cases 2 (JFJ) and 3 (CBW-20), 0–40 m footprints on a GH200
+with the same seed, is within particle sampling noise: total sensitivity
+changed by 0.3–0.4% against 0.3–2.5% between seeds, and cell by cell by a
+weighted mean of 0.148 and 0.005 in log10 against 0.155 and 0.005 between seeds
+(`scripts/validation/zs-repair/`).
 
 The recipes here and the met-bazarr release are a pair: a recipe uses
 met-bazarr's recipe keys and source types, so check that a recipe still loads
