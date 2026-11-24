@@ -53,6 +53,10 @@ from .readers import REPO_ROOT, datem_root, read_datem_emit, read_datem_meas
 BASE_CONFIG = Path(__file__).with_name("benchmark_base.yaml")
 PUBLISHED_CSV = REPO_ROOT / "docs" / "published-tracer-scores.csv"
 SCORECARD_VERSION = 1
+#: The output-grid settings the benchmark derives for every site (`glide_config`).
+OUTPUT_GEOMETRY = frozenset(
+    ("lon_bounds", "lat_bounds", "n_x", "n_y", "z_edges_m", "n_time_bins", "time_bin_seconds")
+)
 
 
 # ---------------------------------------------------------------------------
@@ -340,40 +344,27 @@ def parse_overrides(items: list[str]) -> dict[str, object]:
     return out
 
 
-def glide_lon_convention(store_lon: np.ndarray) -> str:
-    """The longitude convention GLIDE's reader leaves a store in.
-
-    ``ArcoEra5ZarrReader._ensure_monotonic_longitude`` converts a store's
-    longitudes to -180..180 only when they are not already ascending. A
-    regional 0..360 store that does not cross Greenwich (every NAM store)
-    keeps 0..360, and the engine then clamps a particle at a negative
-    longitude to the grid's western edge instead of wrapping it. So the
-    benchmark gives every longitude in the convention the reader keeps.
-    """
-
-    lon = np.asarray(store_lon, dtype=np.float64)
-    if np.all(np.diff(lon) > 0) and float(lon.max()) > 180.0:
-        return "0..360"
-    return "-180..180"
-
-
-def to_convention(lon: float, convention: str) -> float:
-    if convention == "0..360":
-        return float(lon) % 360.0
-    return ((float(lon) + 180.0) % 360.0) - 180.0
-
-
 def met_extent(store: str) -> dict:
-    """Horizontal extent of a meteorology store, in the longitude convention GLIDE
-    reads it in, and its met-bazarr provenance attributes."""
+    """Horizontal extent of a meteorology store as GLIDE's reader presents it, and
+    its met-bazarr provenance attributes.
+
+    The longitudes come from ``ArcoEra5ZarrReader.get_lon_lat_coverage``, after
+    the reader's own normalisation (an ascending 0..360 store west of Greenwich,
+    such as met-bazarr's NAM stores, is relabelled -180..180; PR #56). The
+    runtime's preflight checks the met domain against that same extent, so the
+    benchmark keeps no longitude convention rule of its own.
+    """
 
     import xarray as xr
 
+    from lpdm.met_reader import ArcoEra5ZarrReader
+
+    reader = ArcoEra5ZarrReader(zarr_store=store, device="cpu")
+    try:
+        lon0, lon1, lat0, lat1 = reader.get_lon_lat_coverage()
+    finally:
+        reader.close()
     ds = xr.open_zarr(store)
-    lat = ds["latitude"].values
-    raw = ds["longitude"].values
-    conv = glide_lon_convention(raw)
-    lon = np.array([to_convention(x, conv) for x in raw])
     keys = (
         "producer",
         "producer_version",
@@ -388,12 +379,23 @@ def met_extent(store: str) -> dict:
     prov = {k: str(ds.attrs[k]) for k in keys if k in ds.attrs}
     t = ds["time"].values
     return dict(
-        lat=(float(lat.min()), float(lat.max())),
-        lon=(float(lon.min()), float(lon.max())),
-        lon_convention=conv,
+        lat=(lat0, lat1),
+        lon=(lon0, lon1),
         time=(pd.Timestamp(t[0]), pd.Timestamp(t[-1])),
         provenance=prov,
     )
+
+
+def lon_in_extent(lon: float, extent: tuple[float, float]) -> float:
+    """``lon`` written the way it falls inside the reader's longitude ``extent``
+    (as given, or shifted by 360 degrees); a point outside it is returned as
+    given, for the runtime's preflight to refuse."""
+
+    lo, hi = extent
+    for cand in (float(lon), float(lon) - 360.0, float(lon) + 360.0):
+        if lo <= cand <= hi:
+            return cand
+    return float(lon)
 
 
 def glide_config(
@@ -419,7 +421,6 @@ def glide_config(
         _set_dotted(cfg, k, v)
     rec = chunk.receptors
     lo, hi = plan.layer
-    conv = met_box.get("lon_convention", "-180..180")
     cfg["io"] = {"zarr_store": met, "output_uri": output_uri}
     sim = cfg.setdefault("simulation", {})
     sim["start_time"] = rec["start"].min().strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -431,7 +432,7 @@ def glide_config(
         "samples": [
             {
                 "name": r.receptor_id,
-                "lon": round(to_convention(r.lon, conv), 6),
+                "lon": round(lon_in_extent(r.lon, met_box["lon"]), 6),
                 "lat": round(float(r.lat), 6),
                 "start_time": r.start.strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "duration_seconds": int((r.end - r.start).total_seconds()),
@@ -443,15 +444,21 @@ def glide_config(
     }
     h = 1.5 * source_deg
     n_bins = int(math.ceil(chunk.length_s / plan.time_bin_s))
-    cfg["output_grid"] = {
-        "lon_bounds": [to_convention(site.lon, conv) - h, to_convention(site.lon, conv) + h],
-        "lat_bounds": [site.lat - h, site.lat + h],
-        "n_x": 3,
-        "n_y": 3,
-        "z_edges_m": [0.0, float(source_layer_m)],
-        "n_time_bins": n_bins,
-        "time_bin_seconds": int(plan.time_bin_s),
-    }
+    site_lon = lon_in_extent(site.lon, met_box["lon"])
+    # Update, not replace: the geometry is the benchmark's, but any other output
+    # setting given in the base or with --set (e.g. output_grid.density_weighting)
+    # must survive.
+    cfg.setdefault("output_grid", {}).update(
+        {
+            "lon_bounds": [site_lon - h, site_lon + h],
+            "lat_bounds": [site.lat - h, site.lat + h],
+            "n_x": 3,
+            "n_y": 3,
+            "z_edges_m": [0.0, float(source_layer_m)],
+            "n_time_bins": n_bins,
+            "time_bin_seconds": int(plan.time_bin_s),
+        }
+    )
     md = cfg.setdefault("met_domain", {})
     if "lon_bounds" not in md or md.get("lon_bounds") == "store":
         md["lon_bounds"] = [met_box["lon"][0] + 0.5, met_box["lon"][1] - 0.5]
@@ -460,11 +467,34 @@ def glide_config(
     return cfg
 
 
+def check_basis(cfg: dict, basis: str) -> str:
+    """The footprint weighting ``cfg`` will produce, refused if ``basis`` cannot use it.
+
+    An ambient concentration needs plain residence seconds
+    (``output_grid.density_weighting: none``); the default ``dry_air`` store
+    serves the "stp" basis. Checked before GLIDE runs, so a mismatch costs
+    nothing."""
+
+    from lpdm.config import RunConfig
+
+    weighting = RunConfig.model_validate(cfg).output_grid.density_weighting
+    if basis == "ambient" and weighting != "none":
+        raise SystemExit(
+            f"basis 'ambient' needs an unweighted footprint, but output_grid.density_weighting "
+            f"is {weighting!r}; add --set output_grid.density_weighting=none"
+        )
+    return weighting
+
+
 def config_hash(cfg: dict) -> str:
     """SHA-256 of the configuration's physics and numerics: everything except the
-    paths, the release list and the output grid (which the benchmark derives)."""
+    paths, the release list and the output grid's geometry (which the benchmark
+    derives). Other output settings, such as ``density_weighting``, count."""
 
     core = {k: v for k, v in cfg.items() if k not in ("io", "release", "output_grid")}
+    og = {k: v for k, v in cfg.get("output_grid", {}).items() if k not in OUTPUT_GEOMETRY}
+    if og:
+        core["output_grid"] = og
     core = json.loads(json.dumps(core, sort_keys=True, default=str))
     core.get("simulation", {}).pop("start_time", None)
     core.get("simulation", {}).pop("length_seconds", None)
@@ -854,6 +884,61 @@ def _score_run(out: Path, plan: Plan, meta: dict, *, met: str, basis: str) -> li
     return scores
 
 
+#: What scoring writes into a run directory; published together or not at all.
+SCORE_OUTPUTS = (
+    "run_meta.json",
+    "predictions",
+    "predictions.csv",
+    "scorecard.csv",
+    "scorecard.json",
+    "scorecard.md",
+)
+
+
+def score_and_publish(out: Path, glide_dir: Path, plan: Plan, meta: dict, names: list[str]) -> None:
+    """Score ``glide_dir``'s footprints with ``meta`` and publish to ``out``.
+
+    Everything is written first to a temporary directory beside ``out`` (whose
+    ``glide`` links to ``glide_dir``); only when scoring has succeeded are the
+    metadata, predictions and scorecard moved into ``out``, together. A failure
+    leaves ``out`` exactly as it was, so a scorecard never sits beside metadata
+    that describes another scoring.
+    """
+
+    import shutil
+    import tempfile
+
+    out.parent.mkdir(parents=True, exist_ok=True)
+    tmp = Path(tempfile.mkdtemp(prefix=f".{out.name}.scoring-", dir=out.parent))
+    try:
+        (tmp / "glide").symlink_to(glide_dir.resolve(), target_is_directory=True)
+        (tmp / "run_meta.json").write_text(json.dumps(meta, indent=1, default=str))
+        scores = _score_run(tmp, plan, meta, met=meta["met_store"], basis=meta["basis"])
+        build_scorecard(tmp, scores, reference_scores(names, meta["bootstrap_seed"]), meta, names)
+        out.mkdir(parents=True, exist_ok=True)
+        for name in SCORE_OUTPUTS:
+            src, dst = tmp / name, out / name
+            if not src.exists():
+                continue
+            if dst.is_dir() and not dst.is_symlink():
+                old = tmp / f"{name}.old"
+                dst.rename(old)
+            os.replace(src, dst)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _check_glide_link(out: Path, run: Path) -> None:
+    """``out/glide``, if present, must be the requested run's footprints."""
+
+    link = out / "glide"
+    if (link.exists() or link.is_symlink()) and link.resolve() != (run / "glide").resolve():
+        raise SystemExit(
+            f"{out} already holds footprints from {link.resolve()}, not from {run / 'glide'}; "
+            "choose another --out"
+        )
+
+
 def cmd_run(args) -> int:
     names = list(args.experiments)
     check_independence(names, args.registration_record)
@@ -893,6 +978,7 @@ def cmd_run(args) -> int:
                 source_layer_m=args.source_layer_m,
                 overrides=overrides,
             )
+            check_basis(cfg, args.basis)
             cfgs[ch.key] = cfg
             tag = ch.key.replace("/", "_")
             path = out / "configs" / f"{tag}.yaml"
@@ -936,7 +1022,7 @@ def cmd_run(args) -> int:
             source_deg=args.source_deg,
             source_layer_m=args.source_layer_m,
             time_bin_seconds=plan.time_bin_s,
-            lon_convention=box["lon_convention"],
+            met_lon_extent=list(box["lon"]),
             max_span_h=args.max_span_h,
             basis=args.basis,
             glide_wall_seconds=round(wall, 1),
@@ -947,9 +1033,7 @@ def cmd_run(args) -> int:
             },
         ),
     )
-    (out / "run_meta.json").write_text(json.dumps(meta, indent=1, default=str))
-    scores = _score_run(out, plan, meta, met=met, basis=args.basis)
-    build_scorecard(out, scores, reference_scores(names, args.bootstrap_seed), meta, names)
+    score_and_publish(out, out / "glide", plan, meta, names)
     print((out / "scorecard.md").read_text())
     return 0
 
@@ -962,15 +1046,15 @@ def cmd_score(args) -> int:
     names = meta["experiments"]
     plan = build_plan(names, layer=tuple(meta["receptor_layer_m"]), max_span_h=meta["max_span_h"])
     out = Path(args.out).resolve() if args.out else run
-    out.mkdir(parents=True, exist_ok=True)
-    if out != run and not (out / "glide").exists():
-        (out / "glide").symlink_to(run / "glide")
+    if out != run:
+        _check_glide_link(out, run)
     meta = dict(meta, basis=args.basis or meta["basis"])
     if args.bootstrap_seed is not None:
         meta["bootstrap_seed"] = args.bootstrap_seed
-    (out / "run_meta.json").write_text(json.dumps(meta, indent=1, default=str))
-    scores = _score_run(out, plan, meta, met=meta["met_store"], basis=meta["basis"])
-    build_scorecard(out, scores, reference_scores(names, meta["bootstrap_seed"]), meta, names)
+    # Nothing in `out` changes unless scoring succeeds (score_and_publish).
+    score_and_publish(out, run / "glide", plan, meta, names)
+    if out != run and not (out / "glide").is_symlink() and not (out / "glide").exists():
+        (out / "glide").symlink_to(run / "glide")
     print((out / "scorecard.md").read_text())
     return 0
 

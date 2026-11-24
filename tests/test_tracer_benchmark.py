@@ -284,23 +284,101 @@ def test_backward_prediction_matches_the_forward_solution(
 # ---------------------------------------------------------------------------
 
 
-def test_longitudes_follow_the_convention_the_reader_keeps() -> None:
-    """GLIDE's reader converts a store to -180..180 only when its longitudes are not
-    ascending; an ascending 0..360 regional store (NAM) stays 0..360, and particles
-    at negative longitudes would be clamped to its western edge."""
+def _nam_like_store(path: Path) -> Path:
+    """A small ascending 0..360 store west of Greenwich, laid out like met-bazarr's
+    NAM stores (240..305 E), with what ``ArcoEra5ZarrReader`` needs to open it."""
 
-    nam = np.arange(240.0, 305.01, 0.25)
-    europe = np.concatenate([np.arange(262.0, 360.0, 0.25), np.arange(0.0, 39.51, 0.25)])
-    assert benchmark.glide_lon_convention(nam) == "0..360"
-    assert benchmark.glide_lon_convention(europe) == "-180..180"
-    assert benchmark.glide_lon_convention(np.arange(-30.0, 40.0, 0.25)) == "-180..180"
-    assert benchmark.to_convention(-97.46, "0..360") == pytest.approx(262.54)
-    assert benchmark.to_convention(262.54, "-180..180") == pytest.approx(-97.46)
+    lon = np.arange(240.0, 305.01, 1.0)
+    lat = np.arange(58.0, 21.99, -1.0)
+    time = pd.date_range("1980-07-08", periods=3, freq="h")
+    shape = (len(time), len(lat), len(lon))
+    ds = xr.Dataset(
+        {
+            "surface_pressure": (("time", "latitude", "longitude"), np.full(shape, 1e5, "f4")),
+            "boundary_layer_height": (("time", "latitude", "longitude"), np.ones(shape, "f4")),
+        },
+        coords={"time": time, "latitude": lat, "longitude": lon},
+    )
+    ds.to_zarr(path)
+    return path
+
+
+def test_lon_in_extent_follows_the_reader() -> None:
+    assert benchmark.lon_in_extent(-97.46, (-120.0, -55.0)) == pytest.approx(-97.46)
+    assert benchmark.lon_in_extent(262.54, (-120.0, -55.0)) == pytest.approx(-97.46)
+    # A store straddling 180 E stays 0..360 in the reader.
+    assert benchmark.lon_in_extent(-170.0, (150.0, 230.0)) == pytest.approx(190.0)
+    # Outside the grid: left as given for the preflight to refuse.
+    assert benchmark.lon_in_extent(10.0, (-120.0, -55.0)) == 10.0
     # The source box finds the source whichever convention the footprint grid uses.
     edges = np.array([262.165, 262.415, 262.665, 262.915])
     lat = np.array([34.865, 35.115, 35.365, 35.615])
     w = concentration.source_box_weights(lat, edges, 35.24, -97.46, 0.25)
     assert w[1, 1] == pytest.approx(1.0) and w.sum() == pytest.approx(1.0)
+
+
+def test_config_from_a_0_360_store_passes_the_runtime_preflight(tmp_path: Path) -> None:
+    """Review item 1: on an ascending 0..360 NAM-like store, the configuration the
+    benchmark generates uses the reader's -180..180 longitudes and passes
+    ``_validate_meteorology_space_coverage``; the old 0..360 configuration fails it."""
+
+    from lpdm.main import PreflightValidationError, _validate_meteorology_space_coverage
+    from lpdm.met_reader import ArcoEra5ZarrReader
+
+    store = str(_nam_like_store(tmp_path / "nam.zarr"))
+    box = benchmark.met_extent(store)
+    assert box["lon"] == (-120.0, -55.0)
+    assert box["lat"] == (22.0, 58.0)
+    rec = pd.DataFrame(
+        {
+            "receptor_id": ["R0", "R1"],
+            "lat": [35.6, 36.1],
+            "lon": [-97.0, 262.9],  # either convention in, the reader's out
+            "start": [T("1980-07-08 01:00"), T("1980-07-08 01:30")],
+            "end": [T("1980-07-08 02:00"), T("1980-07-08 02:00")],
+        }
+    )
+    site = benchmark.SitePlan("OKC", 35.24, -97.46, ["X"], rec, T("1980-07-08 00:00"))
+    chunk = benchmark.Chunk("OKC/run00", rec, 7200)
+    plan = benchmark.Plan(
+        samples=pd.DataFrame(),
+        receptors=rec,
+        emissions={},
+        sites=[site],
+        time_bin_s=300,
+        layer=(0.0, 100.0),
+    )
+    cfg = benchmark.glide_config(
+        benchmark._load_base(None),
+        site,
+        chunk,
+        plan,
+        met=store,
+        met_box=box,
+        output_uri=str(tmp_path / "glide"),
+        particles=10,
+        seed=1,
+        source_deg=0.25,
+        source_layer_m=40.0,
+        overrides={},
+    )
+    rc = RunConfig.model_validate(cfg)
+    assert rc.met_domain.lon_bounds == (-119.5, -55.5)
+    assert rc.output_grid.lon_bounds == pytest.approx((-97.46 - 0.375, -97.46 + 0.375))
+    assert [s.lon for s in rc.release.samples] == pytest.approx([-97.0, -97.1])
+    reader = ArcoEra5ZarrReader(zarr_store=store, device="cpu")
+    try:
+        _validate_meteorology_space_coverage(reader, rc)  # passes
+        old = json.loads(json.dumps(cfg))
+        # B12's former configuration: everything in 0..360.
+        old["met_domain"]["lon_bounds"] = [240.5, 304.5]
+        old["output_grid"]["lon_bounds"] = [x % 360.0 for x in old["output_grid"]["lon_bounds"]]
+        for smp in old["release"]["samples"]:
+            smp["lon"] %= 360.0
+        with pytest.raises(PreflightValidationError, match="not inside the meteorology grid"):
+            _validate_meteorology_space_coverage(reader, RunConfig.model_validate(old))
+    finally:
+        reader.close()
 
 
 def test_choose_time_bin() -> None:
@@ -390,8 +468,8 @@ def test_okc80_config_and_scorecard_from_a_synthetic_footprint(tmp_path: Path, m
     plan = benchmark.build_plan(["OKC80"], met_start=T("1980-07-08 00:00"))
     (site,) = plan.sites
     ch = site.chunks[0]
-    # The OKC80 store keeps 0..360 longitudes, so the configuration must too.
-    box = dict(lat=(22.0, 58.0), lon=(240.0, 305.0), lon_convention="0..360", provenance={})
+    # The OKC80 store's extent as the reader presents it (-180..180 since PR #56).
+    box = dict(lat=(22.0, 58.0), lon=(-120.0, -55.0), provenance={})
     cfg = benchmark.glide_config(
         benchmark._load_base(None),
         site,
@@ -409,9 +487,13 @@ def test_okc80_config_and_scorecard_from_a_synthetic_footprint(tmp_path: Path, m
     rc = RunConfig.model_validate(cfg)
     assert rc.release.kind == "samples" and len(rc.release.samples) == len(ch.receptors)
     assert rc.release.samples[0].alt_max_agl_m == 100.0
-    assert 240.0 < rc.release.samples[0].lon < 305.0
-    assert rc.output_grid.lon_bounds == pytest.approx((262.54 - 0.375, 262.54 + 0.375))
-    assert rc.met_domain.lon_bounds == (240.5, 304.5)
+    assert -120.0 < rc.release.samples[0].lon < -55.0
+    assert rc.output_grid.lon_bounds == pytest.approx((-97.46 - 0.375, -97.46 + 0.375))
+    assert rc.met_domain.lon_bounds == (-119.5, -55.5)
+    assert rc.output_grid.density_weighting == "dry_air"
+    assert benchmark.check_basis(cfg, "stp") == "dry_air"
+    with pytest.raises(SystemExit, match="density_weighting=none"):
+        benchmark.check_basis(cfg, "ambient")
     assert rc.output_grid.time_bin_seconds == 300
     assert rc.output_grid.z_edges_m == (0.0, 40.0)
     assert rc.turbulence.meander.coefficient == 0.3
@@ -423,6 +505,30 @@ def test_okc80_config_and_scorecard_from_a_synthetic_footprint(tmp_path: Path, m
     cfg3 = json.loads(json.dumps(cfg))
     cfg3["turbulence"]["meander"]["coefficient"] = 0.16
     assert benchmark.config_hash(cfg3) != h
+
+    # Review item 3: an explicit weighting survives the derived output grid, and
+    # the hash sees it.
+    cfg_none = benchmark.glide_config(
+        benchmark._load_base(None),
+        site,
+        ch,
+        plan,
+        met="store.zarr",
+        met_box=box,
+        output_uri=str(tmp_path / "glide"),
+        particles=10,
+        seed=3,
+        source_deg=0.25,
+        source_layer_m=40.0,
+        overrides={
+            "turbulence.meander.coefficient": 0.3,
+            "output_grid.density_weighting": "none",
+        },
+    )
+    assert RunConfig.model_validate(cfg_none).output_grid.density_weighting == "none"
+    assert cfg_none["output_grid"]["n_x"] == 3
+    assert benchmark.check_basis(cfg_none, "ambient") == "none"
+    assert benchmark.config_hash(cfg_none) != h
 
     # A synthetic footprint for every receptor: 10 s per 5-minute bin in the
     # source cell, for the bins inside the release (19:00-22:00).
@@ -453,6 +559,7 @@ def test_okc80_config_and_scorecard_from_a_synthetic_footprint(tmp_path: Path, m
             "latitude_edge": ("latitude_edge", edges_lat),
             "longitude_edge": ("longitude_edge", edges_lon),
         },
+        attrs={"density_weighting": "none", "units": "s"},
     )
     out = tmp_path / "run"
     store = out / "glide" / site.key / "run00" / "footprints.zarr"
@@ -493,3 +600,231 @@ def test_okc80_config_and_scorecard_from_a_synthetic_footprint(tmp_path: Path, m
     text = benchmark.compare_runs([out, out])
     assert "identical predictions" in text and "+0.0000" in text
     assert math.isfinite(s["rank"])
+
+
+# ---------------------------------------------------------------------------
+# footprint weighting and the concentration basis (review item 3)
+# ---------------------------------------------------------------------------
+
+RHO = 1.15  # kg m-3, the dry-air density the synthetic weighted store divides by
+EDGES = np.array([-0.375, -0.125, 0.125, 0.375])
+
+
+def _store(weighting: str | None, value: float) -> xr.Dataset:
+    """One release ending 12:00, eight 15-minute age bins, ``value`` in the source
+    (centre) cell in every bin, a 0-40 m layer, with A04's attributes."""
+
+    n_t = 8
+    fp = np.zeros((1, n_t, 1, 3, 3))
+    fp[0, :, 0, 1, 1] = value
+    attrs = {}
+    if weighting is not None:
+        attrs = {
+            "density_weighting": weighting,
+            "units": {"dry_air": "s m3 kg-1", "none": "s"}[weighting],
+        }
+    return xr.Dataset(
+        {"footprint": (("release", "time_ago", "z_bin", "latitude", "longitude"), fp)},
+        coords={
+            "release_time": ("release", np.array(["2000-01-01T11:00"], dtype="datetime64[ns]")),
+            "release_duration_seconds": ("release", [3600.0]),
+            "site": ("release", ["R0"]),
+            "time_ago_start_hours": ("time_ago", np.arange(n_t) * 0.25),
+            "time_ago_end_hours": ("time_ago", (np.arange(n_t) + 1) * 0.25),
+            "z_bottom_m": ("z_bin", [0.0]),
+            "z_top_m": ("z_bin", [40.0]),
+            "latitude_edge": ("latitude_edge", EDGES),
+            "longitude_edge": ("longitude_edge", EDGES),
+        },
+        attrs=attrs,
+    )
+
+
+def test_concentration_on_each_kind_of_store_by_hand() -> None:
+    """(a) a dry-air-weighted store on the "stp" basis is not divided by the density
+    again; (b) a plain-seconds store on the "ambient" basis is the plain mass
+    concentration; (c) a weighted store on the ambient basis is refused."""
+
+    # 3.6 kg over 10:30-11:00 = ages 60-90 min of a release ending 12:00: bins 4 and 5.
+    e = Emission(T("2000-01-01 10:30"), T("2000-01-01 11:00"), mass=3.6, lat=0.0, lon=0.0)
+    rate = 3.6 / 1800.0  # kg s-1
+    # The centre cell, 0.25 deg square at the equator, in the model's metric, x 40 m.
+    area = 110540.0 * 111320.0 * (180.0 / math.pi) * 2.0 * math.sin(math.radians(0.125)) * 0.25
+    volume = area * 40.0
+    tau = 2 * 100.0  # s in the source cell during the emission
+
+    # (b) ambient, plain seconds: Q tau / V.
+    ambient = concentration.predict_from_dataset(
+        _store("none", 100.0), [e], source_deg=0.25, basis="ambient"
+    )
+    np.testing.assert_allclose(ambient, [rate * tau / volume], rtol=1e-12)
+    assert ambient[0] == pytest.approx(2.0e-3 * 200.0 / volume)
+
+    # (a) stp, weighted store: Q / V x (M_air / V_m) x sum(tau / rho), the store already
+    # holding tau / rho; no density function is given or needed.
+    stp = concentration.predict_from_dataset(
+        _store("dry_air", 100.0 / RHO), [e], source_deg=0.25, basis="stp"
+    )
+    expected = rate / volume * (0.02897 / 0.0224) * tau / RHO
+    np.testing.assert_allclose(stp, [expected], rtol=1e-12)
+    # Dividing again would have given expected / RHO; make sure it did not.
+    assert stp[0] != pytest.approx(expected / RHO, rel=1e-3)
+    # The same answer from the plain store with the density applied afterwards.
+    stp_after = concentration.predict_from_dataset(
+        _store("none", 100.0),
+        [e],
+        source_deg=0.25,
+        basis="stp",
+        density=lambda t: np.full(len(t), RHO),
+    )
+    np.testing.assert_allclose(stp_after, stp, rtol=1e-12)
+
+    # (c) the mismatched combination.
+    with pytest.raises(ValueError, match="ambient concentration needs an unweighted footprint"):
+        concentration.predict_from_dataset(
+            _store("dry_air", 100.0 / RHO), [e], source_deg=0.25, basis="ambient"
+        )
+    # Inconsistent attributes are refused rather than guessed.
+    bad = _store("dry_air", 1.0)
+    bad.attrs["units"] = "s"
+    with pytest.raises(ValueError, match="units"):
+        concentration.is_density_weighted(bad)
+    # A store from before A04 (no attribute) is read as plain seconds, with a warning.
+    with pytest.warns(UserWarning, match="declares no density_weighting"):
+        assert not concentration.is_density_weighted(_store(None, 1.0))
+
+
+# ---------------------------------------------------------------------------
+# rescoring leaves the record alone unless it succeeds (review item 4)
+# ---------------------------------------------------------------------------
+
+
+def _scored_run(tmp_path: Path, monkeypatch, weighting: str) -> tuple[Path, dict]:
+    """A finished run directory (weighted footprint store, metadata, scorecard) whose
+    plan is a single sample of a single site, without DATEM files."""
+
+    run = tmp_path / "run"
+    store = run / "glide" / "SITE" / "run00" / "footprints.zarr"
+    store.parent.mkdir(parents=True)
+    _store(weighting, 100.0 / RHO if weighting == "dry_air" else 100.0).to_zarr(store)
+    rec = pd.DataFrame(
+        {
+            "receptor_id": ["R0"],
+            "lat": [0.0],
+            "lon": [0.0],
+            "start": [T("2000-01-01 11:00")],
+            "end": [T("2000-01-01 12:00")],
+        }
+    )
+    site = benchmark.SitePlan("SITE", 0.0, 0.0, ["OKC80"], rec, T("2000-01-01 10:30"))
+    emis = pd.DataFrame(
+        {
+            "start": [T("2000-01-01 10:30")],
+            "end": [T("2000-01-01 11:00")],
+            "mass": [3.6],
+            "lat": [0.0],
+            "lon": [0.0],
+        }
+    )
+    plan = benchmark.Plan(
+        samples=pd.DataFrame(),
+        emissions={"OKC80": emis},
+        receptors=rec,
+        sites=[site],
+        time_bin_s=900,
+        layer=(0.0, 100.0),
+    )
+    monkeypatch.setattr(benchmark, "build_plan", lambda *a, **k: plan)
+    monkeypatch.setattr(benchmark, "reference_scores", lambda *a, **k: [])
+    meta = dict(
+        experiments=["OKC80"],
+        receptor_layer_m=[0, 100],
+        max_span_h=24.0,
+        source_deg=0.25,
+        bootstrap_seed=0,
+        met_store="unused.zarr",
+        basis="stp",
+    )
+    (run / "run_meta.json").write_text(json.dumps(meta, indent=1))
+    for name in ("scorecard.md", "scorecard.json", "scorecard.csv", "predictions.csv"):
+        (run / name).write_text(f"original {name}\n")
+    (run / "predictions").mkdir()
+    (run / "predictions" / "OKC80.txt").write_text("original predictions\n")
+    return run, meta
+
+
+def _snapshot(d: Path) -> dict[str, bytes]:
+    return {
+        str(p.relative_to(d)): p.read_bytes()
+        for p in sorted(d.rglob("*"))
+        if p.is_file() and "glide" not in p.relative_to(d).parts
+    }
+
+
+def test_failed_rescoring_leaves_the_record_byte_identical(tmp_path: Path, monkeypatch) -> None:
+    run, _ = _scored_run(tmp_path, monkeypatch, "dry_air")
+    before = _snapshot(run)
+    # The weighted store cannot give an ambient concentration: scoring fails...
+    with pytest.raises(ValueError, match="unweighted footprint"):
+        benchmark.main(["score", str(run), "--basis", "ambient"])
+    # ...and neither the metadata nor the scorecard has changed, nor anything been left.
+    assert _snapshot(run) == before
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["run"]
+
+    # A failure late in scoring (after the scorecard is half written) does the same,
+    # into another destination too.
+    def broken(out, *a, **k):
+        (out / "scorecard.csv").write_text("half\n")
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(benchmark, "build_scorecard", broken)
+    monkeypatch.setattr(
+        benchmark, "_score_run", lambda out, *a, **k: (out / "predictions.csv").write_text("x")
+    )
+    with pytest.raises(RuntimeError, match="disk full"):
+        benchmark.main(["score", str(run), "--bootstrap-seed", "5"])
+    with pytest.raises(RuntimeError, match="disk full"):
+        benchmark.main(["score", str(run), "--bootstrap-seed", "5", "--out", str(tmp_path / "b")])
+    assert _snapshot(run) == before
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["run"]
+
+
+def test_rescoring_publishes_metadata_and_scorecard_together(tmp_path: Path, monkeypatch) -> None:
+    run, meta = _scored_run(tmp_path, monkeypatch, "none")
+    before = _snapshot(run)
+
+    def card(out, scores, refs, m, names):
+        (out / "scorecard.md").write_text(f"basis {m['basis']}\n")
+
+    monkeypatch.setattr(benchmark, "build_scorecard", card)
+    monkeypatch.setattr(benchmark, "score_experiment", lambda *a, **k: {"experiment": "OKC80"})
+    monkeypatch.setattr(benchmark, "write_predictions", _fake_write_predictions)
+    other = tmp_path / "ambient"
+    benchmark.main(["score", str(run), "--basis", "ambient", "--out", str(other)])
+    assert _snapshot(run) == before  # the original run is untouched
+    assert json.loads((other / "run_meta.json").read_text())["basis"] == "ambient"
+    assert (other / "scorecard.md").read_text() == "basis ambient\n"
+    assert (other / "glide").resolve() == (run / "glide").resolve()
+    pred = pd.read_csv(other / "predictions.csv")
+    area = 110540.0 * 111320.0 * (180.0 / math.pi) * 2.0 * math.sin(math.radians(0.125)) * 0.25
+    assert pred["pred"].iloc[0] == pytest.approx(3.6 / 1800.0 * 200.0 / (area * 40.0))
+    # In place: the metadata and the scorecard change together.
+    benchmark.main(["score", str(run), "--basis", "ambient"])
+    assert json.loads((run / "run_meta.json").read_text())["basis"] == "ambient"
+    assert (run / "scorecard.md").read_text() == "basis ambient\n"
+    assert not (run / "predictions" / "OKC80.txt").exists()  # replaced as a whole
+
+    # An existing destination must hold the requested run's footprints.
+    run2 = tmp_path / "run2"
+    (run2 / "glide").mkdir(parents=True)
+    (run2 / "run_meta.json").write_text(json.dumps(meta))
+    with pytest.raises(SystemExit, match="already holds footprints"):
+        benchmark.main(["score", str(run2), "--out", str(other)])
+
+
+def _fake_write_predictions(plan, pred, out):
+    """``write_predictions`` without DATEM sample files: the predictions table only."""
+
+    (out / "predictions").mkdir(parents=True, exist_ok=True)
+    pred.to_csv(out / "predictions.csv", index=False)
+    return pred.assign(experiment="OKC80")
