@@ -639,25 +639,38 @@ its development history.
 
 Not a graded experiment; run before the pre-registration to test the
 benchmark, and to be listed as exploratory in the pre-registration's
-development history. Configuration: `benchmark_base.yaml` unchanged, 2,000
-particles per window, release seed 42, bootstrap seed 0, receptors 0–100 m,
-0.25° source box, lowest 40 m, basis "stp", on
-`era5-arco/NAM_19800708-19800712_ERA5-ARCO.zarr` (met-bazarr 0.3.0, with
-the surface-geopotential repair recorded in its attributes). 700 sample windows in four GLIDE
-runs on one GH200, 424 s of GLIDE wall time in all.
+development history. Run on the code merged with `main` (PRs #56 and #57:
+longitudes as the reader presents them, −180..180, with no 0..360
+workaround; footprints dry-air weighted per particle, s m³ kg⁻¹).
+Configuration: `benchmark_base.yaml` unchanged, 2,000 particles per window,
+release seed 42, bootstrap seed 0, receptors 0–100 m, 0.25° source box,
+lowest 40 m, basis "stp", on `era5-arco/NAM_19800708-19800712_ERA5-ARCO.zarr`
+(met-bazarr 0.3.0, surface-geopotential repair by met-bazarr 0.4.0 recorded
+in its attributes). 700 sample windows in four GLIDE runs on one GH200,
+321 s of GLIDE wall time in all.
 
 | Experiment | Pairs | Rank | R² | 1−\|FB/2\| | FMS/100 | 1−KS/100 | Rank, plain R | Mean meas. | Mean calc. (pg m⁻³) |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| OKC80 (PMCH) | 697 | 1.63 | 0.09 | 0.90 | 0.12 | 0.52 | 1.62 | 1,106 | 907 |
-| OKC80-PDCH | 683 | 2.21 | 0.10 | 0.96 | 0.24 | 0.91 | 2.21 | 987 | 905 |
-| DATEM's HYSPLIT example, PMCH, same options | 697 | 1.94 | 0.07 | 0.96 | 0.26 | 0.65 | | | |
+| OKC80 (PMCH) | 697 | 1.641 | 0.091 | 0.905 | 0.124 | 0.520 | 1.637 | 1,106 | 914 |
+| OKC80-PDCH | 683 | 2.215 | 0.107 | 0.960 | 0.237 | 0.910 | 2.210 | 987 | 911 |
+| DATEM's HYSPLIT example, PMCH, same options | 697 | 1.942 | 0.068 | 0.962 | 0.262 | 0.650 | | | |
 
-- A second run with the same seeds gave bit-identical footprints, predictions
-  and scorecard.
-- On the ambient basis (`score --basis ambient`) the means fall by 17%, to
-  753 pg m⁻³, and the ranks to 1.54 and 2.12: the ratio of the source's
-  dry-air density to the 1.293 kg m⁻³ behind DATEM's conversion.
-- With the meander coefficient doubled (`--set
+- These supersede the branch-local numbers recorded before the merge (ranks
+  1.63 and 2.21, means 907 and 905 pg m⁻³, run with 0..360 longitudes and the
+  density applied afterwards at the source). The 0.8% rise in the means is
+  the per-particle density (decision 0022) against one density at the source.
+- A second run with the same seeds gave identical particle trajectories
+  (`endpoint_particles.parquet`) and an identical scorecard, but footprints
+  that differ in the last bit (at most 5 × 10⁻⁷ relative, in under 1% of cells):
+  CUDA's `scatter_add_` accumulates particles in a nondeterministic order,
+  which is invisible when every particle adds the same amount (`none`) and
+  shows once each adds its own density weight (`dry_air`). Two runs with
+  `--set output_grid.density_weighting=none` were bit-identical.
+- On the ambient basis (`run --basis ambient --set
+  output_grid.density_weighting=none`) the means are 759 and 757 pg m⁻³ (17%
+  lower) and the ranks 1.549 and 2.122: the ratio of the dry-air density to
+  the 1.293 kg m⁻³ behind DATEM's conversion.
+- Before the merge, with the meander coefficient doubled (`--set
   turbulence.meander.coefficient=0.32`), `compare` shows the ranks moving
   by +0.010 (PMCH) and −0.010 (PDCH), with R² down 0.006 in both: changes
   of the size the published studies call not meaningful. (That run's
