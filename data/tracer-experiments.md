@@ -418,8 +418,8 @@ archives that skip when `$GLIDE_DATEM` or `$GLIDE_ETEX` is unset).
    ("The first ETEX tracer release",
    https://remon.jrc.ec.europa.eu/past_activities/atmes_2/site/11a.htm):
    Monterfil, 48°03'30" N, 2°00'30" W, ground 90 m above sea level, release
-   8 m above ground (B10b). ETEX-2's are left empty, as no source read gives
-   them. The ETEX reader is checked by
+   8 m above ground (B10b). ETEX-2 was released from the same site (JRC ETEX
+   overview, https://remon.jrc.ec.europa.eu/past_activities/etex/site/index.html). The ETEX reader is checked by
    matching JRC's ETEX-1 against DATEM's sample by sample (§2, "ETEX in
    DATEM").
 2. **Scoring** (`tracers/datem_stats.py`) re-implements `statmain` routine by

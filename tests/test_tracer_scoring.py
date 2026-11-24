@@ -322,7 +322,11 @@ def test_etex_release_source():
     assert r["lon"] == pytest.approx(-2.008333, abs=1e-6)
     assert r["site_alt_m"] == 90.0 and r["height_m"] == 8.0
     assert r["mass"] == 340.0 and r["start"] == pd.Timestamp("1994-10-23 16:00")
-    assert np.isnan(readers.read_etex_release(2).iloc[0]["lat"])
+    # ETEX-2: the same site (JRC ETEX overview page)
+    r2 = readers.read_etex_release(2).iloc[0]
+    assert r2["site"] == "Monterfil"
+    assert (r2["lat"], r2["lon"], r2["site_alt_m"]) == (r["lat"], r["lon"], r["site_alt_m"])
+    assert r2["mass"] == 490.0 and r2["start"] == pd.Timestamp("1994-11-14 15:00")
 
 
 def test_atmes2_results_state_unverified_definitions():

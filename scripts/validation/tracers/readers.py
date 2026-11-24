@@ -255,10 +255,11 @@ ETEX_INTERVAL_ORIGIN = {
 #: read 2026-11-24): "The source was located at Monterfil (2° 00'30" W;
 #: 48° 03'30" N; 90 m asl) ... 340 kg of [PMCH] were emitted at 8 m agl".
 #: ``height_m`` is above ground, ``site_alt_m`` the ground above sea level.
-#: Release 2 used the same chimney (release2.txt), but no source read here
-#: states its coordinates, so they are left NaN until they are checked
-#: against the experiment documentation (Nodop et al., 1998, Atmos.
-#: Environ. 32, 4095-4108); ETEX-2 is not in the benchmark.
+#: Release 2 used the same site: the JRC ETEX overview
+#: (https://remon.jrc.ec.europa.eu/past_activities/etex/site/index.html,
+#: found by Matt Rigby, 24 Nov 2026) gives Monterfil, 48° 03'30" N,
+#: 2° 00'30" W for both releases, and release2.txt says the same chimney.
+#: Its ground height is therefore the same 90 m asl. ETEX-2 is not graded.
 ETEX_RELEASES = {
     1: dict(
         start=pd.Timestamp("1994-10-23 16:00"),
@@ -278,9 +279,9 @@ ETEX_RELEASES = {
         tracer="PMCP",
         height_m=8.0,
         site="Monterfil",
-        lat=np.nan,
-        lon=np.nan,
-        site_alt_m=np.nan,
+        lat=48.0 + 3.0 / 60.0 + 30.0 / 3600.0,
+        lon=-(2.0 + 0.0 / 60.0 + 30.0 / 3600.0),
+        site_alt_m=90.0,
     ),
 }
 _ETEX_FILES = {1: ("pmch.dat", "pmch.cod"), 2: ("pmcp.datv1.2", "pmcp.codv1.2")}
