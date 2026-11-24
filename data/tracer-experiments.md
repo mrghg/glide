@@ -575,11 +575,17 @@ python -m tracers.benchmark run --experiments OKC80 OKC80-PDCH \
   source. This is the dry-air mole fraction converted with the observations'
   fixed factor M / V_m (decision 0022; V_m = 22.40 L mol⁻¹, assumed also for
   OKC80), not the ambient mass concentration (`--basis ambient`, Q / V ×
-  Σₖ φₖ τₖ), which is 10–15% lower in warm air. Until task A04 makes the
-  footprint density-weighted, ρₖ is read from the store at the grid point
-  nearest the source (surface pressure, and temperature and humidity on the
-  lowest model level), interpolated to each bin's centre. The derivation is
-  in the module's docstring.
+  Σₖ φₖ τₖ), which is 10–15% lower in warm air. GLIDE's default footprint is
+  density-weighted (`output_grid.density_weighting: dry_air`, task A04,
+  decision 0022: s m³ kg⁻¹, already τ/ρ per particle), which the "stp" basis
+  uses as it is; the benchmark reads the store's `density_weighting` and
+  `units` attributes, never assumes them. An ambient run needs plain seconds:
+  `run ... --basis ambient --set output_grid.density_weighting=none` (`run`
+  refuses the ambient basis on a weighted configuration before GLIDE starts).
+  On a `none` store the "stp" basis divides by ρₖ read from the meteorology at
+  the grid point nearest the source (surface pressure, and temperature and
+  humidity on the lowest model level), interpolated to each bin's centre. The
+  derivation is in the module's docstring.
 - **Scoring.** Predictions are written in DATEM format
   (`predictions/<experiment>.txt`, pg m⁻³, the measurement keys unchanged)
   and scored with `datem_stats` under the published protocol: `-z0`,
@@ -610,16 +616,20 @@ python -m tracers.benchmark run --experiments OKC80 OKC80-PDCH \
   `--set` values and `--out`, then `compare` over all of them. Keep the
   release and bootstrap seeds fixed across members so that only the
   parameters differ.
-- *The other concentration basis, or another bootstrap seed, without
-  rerunning GLIDE:* `python -m tracers.benchmark score RUN_DIR --basis
-  ambient --out RUN_DIR_AMBIENT`.
+- *Another bootstrap seed, or the other concentration basis where the store
+  allows it, without rerunning GLIDE:* `python -m tracers.benchmark score
+  RUN_DIR --bootstrap-seed 1 --out RUN_DIR_B1`. A `dry_air` store serves only
+  "stp"; a `none` store serves both. Scoring is written to a temporary
+  directory and published (metadata, predictions and scorecard together) only
+  when it succeeds, so a refused rescoring leaves the run's record unchanged;
+  an existing `--out` must already link to the same run.
 
-**Longitudes.** GLIDE's reader keeps an ascending 0..360 store (every NAM
-store) in 0..360, and the engine clamps a particle at a negative longitude to
-the grid's western edge without an error (STATUS.md, "Known follow-ups"). The
-benchmark therefore writes every longitude in the convention the reader keeps
-(`benchmark.glide_lon_convention`); a hand-written configuration on a NAM
-store must do the same until GLIDE is fixed.
+**Longitudes.** The benchmark takes the meteorology's extent from GLIDE's
+reader (`ArcoEra5ZarrReader.get_lon_lat_coverage`, after its normalisation:
+NAM stores, ascending 0..360 on disk, are read as −120..−55) and writes every
+longitude inside it, so the configuration uses the convention the runtime sees
+and passes its preflight. (Before PR #56 the reader kept such stores in 0..360
+and clamped negative longitudes to the western edge; STATUS.md.)
 
 A rerun with the same seeds reproduces the scorecard (checked on OKC80, see
 below). Every run before the pre-registration is exploratory and belongs in
