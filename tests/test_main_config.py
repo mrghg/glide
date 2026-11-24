@@ -4,6 +4,7 @@ import textwrap
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import numpy as np
 import pytest
 from pydantic import ValidationError
 
@@ -499,12 +500,23 @@ def test_validate_meteorology_time_coverage_rejects_insufficient_history() -> No
 # --- met_domain.vertical_levels (configurable internal AGL grid) -------------
 
 
-def test_met_domain_vertical_levels_defaults_to_builtin_ladder() -> None:
-    """Unset => None, i.e. the reader's built-in 23-level default (back-compat)."""
+def test_met_domain_default_ladder_is_40_stretched_levels() -> None:
+    """Task A01, decision 0017: unset => 40 stretched levels from first_layer_m,
+    spanning alt_max_m. The pre-A01 23-level ladder can still be pinned explicitly."""
+
+    from lpdm.vertical_grid import default_agl_levels
 
     cfg = RunConfig.model_validate(_base_dict())
-    assert cfg.met_domain.vertical_levels is None
-    assert cfg.met_domain.resolve_agl_levels() is None
+    md = cfg.met_domain
+    assert md.vertical_levels is None
+    levels = md.resolve_agl_levels()
+    assert len(levels) == 40
+    assert levels[0] == 0.0 and levels[-1] >= md.alt_max_m
+    assert levels[1] == pytest.approx(md.first_layer_m)
+
+    legacy = list(default_agl_levels(md.alt_max_m))
+    pinned = RunConfig.model_validate(_base_dict(met_domain={"vertical_levels": legacy}))
+    np.testing.assert_array_equal(pinned.met_domain.resolve_agl_levels(), legacy)
 
 
 def test_met_domain_vertical_levels_count_generates_stretched_grid() -> None:

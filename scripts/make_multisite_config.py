@@ -63,13 +63,13 @@ _BYTES_PER_GIB = float(1024**3)
 # model levels both land on the same ladder). The empirical figure was measured on
 # the built-in 23-level default, so scale it when --vertical-levels raises that.
 _MET_GIB_PER_HOUR_AT_23_LEVELS = 0.27
-_DEFAULT_AGL_LEVEL_COUNT = 23
+_DEFAULT_AGL_LEVEL_COUNT = 40  # decision 0017; was 23 before task A01
 _HOST_RESERVE_GIB = 20.0
 
 
 def _met_gib_per_hour(n_levels: int) -> float:
     """Per-cached-hour host RAM, linear in the AGL level count."""
-    return _MET_GIB_PER_HOUR_AT_23_LEVELS * (n_levels / _DEFAULT_AGL_LEVEL_COUNT)
+    return _MET_GIB_PER_HOUR_AT_23_LEVELS * (n_levels / 23)
 
 
 # EUROPE domain + output grid, identical to configs/example_mhd_january_periodic.yaml
@@ -237,7 +237,7 @@ def main() -> None:
         type=int,
         default=None,
         help="Number of internal terrain-following AGL levels the met is resampled "
-        "onto (default: the built-in 23-level ladder). This grid — not the met "
+        "onto (default: 40 stretched levels, decision 0017). This grid — not the met "
         "source — sets the vertical resolution the physics sees, so raise it to "
         "exploit a model-level (hybrid) source: ~40 matches ERA5 model levels' "
         "near-surface density. Host met-cache RAM scales LINEARLY with it.",

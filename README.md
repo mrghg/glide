@@ -196,9 +196,10 @@ Two settings deserve particular attention:
 meteorology is resampled onto. **This, not the meteorology source, is the
 vertical resolution the physics sees.** Give it a count (levels are geometrically
 stretched from `first_layer_m` up to `alt_max_m`) or an explicit ascending list of
-heights in metres; omit it for the built-in 23-level default. Raise it to exploit
-a model-level source, whose fine near-surface levels the default under-uses — but
-note the meteorology cache scales linearly with the level count.
+heights in metres; omit it for the default, 40 levels stretched from
+`first_layer_m` (decision 0017), which roughly matches the near-surface density
+of ERA5's model levels, the default meteorology. The meteorology cache scales
+linearly with the level count.
 
 **`batch.max_releases_per_batch`** controls how many releases are integrated
 together in one engine pass, and it is the main memory lever. Keep it a multiple
@@ -248,8 +249,11 @@ EUROPE at 37 pressure levels is ~80 GB/month uncompressed (~25–30 GB on disk).
 Each month is a separate, resumable store.
 
 By default these land in `data/era5/` (pressure levels) or `data/era5-model/`
-(`--levels model`, with an `_ml` suffix), which is where the shipped configs'
-`data/era5/EUROPE_*.zarr` glob looks. The two are kept apart so that glob never
+(`--levels model`, with an `_ml` suffix). The shipped configs instead read the
+model-level stores built by [met-bazarr](https://github.com/mrghg/met-bazarr)
+(decisions 0017, 0018) through the glob
+`data/era5-arco/EUROPE_*_ERA5-ARCO.zarr`; link `data/era5-arco` to where they
+are (`ln -s $GLIDE_DATA/era5-arco data/era5-arco`). The two are kept apart so that glob never
 mixes vertical coordinates. Paths are relative to the repo root, so run from
 there. If the checkout is on a small filesystem, symlink the directories to bulk
 storage first:
