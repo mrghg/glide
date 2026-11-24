@@ -96,9 +96,9 @@ Work through this once. The queue assumes all of it.
       pre-registration (A8b) needs the validation inputs prepared with it.
 - [ ] The reference multi-site configuration
       (`configs/example_multisite_january.yaml` or its successor) points at a
-      cube that exists. The shipped configs read `data/era5/EUROPE_*.zarr`
-      (model levels: `data/era5-model/`), so symlink those directories in the
-      checkout to the cubes under `$GLIDE_DATA`.
+      cube that exists. The shipped configs read the met-bazarr model-level
+      stores, `data/era5-arco/EUROPE_*_ERA5-ARCO.zarr` (task A01), so link
+      `data/era5-arco` in the checkout to `$GLIDE_DATA/era5-arco`.
 - [ ] A small cube for smoke tests and a medium cube for benchmarks, both local.
 - [ ] Decide which additional cubes you will download before the tasks that
       need them: a model-level cube matching the reference configuration's

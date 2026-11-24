@@ -1292,8 +1292,7 @@ def _run(
             zarr_store=cfg.io.zarr_store,
             channel_names=required_channels,
             device=reader_device,
-            # None => the reader's built-in 23-level ladder. Set met_domain.vertical_levels
-            # to resolve more of a fine-vertical-resolution source (e.g. model levels).
+            # Unset met_domain.vertical_levels => 40 stretched levels (decision 0017).
             agl_levels_m=cfg.met_domain.resolve_agl_levels(),
         )
         # The AGL grid sets the vertical resolution the physics actually sees (and the

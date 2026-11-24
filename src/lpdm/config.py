@@ -23,7 +23,7 @@ import numpy as np
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from lpdm.vertical_grid import stretched_agl_levels
+from lpdm.vertical_grid import DEFAULT_VERTICAL_LEVEL_COUNT, stretched_agl_levels
 
 
 def _parse_datetime_utc(value: datetime | str) -> datetime:
@@ -405,7 +405,9 @@ class MetDomainConfig(_Frozen):
     #   - an int  -> that many geometrically stretched levels (see
     #     `vertical_grid.stretched_agl_levels`); the user-friendly form, and
     #   - a list  -> explicit ascending AGL heights in metres, for full control.
-    # None (default) keeps the fixed 23-level built-in ladder.
+    # None (default) -> DEFAULT_VERTICAL_LEVEL_COUNT (40) stretched levels from
+    # `first_layer_m` (decision 0017). The pre-A01 23-level ladder is
+    # `list(vertical_grid.default_agl_levels(alt_max_m))`.
     #
     # This grid, NOT the met source, sets the vertical resolution the physics sees:
     # the default resolves ~13 levels below 1.5 km, which under-uses a model-level
@@ -452,10 +454,15 @@ class MetDomainConfig(_Frozen):
         return self
 
     def resolve_agl_levels(self) -> np.ndarray | None:
-        """The explicit AGL height grid for this config, or None for the built-in default."""
+        """The AGL height grid for this config.
+
+        Unset -> ``DEFAULT_VERTICAL_LEVEL_COUNT`` stretched levels (decision 0017).
+        """
 
         if self.vertical_levels is None:
-            return None
+            return stretched_agl_levels(
+                DEFAULT_VERTICAL_LEVEL_COUNT, self.alt_max_m, first_layer_m=self.first_layer_m
+            )
         if isinstance(self.vertical_levels, int):
             return stretched_agl_levels(
                 self.vertical_levels, self.alt_max_m, first_layer_m=self.first_layer_m
