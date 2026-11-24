@@ -306,6 +306,29 @@ model levels. See
 Model levels require the terrain-following path (`terrain_following=True`, the
 default).
 
+**On model levels, the level and surface geopotentials must describe the same
+ground: no model level lies below `geopotential_at_surface`.** Heights above
+ground are (`geopotential` − `geopotential_at_surface`) / g, so a surface field
+that disagrees with the levels shifts the whole terrain-following grid in that
+column, and with it the height every wind and temperature is placed at. A
+producer that takes the two fields from different sources must make them
+consistent. This is a product-neutral rule; how each source meets it is the
+producer's business, not GLIDE's:
+
+- **ERA5** (met-bazarr ≥ v0.4.0, decision 0009 there): ARCO's surface
+  geopotential disagrees with its model-level geopotential by up to ~130 m in
+  steep terrain, so met-bazarr derives the surface from the lowest level by the
+  IFS's own relation (level 137 sits ~10 m above the ground). Stores built
+  earlier are brought up to the rule by `metbazarr repair`, recorded in their
+  `glide_repairs` attribute.
+- **Met Office UM** (met-bazarr decision 0003): consistent by construction; both
+  fields come from the same orography, and the lowest level lies 12–20 m above
+  the surface.
+
+met-bazarr's validator makes a violation an error for validation inputs
+(`--validation-input`) and a warning otherwise. On **pressure levels** the rule
+does not apply: levels below the ground are normal there (see above).
+
 **Tag your model-level cubes.** GLIDE **refuses** to read a store as pressure
 levels when the vertical coordinate does not look like pressures — when it is
 named `hybrid`/`model_level`, declares a `hybrid_sigma_pressure` `standard_name`,
