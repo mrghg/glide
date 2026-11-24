@@ -510,6 +510,16 @@ def _build_footprint_dataset_metadata(
     # `site` label only when present (multi-site); single-location runs omit it.
     if any(r.label is not None for r in releases):
         coords["site"] = ("release", np.array([r.label or "" for r in releases]))
+    # Top of each release's height range, only when some release has one (`kind: samples`);
+    # `release_alt_agl_m` is then the bottom. Other runs omit it, so their output is unchanged.
+    if any(r.alt_top_agl_m is not None for r in releases):
+        coords["release_alt_top_agl_m"] = (
+            "release",
+            np.array(
+                [r.alt_top_agl_m if r.alt_top_agl_m is not None else r.alt_agl_m for r in releases],
+                dtype=np.float64,
+            ),
+        )
     return coords, {}
 
 

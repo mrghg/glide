@@ -189,11 +189,69 @@ class MultiPointPeriodicReleaseConfig(_Frozen):
         return v
 
 
+class SampleSpec(_Frozen):
+    """One measured sample: where, when and over which heights its particles start.
+
+    Particles are released uniformly in time over ``[start_time, start_time +
+    duration_seconds)`` and uniformly in height between ``alt_min_agl_m`` and
+    ``alt_max_agl_m`` (a point when the two are equal).
+    """
+
+    name: str = Field(..., min_length=1)
+    lon: float
+    lat: float
+    start_time: datetime
+    duration_seconds: int = Field(..., gt=0)
+    alt_min_agl_m: float = Field(..., ge=0)
+    alt_max_agl_m: float = Field(..., ge=0)
+
+    @field_validator("start_time", mode="before")
+    @classmethod
+    def _coerce_start_time(cls, v: Any) -> datetime:
+        return _parse_datetime_utc(v)
+
+    @model_validator(mode="after")
+    def _height_range_ascending(self) -> SampleSpec:
+        if self.alt_max_agl_m < self.alt_min_agl_m:
+            raise ValueError("alt_max_agl_m must be >= alt_min_agl_m")
+        return self
+
+
+class SampleReleaseConfig(_Frozen):
+    """One backward release per measured sample (queue task B12).
+
+    Each sample has its own location, start, duration and height range, so a
+    tracer experiment's samples can be configured one release each. Releases
+    are expanded in the order given; list them in time order so that batches
+    span short periods.
+    """
+
+    kind: Literal["samples"]
+    samples: tuple[SampleSpec, ...] = Field(..., min_length=1)
+    n_particles_per_release: int = Field(..., gt=0)
+    seed: int | None = Field(None, ge=0)
+
+    @property
+    def duration_seconds(self) -> int:
+        """The longest sample window (what the run-length check needs)."""
+
+        return max(s.duration_seconds for s in self.samples)
+
+    @field_validator("samples")
+    @classmethod
+    def _unique_sample_names(cls, v: tuple[SampleSpec, ...]) -> tuple[SampleSpec, ...]:
+        names = [s.name for s in v]
+        if len(set(names)) != len(names):
+            raise ValueError("sample names must be unique")
+        return v
+
+
 ReleaseConfig = Annotated[
     PointReleaseConfig
     | PeriodicPointReleaseConfig
     | PointScheduleReleaseConfig
-    | MultiPointPeriodicReleaseConfig,
+    | MultiPointPeriodicReleaseConfig
+    | SampleReleaseConfig,
     Field(discriminator="kind"),
 ]
 
@@ -234,6 +292,9 @@ class ConcreteRelease:
     n_particles: int
     seed: int | None
     label: str | None = None  # site name for multi-site runs; None for single-location variants
+    # Top of the release layer for `kind: samples` with a height range: particles start
+    # uniformly between alt_agl_m and this. None (every other kind) releases at alt_agl_m.
+    alt_top_agl_m: float | None = None
 
 
 @dataclass(frozen=True)
@@ -533,6 +594,8 @@ class RunConfig(_Frozen):
         md = self.met_domain
         if isinstance(self.release, MultiPointPeriodicReleaseConfig):
             points = [(s.lon, s.lat, s.alt_agl_m, s.name) for s in self.release.sites]
+        elif isinstance(self.release, SampleReleaseConfig):
+            points = [(s.lon, s.lat, s.alt_max_agl_m, s.name) for s in self.release.samples]
         else:
             lon, lat, alt_agl_m = _release_point(self.release)
             points = [(lon, lat, alt_agl_m, None)]
@@ -612,6 +675,28 @@ class RunConfig(_Frozen):
                         )
                     )
                     idx += 1
+        elif isinstance(rel, SampleReleaseConfig):
+            # One release per sample, in the order given, each with its own window and
+            # (optionally) height range. Seeds derive as seed + release_idx, as for the
+            # other multi-release kinds.
+            seed = rel.seed
+            concretes = [
+                ConcreteRelease(
+                    release_idx=i,
+                    release_time=s.start_time,
+                    lon=float(s.lon),
+                    lat=float(s.lat),
+                    alt_agl_m=float(s.alt_min_agl_m),
+                    duration_seconds=int(s.duration_seconds),
+                    n_particles=int(rel.n_particles_per_release),
+                    seed=(seed + i) if seed is not None else None,
+                    label=s.name,
+                    alt_top_agl_m=(
+                        float(s.alt_max_agl_m) if s.alt_max_agl_m > s.alt_min_agl_m else None
+                    ),
+                )
+                for i, s in enumerate(rel.samples)
+            ]
         else:
             if isinstance(rel, PeriodicPointReleaseConfig):
                 times = tuple(

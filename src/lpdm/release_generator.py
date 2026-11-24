@@ -237,6 +237,23 @@ class ParticleBatch:
     batch_start_time: datetime  # earliest release_time in the batch (UTC)
 
 
+def _uniform(
+    n: int,
+    low: float,
+    high: float,
+    rng: torch.Generator | None,
+    dtype: torch.dtype,
+    device: torch.device,
+) -> torch.Tensor:
+    """``n`` uniform draws in ``[low, high)``: from ``rng`` on the CPU when given
+    (reproducible, decision 0021), otherwise from the device's default generator."""
+
+    if rng is not None:
+        draws = torch.empty(n, device="cpu", dtype=torch.float32).uniform_(low, high, generator=rng)
+        return draws.to(device=device, dtype=dtype)
+    return torch.empty(n, device=device, dtype=dtype).uniform_(low, high)
+
+
 def generate_batch_particles(
     batch: ReleaseBatch,
     *,
@@ -249,7 +266,11 @@ def generate_batch_particles(
 
     * Each release contributes ``rel.n_particles`` particles at its constant
       ``(lon, lat, alt_agl_m)`` with weight ``1 / rel.n_particles`` — i.e. the
-      same point cloud :class:`PointRelease` produces today.
+      same point cloud :class:`PointRelease` produces today. A release with a
+      height range (``alt_top_agl_m``, from ``kind: samples``) instead spreads
+      its particles uniformly between ``alt_agl_m`` and ``alt_top_agl_m``, as
+      :class:`VolumeRelease` does in height, with the draws taken from the
+      release's seeded generator after the release times.
     * Within-release release-time offsets are drawn uniformly in
       ``[0, rel.duration_seconds)`` using a CPU :class:`torch.Generator` seeded
       with ``rel.seed`` when non-null, then moved to ``device``. The two-step
@@ -282,17 +303,12 @@ def generate_batch_particles(
                 f"ConcreteRelease(release_idx={rel.release_idx}) has n_particles={n}; must be > 0"
             )
 
-        lon = torch.full((n,), rel.lon, dtype=dtype, device=device_t)
-        lat = torch.full((n,), rel.lat, dtype=dtype, device=device_t)
-        alt = torch.full((n,), rel.alt_agl_m, dtype=dtype, device=device_t)
-        weight = torch.full((n,), 1.0 / n, dtype=dtype, device=device_t)
-        particle_chunks.append(torch.stack((lon, lat, alt, weight), dim=1))
-
         release_idx_chunks.append(
             torch.full((n,), rel.release_idx, dtype=torch.int64, device=device_t)
         )
 
         duration_s = float(rel.duration_seconds)
+        rng: torch.Generator | None = None
         if rel.seed is not None:
             rng = torch.Generator(device="cpu")
             rng.manual_seed(int(rel.seed))
@@ -303,6 +319,19 @@ def generate_batch_particles(
             )
         else:
             within = torch.empty(n, device=device_t, dtype=torch.float32).uniform_(0.0, duration_s)
+
+        lon = torch.full((n,), rel.lon, dtype=dtype, device=device_t)
+        lat = torch.full((n,), rel.lat, dtype=dtype, device=device_t)
+        alt_top = getattr(rel, "alt_top_agl_m", None)
+        if alt_top is None:
+            alt = torch.full((n,), rel.alt_agl_m, dtype=dtype, device=device_t)
+        else:
+            # Height range (`kind: samples`): uniform between alt_agl_m and alt_top, drawn
+            # AFTER the release times from the same seeded generator, so the times are
+            # the same draws a point release with this seed would make.
+            alt = _uniform(n, float(rel.alt_agl_m), float(alt_top), rng, dtype, device_t)
+        weight = torch.full((n,), 1.0 / n, dtype=dtype, device=device_t)
+        particle_chunks.append(torch.stack((lon, lat, alt, weight), dim=1))
 
         rel_offset_s = float((rel.release_time - batch_start).total_seconds())
         offset_chunks.append(within + rel_offset_s)
