@@ -418,6 +418,22 @@ never modified by transport; convection redistributes particles between levels
 but conserves their number and weight. Total weight is checked in the physics
 tests as a conservation invariant.
 
+**When a particle stops: by its own age.** Every particle is followed for
+`simulation.length_seconds` back from its *own* release time, then stops. The
+run has no single end time for all particles: a release made two hours after
+another stops two hours (of model time) later, whatever else shares its batch.
+In the code this is the per-particle `active_mask` in `main._run`: a particle is
+active while the backward cursor lies between its release time and that time
+minus the length; each batch's cursor runs from its latest release-window end
+to its earliest release time minus the length. A particle counts for a step
+when it is active at the step's upper (later) end, so its last step ends
+exactly one length before its release, to within one step where the length is
+not a whole number of steps. This is the rule the reference runs use
+([reference-runs.md](reference-runs.md) §1: 240 h from each particle's own
+release). Tests: `test_each_particle_stops_its_own_length_after_its_release` and
+`test_every_particle_followed_for_full_simulation_length`
+(`tests/test_main_runtime.py`).
+
 ---
 
 ## 5. Boundary conditions
@@ -463,6 +479,31 @@ the coordinate normalisation would clamp it to the grid edge and it would be
 pushed by edge winds for the rest of the run. Such particles have their liveness
 bit cleared and are never advected or accumulated again. The count is reported in
 `run_metadata.json`. There is no lower kill: $z = 0$ is handled by reflection.
+
+**The top of the model.** `met_domain.alt_max_m` is the top of the vertical
+grid (the AGL ladder ends there). A particle that rises above it — by the
+resolved wind, turbulence or convection — is **removed**, not reflected and
+not held below the top:
+- within the step that takes it there, its meteorology is that of the top
+  level (the coordinate normalisation clamps $z$ to the grid);
+- the footprint is counted for that step at the height the particle reached,
+  then the particle's liveness bit is cleared (`_within_met_domain`, applied in
+  `main._run` after the gridder on both step paths: `alt <= alt_max_m` is
+  inside), so it counts for nothing afterwards;
+- its end record in `endpoint_particles.parquet` keeps that position, above the
+  top, and it is counted in `escaped_this_step` and `escaped_met_domain_total`.
+
+The convection scheme places particles within the grid's layers, so it takes a
+particle above `alt_max_m` only when a configured list of levels
+(`met_domain.vertical_levels`) ends above it; with the default ladder, removal
+at the top comes from the resolved and turbulent vertical motion. Test:
+`test_particle_reaching_the_model_top_is_removed` (`tests/test_main_runtime.py`).
+The reference models differ: FLEXPART holds a particle just below its top level
+(near 80 km), NAME removes it at its domain top
+([reference-runs.md](reference-runs.md) §2, which requires that no particle be
+removed below 20 km). GLIDE's shipped configurations set `alt_max_m` to
+15,000 m, so a validation configuration must raise it to at least 20,000 m to
+meet that rule.
 
 ---
 
@@ -641,6 +682,7 @@ Stated plainly, because they bound what the model can be trusted for.
 | Initial $u', v', w' = 0$ rather than sampled from the local $\sigma$ | Particles equilibrate within one $T_L$ (typically ~100 s), which is shorter than the release window. |
 | Virtual temperature approximated as $T$ in the Obukhov length | Humidity correction is small; deferred. |
 | Free-troposphere horizontal turbulence treated as isotropic with the vertical | The unresolved-mesoscale horizontal spread is carried separately by the meander process. |
+| Meander process has no drift correction for its spatially varying $\sigma_m$ | Particles collect slowly where $\sigma_m$ is small: after 10 days, 0.8–1.9% systematic unevenness in 0.25° cells and 0.35–0.75% in 1° cells, below particle noise at validation particle counts (task A03; [turbulence.md §7](turbulence.md#7-meander-unresolved-mesoscale-motion)). Left uncorrected in v1 (decision of 24 Nov 2026). |
 
 Beyond these, the transport physics as a whole **has not been validated against
 external references**. The analytic tests below verify GLIDE against closed-form

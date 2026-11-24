@@ -93,8 +93,10 @@ comparisons. Examples include:
   over 10 days, less than one output cell), and it is measured by the
   sensitivity runs of Tier 2;
 - the top of the model: FLEXPART holds a particle just below its top level,
-  near 80 km, and NAME removes it at 20 km above the ground. What GLIDE does
-  is stated and tested in task B5.
+  near 80 km, and NAME removes it at 20 km above the ground. GLIDE removes
+  it when it rises above `met_domain.alt_max_m`, after counting the step in
+  which it crossed ([physics.md](physics.md) §5; tested in task A03), so the
+  validation configurations need a top of at least 20 km.
 
 If a difference was predicted before the comparison was run, it counts as
 evidence that the model is understood. If it is explained only after it is
@@ -107,7 +109,7 @@ seen, it does not count. The full list is fixed in the pre-registration record
 
 | Tier | Question it answers | Reference | Status |
 | --- | --- | --- | --- |
-| 0 | Does the code solve the equations it claims to solve? | Exact mathematical solutions, numerical solutions of the diffusion equation, and conservation checks | Largely done. The reciprocity test, the convergence figures and the meander test are still missing |
+| 0 | Does the code solve the equations it claims to solve? | Exact mathematical solutions, numerical solutions of the diffusion equation, and conservation checks | Largely done. The reciprocity test and the convergence figures are still missing |
 | 1 | Do GLIDE's turbulence and convection schemes give the same numbers as FLEXPART's code? | FLEXPART v11's own routines, run on the same input profile | Not started |
 | 2 | Does the full model move particles like the established models when both use the same meteorology? | FLEXPART v11 on ERA5 (primary, public); NAME on Met Office analyses (second) | Comparison tools exist, but have not been run on the frozen physics |
 | 3 | Does GLIDE reproduce measured concentrations from tracer releases with known emissions? | ETEX, CAPTEX and ANATEX observations; radon-222 | Data located; not started |
@@ -140,9 +142,9 @@ These tests are already in the test suite (see
   with observations.
 - **The meander term alone.** With a uniform wind, a fixed meander velocity
   scale and timescale, and everything else switched off, the horizontal
-  spread of a particle cloud has an exact answer at every time. The existing
-  tests check how the velocity scale is computed, not the spread it
-  produces. A second part checks an approximation: the term has no
+  spread of a particle cloud has an exact answer at every time
+  (`test_meander_alone_gives_the_exact_ou_displacement_variance`, task A03;
+  the formula is in [turbulence.md](turbulence.md) §7). A second part checks an approximation: the term has no
   correction for a velocity scale that varies in space, so particles can
   slowly collect where the scale is small. The test measures how uneven an
   initially even cloud becomes over 10 days in a realistic field (task

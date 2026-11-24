@@ -134,16 +134,16 @@ Coarser meteorology is read directly, but it is not free of consequence: GLIDE
 interpolates the wind linearly across a window, so anything varying inside one —
 the diurnal boundary-layer cycle, a frontal passage — is smoothed. The physics is
 tuned against hourly ERA5, and a run coarser than that logs a warning at startup.
-Two settings that are tied to the source interval and do **not** follow it
-automatically:
+Settings tied to the source interval:
 
-- `turbulence.meander_timescale_seconds` defaults to 1800 s, half the hourly
-  interval. Meander parameterises the mesoscale motion the met does not resolve,
-  so on a coarser source consider setting it to half your interval. It is left as
-  an explicit knob because changing it moves results.
-- `memory.met_cache_max_hours` counts met **windows**, not hours. At 3-hourly
-  cadence a value of 48 caches six days of meteorology, and the host RAM it uses
-  scales with the window count, not the wall-clock span.
+- `turbulence.meander.timescale_seconds`, when unset, is half the interval
+  measured from the store (1800 s hourly, 5400 s 3-hourly), fixed at the start
+  of the run ([turbulence.md](turbulence.md) §7; decision 0024). Set it to
+  override.
+- `memory.met_cache_max_hours` does **not** follow the interval: it counts met
+  **windows**, not hours. At 3-hourly cadence a value of 48 caches six days of
+  meteorology, and the host RAM it uses scales with the window count, not the
+  wall-clock span.
 
 ## Required variables
 

@@ -183,7 +183,7 @@ fp["footprint"].set_index(release=["site", "release_time"]).unstack("release").s
 `simulation.length_seconds > release.duration_seconds`, strictly ascending
 `output_grid.z_edges_m`, and every release point lying inside `met_domain`.
 
-Two settings deserve particular attention:
+Three settings deserve particular attention:
 
 **`met_domain.vertical_levels`** sets the internal terrain-following AGL grid the
 meteorology is resampled onto. **This, not the meteorology source, is the
@@ -193,6 +193,13 @@ heights in metres; omit it for the default, 40 levels stretched from
 `first_layer_m` (decision 0017), which roughly matches the near-surface density
 of ERA5's model levels, the default meteorology. The meteorology cache scales
 linearly with the level count.
+
+**`turbulence.boundary_layer_depth_min_m` / `_max_m`** hold the boundary-layer
+depth from the meteorology within limits wherever the turbulence scheme uses it.
+The defaults, 50 m and no maximum (`null`), keep GLIDE's long-standing behaviour;
+runs compared with FLEXPART and NAME set 100 and 4500, as those models do
+([docs/turbulence.md](docs/turbulence.md) §2). An unset
+`turbulence.meander.timescale_seconds` is half the store's met interval.
 
 **`batch.max_releases_per_batch`** controls how many releases are integrated
 together in one engine pass, and it is the main memory lever. Keep it a multiple

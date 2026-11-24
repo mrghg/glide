@@ -75,6 +75,17 @@ class TurbulenceScheme(ABC):
                 place; callers must treat the return values as authoritative.
         """
 
+    def bind_met_interval(self, met_interval_seconds: float) -> None:
+        """Receive the spacing of the meteorology's time coordinate, in seconds.
+
+        The runtime calls this once, after the reader has measured the store and
+        before the first step. A scheme with a setting that follows the met interval
+        (``HannaScheme``'s meander timescale) fixes it here, so the value is a
+        constant of the run. Default: nothing to do.
+        """
+
+        del met_interval_seconds
+
     def step_includes_advection(self, engine: GPUEngine) -> bool:
         """Whether ``step`` also performs the RK2 mean-wind advection (so the runtime
         must NOT advect separately).

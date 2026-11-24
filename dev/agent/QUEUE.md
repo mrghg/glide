@@ -731,7 +731,9 @@ Model: Opus 5.5, high effort. Run strictly in order unless a task is BLOCKED.
   for every release, FLEXPART for the seven standard cases only.
 - **Settings.** GLIDE's Tier 2 runs use `convection.scheme:
   emanuel_reduced` (A02), boundary-layer depth limits of 100 and 4,500 m
-  (A03), the meander term on, and the number of particles each reference
+  (A03), `met_domain.alt_max_m` of at least 20,000 m (particles may not be
+  removed below 20 km, `docs/reference-runs.md` §2; the shipped configs use
+  15,000 m), the meander term on, and the number of particles each reference
   run actually released (its `n_particles`). On Met Office fields the
   meander timescale is half the fields' interval.
 - **Meander sensitivity runs** (reported, not graded): GLIDE with the

@@ -159,9 +159,6 @@ relevant docs page with its consequence.
 - **Per-sub-step $\sigma$ re-evaluation.** FLEXPART re-evaluates $\sigma$ and
   $T_L$ every sub-step; GLIDE holds them at the outer-step value (the
   velocity-dependent part of the drift *is* re-evaluated).
-- **Meander timescale is not tied to the met cadence.** It defaults to 1800 s,
-  half the hourly ERA5 interval, and stays there on a coarser source. Left as an
-  explicit knob because changing it moves results.
 - **Forward/backward reciprocity test.** It tests the backward formulation
   directly, which nothing else does. Planned as task A6.
 - **The source of u\*.** From the surface stresses for v1; ERA5's `zust` is
