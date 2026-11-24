@@ -56,7 +56,7 @@ for the gaps you will most likely have to close yourself.
 | --- | --- | --- |
 | Time | `time` | `datetime64`, **UTC**, any *uniform* cadence. Must cover the run's backward window. |
 | Latitude | `latitude` | Degrees north. Ascending or descending both accepted. |
-| Longitude | `longitude` | Degrees east. Either $-180..180$ or $0..360$; GLIDE detects and normalises. |
+| Longitude | `longitude` | Degrees east. Either $-180..180$ or $0..360$; GLIDE reads the grid in $-180..180$ whenever it stays one ascending run there (a box crossing 0° E, or one west of it such as NAM, $240..305$ in the store). A box crossing 180° E stays in $0..360$, and its configuration (`met_domain`, `output_grid`, release points) must then be written in $0..360$ too; the preflight refuses a `met_domain` outside the grid in either convention. A global domain (wrapping round) is not supported. |
 | Vertical | `level` | 1-D. Its *meaning* depends on the vertical mode below. |
 
 **One grid for every field.** All variables share one set of `latitude` and

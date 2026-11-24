@@ -390,6 +390,31 @@ def test_fetch_hourly_window_handles_negative_lon_request_with_360_dataset() -> 
     result = reader.fetch_hourly_window(request)
     assert result.hour_start.shape == (5, 2, 2, 2)
     assert result.hour_end.shape == (5, 2, 2, 2)
+    # The grid comes back in the request's convention, where the particles are:
+    # left at 237.5/238.5, particles at -122 were held at the grid's edge.
+    np.testing.assert_allclose(result.metadata.lon, [-122.5, -121.5])
+    assert reader.get_lon_lat_coverage()[:2] == (-122.5, -121.5)
+
+
+def test_store_straddling_180_keeps_0_360() -> None:
+    """A box across the date line (as met-bazarr writes it: one ascending run in
+    0..360, e.g. 179.5..180.5) cannot be relabelled to -180..180 and stays in
+    0..360; such a domain is configured in 0..360 too, and the preflight
+    (`main._validate_meteorology_space_coverage`) refuses -180..180 bounds."""
+
+    ds = _build_mock_era5_dataset().assign_coords(
+        longitude=np.array([179.5, 180.5], dtype=np.float64)
+    )
+    reader = _InMemoryArcoReader(ds)
+    assert reader.get_lon_lat_coverage()[:2] == (179.5, 180.5)
+
+
+def test_ascending_store_west_of_greenwich_is_relabelled() -> None:
+    """met-bazarr's NAM stores (240..305 E) are read in -180..180, as GLIDE's
+    configurations give longitudes (task B12)."""
+
+    reader = _InMemoryArcoReader(_build_mock_era5_dataset_360_lon())
+    assert reader.get_lon_lat_coverage()[:2] == (-122.5, -121.5)
 
 
 def test_get_time_coverage_returns_dataset_bounds() -> None:
