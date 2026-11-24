@@ -152,7 +152,17 @@ Particle aggregation (roadmap 6b) and convection refinements (6c) are after v1.
 
 ## Known follow-ups
 
-These are documented approximations rather than bugs; each is stated in the
+**A known bug (found 2026-11-24 by task B12, not yet fixed).** The reader
+converts a store's longitudes to −180..180 only when they are not ascending
+(`_ensure_monotonic_longitude`). A regional 0..360 store that does not cross
+Greenwich, which is every NAM store, keeps 0..360, and the engine clamps a
+particle at a negative longitude to the grid's western edge instead of
+wrapping it. A configuration written in −180..180 on such a store therefore
+advects every particle with the winds at the domain's western edge, with no
+error. Until the reader or the engine is fixed, give every longitude on a NAM
+store in 0..360 (the tracer benchmark does).
+
+The rest are documented approximations rather than bugs; each is stated in the
 relevant docs page with its consequence.
 
 - **Per-column vertical interpolation and convection profiles.** Both currently
