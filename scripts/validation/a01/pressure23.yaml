@@ -20,11 +20,11 @@ memory:
 met_domain:
   alt_max_m: 15000.0
   lat_bounds:
-  - 10.0
-  - 80.0
+  - 10.75
+  - 79.0
   lon_bounds:
-  - -100.0
-  - 40.0
+  - -98.0
+  - 39.5
   vertical_levels:
   - 0.0
   - 10.0
