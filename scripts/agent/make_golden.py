@@ -44,6 +44,7 @@ def build_fixture(
     data_dir: Path,
     run_record: gc.RunRecord | None,
     overwrite: bool,
+    run_rev: str | None = None,
 ) -> dict:
     run_dir = run_dir.resolve()
     meta = json.loads((run_dir / gc.METADATA_FILE).read_text())
@@ -92,6 +93,7 @@ def build_fixture(
         "runtime_device": run_device,
         "seed": meta.get("config", {}).get("release", {}).get("seed"),
         **gc.git_info(),
+        **({"git_rev": run_rev, "git_rev_fixed_at": gc.git_info()["git_rev"]} if run_rev else {}),
         **gc.torch_info(gpu=device == "cuda"),
         "python": sys.version.split()[0],
         "data_location": "." if data_dir == fixture_dir else gc.portable_location(data_dir),
@@ -157,6 +159,11 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         help="build from an existing run directory made at this rev instead of running",
     )
+    p.add_argument(
+        "--run-rev",
+        help="with --from-output: the git rev the run was made at, if not HEAD "
+        "(src/ must be unchanged between the two)",
+    )
     p.add_argument("--phase-timers", action="store_true", help="set GLIDE_PHASE_TIMERS=1")
     p.add_argument("--overwrite", action="store_true")
     args = p.parse_args(argv)
@@ -188,6 +195,7 @@ def main(argv: list[str] | None = None) -> int:
         data_dir=data_dir,
         run_record=record,
         overwrite=args.overwrite,
+        run_rev=args.run_rev,
     )
     size = sum(f["bytes"] for f in m["files"].values())
     print(f"fixture {m['fixture']} at {fixture_dir}")
