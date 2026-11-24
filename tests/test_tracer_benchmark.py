@@ -271,14 +271,36 @@ def test_backward_prediction_matches_the_forward_solution(
         ]
     )
     assert expected[0] > 0
-    # Residence is counted in whole steps of 60 s against transits of 46 min (0.25°)
-    # to 3 h; 20,000 particles per sample. Observed agreement is better than 1%.
-    np.testing.assert_allclose(c, expected, rtol=0.02, atol=0.01 * expected.max())
+    # Observed: within 0.13% (seed 1, 20,000 particles per sample). GLIDE credits a
+    # step's residence, at the step's older position, to the age of its younger end,
+    # a timing offset of dt/2: with 60 s steps the 0.25° case (a 46-minute transit
+    # cut by the puff's edges) comes out 2.3% and 7% low, and 1.0% and 2.8% with
+    # 30 s; hence 10 s there. For hours-long tracer releases the offset is < 0.5%.
+    np.testing.assert_allclose(c, expected, rtol=0.005)
 
 
 # ---------------------------------------------------------------------------
 # the benchmark's plumbing
 # ---------------------------------------------------------------------------
+
+
+def test_longitudes_follow_the_convention_the_reader_keeps() -> None:
+    """GLIDE's reader converts a store to -180..180 only when its longitudes are not
+    ascending; an ascending 0..360 regional store (NAM) stays 0..360, and particles
+    at negative longitudes would be clamped to its western edge."""
+
+    nam = np.arange(240.0, 305.01, 0.25)
+    europe = np.concatenate([np.arange(262.0, 360.0, 0.25), np.arange(0.0, 39.51, 0.25)])
+    assert benchmark.glide_lon_convention(nam) == "0..360"
+    assert benchmark.glide_lon_convention(europe) == "-180..180"
+    assert benchmark.glide_lon_convention(np.arange(-30.0, 40.0, 0.25)) == "-180..180"
+    assert benchmark.to_convention(-97.46, "0..360") == pytest.approx(262.54)
+    assert benchmark.to_convention(262.54, "-180..180") == pytest.approx(-97.46)
+    # The source box finds the source whichever convention the footprint grid uses.
+    edges = np.array([262.165, 262.415, 262.665, 262.915])
+    lat = np.array([34.865, 35.115, 35.365, 35.615])
+    w = concentration.source_box_weights(lat, edges, 35.24, -97.46, 0.25)
+    assert w[1, 1] == pytest.approx(1.0) and w.sum() == pytest.approx(1.0)
 
 
 def test_choose_time_bin() -> None:
@@ -368,7 +390,8 @@ def test_okc80_config_and_scorecard_from_a_synthetic_footprint(tmp_path: Path, m
     plan = benchmark.build_plan(["OKC80"], met_start=T("1980-07-08 00:00"))
     (site,) = plan.sites
     ch = site.chunks[0]
-    box = dict(lat=(22.0, 58.0), lon=(-120.0, -55.0), provenance={})
+    # The OKC80 store keeps 0..360 longitudes, so the configuration must too.
+    box = dict(lat=(22.0, 58.0), lon=(240.0, 305.0), lon_convention="0..360", provenance={})
     cfg = benchmark.glide_config(
         benchmark._load_base(None),
         site,
@@ -386,6 +409,9 @@ def test_okc80_config_and_scorecard_from_a_synthetic_footprint(tmp_path: Path, m
     rc = RunConfig.model_validate(cfg)
     assert rc.release.kind == "samples" and len(rc.release.samples) == len(ch.receptors)
     assert rc.release.samples[0].alt_max_agl_m == 100.0
+    assert 240.0 < rc.release.samples[0].lon < 305.0
+    assert rc.output_grid.lon_bounds == pytest.approx((262.54 - 0.375, 262.54 + 0.375))
+    assert rc.met_domain.lon_bounds == (240.5, 304.5)
     assert rc.output_grid.time_bin_seconds == 300
     assert rc.output_grid.z_edges_m == (0.0, 40.0)
     assert rc.turbulence.meander.coefficient == 0.3

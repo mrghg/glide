@@ -340,16 +340,40 @@ def parse_overrides(items: list[str]) -> dict[str, object]:
     return out
 
 
+def glide_lon_convention(store_lon: np.ndarray) -> str:
+    """The longitude convention GLIDE's reader leaves a store in.
+
+    ``ArcoEra5ZarrReader._ensure_monotonic_longitude`` converts a store's
+    longitudes to -180..180 only when they are not already ascending. A
+    regional 0..360 store that does not cross Greenwich (every NAM store)
+    keeps 0..360, and the engine then clamps a particle at a negative
+    longitude to the grid's western edge instead of wrapping it. So the
+    benchmark gives every longitude in the convention the reader keeps.
+    """
+
+    lon = np.asarray(store_lon, dtype=np.float64)
+    if np.all(np.diff(lon) > 0) and float(lon.max()) > 180.0:
+        return "0..360"
+    return "-180..180"
+
+
+def to_convention(lon: float, convention: str) -> float:
+    if convention == "0..360":
+        return float(lon) % 360.0
+    return ((float(lon) + 180.0) % 360.0) - 180.0
+
+
 def met_extent(store: str) -> dict:
-    """Horizontal extent of a meteorology store (longitudes in -180..180) and its
-    met-bazarr provenance attributes."""
+    """Horizontal extent of a meteorology store, in the longitude convention GLIDE
+    reads it in, and its met-bazarr provenance attributes."""
 
     import xarray as xr
 
     ds = xr.open_zarr(store)
     lat = ds["latitude"].values
-    lon = ds["longitude"].values
-    lon = np.where(lon > 180.0, lon - 360.0, lon)
+    raw = ds["longitude"].values
+    conv = glide_lon_convention(raw)
+    lon = np.array([to_convention(x, conv) for x in raw])
     keys = (
         "producer",
         "producer_version",
@@ -366,6 +390,7 @@ def met_extent(store: str) -> dict:
     return dict(
         lat=(float(lat.min()), float(lat.max())),
         lon=(float(lon.min()), float(lon.max())),
+        lon_convention=conv,
         time=(pd.Timestamp(t[0]), pd.Timestamp(t[-1])),
         provenance=prov,
     )
@@ -394,6 +419,7 @@ def glide_config(
         _set_dotted(cfg, k, v)
     rec = chunk.receptors
     lo, hi = plan.layer
+    conv = met_box.get("lon_convention", "-180..180")
     cfg["io"] = {"zarr_store": met, "output_uri": output_uri}
     sim = cfg.setdefault("simulation", {})
     sim["start_time"] = rec["start"].min().strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -405,7 +431,7 @@ def glide_config(
         "samples": [
             {
                 "name": r.receptor_id,
-                "lon": round(float(r.lon), 6),
+                "lon": round(to_convention(r.lon, conv), 6),
                 "lat": round(float(r.lat), 6),
                 "start_time": r.start.strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "duration_seconds": int((r.end - r.start).total_seconds()),
@@ -418,7 +444,7 @@ def glide_config(
     h = 1.5 * source_deg
     n_bins = int(math.ceil(chunk.length_s / plan.time_bin_s))
     cfg["output_grid"] = {
-        "lon_bounds": [site.lon - h, site.lon + h],
+        "lon_bounds": [to_convention(site.lon, conv) - h, to_convention(site.lon, conv) + h],
         "lat_bounds": [site.lat - h, site.lat + h],
         "n_x": 3,
         "n_y": 3,
@@ -901,6 +927,7 @@ def cmd_run(args) -> int:
             source_deg=args.source_deg,
             source_layer_m=args.source_layer_m,
             time_bin_seconds=plan.time_bin_s,
+            lon_convention=box["lon_convention"],
             max_span_h=args.max_span_h,
             basis=args.basis,
             glide_wall_seconds=round(wall, 1),

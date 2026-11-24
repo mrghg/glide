@@ -125,6 +125,11 @@ def source_box_weights(
     """Fraction of each footprint cell inside the ``size_deg`` box centred on the source."""
 
     h = 0.5 * size_deg
+    # Put the source in the grid's longitude convention (0..360 or -180..180).
+    if float(np.max(lon_edges)) > 180.0 and lon < 0.0:
+        lon += 360.0
+    elif float(np.min(lon_edges)) < 0.0 and lon > 180.0:
+        lon -= 360.0
     wy = box_overlap(lat_edges, lat - h, lat + h)
     wx = box_overlap(lon_edges, lon - h, lon + h)
     w = wy[:, None] * wx[None, :]
