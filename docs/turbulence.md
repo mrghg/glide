@@ -419,6 +419,12 @@ particles per 0.25° cell at 50 m. The term itself is small in this field: with
 $\sigma_m \approx 0.09\ \mathrm{m\ s^{-1}}$ the 10-day RMS meander displacement is
 about 5 km.
 
+**Decision (Matt Rigby, 24 Nov 2026): no drift term in v1.** The effect is
+recorded as a known approximation (`docs/physics.md`, approximations table) and
+left uncorrected: below particle noise at the validation's particle counts, and a
+correction would change the physics before the freeze for an effect under the
+noise floor. Revisit if dense-cloud uses (many releases averaged per cell) need it.
+
 Meander is **off by default** in code so existing baselines stay bit-identical,
 and **on** in every shipped example config.
 

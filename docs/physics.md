@@ -647,6 +647,7 @@ Stated plainly, because they bound what the model can be trusted for.
 | Initial $u', v', w' = 0$ rather than sampled from the local $\sigma$ | Particles equilibrate within one $T_L$ (typically ~100 s), which is shorter than the release window. |
 | Virtual temperature approximated as $T$ in the Obukhov length | Humidity correction is small; deferred. |
 | Free-troposphere horizontal turbulence treated as isotropic with the vertical | The unresolved-mesoscale horizontal spread is carried separately by the meander process. |
+| Meander process has no drift correction for its spatially varying $\sigma_m$ | Particles collect slowly where $\sigma_m$ is small: after 10 days, 0.8–1.9% systematic unevenness in 0.25° cells and 0.35–0.75% in 1° cells, below particle noise at validation particle counts (task A03; [turbulence.md §7](turbulence.md#7-meander-unresolved-mesoscale-motion)). Left uncorrected in v1 (decision of 24 Nov 2026). |
 
 Beyond these, the transport physics as a whole **has not been validated against
 external references**. The analytic tests below verify GLIDE against closed-form
