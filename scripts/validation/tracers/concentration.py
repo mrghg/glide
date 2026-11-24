@@ -3,7 +3,8 @@
 Queue task B12. Derivation (``data/tracer-experiments.md`` §5, step 5):
 
 GLIDE's raw footprint ``f[r, k, z, y, x]`` (``footprints.zarr``, variable
-``footprint``) is the residence time, in seconds, of release ``r``'s
+``footprint``) is the residence time, in seconds (divided by the dry-air density
+for a ``dry_air``-weighted store, see below), of release ``r``'s
 particles in cell ``(z, y, x)`` during age bin ``k``, per unit released
 weight (the weights of one release sum to 1; ``docs/physics.md`` §7). Ages
 count back from the END of the release window in bins of
@@ -42,15 +43,20 @@ The tracer's molar mass cancels. ``M_air / V_m`` is 1.2933 kg m⁻³ for
     c_ambient = Q / V_s × Σ_k φ_k τ_k                                        (basis "ambient")
 
 differs from it by ``ρ_k / (M_air / V_m)``, 10–15% in a warm boundary
-layer, which is the spurious factor decision 0022 warns about. GLIDE's
-footprint is not yet density-weighted (queue task A04); until it is, the
-"stp" basis divides each age bin's residence by the dry-air density of the
-meteorology at the source, interpolated in time to the bin's centre. That
-captures how residence and density vary together through the day to the
-resolution of the bins, but not within the box or the 40 m layer
-(decision 0022 estimates the error of dividing afterwards at a few
-percent). When the footprint carries ``density_weighting = "dry_air"``
-(A04), ``τ`` is already divided by the density and no meteorology is read.
+layer, which is the spurious factor decision 0022 warns about.
+
+Which basis a store supports follows from its ``density_weighting``
+attribute (A04, decision 0022). GLIDE's default, ``dry_air``, stores
+``τ/ρ`` per particle (s m³ kg⁻¹): the "stp" basis uses it as it is and reads
+no meteorology, and the "ambient" basis is refused (it would need the density
+multiplied back in). A ``none`` store (``--set output_grid.density_weighting=none``)
+holds plain seconds: "ambient" uses it as it is, and "stp" divides each age
+bin's residence by the dry-air density of the meteorology at the source,
+interpolated in time to the bin's centre, which captures how residence and
+density vary together through the day to the resolution of the bins but not
+within the box or the 40 m layer (decision 0022 estimates the error of dividing
+afterwards at a few percent). A store with no attribute predates A04 and is
+read as plain seconds, with a warning.
 
 Areas use the model's own metric (``GPUEngine.horizontal_turbulent_displacement``:
 110,540 m per degree of latitude and 111,320 cos φ m per degree of
@@ -61,6 +67,7 @@ same Earth.
 from __future__ import annotations
 
 import math
+import warnings
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
@@ -282,7 +289,24 @@ def is_density_weighted(ds) -> bool:
     """Whether a footprint store is already divided by the dry-air density (task A04)."""
 
     attrs = {**ds.attrs, **ds["footprint"].attrs}
-    return str(attrs.get("density_weighting", "none")) == "dry_air"
+    weighting = attrs.get("density_weighting")
+    if weighting is None:
+        # Stores written before A04 carry no attribute and hold plain seconds.
+        warnings.warn(
+            "the footprint store declares no density_weighting; treating it as plain "
+            "residence seconds (a store written before decision 0022)",
+            stacklevel=2,
+        )
+        return False
+    expected_units = {"dry_air": "s m3 kg-1", "none": "s"}
+    if weighting not in expected_units:
+        raise ValueError(f"unknown density_weighting {weighting!r} on the footprint store")
+    units = attrs.get("units")
+    if units is not None and units != expected_units[weighting]:
+        raise ValueError(
+            f"footprint store says density_weighting={weighting!r} but units={units!r}"
+        )
+    return weighting == "dry_air"
 
 
 def predict_from_dataset(

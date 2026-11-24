@@ -11,6 +11,8 @@ import pytest
 import torch
 import xarray as xr
 from pydantic import ValidationError
+from test_density_weighting import _config as _density_config
+from test_density_weighting import _FrozenTurbulence, _WindowConstantReader
 from test_main_runtime import _make_reader, _make_run_config
 
 from lpdm.config import ConcreteRelease, ReleaseBatch, RunConfig
@@ -171,3 +173,44 @@ def test_samples_run_records_the_height_range(tmp_path: Path) -> None:
     np.testing.assert_array_equal(ds["release_alt_top_agl_m"].values, [100.0, 5.0])
     np.testing.assert_array_equal(ds["release_duration_seconds"].values, [900.0, 1800.0])
     assert np.all(ds["footprint"].sum(dim=["time_ago", "z_bin", "latitude", "longitude"]) > 0)
+
+
+@pytest.mark.parametrize(("weighting", "units"), [("dry_air", "s m3 kg-1"), ("none", "s")])
+def test_samples_store_keeps_the_height_range_and_the_weighting(
+    tmp_path: Path, weighting: str, units: str
+) -> None:
+    """The merged metadata keeps both B12's top-height coordinate and A04's attributes.
+
+    The tracer benchmark reads ``density_weighting`` to decide whether to divide by
+    the density; losing it would divide a weighted store a second time."""
+
+    data = _density_config(tmp_path / "out", weighting).model_dump(mode="json")
+    start = datetime.fromisoformat(data["simulation"]["start_time"])
+    data["release"] = {
+        "kind": "samples",
+        "samples": [
+            {
+                "name": "a",
+                "lon": 0.0,
+                "lat": 0.0,
+                "start_time": start.isoformat(),
+                "duration_seconds": 10,
+                "alt_min_agl_m": 0.0,
+                "alt_max_agl_m": 30.0,
+            }
+        ],
+        "n_particles_per_release": 64,
+        "seed": 7,
+    }
+    cfg = RunConfig.model_validate(data)
+    reader = _WindowConstantReader(
+        coverage_start=start - timedelta(hours=2),
+        coverage_end=start + timedelta(hours=2),
+        fields=lambda _t0: (290.0, 0.01, 100000.0),
+    )
+    _run(cfg, reader=reader, scheme=_FrozenTurbulence())
+    ds = xr.open_zarr(tmp_path / "out" / "footprints.zarr").load()
+    np.testing.assert_array_equal(ds["release_alt_top_agl_m"].values, [30.0])
+    attrs = {**ds.attrs, **ds["footprint"].attrs}
+    assert attrs["density_weighting"] == weighting
+    assert attrs["units"] == units
