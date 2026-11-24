@@ -411,9 +411,15 @@ archives that skip when `$GLIDE_DATEM` or `$GLIDE_ETEX` is unset).
    `meas-t1.txt` and labels each record with its background (t0: the original
    background analysis, arl-080; t1: the variable background from a global
    model). `write_datem_predictions` writes predictions in the measurement
-   format with the measurement keys unchanged. The JRC files do not give the
-   source coordinates; the release table leaves them empty until they are
-   taken from the experiment documentation. The ETEX reader is checked by
+   format with the measurement keys unchanged, and refuses any non-finite
+   prediction (written as `nan`, `statmain` would read it as missing and drop
+   the pair without a word; B10b). The JRC files do not give the source
+   coordinates; `ETEX_RELEASES` takes ETEX-1's from the JRC ATMES-II pages
+   ("The first ETEX tracer release",
+   https://remon.jrc.ec.europa.eu/past_activities/atmes_2/site/11a.htm):
+   Monterfil, 48°03'30" N, 2°00'30" W, ground 90 m above sea level, release
+   8 m above ground (B10b). ETEX-2's are left empty, as no source read gives
+   them. The ETEX reader is checked by
    matching JRC's ETEX-1 against DATEM's sample by sample (§2, "ETEX in
    DATEM").
 2. **Scoring** (`tracers/datem_stats.py`) re-implements `statmain` routine by
@@ -443,8 +449,9 @@ archives that skip when `$GLIDE_DATEM` or `$GLIDE_ETEX` is unset).
 
    - **The published experiments** (`tracers/experiments.py`). Neither paper
      says which samples belong to which release. The candidate rules and
-     their pair counts (`python -m tracers rules`; "6h" keeps only CAPTEX's
-     6-hour samples; ANATEX's are all 24 h):
+     their pair counts (`python -m tracers rules`; "6 h" is the duration
+     rule `6h_or_24h`, which keeps CAPTEX's 6-hour samples, dropping its
+     3-hour ones, and ANATEX's samples, which are all 24 h):
 
      | Rule | C1 | C2 | C3 | C4 | C5 | C7 | GGW | STC | Σ\|diff\| |
      | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -458,8 +465,11 @@ archives that skip when `$GLIDE_DATEM` or `$GLIDE_ETEX` is unset).
      | all, start within 60 h | 394 | 395 | 402 | 367 | 325 | 288 | 813 | 800 | 813 |
      | all, whole sample within 60 h | 392 | 382 | 400 | 367 | 318 | 288 | 469 | 465 | 478 |
      | 6 h, most recent; ANATEX samples starting 5–12 Jan | 347 | 352 | 356 | 281 | 318 | 177 | 507 | 501 | 176 |
+     | 6 h, most recent; ANATEX 5–12 Jan, sites inside WRF d02 | 347 | 352 | 356 | 281 | 318 | 177 | 484 | 478 | 222 |
      | **6 h, most recent; ANATEX samples starting 5–13 Jan** | **347** | **352** | **356** | **281** | **318** | **177** | **577** | **570** | **95** |
+     | 6 h, most recent; ANATEX 5–13 Jan, sites inside WRF d02 | 347 | 352 | 356 | 281 | 318 | 177 | 551 | 544 | 89 |
      | 6 h, most recent; ANATEX samples starting 5–14 Jan | 347 | 352 | 356 | 281 | 318 | 177 | 646 | 638 | 232 |
+     | 6 h, most recent; ANATEX 5–14 Jan, sites inside WRF d02 | 347 | 352 | 356 | 281 | 318 | 177 | 617 | 609 | 174 |
 
      **Adopted** (`experiments.ADOPTED_RULE`): for CAPTEX, the 6-hour
      samples, each assigned to the most recent release (release 6's samples
@@ -470,8 +480,32 @@ archives that skip when `$GLIDE_DATEM` or `$GLIDE_ETEX` is unset).
      release-based rule comes near, because the five releases of each tracer
      run to 15 January and Hegarty et al. have fewer pairs than samples in
      that period; the date cut is empirical, and leaves 15 and 14 pairs more
-     than published (perhaps sites outside their 10 km WRF domain). The full
-     table, with 48- and 72-hour windows, is printed by `rules`.
+     than published. The full table, with 48- and 72-hour windows, is
+     printed by `rules`.
+   - **The ANATEX surplus is not sites outside the WRF domain** (B10b,
+     24 Nov 2026). Hegarty et al.'s ANATEX runs used AER's WRF inner
+     domain, which NOAA ARL posts with DATEM as
+     `https://www.ready.noaa.gov/data/archives/datem/anatex/aer_anatex_PBL1A_*.d02`
+     (5–16 January). The first index record of those files (only the header
+     was read) gives the grid: Lambert conformal, true latitudes 33° and
+     45° N, reference longitude 100° W, 10 km, 454 × 334 points, point
+     (227, 167) at 41.2° N, 98.02° W (`experiments.ANATEX_WRF_D02`;
+     spherical projection on ARL's 6371.2 km earth). Three ANATEX sites lie
+     outside it: 2601 (25.90° N, 97.43° W; 3.3 cells south), 3052 (53.30° N,
+     60.37° W; 19 cells east, 26 north) and 3007 (41.67° N, 69.97° W;
+     0.35 cells east, outside under every variant of earth radius and
+     half-cell origin tried). Under the adopted date cut they hold 26 pairs
+     per tracer (9, 9 and 8), so dropping them gives 551 and 544 against
+     Hegarty et al.'s 562 and 556: 11 and 12 too few instead of 15 and 14
+     too many. The total difference falls only from 95 to 89, because the
+     cut overshoots rather than closes the gap, and no other date cut
+     combined with it does better. Dropping only the two sites well outside would give 559 and
+     552, but there is no reason to keep 3007, and whether a site outside
+     the meteorology loses its pairs at all depends on each model's
+     concentration grid, which DATEM pairs on (a zero is still a pair). The
+     domain cut is therefore **not** adopted; it is available as
+     `AssignmentRule(..., anatex_wrf_domain=True)` and listed by `rules`.
+     The remaining difference is unexplained.
    - **The sample list for A11** (`python -m tracers export-samples DIR`)
      writes `tracer_samples.csv` (experiment, assigned release, tracer,
      sample ID, site, latitude, longitude, UTC start and end) and
@@ -531,8 +565,8 @@ record whose `**Registration.**` line is filled in (validation-plan Tier 3);
 `OKC80` (PMCH, DATEM tracer 1), `OKC80-PDCH` (tracer 2, sampled at the same
 windows, so the same footprints serve both), and the eight published ones
 (`CAPTEX-1` … `CAPTEX-7`, `ANATEX-GGW`, `ANATEX-STC`, with B10's adopted
-sample rule). ETEX is not wired in yet: its source coordinates are not in the
-files (step 1).
+sample rule). ETEX is not wired in yet; ETEX-1's source coordinates are now in
+`readers.ETEX_RELEASES` (step 1).
 
 From `scripts/validation`, with `PYTHONPATH` pointing at the GLIDE `src` to
 use and, on a GPU node, `scripts/gpu_env.sh` sourced:
