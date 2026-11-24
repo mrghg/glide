@@ -39,19 +39,23 @@ fixtures in the same change.
 
 **Measured.** Low-lying sites barely move: the smoke run (Mace Head, 1 day)
 changes its release total by +2.2e-5 (CPU) and +6.2e-5 (CUDA) relative and its
-0–40 m total by +0.03% (CPU). Over the Alps the change is large and real: one
-release at the Jungfraujoch site (46.5475° N, 7.9851° E, 1,000 m above ground,
-1 Jan 2024 00 UTC, 5 days back, 21,600 particles, CUDA) loses 17.9% of its
-0–40 m sensitivity (weighted mean |log10 ratio| of the 0–40 m map 0.108),
-against seed-to-seed differences of 0.5% and 0.060 (seed 42 vs 43, both with
-this change). Most of it is the free-troposphere closure, not the density
-drift: the drift's $\partial_z\ln\rho$ at the Jungfraujoch column changes by
-4–6%, but $N^2 = (g/\theta)\,\partial_z\theta$ is a small difference of two
-large terms ($\partial_z \ln T$ and $\kappa\,\partial_z \ln p$), and with the
-area-mean $p$ it was 5–55% too low in that column between 0.5 and 10 km
-(median 4%, 95th percentile 19% over the Alps, 43–48.5° N, 5–16.5° E,
-500 m–15 km; window 31 Dec 2023 12 UTC), so the free
-troposphere there was mixed too strongly. The fixtures were regenerated with
+0–40 m total by +0.03% (CPU). In the fields over the Alps the change is large:
+the drift's $\partial_z\ln\rho$ at the Jungfraujoch column changes by 4–6%, and
+$N^2 = (g/\theta)\,\partial_z\theta$, a small difference of two large terms
+($\partial_z \ln T$ and $\kappa\,\partial_z \ln p$), was 5–55% too low in that
+column between 0.5 and 10 km with the area-mean $p$ (median 4%, 95th percentile
+19% over the Alps, 43–48.5° N, 5–16.5° E, 500 m–15 km; window 31 Dec 2023
+12 UTC). **On a footprint the effect is within particle noise:** one release at
+the Jungfraujoch site (46.5475° N, 7.9851° E, 1,000 m above ground, 1 Jan 2024
+00 UTC, 5 days back, 21,600 particles, CUDA, physics of
+`configs/smoke_mhd_single_release.yaml`) changes its 0–40 m total by −0.4%
+against `main` (weighted mean |log10 ratio| of the 0–40 m map 0.063), the same
+size as seed-to-seed differences (0.5% and 0.060). Fixing only the density, or
+only θ, gives −1.9% and −1.4% (0.061, 0.062), also at the noise level
+(24 Nov 2026). A first measurement during this change reported −17.9% (0.108)
+for the same configuration; it could not be reproduced with either `main`'s code
+or a switch restoring the old pressure, and its run outputs (on a node-local
+scratch area) were lost, so it is withdrawn. The fixtures were regenerated with
 this change (docs/VALIDATION.md §8). Unit tests:
 `tests/test_hanna_column_pressure.py` (closed-form hydrostatic columns, flat
 and elevated; independence from the other columns; window midpoint; bit
