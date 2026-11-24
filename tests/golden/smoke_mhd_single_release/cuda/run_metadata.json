@@ -13,7 +13,7 @@
       "scheme": "emanuel_reduced"
     },
     "io": {
-      "output_uri": "outputs/golden-runs/smoke-cuda-fixture",
+      "output_uri": "/run/user/1483808456/claude-1483808456/-home-u6za-chxmr-u6za-code-glide/6e24b093-d7c0-4eba-8750-53dc75bf6263/scratchpad/runs/smoke_cuda_make",
       "zarr_store": "data/era5-arco/EUROPE_*_ERA5-ARCO.zarr"
     },
     "memory": {
@@ -115,10 +115,10 @@
     "value_dimensionality": "(dimensionless mass fraction) \u00d7 s m3 kg-1 \u2014 residence time per unit released mass, divided by the dry-air density"
   },
   "outputs": {
-    "endpoint_particles": "outputs/golden-runs/smoke-cuda-fixture/endpoint_particles.parquet",
-    "footprints": "outputs/golden-runs/smoke-cuda-fixture/footprints.zarr",
-    "metadata": "outputs/golden-runs/smoke-cuda-fixture/run_metadata.json",
-    "trajectory_diagnostics": "outputs/golden-runs/smoke-cuda-fixture/trajectory_diagnostics.parquet"
+    "endpoint_particles": "/run/user/1483808456/claude-1483808456/-home-u6za-chxmr-u6za-code-glide/6e24b093-d7c0-4eba-8750-53dc75bf6263/scratchpad/runs/smoke_cuda_make/endpoint_particles.parquet",
+    "footprints": "/run/user/1483808456/claude-1483808456/-home-u6za-chxmr-u6za-code-glide/6e24b093-d7c0-4eba-8750-53dc75bf6263/scratchpad/runs/smoke_cuda_make/footprints.zarr",
+    "metadata": "/run/user/1483808456/claude-1483808456/-home-u6za-chxmr-u6za-code-glide/6e24b093-d7c0-4eba-8750-53dc75bf6263/scratchpad/runs/smoke_cuda_make/run_metadata.json",
+    "trajectory_diagnostics": "/run/user/1483808456/claude-1483808456/-home-u6za-chxmr-u6za-code-glide/6e24b093-d7c0-4eba-8750-53dc75bf6263/scratchpad/runs/smoke_cuda_make/trajectory_diagnostics.parquet"
   },
   "runtime": {
     "device": "cuda",
@@ -176,8 +176,8 @@
       }
     ],
     "peak_device_allocated_bytes": 498540032,
-    "peak_device_reserved_bytes": 1077936128,
-    "peak_rss_bytes": 8403877888,
+    "peak_device_reserved_bytes": 1098907648,
+    "peak_rss_bytes": 7831617536,
     "rng_seed": 42,
     "status": "completed",
     "steps": 1500
