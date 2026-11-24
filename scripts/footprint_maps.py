@@ -33,6 +33,8 @@ MERCATOR_LAT_LIMIT = 85.05112878
 # Matches the FLEXPART/NAME surface layer and the run's bottom z-bin (both 0-40 m),
 # so the STILT conversion is exact rather than overlap-approximated.
 DEFAULT_SURFACE_LAYER_DEPTH_M = 40.0
+# Applied only to footprints in plain seconds (density_weighting: none); a
+# dry_air footprint is already divided by the density at each particle.
 DEFAULT_AIR_DENSITY_KG_M3 = 1.2
 
 # The Europe/Atlantic region the ICOS network is sensitive to. The east edge sits
@@ -69,6 +71,14 @@ def lat_to_y(lat: np.ndarray | float) -> np.ndarray:
 # --------------------------------------------------------------------------- #
 
 
+def density_for(footprint: xr.DataArray, air_density_kg_m3: float) -> float | None:
+    """The density to apply afterwards: none for a footprint already weighted by
+    the dry-air density while counting (decision 0022), else the given one."""
+    if footprint.attrs.get("density_weighting", "none") == "none":
+        return air_density_kg_m3
+    return None
+
+
 def compute_frames(
     footprint: xr.DataArray,
     release_times: np.ndarray,
@@ -88,12 +98,13 @@ def compute_frames(
             # release_times is the materialised coord; build integer indices rather
             # than masking the dask-backed store coord.
             at_t = footprint.isel(release=np.nonzero(release_times == stamp)[0])
-            combined = at_t.sum("release")  # (time_ago, z_bin, latitude, longitude)
+            # keep_attrs: the footprint's density_weighting must reach the helper.
+            combined = at_t.sum("release", keep_attrs=True)  # (time_ago, z_bin, lat, lon)
             pending.append(
                 to_stilt_surface_footprint(
                     combined,
                     surface_layer_depth_m=surface_layer_depth_m,
-                    air_density_kg_m3=air_density_kg_m3,
+                    air_density_kg_m3=density_for(combined, air_density_kg_m3),
                     integrate_time=True,
                 ).data
             )

@@ -244,13 +244,21 @@ one = fp.isel(release=0)  # or .sel() on the release coords
 stilt = to_stilt_surface_footprint(
     one,
     surface_layer_depth_m=40.0,  # must equal the bottom z-bin you ran with
-    air_density_kg_m3=1.225,  # or a 2-D field from surface_air_density_from_met
     integrate_time=True,
 )
 ```
 
-Raw footprints are in seconds per cell; this applies Lin et al. (2003) Eq. 5 to
-get $\mathrm{m^2\ s\ mol^{-1}}$.
+By default (`output_grid.density_weighting: dry_air`, decision 0022) raw
+footprints are already divided by the dry-air density at each particle, in
+s m³ kg⁻¹, and this multiplies by $M_\mathrm{air}/h$ to get
+$\mathrm{m^2\ s\ mol^{-1}}$ of dry air. A footprint run with
+`density_weighting: none` is in plain seconds and needs
+`air_density_kg_m3=` (a scalar, or a 2-D field from
+`surface_air_density_from_met`), Lin et al. (2003) Eq. 5; the helper reads the
+store's `density_weighting` attribute and refuses a density for a weighted
+footprint. Keep the attributes through any reduction (`keep_attrs=True`).
+FLEXPART's and NAME's footprints are put into the same dry-air units by
+`flexpart_to_dry_air_footprint` and `name_to_dry_air_footprint`.
 
 ### Step 3 — compare cell for cell
 
@@ -278,8 +286,9 @@ mass-conservative area-weighted regridding for rectangular lat/lon grids.
 - **Mismatched surface-layer depth.** If you cannot make the bins match exactly,
   the converter depth-weights overlapping bins — approximate, and it assumes
   uniform residence-time density within a bin.
-- **Spatially varying density.** For runs spanning large latitude or elevation
-  ranges, replace the scalar `air_density_kg_m3` with a 2-D field.
+- **Density.** A `dry_air` footprint carries the density of each particle as
+  it was counted; dividing an unweighted footprint afterwards by one density
+  per cell is biased where residence and density co-vary (decision 0022).
 - **Release setup.** Keep the release inside the surface layer
   (`alt_agl_m < surface_layer_depth_m`) so "particle not yet mixed" startup
   transients do not dominate.

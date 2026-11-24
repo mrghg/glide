@@ -603,6 +603,34 @@ def test_footprint_time_bin_index_uses_the_bin_width() -> None:
     assert _footprint_time_bin_index(end, end - timedelta(days=1, hours=1), 2, 86400.0) == 1
 
 
+def test_preflight_refuses_met_domain_outside_the_grid() -> None:
+    """A met domain in -180..180 over a grid left in 0..360 ran silently with
+    the grid edge's winds (task B12); the preflight now refuses it."""
+
+    from lpdm.main import PreflightValidationError, _validate_meteorology_space_coverage
+
+    class _Grid:
+        def __init__(self, coverage):
+            self._c = coverage
+
+        def get_lon_lat_coverage(self):
+            return self._c
+
+    cfg = RunConfig.model_validate(_base_dict())
+    md = cfg.met_domain
+    inside = (
+        md.lon_bounds[0] - 1,
+        md.lon_bounds[1] + 1,
+        md.lat_bounds[0] - 1,
+        md.lat_bounds[1] + 1,
+    )
+    _validate_meteorology_space_coverage(_Grid(inside), cfg)
+    _validate_meteorology_space_coverage(_Grid(None), cfg)  # reader cannot say: no check
+    shifted = (inside[0] + 360.0, inside[1] + 360.0, inside[2], inside[3])
+    with pytest.raises(PreflightValidationError, match="longitude convention"):
+        _validate_meteorology_space_coverage(_Grid(shifted), cfg)
+
+
 # ---- A03: boundary-layer depth limits and the meander timescale (decision 0024) ----
 
 

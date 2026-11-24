@@ -141,6 +141,31 @@ class HourlyMetTensors:
     # hour_end value is the mean over exactly this window, so it is held
     # constant through the window instead of interpolated (see `time_weight`).
     period_channels: frozenset[str] = frozenset()
+    # Per-column pressure on the window's levels, hPa: `(hour_start, hour_end)`,
+    # each `[z, y, x]` (shared with the reader's hour cache, like the channel
+    # tensors). `metadata.pressure_level_hpa` is its horizontal mean. Deep
+    # convection lifts each column's parcel on these (task A02). `None` for
+    # synthetic readers and for the pressure-level path without terrain
+    # following, where every column has the level pressures.
+    pressure_hpa: tuple[torch.Tensor, torch.Tensor] | None = None
+
+    def column_pressure_hpa(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return `(hour_start, hour_end)` per-column pressure, hPa, `[z, y, x]`.
+
+        Falls back to `metadata.pressure_level_hpa` broadcast over the
+        horizontal when the reader did not supply per-column pressure.
+        """
+
+        if self.pressure_hpa is not None:
+            return self.pressure_hpa[0], self.pressure_hpa[1]
+        shape = self.hour_start.shape[1:]
+        p = torch.as_tensor(
+            np.array(self.metadata.pressure_level_hpa, dtype=np.float64),
+            dtype=self.hour_start.dtype,
+            device=self.hour_start.device,
+        )
+        p3 = p.view(-1, 1, 1).expand(shape)
+        return p3, p3
 
     def time_weight(self, name: str, alpha: float) -> float:
         """Weight of ``hour_end`` when interpolating channel ``name`` at
@@ -228,6 +253,13 @@ class MetReader(ABC):
     @abstractmethod
     def get_time_coverage(self) -> tuple[datetime, datetime]:
         """Return the dataset time coverage as UTC datetimes."""
+
+    def get_lon_lat_coverage(self) -> tuple[float, float, float, float] | None:
+        """(lon_min, lon_max, lat_min, lat_max) of the grid as the runtime sees
+        it, or None if the reader cannot say. Used by the preflight to refuse a
+        met domain outside the grid (or in another longitude convention)."""
+
+        return None
 
     @property
     def met_interval_seconds(self) -> int:
@@ -875,6 +907,7 @@ class ArcoEra5ZarrReader(MetReader):
                     height_broadcast, dtype=self.dtype, device=self.device
                 ),
                 period_channels=self.period_channels,
+                pressure_hpa=(bundle_start["pressure_hpa"], bundle_end["pressure_hpa"]),
             )
 
         hour_start = self._dataset_to_channel_tensor(ds_start)
@@ -937,7 +970,7 @@ class ArcoEra5ZarrReader(MetReader):
         tensor_p = self._dataset_to_channel_tensor(ds_hour)
         lon_arr = np.asarray(ds_hour[self.lon_name].values)
         lat_arr = np.asarray(ds_hour[self.lat_name].values)
-        tensor_agl, level_out, pressure_level_hpa = self._resample_hour_to_agl(
+        tensor_agl, level_out, pressure_level_hpa, pressure_hpa = self._resample_hour_to_agl(
             tensor_p, height_agl_p, ds_hour, lat_arr, lon_arr, spatial.z_max
         )
         bundle = dict(
@@ -946,6 +979,7 @@ class ArcoEra5ZarrReader(MetReader):
             lat=lat_arr,
             level=level_out,
             pressure_level_hpa=pressure_level_hpa,
+            pressure_hpa=pressure_hpa,
             units=self._read_variable_units(ds_hour),
         )
         with self._hour_cache_lock:
@@ -1000,8 +1034,11 @@ class ArcoEra5ZarrReader(MetReader):
         lat_arr: np.ndarray,
         lon_arr: np.ndarray,
         z_max_m: float,
-    ) -> tuple[torch.Tensor, np.ndarray, np.ndarray]:
+    ) -> tuple[torch.Tensor, np.ndarray, np.ndarray, torch.Tensor]:
         """Resample ONE hour's pressure-level channels onto the fixed AGL grid.
+
+        Returns the channel tensor, the AGL levels, the bbox-mean pressure per
+        level (hPa) and the per-column pressure on the AGL grid (hPa, tensor).
 
         FLEXPART-style hybrid coordinate (Finding 7): per-column regrid excluding
         sub-surface levels, then slope-correct `w` into the AGL frame. Runs on the
@@ -1044,7 +1081,13 @@ class ArcoEra5ZarrReader(MetReader):
         pressure_level_hpa = pressure_agl.mean(axis=(1, 2))  # already hPa
 
         tensor_agl = torch.as_tensor(arr_agl, dtype=self.dtype, device=self.device)
-        return tensor_agl, np.asarray(agl_levels, dtype="float64"), pressure_level_hpa
+        pressure_hpa = torch.as_tensor(pressure_agl, dtype=self.dtype, device=self.device)
+        return (
+            tensor_agl,
+            np.asarray(agl_levels, dtype="float64"),
+            pressure_level_hpa,
+            pressure_hpa,
+        )
 
     #: Store attributes copied into run_metadata.json (met format 2.0,
     #: "Provenance attributes"; task B1). Absent ones are left out.
@@ -1089,6 +1132,14 @@ class ArcoEra5ZarrReader(MetReader):
                 entry["error"] = f"{type(exc).__name__}: {exc}"
             out.append(entry)
         return out
+
+    def get_lon_lat_coverage(self) -> tuple[float, float, float, float]:
+        """Grid extent after longitude normalisation (`_ensure_monotonic_longitude`)."""
+
+        ds = self._open_dataset()
+        lon = np.asarray(ds[self.lon_name].values, dtype=np.float64)
+        lat = np.asarray(ds[self.lat_name].values, dtype=np.float64)
+        return float(lon.min()), float(lon.max()), float(lat.min()), float(lat.max())
 
     def get_time_coverage(self) -> tuple[datetime, datetime]:
         """Return the first and last timestamps available in the dataset."""
@@ -1169,10 +1220,18 @@ class ArcoEra5ZarrReader(MetReader):
         if lon.size <= 1:
             return ds
 
-        if np.all(np.diff(lon) > 0):
-            return ds  # already strictly ascending
-
         new_lon = np.where(lon >= 180.0, lon - 360.0, lon)
+        if np.all(np.diff(lon) > 0):
+            # Already ascending. GLIDE's configurations give longitudes in
+            # -180..180, so an ascending 0..360 store that stays ascending in
+            # -180..180 (a box west of Greenwich, e.g. met-bazarr's NAM stores,
+            # 240..305) is relabelled to match. Without this the particles, at
+            # -120..-55, fell outside the met grid's 240..305 and were silently
+            # held at its western edge (task B12, 24 Nov 2026). A box straddling
+            # 180 E would not stay ascending and keeps 0..360.
+            if float(lon.max()) > 180.0 and np.all(np.diff(new_lon) > 0):
+                return ds.assign_coords({self.lon_name: new_lon})
+            return ds
         if np.all(np.diff(new_lon) > 0):
             return ds.assign_coords({self.lon_name: new_lon})
 

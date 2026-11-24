@@ -208,6 +208,9 @@ def _make_run_config(**flat_overrides: object) -> RunConfig:
                 "n_y": flat["output_n_y"],
                 "z_edges_m": flat["z_edges_m"],
                 "n_time_bins": flat["n_time_bins"],
+                # Plain residence seconds, as before decision 0022; the
+                # density-weighting tests set "dry_air".
+                "density_weighting": flat.get("density_weighting", "none"),
             },
             "met_domain": {
                 "lon_bounds": flat["met_lon_bounds"],
@@ -1070,6 +1073,7 @@ def _make_periodic_config(
                 "n_y": 16,
                 "z_edges_m": (0.0, 1000.0, 5000.0),
                 "n_time_bins": 3,
+                "density_weighting": "none",
             },
             "met_domain": {
                 "lon_bounds": (-3.0, 3.0),
@@ -1145,6 +1149,7 @@ def _make_multi_site_config(
                 "n_y": 16,
                 "z_edges_m": (0.0, 1000.0, 5000.0),
                 "n_time_bins": 3,
+                "density_weighting": "none",
             },
             "met_domain": {
                 "lon_bounds": (-3.0, 3.0),

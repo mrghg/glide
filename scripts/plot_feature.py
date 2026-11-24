@@ -31,6 +31,7 @@ from footprint_maps import (  # noqa: E402
     build_map,
     colour_ceiling,
     compute_frames,
+    density_for,
     hour_stamp,
     n_sites,
 )
@@ -40,10 +41,11 @@ def mean_footprint(footprint: xr.DataArray, args) -> np.ndarray:
     """Combined surface sensitivity averaged over every release hour in the run."""
     from lpdm.comparison import to_stilt_surface_footprint
 
+    combined = footprint.sum("release", keep_attrs=True)
     total = to_stilt_surface_footprint(
-        footprint.sum("release"),
+        combined,
         surface_layer_depth_m=args.surface_layer_depth,
-        air_density_kg_m3=args.air_density,
+        air_density_kg_m3=density_for(combined, args.air_density),
         integrate_time=True,
     ).compute(scheduler="threads")
     n_hours = len(np.unique(footprint["release_time"].values))
