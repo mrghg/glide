@@ -208,6 +208,9 @@ def _make_run_config(**flat_overrides: object) -> RunConfig:
                 "n_y": flat["output_n_y"],
                 "z_edges_m": flat["z_edges_m"],
                 "n_time_bins": flat["n_time_bins"],
+                # Plain residence seconds, as before decision 0022; the
+                # density-weighting tests set "dry_air".
+                "density_weighting": flat.get("density_weighting", "none"),
             },
             "met_domain": {
                 "lon_bounds": flat["met_lon_bounds"],
@@ -1070,6 +1073,7 @@ def _make_periodic_config(
                 "n_y": 16,
                 "z_edges_m": (0.0, 1000.0, 5000.0),
                 "n_time_bins": 3,
+                "density_weighting": "none",
             },
             "met_domain": {
                 "lon_bounds": (-3.0, 3.0),
@@ -1145,6 +1149,7 @@ def _make_multi_site_config(
                 "n_y": 16,
                 "z_edges_m": (0.0, 1000.0, 5000.0),
                 "n_time_bins": 3,
+                "density_weighting": "none",
             },
             "met_domain": {
                 "lon_bounds": (-3.0, 3.0),
@@ -2238,3 +2243,145 @@ def test_time_bins_must_cover_the_simulation(tmp_path: Path) -> None:
     assert cfg.output_grid.drop_older_ages
     _binned_config(tmp_path, "c", 10800, 1, 3600)  # one bin: time-integrated, always fine
     _binned_config(tmp_path, "d", 10800, 2, 5400)  # 2 x 1.5 h covers 3 h
+
+
+# ---- A03: meander timescale binding, the model top, and stopping by age ----
+
+
+@pytest.mark.parametrize(
+    ("interval_seconds", "configured", "expected"),
+    [(3600, None, 1800.0), (10800, None, 5400.0), (10800, 900.0, 900.0)],
+)
+def test_meander_timescale_bound_from_the_met_interval(
+    tmp_path: Path, interval_seconds: int, configured, expected: float
+) -> None:
+    """Decision 0024: an unset meander timescale becomes half the interval the
+    reader reports, fixed once before the first step; a configured one is kept."""
+
+    from lpdm.main import _scheme_kwargs
+    from lpdm.turbulence import get_scheme
+
+    cfg = _make_run_config(
+        output_uri=str(tmp_path / "out"),
+        turbulence_scheme="hanna_1982",
+        simulation_length_seconds=10800,
+        n_particles=32,
+        n_time_bins=1,
+    )
+    meander = {"enabled": True, "timescale_seconds": configured}
+    cfg = cfg.model_copy(
+        update={
+            "turbulence": cfg.turbulence.model_copy(
+                update={"meander": cfg.turbulence.meander.model_copy(update=meander)}
+            )
+        }
+    )
+    reader = AnalyticMetReader(
+        coverage_start=cfg.simulation.start_time
+        - timedelta(seconds=cfg.simulation.length_seconds + interval_seconds),
+        coverage_end=cfg.simulation.start_time + timedelta(seconds=interval_seconds),
+        wind_fn=lambda _: (5.0, 0.0, 0.0),
+        channel_names=("u", "v", "w", "blh", "sp", "t", "ustar", "shf"),
+        interval_seconds=interval_seconds,
+    )
+    scheme = get_scheme("hanna_1982", **_scheme_kwargs(cfg))
+
+    metadata = _run(cfg, reader=reader, scheme=scheme)
+
+    assert metadata["runtime"]["status"] == "completed"
+    assert scheme.meander_timescale_seconds == expected
+
+
+@pytest.mark.parametrize("static", [False, True], ids=["dynamic", "static"])
+def test_particle_reaching_the_model_top_is_removed(
+    tmp_path: Path, static: bool, monkeypatch
+) -> None:
+    """docs/physics.md §5: a particle that rises above met_domain.alt_max_m (the top
+    of the vertical grid) is removed at the end of the step in which it crosses
+    (`_within_met_domain`, applied in `main._run` after the footprint is counted).
+    It is neither reflected nor held at the top. It counts for that last step at
+    the height it reached, then for nothing; its end record keeps that position.
+
+    Still air but for a uniform updraft: backward in time a particle moves by
+    -w dt, so w = -1 m/s lifts it 300 m per 300 s step. From 450 m it is at
+    1,950 m after five steps (inside a 2,000 m top) and 2,250 m after six.
+    """
+
+    monkeypatch.setattr(PlaceholderConstantOU, "sigma_w2", 0.0)
+    monkeypatch.setenv("GLIDE_STATIC_SUBSTEPS", "1" if static else "0")
+    n = 16
+    cfg = _make_run_config(
+        output_uri=str(tmp_path / "out"),
+        simulation_length_seconds=10800,
+        dt_seconds=300,
+        release_alt_agl_m=450.0,
+        release_duration_seconds=300,
+        n_particles=n,
+        n_time_bins=1,
+        met_alt_max_m=2000.0,
+        z_edges_m=(0.0, 1000.0, 2000.0, 3000.0),
+    )
+    reader = _make_reader(cfg, wind_fn=lambda _: (0.0, 0.0, -1.0))
+
+    metadata = _run(cfg, reader=reader)
+
+    traj = pd.read_parquet(tmp_path / "out" / "trajectory_diagnostics.parquet")
+    escaped = traj["escaped_this_step"].to_numpy()
+    active = traj["active_particles"].to_numpy()
+    assert int(escaped.sum()) == n == metadata["schedule"]["escaped_met_domain_total"]
+    # All removed together, at the end of their sixth step (450 + 6 x 300 = 2,250 m),
+    # none earlier, and nothing active afterwards.
+    first_active = int(np.nonzero(active)[0][0])
+    (step_idx,) = np.nonzero(escaped)
+    assert step_idx.tolist() == [first_active + 5]
+    assert int(active[step_idx[0] + 1 :].max()) == 0
+
+    # End records keep the position at removal, 250 m above the top.
+    ends = pd.read_parquet(tmp_path / "out" / "endpoint_particles.parquet")
+    np.testing.assert_allclose(ends["alt"].to_numpy(), 2250.0, atol=1e-3)
+
+    # The footprint counts every step up to and including the crossing one, that one
+    # at 2,250 m in the 2-3 km layer above the top, and nothing after it: one step
+    # at 750 m, four between 1,050 and 1,950 m, one at 2,250 m.
+    fp = xr.open_zarr(tmp_path / "out" / "footprints.zarr")["footprint"]
+    per_layer = fp.sum(dim=("release", "time_ago", "latitude", "longitude")).values
+    np.testing.assert_allclose(per_layer, [300.0, 1200.0, 300.0], rtol=1e-5)
+
+
+@pytest.mark.parametrize("static", [False, True], ids=["dynamic", "static"])
+def test_each_particle_stops_its_own_length_after_its_release(
+    tmp_path: Path, static: bool, monkeypatch
+) -> None:
+    """Stopping by age (docs/physics.md §4): every particle is followed for
+    simulation.length_seconds back from its own release time and then stops,
+    whatever the other releases in its batch do; there is no single end time for
+    the run's particles. (`active_mask` in `main._run`; the footprint totals are
+    checked in test_every_particle_followed_for_full_simulation_length.)
+
+    Two releases 2 h apart, each within one 300 s step, followed 3 h, in one
+    batch. Backward from the later release: 2 h with only its particles, 1 h with
+    both, then 2 h with only the earlier release's, which stops 3 h before its
+    own release time, not at the end of the later release's 3 h.
+    """
+
+    monkeypatch.setattr(PlaceholderConstantOU, "sigma_w2", 0.0)
+    monkeypatch.setenv("GLIDE_STATIC_SUBSTEPS", "1" if static else "0")
+    n = 8
+    cfg = _make_periodic_config(
+        output_uri=str(tmp_path / "out"),
+        n_releases=2,
+        period_seconds=7200,
+        duration_seconds=300,
+        n_particles_per_release=n,
+        simulation_length_seconds=10800,
+        max_releases_per_batch=2,
+    )
+    reader = _make_multi_release_reader(cfg, wind_fn=lambda _: (0.0, 0.0, 0.0))
+
+    _run(cfg, reader=reader)
+
+    traj = pd.read_parquet(tmp_path / "out" / "trajectory_diagnostics.parquet")
+    active = traj["active_particles"].to_numpy()
+    steps_per_hour = 3600 // cfg.simulation.dt_seconds
+    expected = [n] * (2 * steps_per_hour) + [2 * n] * steps_per_hour + [n] * (2 * steps_per_hour)
+    assert active[active > 0].tolist() == expected

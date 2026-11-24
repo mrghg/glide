@@ -62,7 +62,7 @@ inlets today, column and satellite releases on the roadmap.
 | **Transport** | First-order Lagrangian stochastic model (Thomson 1987). RK2 midpoint advection; exact-OU turbulent velocity update with the full well-mixed drift and the Stohl–Thomson density correction, sign-flipped for backward integration. |
 | **Vertical coordinate** | Geometric metres above ground, on a fixed terrain-following grid. Meteorology is resampled onto it once per hour and the vertical velocity is transformed into that frame. |
 | **Turbulence** | Hanna (1982) in three stability regimes, aligned to FLEXPART v11; gradient-Richardson closure above the boundary layer; optional Maryon (1998) unresolved-mesoscale meander. |
-| **Convection** | Reduced Emanuel & Živković-Rothman mass-flux scheme, once per meteorology window, with a non-divergent flux matrix sampled by its transpose in backward mode. |
+| **Convection** | Reduced Emanuel & Živković-Rothman mass-flux scheme, in each meteorology column, once per meteorology window, with a non-divergent flux matrix sampled by its transpose in backward mode. |
 | **Boundaries** | Smooth-wall ground reflection flipping both position and vertical velocity; constant-statistics basal layer; drop-and-count at the domain edge. |
 | **Output** | Streaming 5-D Zarr footprint store `(release × time_ago × z × lat × lon)`, plus endpoint particles, diagnostics, and run metadata. |
 
@@ -190,7 +190,7 @@ fp["footprint"].set_index(release=["site", "release_time"]).unstack("release").s
 `simulation.length_seconds > release.duration_seconds`, strictly ascending
 `output_grid.z_edges_m`, and every release point lying inside `met_domain`.
 
-Two settings deserve particular attention:
+Three settings deserve particular attention:
 
 **`met_domain.vertical_levels`** sets the internal terrain-following AGL grid the
 meteorology is resampled onto. **This, not the meteorology source, is the
@@ -200,6 +200,13 @@ heights in metres; omit it for the default, 40 levels stretched from
 `first_layer_m` (decision 0017), which roughly matches the near-surface density
 of ERA5's model levels, the default meteorology. The meteorology cache scales
 linearly with the level count.
+
+**`turbulence.boundary_layer_depth_min_m` / `_max_m`** hold the boundary-layer
+depth from the meteorology within limits wherever the turbulence scheme uses it.
+The defaults, 50 m and no maximum (`null`), keep GLIDE's long-standing behaviour;
+runs compared with FLEXPART and NAME set 100 and 4500, as those models do
+([docs/turbulence.md](docs/turbulence.md) §2). An unset
+`turbulence.meander.timescale_seconds` is half the store's met interval.
 
 **`batch.max_releases_per_batch`** controls how many releases are integrated
 together in one engine pass, and it is the main memory lever. Keep it a multiple
@@ -219,10 +226,20 @@ Written under `io.output_uri`:
 
 | File | Contents |
 | --- | --- |
-| `footprints.zarr` | the 5-D footprint store, streamed one batch at a time. Time-ago bins are `output_grid.time_bin_seconds` wide (default 1 h), counted back from each release window's end; `n_time_bins` of them must cover the simulation length unless `output_grid.drop_older_ages: true`, and the axis adds bins for the release window. `time_ago_start_hours` / `time_ago_end_hours` give each bin's edges |
+| `footprints.zarr` | the 5-D footprint store, streamed one batch at a time. Time-ago bins are `output_grid.time_bin_seconds` wide (default 1 h), counted back from each release window's end; `n_time_bins` of them must cover the simulation length unless `output_grid.drop_older_ages: true`, and the axis adds bins for the release window. `time_ago_start_hours` / `time_ago_end_hours` give each bin's edges. Values depend on `output_grid.density_weighting` (decision 0022): `dry_air` (default) divides each counted particle-second by the dry-air density at the particle, giving s m³ kg⁻¹, which `M_air / h` (0.02897 kg mol⁻¹ / 40 m) turns into m² s mol⁻¹ of dry air with no further density; `none` gives plain residence seconds. The store's attributes (on the dataset and the `footprint` variable) declare `density_weighting`, `units` and `density_formula`: read them rather than assume, as `lpdm.comparison.to_stilt_surface_footprint` does |
+| `footprints_sparse.zarr` | only with `output_grid.footprint_sparse: true`: the same footprint as non-zero cells per release (COO); load with `lpdm.comparison.load_sparse_footprint` |
 | `endpoint_particles.parquet` | final particle states |
 | `trajectory_diagnostics.parquet` | per-run diagnostics |
-| `run_metadata.json` | provenance, config echo, timings, guard report |
+| `run_metadata.json` | provenance, config echo, timings, guard report; `footprint_units` repeats the footprint's weighting and units |
+
+**Footprint storage** (all off by default, so output is unchanged unless set):
+`output_grid.footprint_zstd_level` compresses the footprint with zstd (lossless);
+`output_grid.footprint_keep_mantissa_bits` first rounds each value to that many
+of float32's 23 mantissa bits (lossy: relative error at most 2^-(bits+1); not
+for validation output). On a 72-release, 5-day EUROPE run (task B2) the default
+store is 7.7 MB; zstd level 9 gives 6.1 MB, 10 bits + zstd 4.8 MB, 7 bits + zstd
+3.9 MB. The sparse copy is 6.0 MB there (8.6% of cells non-zero); it pays off
+for time-resolved footprints, where far more cells are empty.
 
 ---
 

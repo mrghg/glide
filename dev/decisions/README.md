@@ -32,3 +32,5 @@ alternatives → Status**, with a pointer to the relevant `docs/` page.
 | [0020](0020-time-meaning-of-period-fields.md) | Means and accumulations held through the interval they average, as NAME does; u* from stresses |
 | [0021](0021-seed-reproducible-runs.md) | A run's seed seeds torch's default generators, so the whole run is reproducible |
 | [0022](0022-density-weighting-and-dry-air.md) | Each particle divided by the dry-air density where it is counted; NAME and FLEXPART corrected to dry air |
+| [0023](0023-convection-per-column.md) | Deep convection in each meteorology column, batched over columns |
+| [0024](0024-boundary-layer-depth-limits-and-meander-timescale.md) | Boundary-layer depth limits as configuration (defaults 50 m, none); meander timescale half the store's met interval |

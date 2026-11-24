@@ -56,7 +56,7 @@ for the gaps you will most likely have to close yourself.
 | --- | --- | --- |
 | Time | `time` | `datetime64`, **UTC**, any *uniform* cadence. Must cover the run's backward window. |
 | Latitude | `latitude` | Degrees north. Ascending or descending both accepted. |
-| Longitude | `longitude` | Degrees east. Either $-180..180$ or $0..360$; GLIDE detects and normalises. |
+| Longitude | `longitude` | Degrees east. Either $-180..180$ or $0..360$; GLIDE reads the grid in $-180..180$ whenever it stays one ascending run there (a box crossing 0° E, or one west of it such as NAM, $240..305$ in the store). A box crossing 180° E stays in $0..360$, and its configuration (`met_domain`, `output_grid`, release points) must then be written in $0..360$ too; the preflight refuses a `met_domain` outside the grid in either convention. A global domain (wrapping round) is not supported. |
 | Vertical | `level` | 1-D. Its *meaning* depends on the vertical mode below. |
 
 **One grid for every field.** All variables share one set of `latitude` and
@@ -134,16 +134,16 @@ Coarser meteorology is read directly, but it is not free of consequence: GLIDE
 interpolates the wind linearly across a window, so anything varying inside one —
 the diurnal boundary-layer cycle, a frontal passage — is smoothed. The physics is
 tuned against hourly ERA5, and a run coarser than that logs a warning at startup.
-Two settings that are tied to the source interval and do **not** follow it
-automatically:
+Settings tied to the source interval:
 
-- `turbulence.meander_timescale_seconds` defaults to 1800 s, half the hourly
-  interval. Meander parameterises the mesoscale motion the met does not resolve,
-  so on a coarser source consider setting it to half your interval. It is left as
-  an explicit knob because changing it moves results.
-- `memory.met_cache_max_hours` counts met **windows**, not hours. At 3-hourly
-  cadence a value of 48 caches six days of meteorology, and the host RAM it uses
-  scales with the window count, not the wall-clock span.
+- `turbulence.meander.timescale_seconds`, when unset, is half the interval
+  measured from the store (1800 s hourly, 5400 s 3-hourly), fixed at the start
+  of the run ([turbulence.md](turbulence.md) §7; decision 0024). Set it to
+  override.
+- `memory.met_cache_max_hours` does **not** follow the interval: it counts met
+  **windows**, not hours. At 3-hourly cadence a value of 48 caches six days of
+  meteorology, and the host RAM it uses scales with the window count, not the
+  wall-clock span.
 
 ## Required variables
 
@@ -305,6 +305,29 @@ model levels. See
 
 Model levels require the terrain-following path (`terrain_following=True`, the
 default).
+
+**On model levels, the level and surface geopotentials must describe the same
+ground: no model level lies below `geopotential_at_surface`.** Heights above
+ground are (`geopotential` − `geopotential_at_surface`) / g, so a surface field
+that disagrees with the levels shifts the whole terrain-following grid in that
+column, and with it the height every wind and temperature is placed at. A
+producer that takes the two fields from different sources must make them
+consistent. This is a product-neutral rule; how each source meets it is the
+producer's business, not GLIDE's:
+
+- **ERA5** (met-bazarr ≥ v0.4.0, decision 0009 there): ARCO's surface
+  geopotential disagrees with its model-level geopotential by up to ~130 m in
+  steep terrain, so met-bazarr derives the surface from the lowest level by the
+  IFS's own relation (level 137 sits ~10 m above the ground). Stores built
+  earlier are brought up to the rule by `metbazarr repair`, recorded in their
+  `glide_repairs` attribute.
+- **Met Office UM** (met-bazarr decision 0003): consistent by construction; both
+  fields come from the same orography, and the lowest level lies 12–20 m above
+  the surface.
+
+met-bazarr's validator makes a violation an error for validation inputs
+(`--validation-input`) and a warning otherwise. On **pressure levels** the rule
+does not apply: levels below the ground are normal there (see above).
 
 **Tag your model-level cubes.** GLIDE **refuses** to read a store as pressure
 levels when the vertical coordinate does not look like pressures — when it is

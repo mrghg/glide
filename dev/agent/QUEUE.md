@@ -731,7 +731,9 @@ Model: Opus 5.5, high effort. Run strictly in order unless a task is BLOCKED.
   for every release, FLEXPART for the seven standard cases only.
 - **Settings.** GLIDE's Tier 2 runs use `convection.scheme:
   emanuel_reduced` (A02), boundary-layer depth limits of 100 and 4,500 m
-  (A03), the meander term on, and the number of particles each reference
+  (A03), `met_domain.alt_max_m` of at least 20,000 m (particles may not be
+  removed below 20 km, `docs/reference-runs.md` §2; the shipped configs use
+  15,000 m), the meander term on, and the number of particles each reference
   run actually released (its `n_particles`). On Met Office fields the
   meander timescale is half the fields' interval.
 - **Meander sensitivity runs** (reported, not graded): GLIDE with the
@@ -997,6 +999,45 @@ dependency is listed; run in the listed order by default.
   `data/tracer-experiments.md`. Reader tests on small synthetic files in
   the repository. `data/tracer-experiments.md` §5 updated. No data files
   committed.
+
+### B10b — Tracer scoring follow-ups (before A8b)
+
+- **Size:** S. **Depends on:** B10. Must merge before A8b (the sample rule and
+  the reported definitions are pre-registered). Model: Sonnet 5.5, or Opus 5.5.
+- **Scope.** From B10's hand-off and the review of PR #46 (24 Nov 2026):
+  - **ETEX source coordinates.** The JRC files do not give the release site;
+    add Monterfil's coordinates and release height to `ETEX_RELEASES`
+    (`scripts/validation/tracers/readers.py`) from the experiment
+    documentation (Nodop et al., 1998, or the JRC ETEX pages), citing the
+    source, and test that the reader fills them.
+  - **ANATEX surplus.** The adopted rule gives 577 and 570 pairs against
+    Hegarty et al.'s 562 and 556. Check whether the surplus is sites outside
+    Hegarty et al.'s WRF domain (their Fig. 1 or domain description); if so,
+    adopt the domain cut as part of the rule, recompute `rule_table`, and
+    record it in `data/tracer-experiments.md` §5. If not, record that it is
+    not.
+  - **Refuse NaN predictions.** `write_datem_predictions` writes NaN as `nan`,
+    which pairing then treats as missing, silently dropping the sample. Raise
+    on any non-finite prediction; test it.
+  - **Record DATEM's KS quirk** under reference issues and in
+    `docs/published-tracer-scores.md`: `statmain`'s KSPARM counts a measured
+    percentile only if some modelled percentile reaches it, so a model that
+    predicts far too low gets a near-perfect KS term. GLIDE copies it (scores
+    must match the published protocol); the four terms are reported
+    separately (validation-plan §3, Tier 3) so the effect is visible.
+  - **ATMES-II definitions: the JRC report (EUR 17756 EN) could not be
+    obtained** (Matt, 24 Nov 2026). Keep B10's definitions of KS, FA and the
+    zero filter, and state in `docs/published-tracer-scores.md` §6 and in the
+    output of the ATMES-II statistics that they follow Mosca et al. (1998) as
+    summarised there and are not checked against the full report. They are
+    reported, not graded (validation-plan §3, Tier 3), so nothing depends on
+    them.
+  - Nits: drop `_bootstrap_r2`'s unused arguments; name the "6h" duration rule
+    for what it keeps (CAPTEX 6-hour and ANATEX 24-hour samples); check that
+    releases are in time order before `searchsorted`.
+- **Acceptance.** Tests for the source coordinates, the NaN refusal and any
+  rule change; `rule_table` rerun and the counts recorded; docs updated. No
+  GLIDE output used.
 
 ### B12 — Tracer benchmark runner (1e, 1f, 1h)
 

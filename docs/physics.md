@@ -55,7 +55,8 @@ GLIDE is built to do.
 
 Following Seibert & Frank (2004), the footprint of a backward run is the
 **residence time** the released particle ensemble spends in each source volume,
-per unit released mass. GLIDE accumulates exactly that (§7); converting it to a
+per unit released mass. GLIDE accumulates that, divided by the dry-air density at
+each particle as it is counted (§7, decision 0022); converting it to a
 concentration-per-flux sensitivity in STILT units is a post-processing step
 (`lpdm.comparison.to_stilt_surface_footprint`).
 
@@ -417,6 +418,22 @@ never modified by transport; convection redistributes particles between levels
 but conserves their number and weight. Total weight is checked in the physics
 tests as a conservation invariant.
 
+**When a particle stops: by its own age.** Every particle is followed for
+`simulation.length_seconds` back from its *own* release time, then stops. The
+run has no single end time for all particles: a release made two hours after
+another stops two hours (of model time) later, whatever else shares its batch.
+In the code this is the per-particle `active_mask` in `main._run`: a particle is
+active while the backward cursor lies between its release time and that time
+minus the length; each batch's cursor runs from its latest release-window end
+to its earliest release time minus the length. A particle counts for a step
+when it is active at the step's upper (later) end, so its last step ends
+exactly one length before its release, to within one step where the length is
+not a whole number of steps. This is the rule the reference runs use
+([reference-runs.md](reference-runs.md) §1: 240 h from each particle's own
+release). Tests: `test_each_particle_stops_its_own_length_after_its_release` and
+`test_every_particle_followed_for_full_simulation_length`
+(`tests/test_main_runtime.py`).
+
 ---
 
 ## 5. Boundary conditions
@@ -462,6 +479,31 @@ the coordinate normalisation would clamp it to the grid edge and it would be
 pushed by edge winds for the rest of the run. Such particles have their liveness
 bit cleared and are never advected or accumulated again. The count is reported in
 `run_metadata.json`. There is no lower kill: $z = 0$ is handled by reflection.
+
+**The top of the model.** `met_domain.alt_max_m` is the top of the vertical
+grid (the AGL ladder ends there). A particle that rises above it — by the
+resolved wind, turbulence or convection — is **removed**, not reflected and
+not held below the top:
+- within the step that takes it there, its meteorology is that of the top
+  level (the coordinate normalisation clamps $z$ to the grid);
+- the footprint is counted for that step at the height the particle reached,
+  then the particle's liveness bit is cleared (`_within_met_domain`, applied in
+  `main._run` after the gridder on both step paths: `alt <= alt_max_m` is
+  inside), so it counts for nothing afterwards;
+- its end record in `endpoint_particles.parquet` keeps that position, above the
+  top, and it is counted in `escaped_this_step` and `escaped_met_domain_total`.
+
+The convection scheme places particles within the grid's layers, so it takes a
+particle above `alt_max_m` only when a configured list of levels
+(`met_domain.vertical_levels`) ends above it; with the default ladder, removal
+at the top comes from the resolved and turbulent vertical motion. Test:
+`test_particle_reaching_the_model_top_is_removed` (`tests/test_main_runtime.py`).
+The reference models differ: FLEXPART holds a particle just below its top level
+(near 80 km), NAME removes it at its domain top
+([reference-runs.md](reference-runs.md) §2, which requires that no particle be
+removed below 20 km). GLIDE's shipped configurations set `alt_max_m` to
+15,000 m, so a validation configuration must raise it to at least 20,000 m to
+meet that rule.
 
 ---
 
@@ -533,18 +575,25 @@ drift into a NaN. FLEXPART has the equivalent clip.
 At every step, every live particle inside the output grid adds
 
 $$
-\Delta f = m_p \  \Delta t
+\Delta f = \frac{m_p \  \Delta t}{\rho_d}
 $$
 
-to the cell it occupies, in its own time-ago bin, in its own release's slice. The
-grid is 5-dimensional:
+to the cell it occupies, in its own time-ago bin, in its own release's slice,
+where $\rho_d$ is the **dry-air density at the particle** as it is counted
+(`output_grid.density_weighting: dry_air`, the default; decision 0022). With
+`density_weighting: none` the density is left out and $\Delta f = m_p\,\Delta t$.
+The grid is 5-dimensional:
 
 $$
 f\big[\ \text{release},\ \text{time ago},\ z,\ \text{lat},\ \text{lon}\ \big]
 $$
 
-Raw units are **seconds** (weight is dimensionless and sums to 1 per release), so
-the raw value is residence time per unit released mass. The vertical bins are set
+Raw units are **s m³ kg⁻¹** with `dry_air` (residence time per unit released
+mass, divided by the dry-air density) and **seconds** with `none` (weight is
+dimensionless and sums to 1 per release). The footprint store declares which, in
+the attributes `density_weighting` and `units` of the dataset and of its
+`footprint` variable, and `run_metadata.json` repeats them under
+`footprint_units`. The vertical bins are set
 by `output_grid.z_edges_m`, an arbitrary strictly-ascending edge list — e.g.
 `[0, 40, 1000, 5000]` gives a 0–40 m surface bin matching the FLEXPART/NAME
 convention, a mixed-layer bin, and a free-troposphere bin. Accumulating *directly*
@@ -571,20 +620,48 @@ dropped rather than clamped, so the axis labels stay honest.
 Particles outside the grid horizontally, vertically, in time-ago, or in release
 index contribute nothing.
 
-**Conversion to STILT units.** Lin et al. (2003) Eq. 5:
+**The dry-air density at the particle.** $\rho_d = (p - e)/(R_d T)$ with
+$R_d = 287.05$ J kg⁻¹ K⁻¹ and the vapour pressure $e = q p / (0.622 + 0.378 q)$
+from the specific humidity $q$. $T$, $q$ and the surface pressure $p_s$ are
+interpolated to the particle's position (trilinearly, with the same vertical
+lookup as the wind) in the step's met window and with the step's time weight,
+as the step itself uses them. The met window holds no 3-D pressure, so the
+pressure at the particle's height $z$ above the ground is the surface pressure
+carried up hydrostatically,
 
 $$
-f_{\mathrm{STILT}}(y,x) \ =\  \frac{m_{\mathrm{air}}}{h_{\mathrm{sfc}}\ \bar{\rho}} \sum_{t}\sum_{z \in \text{surface layer}} f\big[t,z,y,x\big]
+p(z) = p_s \exp\!\left(-\frac{g\,z}{R_d\,\bar T_v}\right), \qquad T_v = T\,(1 + 0.6077\,q),
+$$
+
+with the layer-mean virtual temperature $\bar T_v$ taken at $z/2$. This is the
+hypsometric relation GLIDE already uses to reconstruct model-level pressure
+from the surface pressure (decision 0010), applied from the ground to the
+particle; the midpoint rule's error is below 10⁻⁷ in $p$ over the 40 m
+layer. The fields move to the device once per met window; each step is tensor
+operations on the whole particle buffer, with no host synchronisation
+(decision 0004). Dividing while counting captures the pairing of residence and
+density (more time near the ground at night, in denser air) that dividing the
+summed residence by one density per cell misses (decision 0022).
+
+**Conversion to STILT units.** For a `dry_air` footprint,
+
+$$
+f_{\mathrm{STILT}}(y,x) \ =\  \frac{m_{\mathrm{air}}}{h_{\mathrm{sfc}}} \sum_{t}\sum_{z \in \text{surface layer}} f\big[t,z,y,x\big]
 $$
 
 giving $\mathrm{m^2\ s\ mol^{-1}}$, equivalently
-$(\mathrm{mol/mol})/(\mathrm{mol\ m^{-2}\ s^{-1}})$. Here $h_{\mathrm{sfc}}$ is
-the depth of the surface layer being integrated over — 40 m by convention, and
-**not** the boundary-layer depth $h$ of §2 — $\bar{\rho}$ is the surface air
-density (a scalar, or a 2-D field derived from the meteorology by
-`surface_air_density_from_met`), and $m_{\mathrm{air}} = 0.02897\ \mathrm{kg\ mol^{-1}}$
-is the molar mass of dry air. Bins that only partially overlap the chosen surface
-layer are credited by their overlap fraction.
+$(\mathrm{mol/mol})/(\mathrm{mol\ m^{-2}\ s^{-1}})$, for the dry-air mole
+fraction (`docs/reference-runs.md` §6). Here $h_{\mathrm{sfc}}$ is the depth of
+the surface layer being integrated over — 40 m by convention, and **not** the
+boundary-layer depth $h$ of §2 — and $m_{\mathrm{air}} = 0.02897\ \mathrm{kg\ mol^{-1}}$
+is the molar mass of dry air. For a `none` footprint (plain seconds) the density
+is applied afterwards, as in Lin et al. (2003) Eq. 5, dividing by a surface air
+density $\bar\rho$ (a scalar, or a 2-D field from `surface_air_density_from_met`);
+that is biased where residence and density vary together (decision 0022).
+`to_stilt_surface_footprint` reads the footprint's `density_weighting`
+attribute, applies the matching formula, and refuses a density for a `dry_air`
+footprint, which would divide twice. Bins that only partially overlap the chosen
+surface layer are credited by their overlap fraction.
 
 The whole chain — advection, turbulence, reflection, gridding, and the STILT
 conversion — is validated end-to-end against an analytic reflected-Gaussian plume
@@ -601,11 +678,11 @@ Stated plainly, because they bound what the model can be trusted for.
 | Gaussian vertical velocity PDF everywhere — no skewed convective-boundary-layer PDF | Under-represents the updraft/downdraft asymmetry of a strongly convective BL. Thomson (1987, §5.2) found ground-level concentration relatively insensitive to skewness even where dispersion aloft is sensitive, so this is defensible for a surface-flux footprint model — but it is a modelling choice, not a free lunch. |
 | $\sigma$, $T_L$ and the profile gradients held fixed across the sub-steps of one outer step | FLEXPART re-evaluates per sub-step. The change in $\sigma$ across one 60 s outer step is moderate; the velocity-dependent part of the drift *is* re-evaluated. A documented follow-up. |
 | Turbulence support fields ($\rho$, free-troposphere $\sigma/T_L$, meander $\sigma$) built once per meteorology hour at the window midpoint | A met-cadence approximation (<1%/hr drift), matching how FLEXPART-class models refresh turbulence fields. Per-particle interpolation through those fields is unchanged. |
-| Deep convection uses one bounding-box-mean column for the whole domain | Convection fires or does not fire uniformly across the met domain. Fine for a small domain; for continental Europe it can over- or under-trigger. See [convection.md](convection.md) §4. |
-| Convection interval hardcoded at 3600 s | Correct for hourly ERA5; wrong for any other cadence. |
+| Deep convection assigns each particle to the nearest meteorology column | Each (lon, lat) column has its own parcel lift, trigger and matrix (task A02), fired once per meteorology interval read from the store. A particle near a column boundary takes the nearest column's matrix rather than a blend. See [convection.md](convection.md) §1 and §7. |
 | Initial $u', v', w' = 0$ rather than sampled from the local $\sigma$ | Particles equilibrate within one $T_L$ (typically ~100 s), which is shorter than the release window. |
 | Virtual temperature approximated as $T$ in the Obukhov length | Humidity correction is small; deferred. |
 | Free-troposphere horizontal turbulence treated as isotropic with the vertical | The unresolved-mesoscale horizontal spread is carried separately by the meander process. |
+| Meander process has no drift correction for its spatially varying $\sigma_m$ | Particles collect slowly where $\sigma_m$ is small: after 10 days, 0.8–1.9% systematic unevenness in 0.25° cells and 0.35–0.75% in 1° cells, below particle noise at validation particle counts (task A03; [turbulence.md §7](turbulence.md#7-meander-unresolved-mesoscale-motion)). Left uncorrected in v1 (decision of 24 Nov 2026). |
 
 Beyond these, the transport physics as a whole **has not been validated against
 external references**. The analytic tests below verify GLIDE against closed-form

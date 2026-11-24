@@ -435,6 +435,10 @@ def test_scheme_kwargs_forwards_meander_only_for_hanna() -> None:
         # (T_L floors on, legacy surface-layer override off).
         "flexpart_tl_floors": True,
         "surface_layer_override": False,
+        # Boundary-layer depth limits default to the long-standing 50 m floor and
+        # no ceiling (A03, decision 0024).
+        "blh_min_m": 50.0,
+        "blh_max_m": None,
     }
 
     # Non-Hanna schemes take no kwargs (would reject meander), so forward nothing.
@@ -597,3 +601,77 @@ def test_footprint_time_bin_index_uses_the_bin_width() -> None:
     assert _footprint_time_bin_index(end, end - timedelta(hours=5), 3, 7200.0) == 2
     assert _footprint_time_bin_index(end, end - timedelta(hours=3, minutes=59), 3, 7200.0) == 1
     assert _footprint_time_bin_index(end, end - timedelta(days=1, hours=1), 2, 86400.0) == 1
+
+
+def test_preflight_refuses_met_domain_outside_the_grid() -> None:
+    """A met domain in -180..180 over a grid left in 0..360 ran silently with
+    the grid edge's winds (task B12); the preflight now refuses it."""
+
+    from lpdm.main import PreflightValidationError, _validate_meteorology_space_coverage
+
+    class _Grid:
+        def __init__(self, coverage):
+            self._c = coverage
+
+        def get_lon_lat_coverage(self):
+            return self._c
+
+    cfg = RunConfig.model_validate(_base_dict())
+    md = cfg.met_domain
+    inside = (
+        md.lon_bounds[0] - 1,
+        md.lon_bounds[1] + 1,
+        md.lat_bounds[0] - 1,
+        md.lat_bounds[1] + 1,
+    )
+    _validate_meteorology_space_coverage(_Grid(inside), cfg)
+    _validate_meteorology_space_coverage(_Grid(None), cfg)  # reader cannot say: no check
+    shifted = (inside[0] + 360.0, inside[1] + 360.0, inside[2], inside[3])
+    with pytest.raises(PreflightValidationError, match="longitude convention"):
+        _validate_meteorology_space_coverage(_Grid(shifted), cfg)
+
+
+# ---- A03: boundary-layer depth limits and the meander timescale (decision 0024) ----
+
+
+def test_boundary_layer_depth_limits_default_and_forwarded() -> None:
+    """Defaults keep the long-standing 50 m floor and no ceiling; set values (the
+    validation runs' 100 m and 4,500 m) reach the Hanna scheme; an unset meander
+    timescale is not forwarded, so the scheme takes half the met interval."""
+
+    from lpdm.main import _scheme_kwargs
+    from lpdm.turbulence import get_scheme
+
+    default = RunConfig.model_validate(_base_dict(turbulence={"scheme": "hanna_1982"}))
+    assert default.turbulence.boundary_layer_depth_min_m == 50.0
+    assert default.turbulence.boundary_layer_depth_max_m is None
+    assert "meander_timescale_seconds" not in _scheme_kwargs(default)
+
+    cfg = RunConfig.model_validate(
+        _base_dict(
+            turbulence={
+                "scheme": "hanna_1982",
+                "boundary_layer_depth_min_m": 100.0,
+                "boundary_layer_depth_max_m": 4500.0,
+            }
+        )
+    )
+    kw = _scheme_kwargs(cfg)
+    assert kw["blh_min_m"] == 100.0
+    assert kw["blh_max_m"] == 4500.0
+    scheme = get_scheme("hanna_1982", **kw)
+    assert (scheme.blh_min_m, scheme.blh_max_m) == (100.0, 4500.0)
+
+
+@pytest.mark.parametrize(
+    "limits",
+    [
+        {"boundary_layer_depth_min_m": 0.0},
+        {"boundary_layer_depth_max_m": 0.0},
+        {"boundary_layer_depth_min_m": 100.0, "boundary_layer_depth_max_m": 100.0},
+        {"boundary_layer_depth_min_m": 500.0, "boundary_layer_depth_max_m": 400.0},
+    ],
+)
+def test_boundary_layer_depth_limits_rejected_when_invalid(limits) -> None:
+    with pytest.raises(ValidationError):
+        RunConfig.model_validate(_base_dict(turbulence={"scheme": "hanna_1982", **limits}))

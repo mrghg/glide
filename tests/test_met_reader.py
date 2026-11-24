@@ -390,6 +390,31 @@ def test_fetch_hourly_window_handles_negative_lon_request_with_360_dataset() -> 
     result = reader.fetch_hourly_window(request)
     assert result.hour_start.shape == (5, 2, 2, 2)
     assert result.hour_end.shape == (5, 2, 2, 2)
+    # The grid comes back in the request's convention, where the particles are:
+    # left at 237.5/238.5, particles at -122 were held at the grid's edge.
+    np.testing.assert_allclose(result.metadata.lon, [-122.5, -121.5])
+    assert reader.get_lon_lat_coverage()[:2] == (-122.5, -121.5)
+
+
+def test_store_straddling_180_keeps_0_360() -> None:
+    """A box across the date line (as met-bazarr writes it: one ascending run in
+    0..360, e.g. 179.5..180.5) cannot be relabelled to -180..180 and stays in
+    0..360; such a domain is configured in 0..360 too, and the preflight
+    (`main._validate_meteorology_space_coverage`) refuses -180..180 bounds."""
+
+    ds = _build_mock_era5_dataset().assign_coords(
+        longitude=np.array([179.5, 180.5], dtype=np.float64)
+    )
+    reader = _InMemoryArcoReader(ds)
+    assert reader.get_lon_lat_coverage()[:2] == (179.5, 180.5)
+
+
+def test_ascending_store_west_of_greenwich_is_relabelled() -> None:
+    """met-bazarr's NAM stores (240..305 E) are read in -180..180, as GLIDE's
+    configurations give longitudes (task B12)."""
+
+    reader = _InMemoryArcoReader(_build_mock_era5_dataset_360_lon())
+    assert reader.get_lon_lat_coverage()[:2] == (-122.5, -121.5)
 
 
 def test_get_time_coverage_returns_dataset_bounds() -> None:
@@ -1296,6 +1321,22 @@ def test_three_hourly_store_brackets_on_three_hours() -> None:
     assert result.metadata.time_end == datetime(2024, 1, 1, 3, 0, tzinfo=UTC)
 
 
+@pytest.mark.parametrize(("step_hours", "expected_s"), [(1, 1800.0), (3, 5400.0)])
+def test_meander_timescale_from_hourly_and_three_hourly_store(step_hours, expected_s) -> None:
+    """A03 / decision 0024: an unset meander timescale is half the interval the
+    reader measures from the store's time coordinate: unchanged (1800 s) on an
+    hourly store, 5400 s on a 3-hourly one."""
+
+    from lpdm.turbulence import HannaScheme
+
+    reader = _InMemoryArcoReader(_retimed_mock_dataset("2024-01-01T00:00:00", step_hours))
+    scheme = HannaScheme(meander_enabled=True)
+    scheme.bind_met_interval(reader.met_interval_seconds)
+
+    assert reader.met_interval_seconds == step_hours * 3600
+    assert scheme.meander_timescale_seconds == expected_s
+
+
 def test_window_grid_is_anchored_on_the_stores_own_first_timestamp() -> None:
     """A store sampled at :30 past has windows at :30, not on the hour. Flooring to
     the wall-clock hour would ask for a timestamp the store does not have."""
@@ -1491,3 +1532,60 @@ def test_store_provenance_lists_each_store(tmp_path) -> None:
     assert prov[0]["glide_flux_accumulation_seconds"] == "3600"
     assert "unrelated" not in prov[0]
     assert "error" in prov[1]
+
+
+# --- per-column pressure and the convection interval (task A02) ---------------
+
+
+def test_terrain_following_window_carries_per_column_pressure() -> None:
+    """Convection lifts each column's parcel on that column's pressures, so the
+    window carries them; their horizontal mean is the level pressure."""
+
+    reader = _InMemoryArcoReader(_build_mock_model_level_dataset(), terrain_following=True)
+    result = reader.fetch_hourly_window(_model_level_request())
+
+    assert result.pressure_hpa is not None
+    p_start, p_end = result.column_pressure_hpa()
+    assert p_start.shape == result.hour_start.shape[1:]
+    assert p_end.shape == result.hour_end.shape[1:]
+    np.testing.assert_allclose(
+        p_start.mean(dim=(1, 2)).numpy(), result.metadata.pressure_level_hpa, rtol=1e-12
+    )
+
+
+def test_window_without_per_column_pressure_falls_back_to_level_pressure() -> None:
+    reader = _InMemoryArcoReader(_build_mock_era5_dataset())  # pressure levels, no terrain
+    result = _fetch_mock_window(reader)
+
+    assert result.pressure_hpa is None
+    p_start, p_end = result.column_pressure_hpa()
+    assert p_start.shape == result.hour_start.shape[1:]
+    for k, level_hpa in enumerate(result.metadata.pressure_level_hpa):
+        assert torch.all(p_start[k] == float(level_hpa))
+        assert torch.all(p_end[k] == float(level_hpa))
+
+
+def _fetch_mock_window(reader, start=datetime(2024, 1, 1, 0, 20, tzinfo=UTC)):
+    return reader.fetch_hourly_window(
+        BoundingBoxRequest(
+            spatial=SpatialBounds(
+                lon_min=19.5, lon_max=21.5, lat_min=9.5, lat_max=11.5, z_min=850.0, z_max=1050.0
+            ),
+            time=TimeBounds(start=start, end=start),
+        )
+    )
+
+
+@pytest.mark.parametrize(("thin", "expected_s"), [(1, 3600.0), (3, 10800.0)])
+def test_convection_interval_is_the_stores_cadence(thin: int, expected_s: float) -> None:
+    """Acceptance (A02): on hourly ERA5 convection fires every 3,600 s and scales
+    its mass flux by 3,600 s; on the same store thinned to 3-hourly, 10,800 s."""
+
+    from lpdm.convection.emanuel import convection_interval_seconds
+
+    hourly = _retimed_mock_dataset("2024-01-01T00:00:00", step_hours=1, n_steps=7)
+    reader = _InMemoryArcoReader(hourly.isel(time=slice(None, None, thin)))
+
+    assert reader.met_interval_seconds == expected_s
+    window = _fetch_mock_window(reader, start=datetime(2024, 1, 1, 1, 20, tzinfo=UTC))
+    assert convection_interval_seconds(window) == expected_s

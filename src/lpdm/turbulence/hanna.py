@@ -66,7 +66,13 @@ SURFACE_LAYER_FRACTION = 0.1
 SIGMA_MIN_M_S = 1e-3
 T_L_MIN_S = 1.0
 USTAR_MIN_M_S = 1e-3
-BLH_MIN_M = 50.0
+# Default limits on the boundary-layer depth h (docs/turbulence.md §2; decision 0024).
+# The scheme holds h between `blh_min_m` and `blh_max_m`, set from the
+# configuration (`turbulence.boundary_layer_depth_min_m` / `_max_m`) at
+# construction. The defaults keep GLIDE's long-standing 50 m floor and no ceiling;
+# the validation runs set FLEXPART's and NAME's 100 m and 4,500 m.
+BLH_MIN_M_DEFAULT = 50.0
+BLH_MAX_M_DEFAULT: float | None = None
 Z_MIN_M = 1.0  # height floor (metres) for near-surface z in gradient/timescale lookups
 
 # FLEXPART v11 Lagrangian-timescale floors (turbulence_mod.f90 subroutine hanna:
@@ -178,14 +184,18 @@ def convective_velocity(
     shf: torch.Tensor,
     t_surface: torch.Tensor,
     sp: torch.Tensor,
+    *,
+    blh_min_m: float = BLH_MIN_M_DEFAULT,
 ) -> torch.Tensor:
     """Convective velocity scale `w* = ((g h H) / (T ρ c_p))^(1/3)`.
 
     Returns 0 where `H ≤ 0` (stable / neutral), since `w*` is undefined there.
+    `blh_min_m` floors `h`; the scheme passes its own configured minimum (its `h`
+    is already limited, so the floor is then a no-op).
     """
 
     rho = air_density(sp, t_surface)
-    cube = (GRAVITY_M_S2 * blh.clamp(min=BLH_MIN_M) * shf) / (t_surface * rho * C_P_DRY_AIR_J_KG_K)
+    cube = (GRAVITY_M_S2 * blh.clamp(min=blh_min_m) * shf) / (t_surface * rho * C_P_DRY_AIR_J_KG_K)
     return torch.where(cube > 0, cube.clamp(min=0.0).pow(1.0 / 3.0), torch.zeros_like(cube))
 
 
@@ -443,7 +453,9 @@ class HannaScheme(TurbulenceScheme):
         meander_enabled: bool = False,
         meander_coefficient: float = MEANDER_COEFFICIENT_DEFAULT,
         meander_stencil_radius: int = MEANDER_STENCIL_RADIUS_DEFAULT,
-        meander_timescale_seconds: float = MEANDER_TIMESCALE_S_DEFAULT,
+        meander_timescale_seconds: float | None = None,
+        blh_min_m: float = BLH_MIN_M_DEFAULT,
+        blh_max_m: float | None = BLH_MAX_M_DEFAULT,
         substep_c: float = SUBSTEP_C_DEFAULT,
         max_substeps: int = MAX_SUBSTEPS_DEFAULT,
         z_ubl_m: float = Z_UBL_DEFAULT_M,
@@ -495,8 +507,12 @@ class HannaScheme(TurbulenceScheme):
             raise ValueError("meander_coefficient must be > 0")
         if meander_stencil_radius < 1:
             raise ValueError("meander_stencil_radius must be >= 1")
-        if meander_timescale_seconds <= 0:
+        if meander_timescale_seconds is not None and meander_timescale_seconds <= 0:
             raise ValueError("meander_timescale_seconds must be > 0")
+        if not blh_min_m > 0:
+            raise ValueError("blh_min_m must be > 0")
+        if blh_max_m is not None and not blh_max_m > blh_min_m:
+            raise ValueError("blh_max_m must be > blh_min_m")
         if substep_c <= 0:
             raise ValueError("substep_c must be > 0")
         if max_substeps < 1:
@@ -507,7 +523,19 @@ class HannaScheme(TurbulenceScheme):
         self.meander_enabled = bool(meander_enabled)
         self.meander_coefficient = float(meander_coefficient)
         self.meander_stencil_radius = int(meander_stencil_radius)
-        self.meander_timescale_seconds = float(meander_timescale_seconds)
+        # Unset (None) => half the meteorology interval, bound by the runtime from
+        # the store before the first step (`bind_met_interval`); until then the
+        # hourly-ERA5 value. Explicit values are never overridden. Docs §7.
+        self._meander_timescale_explicit = meander_timescale_seconds is not None
+        self.meander_timescale_seconds = float(
+            meander_timescale_seconds
+            if meander_timescale_seconds is not None
+            else MEANDER_TIMESCALE_S_DEFAULT
+        )
+        # Boundary-layer depth limits: construction-time Python constants, so the
+        # compiled step specialises on them once (decision 0004), never per step.
+        self.blh_min_m = float(blh_min_m)
+        self.blh_max_m = None if blh_max_m is None else float(blh_max_m)
         self.substep_c = float(substep_c)
         self.max_substeps = int(max_substeps)
         self.flexpart_tl_floors = bool(flexpart_tl_floors)
@@ -556,6 +584,24 @@ class HannaScheme(TurbulenceScheme):
     def required_met_keys(self) -> tuple[str, ...]:
         # Baseline (u, v, w, blh, sp) is added by the runtime; declare scheme-specific extras.
         return ("t", "ustar", "shf")
+
+    def bind_met_interval(self, met_interval_seconds: float) -> None:
+        """Set the meander timescale to half the met interval, unless configured.
+
+        Called by the runtime once, after the reader has measured the store's time
+        spacing and before the first step, so the value is a constant of the run
+        (and of the compiled step). On hourly ERA5 it gives the long-standing 1800 s.
+        """
+
+        if met_interval_seconds <= 0:
+            raise ValueError("met_interval_seconds must be > 0")
+        if not self._meander_timescale_explicit:
+            self.meander_timescale_seconds = 0.5 * float(met_interval_seconds)
+
+    def _limit_blh(self, blh: torch.Tensor) -> torch.Tensor:
+        """Hold the boundary-layer depth within the configured limits (docs §2)."""
+
+        return blh.clamp(min=self.blh_min_m, max=self.blh_max_m)
 
     def initialize_state(
         self,
@@ -646,9 +692,9 @@ class HannaScheme(TurbulenceScheme):
         lat_deg = active_xyz[:, 1]
         z_agl = active_xyz[:, 2]
 
-        blh = self._interp_surface_field(
-            met_window, "blh", t_alpha, lon_deg, lat_deg, device, dtype
-        ).clamp(min=BLH_MIN_M)
+        blh = self._limit_blh(
+            self._interp_surface_field(met_window, "blh", t_alpha, lon_deg, lat_deg, device, dtype)
+        )
         sp = self._interp_surface_field(met_window, "sp", t_alpha, lon_deg, lat_deg, device, dtype)
         ustar = self._interp_surface_field(
             met_window, "ustar", t_alpha, lon_deg, lat_deg, device, dtype
@@ -662,7 +708,7 @@ class HannaScheme(TurbulenceScheme):
 
         L = obukhov_length(ustar, shf, t_surface, sp)
         h_over_L = blh / L
-        w_star = convective_velocity(blh, shf, t_surface, sp)
+        w_star = convective_velocity(blh, shf, t_surface, sp, blh_min_m=self.blh_min_m)
 
         ft_fields, grid_bounds = self._free_trop_fields(met_window, device, dtype)
         density_fields = self._density_fields(met_window, device, dtype)
@@ -955,8 +1001,8 @@ class HannaScheme(TurbulenceScheme):
         lon0, lon1 = grid_bounds.lon_first, grid_bounds.lon_last
         lat0, lat1 = grid_bounds.lat_first, grid_bounds.lat_last
 
-        blh = self._bilinear_at(blh_field, lon0, lon1, lat0, lat1, lon_deg, lat_deg).clamp(
-            min=BLH_MIN_M
+        blh = self._limit_blh(
+            self._bilinear_at(blh_field, lon0, lon1, lat0, lat1, lon_deg, lat_deg)
         )
         sp = self._bilinear_at(sp_field, lon0, lon1, lat0, lat1, lon_deg, lat_deg)
         ustar = self._bilinear_at(ustar_field, lon0, lon1, lat0, lat1, lon_deg, lat_deg).clamp(
@@ -967,7 +1013,7 @@ class HannaScheme(TurbulenceScheme):
 
         L = obukhov_length(ustar, shf, t_surface, sp)
         h_over_L = blh / L
-        w_star = convective_velocity(blh, shf, t_surface, sp)
+        w_star = convective_velocity(blh, shf, t_surface, sp, blh_min_m=self.blh_min_m)
 
         col_kwargs = dict(
             blh=blh,
