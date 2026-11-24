@@ -59,8 +59,7 @@ Documented departures from full Emanuel:
 from __future__ import annotations
 
 import logging
-import math
-from typing import ClassVar
+from typing import ClassVar, NamedTuple
 
 import numpy as np
 import torch
@@ -265,17 +264,18 @@ def _layer_masses_per_area(
 ) -> torch.Tensor:
     """Mass per unit area for each pressure layer: m_i = (p_bot − p_top) / g.
 
-    ``pressure_pa`` is the per-level pressure [Z]. Layer i lies between levels i
-    and i+1 (or i-1 and i for the descending-pressure convention). We use a
-    half-bracket: layer mass at level i is `|p_{i+1} - p_{i-1}|·0.5 / g` for
-    interior, and the half-layer for the top/bottom. Returns shape [Z].
+    ``pressure_pa`` is the per-level pressure [..., Z] (one column [Z], or a
+    batch of columns [C, Z]). Layer i lies between levels i and i+1 (or i-1 and
+    i for the descending-pressure convention). We use a half-bracket: layer mass
+    at level i is `|p_{i+1} - p_{i-1}|·0.5 / g` for interior, and the half-layer
+    for the top/bottom. Returns the shape of ``pressure_pa``.
     """
 
     p = pressure_pa
     dp = torch.zeros_like(p)
-    dp[1:-1] = 0.5 * (p[:-2] - p[2:]).abs()
-    dp[0] = (p[0] - p[1]).abs() * 0.5
-    dp[-1] = (p[-2] - p[-1]).abs() * 0.5
+    dp[..., 1:-1] = 0.5 * (p[..., :-2] - p[..., 2:]).abs()
+    dp[..., 0] = (p[..., 0] - p[..., 1]).abs() * 0.5
+    dp[..., -1] = (p[..., -2] - p[..., -1]).abs() * 0.5
     return dp / GRAVITY_M_S2
 
 
@@ -507,6 +507,266 @@ def compute_mass_flux_matrix(
 
 
 # ---------------------------------------------------------------------------
+# Every column at once (task A02)
+# ---------------------------------------------------------------------------
+#
+# The functions below are the column-batched forms of `compute_lcl_lnb_cape`,
+# the closure in `EmanuelReducedConvection` and `compute_mass_flux_matrix`.
+# They take profiles of shape [C, Z] (C columns, Z levels ascending from the
+# surface) and do the same arithmetic, element by element, with no Python loop
+# over columns or levels. The single-column functions above stay as the
+# reference: the tests check that every column of the batched result equals
+# them.
+
+
+def compute_lcl_lnb_cape_columns(
+    t_env: torch.Tensor,
+    q_env: torch.Tensor,
+    pressure_pa: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """`compute_lcl_lnb_cape` for C columns at once.
+
+    Inputs are [C, Z] profiles with the surface at level index 0. Returns
+    ``(i_lcl, i_lnb, cape, dtv_lcl_plus_1)``, each of shape [C], with the same
+    meaning and the same ``-1`` conventions as the single-column function.
+    """
+
+    n_col, n_lev = t_env.shape
+    device = t_env.device
+    k = torch.arange(n_lev, device=device)
+
+    t_sfc = t_env[:, 0]
+    q_sfc = q_env[:, 0]
+    p_sfc = pressure_pa[:, 0]
+
+    t_lcl = lcl_temperature_bolton(t_sfc, q_sfc, p_sfc)
+    p_lcl = lcl_pressure_poisson(t_sfc, t_lcl, p_sfc)
+    theta_e_parcel = equivalent_potential_temperature(t_sfc, q_sfc, p_sfc)
+
+    # Dry adiabat at/below the LCL, moist (θ_e conserved) above; the moist lift
+    # is solved for every level of every column in one bisection.
+    theta_sfc = potential_temperature(t_sfc, p_sfc)
+    dry_t = theta_sfc.unsqueeze(1) * (pressure_pa / P0_PA).pow(KAPPA_POISSON)
+    moist_t = lift_parcel_moist_pseudo_adiabatic(theta_e_parcel.unsqueeze(1), pressure_pa)
+    below_lcl_mask = pressure_pa >= p_lcl.unsqueeze(1)
+    t_parcel = torch.where(below_lcl_mask, dry_t, moist_t)
+
+    tv_env = virtual_temperature(t_env, q_env)
+    q_parcel = torch.where(
+        below_lcl_mask,
+        q_sfc.unsqueeze(1).expand_as(t_parcel),
+        saturation_specific_humidity(t_parcel, pressure_pa),
+    )
+    tv_parcel = virtual_temperature(t_parcel, q_parcel)
+    buoyancy = (tv_parcel - tv_env) / tv_env.clamp(min=T_MIN_K)
+
+    # LCL index: first level with p < p_lcl (argmax returns the first maximum).
+    above_lcl = ~below_lcl_mask
+    has_lcl = above_lcl.any(dim=1)
+    i_lcl = torch.where(
+        has_lcl,
+        above_lcl.to(torch.int8).argmax(dim=1),
+        torch.full((n_col,), -1, dtype=torch.long, device=device),
+    )
+
+    # Trigger diagnostic at LCL+1 (-1 K when it does not exist).
+    i_test = (i_lcl + 1).clamp(min=0, max=n_lev - 1).unsqueeze(1)
+    dtv_at_test = (tv_parcel.gather(1, i_test) - tv_env.gather(1, i_test)).squeeze(1)
+    has_test = (i_lcl >= 0) & (i_lcl + 1 < n_lev)
+    dtv_lcl_plus_1 = torch.where(has_test, dtv_at_test, torch.full_like(dtv_at_test, -1.0))
+
+    # CAPE: Σ g·max(B, 0)·dz over levels at and above the LCL, with the
+    # hypsometric layer thickness (same expression as the single column).
+    dz = torch.zeros_like(t_env)
+    dz[:, 1:] = (
+        R_DRY_AIR_J_KG_K
+        * 0.5
+        * (t_env[:, :-1] + t_env[:, 1:])
+        * (
+            torch.log(pressure_pa[:, :-1].clamp(min=P_MIN_PA))
+            - torch.log(pressure_pa[:, 1:].clamp(min=P_MIN_PA))
+        )
+        / GRAVITY_M_S2
+    )
+    positive = buoyancy.clamp(min=0.0)
+    positive = torch.where(k.unsqueeze(0) < i_lcl.unsqueeze(1), 0.0, positive)
+    cape = (GRAVITY_M_S2 * positive * dz).sum(dim=1)
+    cape = torch.where(has_lcl, cape, torch.zeros_like(cape))
+
+    # LNB: first level above the LCL with B <= 0; the column top if none.
+    above_lcl_neg = (buoyancy <= 0.0) & (k.unsqueeze(0) > i_lcl.unsqueeze(1))
+    i_lnb = torch.where(
+        above_lcl_neg.any(dim=1),
+        above_lcl_neg.to(torch.int8).argmax(dim=1),
+        torch.full((n_col,), n_lev - 1, dtype=torch.long, device=device),
+    )
+    i_lnb = torch.where(has_lcl, i_lnb, torch.full_like(i_lnb, -1))
+    return i_lcl, i_lnb, cape, dtv_lcl_plus_1
+
+
+def cloud_base_mass_flux_columns(
+    t_env: torch.Tensor,
+    pressure_pa: torch.Tensor,
+    i_lcl: torch.Tensor,
+    cape: torch.Tensor,
+    closure_c: float,
+) -> torch.Tensor:
+    """Cloud-base mass flux ``M_b = c·ρ_LCL·min(√(2·CAPE), w_max)`` per column,
+    kg m⁻² s⁻¹, shape [C], in float64 (the closure was evaluated in Python
+    floats before A02; float64 keeps the batched result identical).
+
+    ``ρ_LCL`` uses the environment's temperature and pressure at the LCL level.
+    Columns without an LCL get the value at level 0; the caller masks them.
+    """
+
+    idx = i_lcl.clamp(min=0).unsqueeze(1)
+    t_lcl = t_env.gather(1, idx).squeeze(1)
+    p_lcl = pressure_pa.gather(1, idx).squeeze(1)
+    rho_lcl = p_lcl / (R_DRY_AIR_J_KG_K * t_lcl.clamp(min=T_MIN_K))
+    w_buoy = torch.sqrt(2.0 * cape.double().clamp(min=0.0)).clamp(max=UPDRAFT_W_MAX_M_S)
+    return closure_c * rho_lcl.double() * w_buoy
+
+
+def compute_mass_flux_matrices(
+    pressure_pa: torch.Tensor,
+    i_lcl: torch.Tensor,
+    i_lnb: torch.Tensor,
+    m_b: torch.Tensor,
+) -> torch.Tensor:
+    """`compute_mass_flux_matrix` for C columns at once: returns [C, Z, Z].
+
+    ``pressure_pa`` is [C, Z] (ascending from the surface); ``i_lcl``, ``i_lnb``
+    are [C] level indices and ``m_b`` [C] the cloud-base mass flux already
+    multiplied by the event interval (kg/m²). A column with no cloud
+    (``i_lcl < 0`` or ``i_lnb <= i_lcl``) or ``m_b <= 0`` gets a zero matrix.
+    Same construction as the single column: mass-weighted boundary-layer
+    entrainment, linear detrainment over [LCL, LNB], their outer product, the
+    compensating subsidence on the sub-diagonal, and one CFL scale per column.
+    """
+
+    n_col, n_lev = pressure_pa.shape
+    device, dtype = pressure_pa.device, pressure_pa.dtype
+    k = torch.arange(n_lev, device=device)
+
+    m_b = m_b.to(dtype)
+    valid = (i_lcl >= 0) & (i_lnb > i_lcl) & (m_b > 0.0)
+    lcl = i_lcl.clamp(min=0).unsqueeze(1)
+    lnb = i_lnb.unsqueeze(1)
+    mb = torch.where(valid, m_b, torch.ones_like(m_b)).unsqueeze(1)  # [C, 1]
+
+    m = _layer_masses_per_area(pressure_pa)  # [C, Z]
+
+    # Entrainment: BL [0, LCL), mass-weighted so Σ e = m_b.
+    in_bl = (k.unsqueeze(0) < lcl) & valid.unsqueeze(1)
+    m_bl = torch.where(in_bl, m, torch.zeros_like(m))
+    bl_total = m_bl.sum(dim=1, keepdim=True).clamp(min=1e-12)
+    e = mb * m_bl / bl_total
+
+    # Detrainment: linear 1 → 0 over [LCL, LNB], Σ d = m_b. The weight is
+    # formed in float64, as the single-column loop formed it in Python floats.
+    depth = (lnb - lcl).clamp(min=1).double()
+    w64 = 1.0 - (k.unsqueeze(0) - lcl).double() / depth
+    in_cloud = (k.unsqueeze(0) >= lcl) & (k.unsqueeze(0) <= lnb) & valid.unsqueeze(1)
+    w = torch.where(in_cloud, w64.to(dtype), torch.zeros((), dtype=dtype, device=device))
+    w_total = w.sum(dim=1, keepdim=True).clamp(min=1e-12)
+    d = mb * w / w_total
+
+    # Coherent updraft (BL source → cloud) and compensating subsidence.
+    fmass = e.unsqueeze(2) * d.unsqueeze(1) / mb.unsqueeze(2)
+    phi = (torch.cumsum(e, dim=1) - torch.cumsum(d, dim=1))[:, :-1].clamp(min=0.0)
+    fmass = fmass + torch.diag_embed(phi, offset=-1)
+
+    # CFL: one scale per column (keeps each column non-divergent).
+    max_out_frac = (fmass.sum(dim=2) / m.clamp(min=1e-12)).max(dim=1).values
+    scale = torch.where(
+        max_out_frac.double() > CFL_MAX_OUTFLUX_FRAC,
+        max_out_frac.reciprocal() * CFL_MAX_OUTFLUX_FRAC,
+        torch.ones_like(max_out_frac),
+    )
+    scale = torch.where(valid, scale, torch.zeros_like(scale))
+    return fmass * scale.view(n_col, 1, 1)
+
+
+def backward_transition_matrices(fmass: torch.Tensor, layer_mass: torch.Tensor) -> torch.Tensor:
+    """Per-column transition probabilities for GLIDE's backward runs, [C, Z, Z].
+
+    FLEXPART ``calcmatrix``/``redist`` with ``ldirect=-1``: the diagonal closure
+    makes each row of ``fmassfrac`` sum to the layer mass, and a particle in
+    layer i moves to layer j with probability ``fmassfrac[j, i] / m_i`` (the
+    matrix column). ``layer_mass`` is [C, Z].
+    """
+
+    fmassfrac = fmass + torch.diag_embed((layer_mass - fmass.sum(dim=2)).clamp(min=0.0))
+    trans = fmassfrac.transpose(1, 2)
+    return (trans / layer_mass.clamp(min=1e-12).unsqueeze(2)).clamp(min=0.0)
+
+
+def nearest_column_index(
+    lon: torch.Tensor,
+    lat: torch.Tensor,
+    grid_lon: np.ndarray,
+    grid_lat: np.ndarray,
+) -> torch.Tensor:
+    """Flat index ``iy * n_lon + ix`` of the meteorology column nearest each
+    particle, on the regular grid the advection interpolates on (either axis may
+    be descending). Particles beyond the edge get the edge column."""
+
+    def nearest(vals: torch.Tensor, grid: np.ndarray) -> torch.Tensor:
+        n = int(grid.size)
+        if n == 1:
+            return torch.zeros(vals.shape, dtype=torch.long, device=vals.device)
+        first, last = float(grid[0]), float(grid[-1])
+        frac = (vals.double() - first) / (last - first) * (n - 1)
+        return torch.round(frac).clamp(0, n - 1).to(torch.long)
+
+    ix = nearest(lon, np.asarray(grid_lon))
+    iy = nearest(lat, np.asarray(grid_lat))
+    return iy * int(np.asarray(grid_lon).size) + ix
+
+
+class ColumnConvection(NamedTuple):
+    """Per-column convection diagnosis for one met window (task A02).
+
+    Profiles are [C, Z] with the surface at level 0; per-column values are [C].
+    ``m_b`` is the cloud-base mass flux in kg m⁻² s⁻¹ (float64, zero where the
+    column does not fire); one event moves ``m_b · interval_s`` per unit area.
+    """
+
+    t: torch.Tensor
+    q: torch.Tensor
+    pressure_pa: torch.Tensor
+    height_m: torch.Tensor
+    ascending: bool
+    i_lcl: torch.Tensor
+    i_lnb: torch.Tensor
+    cape: torch.Tensor
+    dtv_lcl_plus_1: torch.Tensor
+    cloud_depth_m: torch.Tensor
+    fires: torch.Tensor
+    m_b: torch.Tensor
+    interval_s: float
+
+
+def convection_interval_seconds(met_window: HourlyMetTensors) -> float:
+    """Seconds between convection events: the met window's width.
+
+    The runtime fires convection once per met window, and the reader makes
+    every window one source time step wide (``reader.met_interval_seconds``:
+    3,600 s on hourly ERA5, 10,800 s on a 3-hourly store), so this follows the
+    store's cadence rather than assuming an hour.
+    """
+
+    interval_s = (met_window.metadata.time_end - met_window.metadata.time_start).total_seconds()
+    if interval_s <= 0:
+        raise ValueError(
+            "Met window has non-positive duration "
+            f"({met_window.metadata.time_start} -> {met_window.metadata.time_end}); "
+            "cannot scale the convective mass flux."
+        )
+    return float(interval_s)
+
+
+# ---------------------------------------------------------------------------
 # Scheme class
 # ---------------------------------------------------------------------------
 
@@ -567,6 +827,118 @@ class EmanuelReducedConvection(ConvectionScheme):
 
     # ----- Public API -----
 
+    def column_state(
+        self,
+        met_window: HourlyMetTensors,
+        *,
+        t_alpha: float,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> ColumnConvection:
+        """Parcel lift, trigger and closure for every (lon, lat) column of the window.
+
+        Profiles are the window's own columns, time-interpolated at ``t_alpha``
+        (temperature, humidity and, when the reader supplies it, pressure),
+        reordered so level 0 is the surface. No Python loop over columns.
+        """
+
+        if met_window.height_agl_m is None:
+            raise ValueError(
+                "EmanuelReducedConvection requires HourlyMetTensors.height_agl_m "
+                "(3D geopotential height). The met reader provides it; synthetic "
+                "readers must too."
+            )
+        interval_s = convection_interval_seconds(met_window)
+
+        def columns(field: torch.Tensor) -> torch.Tensor:
+            # [Z, Y, X] -> [C, Z], column index c = iy * n_lon + ix.
+            n_lev = field.shape[0]
+            return field.reshape(n_lev, -1).transpose(0, 1)
+
+        t_start, t_end = met_window.channel("t")
+        q_start, q_end = met_window.channel("q")
+        t_field = (
+            t_start.to(device=device, dtype=dtype) * (1.0 - t_alpha)
+            + t_end.to(device=device, dtype=dtype) * t_alpha
+        )
+        q_field = (
+            q_start.to(device=device, dtype=dtype) * (1.0 - t_alpha)
+            + q_end.to(device=device, dtype=dtype) * t_alpha
+        )
+        p_start, p_end = met_window.column_pressure_hpa()
+        if met_window.pressure_hpa is None:
+            # Level pressures, the same in every column and both hours.
+            p_field = p_start.to(device=device, dtype=dtype)
+        else:
+            p_field = (
+                p_start.to(device=device, dtype=dtype) * (1.0 - t_alpha)
+                + p_end.to(device=device, dtype=dtype) * t_alpha
+            )
+        height_field = met_window.height_agl_m.to(device=device, dtype=dtype)
+
+        t_col = columns(t_field)
+        q_col = columns(q_field).clamp(min=Q_MIN_KG_KG)
+        pressure_pa = columns(p_field) * 100.0
+        height_col = columns(height_field)
+
+        # Surface at index 0. The level order is the same in every column.
+        ascending = bool(height_col[:, -1].mean() > height_col[:, 0].mean())
+        if not ascending:
+            t_col = t_col.flip(1)
+            q_col = q_col.flip(1)
+            pressure_pa = pressure_pa.flip(1)
+            height_col = height_col.flip(1)
+        t_col = t_col.contiguous()
+        q_col = q_col.contiguous()
+        pressure_pa = pressure_pa.contiguous()
+        height_col = height_col.contiguous()
+
+        i_lcl, i_lnb, cape, dtv = compute_lcl_lnb_cape_columns(t_col, q_col, pressure_pa)
+
+        # Trigger (Forster 2007 Eq 34, CAPE floor, deep cloud only). Thresholds
+        # are compared in float64, as the single-column code compared Python floats.
+        n_lev = t_col.shape[1]
+        cloud_depth_m = (
+            height_col.gather(1, i_lnb.clamp(min=0, max=n_lev - 1).unsqueeze(1))
+            - height_col.gather(1, i_lcl.clamp(min=0, max=n_lev - 1).unsqueeze(1))
+        ).squeeze(1)
+        fires = (
+            (i_lcl >= 0)
+            & (i_lnb > i_lcl)
+            & (cape.double() >= self.min_cape_j_kg)
+            & (dtv.double() >= self.trigger_dtv_k)
+            & (cloud_depth_m.double() >= self.min_cloud_depth_m)
+        )
+        m_b = cloud_base_mass_flux_columns(t_col, pressure_pa, i_lcl, cape, self.closure_c)
+        m_b = torch.where(fires, m_b, torch.zeros_like(m_b))
+        return ColumnConvection(
+            t=t_col,
+            q=q_col,
+            pressure_pa=pressure_pa,
+            height_m=height_col,
+            ascending=ascending,
+            i_lcl=i_lcl,
+            i_lnb=i_lnb,
+            cape=cape,
+            dtv_lcl_plus_1=dtv,
+            cloud_depth_m=cloud_depth_m,
+            fires=fires,
+            m_b=m_b,
+            interval_s=interval_s,
+        )
+
+    def column_mass_flux_matrices(self, cols: ColumnConvection) -> torch.Tensor:
+        """The mass-flux matrix of every column, [C, Z, Z] (zeros where no
+        convection fires). For diagnostics and tests; the runtime builds only
+        the firing columns'."""
+
+        return compute_mass_flux_matrices(
+            cols.pressure_pa,
+            cols.i_lcl,
+            cols.i_lnb,
+            (cols.m_b * cols.interval_s).to(cols.pressure_pa.dtype),
+        )
+
     def maybe_convect(
         self,
         particles: torch.Tensor,
@@ -581,146 +953,63 @@ class EmanuelReducedConvection(ConvectionScheme):
     ) -> tuple[torch.Tensor, ConvectionState]:
         if not bool(torch.any(active_mask)):
             return particles, state
-        if met_window.height_agl_m is None:
-            raise ValueError(
-                "EmanuelReducedConvection requires HourlyMetTensors.height_agl_m "
-                "(3D geopotential height). The met reader provides it; synthetic "
-                "readers must too."
-            )
-
         device, dtype = engine.device, engine.dtype
 
-        # Time-interpolated bbox-mean column profiles (Z,). The full Emanuel
-        # scheme would compute per-column profiles; we use the bbox-mean and
-        # document it as a simplification (same approximation used by F9 in
-        # the audit-followup PR).
-        t_start, t_end = met_window.channel("t")
-        q_start, q_end = met_window.channel("q")
-        t_field = (
-            t_start.to(device=device, dtype=dtype) * (1.0 - t_alpha)
-            + t_end.to(device=device, dtype=dtype) * t_alpha
-        )
-        q_field = (
-            q_start.to(device=device, dtype=dtype) * (1.0 - t_alpha)
-            + q_end.to(device=device, dtype=dtype) * t_alpha
-        )
-        t_col = t_field.mean(dim=(1, 2))  # bbox-mean → [Z]
-        q_col = q_field.mean(dim=(1, 2)).clamp(min=Q_MIN_KG_KG)
-        height_col = met_window.height_agl_m.to(device=device, dtype=dtype).mean(dim=(1, 2))
-
-        # Pressure profile from metadata.pressure_level_hpa.
-        pressure_pa = (
-            torch.as_tensor(
-                np.array(met_window.metadata.pressure_level_hpa),
-                device=device,
-                dtype=dtype,
-            )
-            * 100.0
-        )
-        # Reorder all column quantities to ascending z (Emanuel expects surface
-        # at index 0). ARCO ERA5 has level coord descending altitude.
-        ascending = bool(height_col[-1] > height_col[0])
-        if not ascending:
-            t_col = t_col.flip(0)
-            q_col = q_col.flip(0)
-            pressure_pa = pressure_pa.flip(0)
-            height_col = height_col.flip(0)
-
-        # 1) Identify LCL / LNB / CAPE for the bbox-mean column.
-        i_lcl_t, i_lnb_t, cape, dtv_lcl_plus_1 = compute_lcl_lnb_cape(
-            t_col,
-            q_col,
-            pressure_pa,
-        )
-        i_lcl, i_lnb = int(i_lcl_t), int(i_lnb_t)
-
-        # 2) Trigger checks (Forster 2007 Eq 34 + a CAPE/depth floor).
-        fires = (
-            (i_lcl >= 0)
-            and (i_lnb > i_lcl)
-            and (float(cape) >= self.min_cape_j_kg)
-            and (float(dtv_lcl_plus_1) >= self.trigger_dtv_k)
-        )
-        if fires:
-            cloud_depth_m = float(height_col[i_lnb] - height_col[i_lcl])
-            if cloud_depth_m < self.min_cloud_depth_m:
-                fires = False
-
-        if not fires:
+        # 1-3) Parcel lift, trigger and closure in every column.
+        cols = self.column_state(met_window, t_alpha=t_alpha, device=device, dtype=dtype)
+        fire_idx = cols.fires.nonzero().squeeze(1)
+        n_fire = int(fire_idx.numel())
+        if n_fire == 0:
             return particles, state
 
-        # 3) Cloud-base mass flux (closure). M_b ∝ ρ_LCL · w_buoy, with
-        # w_buoy = min(√(2·CAPE), UPDRAFT_W_MAX_M_S). The cap keeps M_b in the
-        # realistic FLEXPART range (0.05–0.5 kg/m²/s); without it, large CAPE
-        # (>500 J/kg) gives unphysically large M_b.
-        t_lcl = t_col[i_lcl]
-        p_lcl = pressure_pa[i_lcl]
-        rho_lcl = p_lcl / (R_DRY_AIR_J_KG_K * t_lcl.clamp(min=T_MIN_K))
-        w_buoy = min(math.sqrt(2.0 * max(float(cape), 0.0)), UPDRAFT_W_MAX_M_S)
-        m_b = self.closure_c * float(rho_lcl) * w_buoy
-
-        # 4) Mass-flux matrix (kg/m² / met-update). Multiply by dt_seconds to
-        # get the per-call redistribution mass — but our scheme is called only
-        # at met-update boundaries, so the met interval is the right timescale.
-        # The window carries its own width, so this follows the source cadence
-        # instead of assuming hourly ERA5.
-        convection_call_interval_s = (
-            met_window.metadata.time_end - met_window.metadata.time_start
-        ).total_seconds()
-        if convection_call_interval_s <= 0:
-            raise ValueError(
-                "Met window has non-positive duration "
-                f"({met_window.metadata.time_start} -> {met_window.metadata.time_end}); "
-                "cannot scale the convective mass flux."
-            )
-        fmass = compute_mass_flux_matrix(
-            t_col,
-            q_col,
-            pressure_pa,
-            i_lcl=i_lcl,
-            i_lnb=i_lnb,
-            m_b=m_b * convection_call_interval_s,
+        # 4) Mass-flux matrices of the firing columns only (kg/m² per event: the
+        # flux times the met interval, which follows the store's cadence).
+        fmass = compute_mass_flux_matrices(
+            cols.pressure_pa[fire_idx],
+            cols.i_lcl[fire_idx],
+            cols.i_lnb[fire_idx],
+            (cols.m_b[fire_idx] * cols.interval_s).to(dtype),
         )
+        layer_mass = _layer_masses_per_area(cols.pressure_pa[fire_idx]).clamp(min=1e-6)
+        prob = backward_transition_matrices(fmass, layer_mass)  # [F, Z, Z]
+        del fmass, layer_mass
 
-        # Per-level mass per area: m_i = (Δp / g) — used for the diagonal closure
-        # and to convert the flux matrix into redistribution probabilities.
-        layer_mass = _layer_masses_per_area(pressure_pa).clamp(min=1e-6)
-
-        # 5) Redistribute particles through the (non-divergent) transition matrix.
-        # GLIDE runs backward, so the destination is sampled from the matrix COLUMN
-        # (FLEXPART redist ldirect=-1); the well-mixed criterion holds either way.
+        # 5) Each particle is moved with the matrix of the column it is in.
+        n_col = cols.fires.numel()
+        col_slot = torch.full((n_col,), -1, dtype=torch.long, device=device)
+        col_slot[fire_idx] = torch.arange(n_fire, device=device)
+        particle_col = nearest_column_index(
+            particles[:, 0], particles[:, 1], met_window.metadata.lon, met_window.metadata.lat
+        )
+        particle_slot = col_slot[particle_col]
         particles_out, n_displaced = self._redistribute_particles(
             particles=particles,
-            active_mask=active_mask,
-            height_col=height_col,
-            fmass=fmass,
-            layer_mass=layer_mass,
-            i_lcl=i_lcl,
-            i_lnb=i_lnb,
+            eligible=active_mask & (particle_slot >= 0),
+            particle_col=particle_col,
+            particle_slot=particle_slot,
+            height_col=cols.height_m,
+            prob=prob,
             generator=generator,
             device=device,
             dtype=dtype,
-            ascending=ascending,
-            backward=True,
         )
 
-        # Log once per met update (the t_alpha changes when met advances).
-        if self._last_log_t_alpha != t_alpha:
+        if LOGGER.isEnabledFor(logging.INFO):
+            fired_cape = cols.cape[fire_idx]
             LOGGER.info(
-                "Emanuel convection: fires at t_alpha=%.2f. "
-                "CAPE=%.0f J/kg, LCL=%.0f m, LNB=%.0f m, depth=%.0f m, M_b=%.3f kg/m²/s. "
+                "Emanuel convection at %s: fires in %d / %d columns "
+                "(CAPE median %.0f, max %.0f J/kg; M_b max %.3f kg/m²/s; interval %.0f s). "
                 "Displaced %d / %d active particles.",
-                t_alpha,
-                float(cape),
-                float(height_col[i_lcl]),
-                float(height_col[i_lnb]),
-                float(height_col[i_lnb] - height_col[i_lcl]),
-                m_b,
+                met_window.metadata.time_start,
+                n_fire,
+                n_col,
+                float(fired_cape.median()),
+                float(fired_cape.max()),
+                float(cols.m_b.max()),
+                cols.interval_s,
                 n_displaced,
                 int(active_mask.sum().item()),
             )
-            self._last_log_t_alpha = t_alpha
-
         return particles_out, state
 
     # ----- Particle redistribution -----
@@ -729,85 +1018,77 @@ class EmanuelReducedConvection(ConvectionScheme):
     def _redistribute_particles(
         *,
         particles: torch.Tensor,
-        active_mask: torch.Tensor,
+        eligible: torch.Tensor,
+        particle_col: torch.Tensor,
+        particle_slot: torch.Tensor,
         height_col: torch.Tensor,
-        fmass: torch.Tensor,
-        layer_mass: torch.Tensor,
-        i_lcl: int,
-        i_lnb: int,
+        prob: torch.Tensor,
         generator: torch.Generator | None,
         device: torch.device,
         dtype: torch.dtype,
-        ascending: bool,
-        backward: bool = True,
     ) -> tuple[torch.Tensor, int]:
-        """Redistribute active particles through the convective transition matrix.
+        """Redistribute eligible particles, each with its own column's transition matrix.
 
-        Follows FLEXPART ``calcmatrix`` / ``redist``: apply the diagonal closure so
-        each row of ``fmassfrac`` sums to the layer air mass (the diagonal is the
-        "stay" mass), then sample a destination level per particle from the
-        transition matrix — the matrix ROW for forward runs, the matrix COLUMN for
-        backward runs (``ldirect=-1``). GLIDE runs backward, so ``backward=True``
-        uses the column (transpose). Because ``fmass`` is non-divergent, both the
-        row- and column-normalised transitions are valid probability distributions
-        and leave a mass-proportional ensemble invariant (the well-mixed criterion).
+        Follows FLEXPART ``calcmatrix`` / ``redist`` (backward, ``ldirect=-1``):
+        ``prob[s, i, j]`` is the probability that a particle in layer ``i`` of
+        firing column ``s`` moves to layer ``j`` (`backward_transition_matrices`).
+        A particle's host layer is its column's level nearest its height; it
+        draws a destination from that row by cumulative sum and a uniform number.
+        Movers are placed at a uniform random height within the destination layer;
+        particles that draw their own layer keep their position. Only altitude
+        changes; lon/lat/weight are untouched.
 
-        Sampled movers are placed at a uniform random height within the destination
-        layer; particles that sample their own layer (the stay-diagonal) keep their
-        position. Only altitude changes; lon/lat/weight are untouched.
+        ``eligible`` marks active particles in a firing column; ``particle_slot``
+        maps each particle to its firing column's index in ``prob`` (-1: none);
+        ``height_col`` is [C, Z], ascending.
         """
 
         n = particles.shape[0]
-        n_lev = height_col.numel()
+        n_lev = height_col.shape[1]
         out = particles.clone()
 
-        # Diagonal closure: fmassfrac[i,i] = m_i - Σ_j fmass[i,j]; rows sum to m_i.
-        # (CFL cap in compute_mass_flux_matrix keeps the diagonal non-negative.)
-        fmassfrac = fmass + torch.diag((layer_mass - fmass.sum(dim=1)).clamp(min=0.0))
-        # Transition matrix: destination distribution for a particle in layer i is
-        # row i (forward) or column i (backward) divided by m_i. Non-divergence ⇒
-        # both are normalised to 1.
-        trans = fmassfrac.t() if backward else fmassfrac
-        prob = (trans / layer_mass.clamp(min=1e-12).unsqueeze(1)).clamp(min=0.0)  # [Z, Z]
-
-        # Per-particle host level (nearest level by height); height_col ascending.
-        z_particles = out[:, 2].contiguous()
-        idx_upper = torch.searchsorted(height_col, z_particles).clamp(min=1, max=n_lev - 1)
-        idx_lower = idx_upper - 1
-        z_lo = height_col[idx_lower]
-        z_hi = height_col[idx_upper]
-        host = torch.where((z_particles - z_lo) < (z_hi - z_particles), idx_lower, idx_upper)
-
-        eligible = active_mask
-        if int(eligible.sum().item()) == 0:
+        sel = eligible.nonzero().squeeze(1)
+        if int(sel.numel()) == 0:
             return out, 0
 
-        # Per-particle destination distribution (includes the stay-diagonal).
-        probs = prob[host]  # [N, Z]
+        # Host level: nearest level of the particle's own column.
+        heights = height_col[particle_col[sel]]  # [S, Z]
+        z_particles = out[sel, 2].contiguous()
+        idx_upper = (
+            torch.searchsorted(heights, z_particles.unsqueeze(1))
+            .squeeze(1)
+            .clamp(min=1, max=n_lev - 1)
+        )
+        idx_lower = idx_upper - 1
+        z_lo = heights.gather(1, idx_lower.unsqueeze(1)).squeeze(1)
+        z_hi = heights.gather(1, idx_upper.unsqueeze(1)).squeeze(1)
+        host = torch.where((z_particles - z_lo) < (z_hi - z_particles), idx_lower, idx_upper)
+
+        # Destination distribution (includes the stay-diagonal).
+        probs = prob[particle_slot[sel], host]  # [S, Z]
         probs = probs / probs.sum(dim=1, keepdim=True).clamp(min=1e-12)
         cum = probs.cumsum(dim=1)
 
+        # One uniform per particle (all N, so the random stream does not depend
+        # on which columns fire).
         u = (
             torch.rand(n, generator=generator, device=device, dtype=dtype)
             if generator is not None
             else torch.rand(n, device=device, dtype=dtype)
         )
-        dest = torch.searchsorted(cum, u.unsqueeze(1)).squeeze(1).clamp(max=n_lev - 1)
+        dest = torch.searchsorted(cum, u[sel].unsqueeze(1)).squeeze(1).clamp(max=n_lev - 1)
 
-        # A particle is "displaced" only if its sampled destination differs from
-        # its host level; stayers (dest == host, the diagonal) keep their z.
-        moved = eligible & (dest != host)
+        moved = dest != host
         n_moved = int(moved.sum().item())
-
         if n_moved > 0:
-            z_lo_d = height_col[(dest - 1).clamp(min=0)]
-            z_hi_d = height_col[dest]
+            z_lo_d = heights.gather(1, (dest - 1).clamp(min=0).unsqueeze(1)).squeeze(1)
+            z_hi_d = heights.gather(1, dest.unsqueeze(1)).squeeze(1)
             u_within = (
                 torch.rand(n, generator=generator, device=device, dtype=dtype)
                 if generator is not None
                 else torch.rand(n, device=device, dtype=dtype)
             )
-            z_new = z_lo_d + u_within * (z_hi_d - z_lo_d)
-            out[:, 2] = torch.where(moved, z_new, out[:, 2])
+            z_new = z_lo_d + u_within[sel] * (z_hi_d - z_lo_d)
+            out[sel, 2] = torch.where(moved, z_new, z_particles)
 
         return out, n_moved

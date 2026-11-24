@@ -700,34 +700,250 @@ def test_emanuel_does_not_fire_on_winter_inversion_column() -> None:
     )
 
 
-def _captured_m_b_for_window(monkeypatch, window_hours: float) -> float:
-    """The `m_b` the scheme hands to the mass-flux matrix for a window of this width.
+def _event_m_b_for_window(window_hours: float) -> float:
+    """The per-event cloud-base mass (kg/m², flux x interval) the scheme uses for
+    a window of this width, in one column of a uniform convective box.
 
-    Spying on the argument rather than counting displaced particles: the
-    redistribution probability saturates well before 3-hourly at realistic closure
-    settings, so a particle count cannot distinguish the two.
+    Read from the column diagnosis rather than by counting displaced particles:
+    the redistribution probability saturates well before 3-hourly at realistic
+    closure settings, so a particle count cannot distinguish the two.
     """
+
+    met = _build_convective_met_window(window_hours=window_hours)
+    scheme = EmanuelReducedConvection(closure_c=0.1, trigger_dtv_k=0.1)
+    cols = scheme.column_state(met, t_alpha=0.5, device=torch.device("cpu"), dtype=torch.float32)
+    assert bool(cols.fires.all())
+    return float(cols.m_b[0]) * cols.interval_s
+
+
+def test_convective_mass_flux_follows_the_met_window_width() -> None:
+    """The scheme fires once per met window and redistributes the mass the cloud-base
+    flux moves over that window, so the mass it redistributes must scale with the
+    window. The interval was hardcoded at 3600 s, which under-convected a 3-hourly
+    source by exactly this factor of 3."""
+
+    hourly = _event_m_b_for_window(1.0)
+    three_hourly = _event_m_b_for_window(3.0)
+
+    assert hourly > 0.0
+    assert three_hourly == pytest.approx(3.0 * hourly, rel=1e-12)
+
+
+# ---------------------------------------------------------------------------
+# Per-column convection (task A02)
+# ---------------------------------------------------------------------------
+
+
+def _old_bbox_mean_matrix(scheme, met, t_alpha: float) -> tuple[torch.Tensor, torch.Tensor]:
+    """The pre-A02 scheme's matrix: one parcel lift in the bbox-mean column,
+    using the single-column reference functions and the closure exactly as
+    `maybe_convect` evaluated them before A02. Returns (fmass, height_col)."""
+
+    dtype = torch.float32
+    t_start, t_end = met.channel("t")
+    q_start, q_end = met.channel("q")
+    t_col = (t_start.to(dtype) * (1.0 - t_alpha) + t_end.to(dtype) * t_alpha).mean(dim=(1, 2))
+    q_col = (
+        (q_start.to(dtype) * (1.0 - t_alpha) + q_end.to(dtype) * t_alpha)
+        .mean(dim=(1, 2))
+        .clamp(min=0.0)
+    )
+    height_col = met.height_agl_m.to(dtype).mean(dim=(1, 2))
+    p_col = torch.as_tensor(np.array(met.metadata.pressure_level_hpa), dtype=dtype) * 100.0
+    if not bool(height_col[-1] > height_col[0]):
+        t_col, q_col, p_col, height_col = (x.flip(0) for x in (t_col, q_col, p_col, height_col))
+    i_lcl_t, i_lnb_t, cape, dtv = compute_lcl_lnb_cape(t_col, q_col, p_col)
+    i_lcl, i_lnb = int(i_lcl_t), int(i_lnb_t)
+    fires = (
+        i_lcl >= 0
+        and i_lnb > i_lcl
+        and float(cape) >= scheme.min_cape_j_kg
+        and float(dtv) >= scheme.trigger_dtv_k
+        and float(height_col[i_lnb] - height_col[i_lcl]) >= scheme.min_cloud_depth_m
+    )
+    assert fires, "reference column must fire for this comparison"
+    rho_lcl = p_col[i_lcl] / (emanuel_module.R_DRY_AIR_J_KG_K * t_col[i_lcl].clamp(min=150.0))
+    w_buoy = min(math.sqrt(2.0 * max(float(cape), 0.0)), emanuel_module.UPDRAFT_W_MAX_M_S)
+    m_b = scheme.closure_c * float(rho_lcl) * w_buoy
+    interval_s = (met.metadata.time_end - met.metadata.time_start).total_seconds()
+    fmass = compute_mass_flux_matrix(
+        t_col, q_col, p_col, i_lcl=i_lcl, i_lnb=i_lnb, m_b=m_b * interval_s
+    )
+    return fmass, height_col
+
+
+def test_uniform_box_gives_the_old_matrix_in_every_column() -> None:
+    """Acceptance (A02): on meteorology that is uniform in the horizontal, every
+    column's matrix equals the one the pre-A02 scheme built from the bbox-mean
+    column. Checked bit for bit (float32 on CPU)."""
+
+    met = _build_convective_met_window()
+    scheme = EmanuelReducedConvection(closure_c=0.1, trigger_dtv_k=0.1)
+    cols = scheme.column_state(met, t_alpha=0.5, device=torch.device("cpu"), dtype=torch.float32)
+    fmass_cols = scheme.column_mass_flux_matrices(cols)
+    fmass_old, height_old = _old_bbox_mean_matrix(scheme, met, t_alpha=0.5)
+
+    n_col = 3 * 3
+    assert fmass_cols.shape == (n_col, *fmass_old.shape)
+    assert bool(cols.fires.all())
+    assert float(fmass_old.abs().sum()) > 0.0
+    for c in range(n_col):
+        assert torch.equal(fmass_cols[c], fmass_old), f"column {c} differs from the old matrix"
+        # The old scheme averaged nine equal float32 heights, which rounds in
+        # the last place; the column keeps its own.
+        assert torch.allclose(cols.height_m[c], height_old, rtol=1e-6, atol=0.0)
+
+
+def _mixed_column_window() -> HourlyMetTensors:
+    """A 3 x 3 box whose columns differ: the convective sounding warmed or cooled
+    at the surface and moistened or dried by column, so LCL, LNB and M_b vary."""
+
+    met = _build_convective_met_window()
+    n_lev, n_lat, n_lon = met.hour_start.shape[1:]
+    t_idx, q_idx = met.channel_names.index("t"), met.channel_names.index("q")
+    fields = met.hour_start.clone()
+    dt = torch.tensor([[-1.0, 0.0, 1.5], [2.5, 0.5, -0.5], [1.0, -1.5, 0.25]])
+    dq = torch.tensor([[0.9, 1.0, 1.1], [1.15, 0.95, 1.05], [1.0, 0.85, 1.2]])
+    decay = torch.exp(-torch.arange(n_lev, dtype=torch.float32) / 3.0).view(n_lev, 1, 1)
+    fields[t_idx] = fields[t_idx] + dt * decay
+    fields[q_idx] = fields[q_idx] * (1.0 + (dq - 1.0) * decay)
+    return HourlyMetTensors(
+        hour_start=fields,
+        hour_end=fields,
+        metadata=met.metadata,
+        channel_names=met.channel_names,
+        height_agl_m=met.height_agl_m,
+    )
+
+
+def test_mass_is_conserved_in_every_column() -> None:
+    """Acceptance (A02), the single-column tests extended to every column: each
+    column's matrix is non-divergent, its backward transition rows are probability
+    distributions, and its layer masses are stationary (mᵀP = mᵀ)."""
+
+    met = _mixed_column_window()
+    scheme = EmanuelReducedConvection(closure_c=0.1, trigger_dtv_k=0.1)
+    cols = scheme.column_state(met, t_alpha=0.5, device=torch.device("cpu"), dtype=torch.float64)
+    fmass = scheme.column_mass_flux_matrices(cols)
+    assert int(cols.fires.sum()) >= 3, "most columns should fire"
+    assert len({float(x) for x in cols.m_b[cols.fires]}) > 1, "columns should differ"
+
+    m = _layer_masses_per_area(cols.pressure_pa).clamp(min=1e-6)
+    prob = emanuel_module.backward_transition_matrices(fmass, m)
+    for c in range(fmass.shape[0]):
+        assert torch.allclose(fmass[c].sum(dim=1), fmass[c].sum(dim=0), rtol=1e-9, atol=1e-12)
+        assert torch.allclose(prob[c].sum(dim=1), torch.ones_like(m[c]), atol=1e-12)
+        assert bool((prob[c] >= 0.0).all())
+        assert torch.allclose(m[c] @ prob[c], m[c], rtol=1e-9, atol=1e-12)
+
+
+def test_matrices_match_the_single_column_reference_in_every_column() -> None:
+    """The batched lift, trigger and matrix agree with the single-column reference
+    functions column by column on a box whose columns all differ."""
+
+    met = _mixed_column_window()
+    scheme = EmanuelReducedConvection(closure_c=0.1, trigger_dtv_k=0.1)
+    cols = scheme.column_state(met, t_alpha=0.5, device=torch.device("cpu"), dtype=torch.float64)
+    fmass = scheme.column_mass_flux_matrices(cols)
+    for c in range(fmass.shape[0]):
+        i_lcl, i_lnb, cape, dtv = compute_lcl_lnb_cape(cols.t[c], cols.q[c], cols.pressure_pa[c])
+        assert int(i_lcl) == int(cols.i_lcl[c])
+        assert int(i_lnb) == int(cols.i_lnb[c])
+        assert float(cape) == pytest.approx(float(cols.cape[c]), rel=1e-12, abs=1e-9)
+        assert float(dtv) == pytest.approx(float(cols.dtv_lcl_plus_1[c]), rel=1e-12)
+        if bool(cols.fires[c]):
+            ref = compute_mass_flux_matrix(
+                cols.t[c],
+                cols.q[c],
+                cols.pressure_pa[c],
+                i_lcl=int(i_lcl),
+                i_lnb=int(i_lnb),
+                m_b=float(cols.m_b[c]) * cols.interval_s,
+            )
+            assert torch.allclose(fmass[c], ref, rtol=1e-12, atol=0.0)
+        else:
+            assert torch.all(fmass[c] == 0.0)
+
+
+def _two_column_window() -> HourlyMetTensors:
+    """1 x 2 box: the convective sounding in the western column, the dry stable
+    sounding (same levels) in the eastern one."""
+
+    from datetime import datetime, timedelta
+
+    from lpdm.met_reader import MetFieldMetadata
+
+    convective = _build_convective_met_window()
+    n_lev = convective.hour_start.shape[1]
+    t_unstable, q_unstable, p_col = _moist_unstable_column(n_lev=n_lev)
+    p_hpa = p_col.numpy() / 100.0
+    z_km = -8.0 * np.log(p_hpa / 1000.0)
+    t_stable = torch.as_tensor(np.minimum(280.0 + 2.0 * z_km, 290.0), dtype=torch.float32)
+    q_stable = torch.full((n_lev,), 1e-5)
+
+    names = ("u", "v", "w", "blh", "sp", "t", "q")
+    shape = (n_lev, 1, 2)
+    t3 = torch.stack((t_unstable.to(torch.float32), t_stable), dim=1).view(shape)
+    q3 = torch.stack((q_unstable.to(torch.float32), q_stable), dim=1).view(shape)
+    chans = {
+        "u": torch.zeros(shape),
+        "v": torch.zeros(shape),
+        "w": torch.zeros(shape),
+        "blh": torch.full(shape, 1500.0),
+        "sp": torch.full(shape, float(p_col[0])),
+        "t": t3,
+        "q": q3,
+    }
+    fields = torch.stack([chans[n] for n in names], dim=0)
+    height = convective.metadata.level
+    t0 = datetime(2024, 7, 1, 12, 0, 0, tzinfo=UTC)
+    metadata = MetFieldMetadata(
+        lon=np.array([0.0, 1.0]),
+        lat=np.array([45.0]),
+        level=height,
+        pressure_level_hpa=p_hpa,
+        time_start=t0,
+        time_end=t0 + timedelta(hours=1),
+        variable_units=dict.fromkeys(names, ""),
+    )
+    height_3d = torch.as_tensor(height, dtype=torch.float32).view(n_lev, 1, 1).expand(shape)
+    return HourlyMetTensors(
+        hour_start=fields,
+        hour_end=fields,
+        metadata=metadata,
+        channel_names=names,
+        height_agl_m=height_3d.contiguous(),
+    )
+
+
+def test_convection_fires_in_the_unstable_column_only() -> None:
+    """Acceptance (A02): two columns, one unstable and one stable. Convection
+    fires in the first only, and only particles in the first move."""
 
     from lpdm.gpu_engine import GPUEngine
 
-    captured: dict[str, float] = {}
-    real = emanuel_module.compute_mass_flux_matrix
-
-    def _spy(*args, m_b: float, **kwargs):
-        captured["m_b"] = float(m_b)
-        return real(*args, m_b=m_b, **kwargs)
-
-    monkeypatch.setattr(emanuel_module, "compute_mass_flux_matrix", _spy)
-
-    torch.manual_seed(20260601)
-    met = _build_convective_met_window(window_hours=window_hours)
+    torch.manual_seed(20261124)
+    met = _two_column_window()
     scheme = EmanuelReducedConvection(closure_c=0.1, trigger_dtv_k=0.1)
-    n = 64
-    particles = torch.zeros(n, 4, dtype=torch.float32)
-    particles[:, 2] = 3000.0
+    cols = scheme.column_state(met, t_alpha=0.5, device=torch.device("cpu"), dtype=torch.float32)
+    assert cols.fires.tolist() == [True, False]
+    fmass = scheme.column_mass_flux_matrices(cols)
+    assert float(fmass[0].abs().sum()) > 0.0
+    assert torch.all(fmass[1] == 0.0)
+
+    # Particles in the cloud layer of each column; the eastern ones sit just
+    # west of the eastern grid point, still nearer to it than to the western one.
+    i_lcl, i_lnb = int(cols.i_lcl[0]), int(cols.i_lnb[0])
+    z_base, z_top = float(cols.height_m[0, i_lcl]), float(cols.height_m[0, i_lnb])
+    n = 2000
+    particles = torch.zeros(n, 4)
+    particles[: n // 2, 0] = 0.3  # western (unstable) column
+    particles[n // 2 :, 0] = 0.7  # eastern (stable) column
+    particles[:, 1] = 45.0
+    particles[:, 2] = torch.empty(n).uniform_(z_base, z_top)
     particles[:, 3] = 1.0 / n
 
-    scheme.maybe_convect(
+    out, _ = scheme.maybe_convect(
         particles,
         scheme.initialize_state(n, device=torch.device("cpu"), dtype=torch.float32),
         met,
@@ -736,20 +952,24 @@ def _captured_m_b_for_window(monkeypatch, window_hours: float) -> float:
         active_mask=torch.ones(n, dtype=torch.bool),
         engine=GPUEngine(device="cpu"),
     )
-    return captured["m_b"]
+    moved = out[:, 2] != particles[:, 2]
+    assert int(moved[: n // 2].sum()) > 100, "particles in the unstable column must move"
+    assert not bool(moved[n // 2 :].any()), "no particle in the stable column may move"
+    assert torch.equal(out[:, [0, 1, 3]], particles[:, [0, 1, 3]])
+    # Backward: the unstable column's particles are traced down towards the surface.
+    assert float((out[: n // 2, 2] - particles[: n // 2, 2]).mean()) < -200.0
 
 
-def test_convective_mass_flux_follows_the_met_window_width(monkeypatch) -> None:
-    """The scheme fires once per met window and redistributes the mass the cloud-base
-    flux moves over that window, so the mass it redistributes must scale with the
-    window. The interval was hardcoded at 3600 s, which under-convected a 3-hourly
-    source by exactly this factor of 3."""
-
-    hourly = _captured_m_b_for_window(monkeypatch, 1.0)
-    three_hourly = _captured_m_b_for_window(monkeypatch, 3.0)
-
-    assert hourly > 0.0
-    assert three_hourly == pytest.approx(3.0 * hourly, rel=1e-9)
+def test_nearest_column_index_handles_descending_latitude() -> None:
+    lon = np.array([-10.0, -9.75, -9.5])
+    lat = np.array([54.0, 53.75])  # descending, as ERA5 stores it
+    idx = emanuel_module.nearest_column_index(
+        torch.tensor([-10.0, -9.6, -9.74, -20.0]),
+        torch.tensor([54.0, 53.8, 53.7, 60.0]),
+        lon,
+        lat,
+    )
+    assert idx.tolist() == [0, 1 * 3 + 2, 1 * 3 + 1, 0]
 
 
 def test_non_positive_met_window_is_refused_by_convection() -> None:
