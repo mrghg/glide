@@ -292,10 +292,22 @@ Model: Opus 5.5, high effort. Run strictly in order unless a task is BLOCKED.
 - **Fixtures to generate:** smoke config on CPU eager (committed, small);
   smoke config on CUDA static path; reference multi-site config on CUDA (kept
   in outputs, manifest committed).
+- **GPU tolerance (decided 24 Nov 2026, Matt).** With the dry-air weighting
+  (decision 0022, A04) each particle adds a different amount to the footprint,
+  and CUDA's `scatter_add_` sums them in an order that varies between runs, so
+  two same-seed GPU runs differ in the last bits: up to 1.4 × 10⁻⁶ relative
+  per value (A04) and 5.3 × 10⁻⁷ (B12); runs with `density_weighting: none`
+  were bit-identical. This is accepted rather than made deterministic. The
+  CUDA fixtures are compared with, per footprint cell,
+  |a − b| ≤ 1e-5 × |b| + 1e-7 × max|b| (the absolute floor keeps near-empty
+  cells from failing on relative noise), and each release's total footprint
+  within 1e-6 relative. CPU fixtures stay bit-identical. `compare_golden.py`
+  takes these as its defaults for a CUDA fixture and prints the largest
+  value of each criterion, so a drift towards the limit is visible.
 - **Out of scope.** Any change to `src/lpdm/`.
 - **Acceptance.** Fixtures exist and are documented in `docs/VALIDATION.md`
   (new subsection "Golden fixtures"); `compare_golden.py` on the same rev passes
-  bit-identically on CPU and within the existing parity tolerance on CUDA;
+  bit-identically on CPU and within the GPU tolerance below on CUDA;
   `benchmark.py` output for the reference config is recorded as the baseline
   in the new `docs/VALIDATION.md` subsection and in the task's progress file.
 - **Runtime.** Reference config on GH200: ~25 min.
