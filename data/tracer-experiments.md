@@ -600,14 +600,18 @@ python -m tracers.benchmark run --experiments OKC80 OKC80-PDCH \
   same samples and options where the archive has one, and the provenance:
   physics tag, GLIDE commit, scoring-code commit, configuration hash (physics
   and numerics only), the overrides, the meteorology store and its
-  met-bazarr attributes, and the seeds.
+  met-bazarr attributes, including any repairs recorded in the store's
+  `glide_repairs` attribute (a summary such as "met-bazarr 0.3.0, repaired
+  0.4.0 (era5-surface-geopotential)", then each repair's version, commit,
+  date and size), and the seeds.
 
 **Rerunning.**
 
 - *With a changed parameter:* `run ... --out RUN_B --set
   turbulence.meander.coefficient=0.3`, then `python -m tracers.benchmark
   compare RUN_A RUN_B`. `compare` lists the settings that differ, every
-  score and term side by side with the differences from the first run, and
+  score and term side by side with the differences from the first run, each
+  run's meteorology store with its producer version and repairs, and
   whether the predictions are identical.
 - *With another meteorology store:* `run ... --met OTHER.zarr --out RUN_C`.
   The store must cover the samples and reach back to a few hours before the

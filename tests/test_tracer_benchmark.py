@@ -284,9 +284,10 @@ def test_backward_prediction_matches_the_forward_solution(
 # ---------------------------------------------------------------------------
 
 
-def _nam_like_store(path: Path) -> Path:
+def _nam_like_store(path: Path, attrs: dict | None = None) -> Path:
     """A small ascending 0..360 store west of Greenwich, laid out like met-bazarr's
-    NAM stores (240..305 E), with what ``ArcoEra5ZarrReader`` needs to open it."""
+    NAM stores (240..305 E), with what ``ArcoEra5ZarrReader`` needs to open it,
+    and the global ``attrs`` given."""
 
     lon = np.arange(240.0, 305.01, 1.0)
     lat = np.arange(58.0, 21.99, -1.0)
@@ -298,6 +299,7 @@ def _nam_like_store(path: Path) -> Path:
             "boundary_layer_height": (("time", "latitude", "longitude"), np.ones(shape, "f4")),
         },
         coords={"time": time, "latitude": lat, "longitude": lon},
+        attrs=attrs or {},
     )
     ds.to_zarr(path)
     return path
@@ -379,6 +381,77 @@ def test_config_from_a_0_360_store_passes_the_runtime_preflight(tmp_path: Path) 
             _validate_meteorology_space_coverage(reader, RunConfig.model_validate(old))
     finally:
         reader.close()
+
+
+REPAIR = {
+    "repair": "era5-surface-geopotential",
+    "description": "geopotential_at_surface replaced (met-bazarr decision 0009)",
+    "date": "2026-11-24T06:36:37Z",
+    "producer_version": "0.4.0",
+    "producer_commit": "a77db3294aff8e64046cbfda73896f3aaa59314b",
+    "change_m": {"median": 0.3, "p99": 16.52, "max": 123.77},
+}
+
+
+def test_scorecard_and_compare_show_the_met_repairs(tmp_path: Path) -> None:
+    """A store repaired after it was built: the scorecard (Markdown and JSON) and
+    ``compare`` show the repair's producer version beside the store's own."""
+
+    base = {"producer": "met-bazarr", "producer_version": "0.3.0", "producer_commit": "abc"}
+    repaired = _nam_like_store(
+        tmp_path / "repaired.zarr", dict(base, glide_repairs=json.dumps([REPAIR]))
+    )
+    plain = _nam_like_store(tmp_path / "plain.zarr", base)
+    score = dict(
+        experiment="OKC80",
+        n_pairs=1,
+        rank=1.0,
+        r2_term=0.1,
+        fb_term=0.2,
+        fms_term=0.3,
+        ks_term=0.4,
+        rank_plain_r=1.0,
+        mean_measured_pg_m3=1.0,
+        mean_calculated_pg_m3=1.0,
+    )
+    runs = []
+    for store in (repaired, plain):
+        box = benchmark.met_extent(str(store))
+        meta = benchmark.provenance({}, str(store), box, dict(receptor_layer_m=[0, 100]))
+        out = tmp_path / store.stem
+        out.mkdir()
+        benchmark.build_scorecard(out, [score], [], meta, ["OKC80"])
+        pd.DataFrame({"experiment": ["OKC80"], "sample_id": [1], "pred_raw": [1.0]}).to_csv(
+            out / "predictions.csv", index=False
+        )
+        runs.append(out)
+
+    summary = "met-bazarr 0.3.0, repaired 0.4.0 (era5-surface-geopotential)"
+    md = (runs[0] / "scorecard.md").read_text()
+    assert f"| met | {summary} |" in md
+    assert "| met repair 1 | `era5-surface-geopotential`: met-bazarr 0.4.0 (`a77db3294aff`)" in md
+    assert "change median 0.3 m, p99 16.52 m, max 123.77 m" in md
+    card = json.loads((runs[0] / "scorecard.json").read_text())
+    assert card["meta"]["met_summary"] == summary
+    assert card["meta"]["met_repairs"] == [REPAIR]
+    md_plain = (runs[1] / "scorecard.md").read_text()
+    assert "| met | met-bazarr 0.3.0, no repairs recorded |" in md_plain
+    assert "| met repairs | none recorded |" in md_plain
+    assert json.loads((runs[1] / "scorecard.json").read_text())["meta"]["met_repairs"] == []
+
+    text = benchmark.compare_runs(runs)
+    assert f"| run 1 | `{repaired}` | {summary} |" in text
+    assert f"| run 2 | `{plain}` | met-bazarr 0.3.0, no repairs recorded |" in text
+
+    # Several repairs group by version; an unreadable attribute is shown, not dropped.
+    second = dict(REPAIR, repair="other-fix", producer_version="0.5.0")
+    third = dict(REPAIR, repair="third-fix")
+    prov = dict(base, glide_repairs=json.dumps([REPAIR, second, third]))
+    assert benchmark.met_summary(prov) == (
+        "met-bazarr 0.3.0, repaired 0.4.0 (era5-surface-geopotential, third-fix); 0.5.0 (other-fix)"
+    )
+    bad = benchmark.met_repairs(dict(base, glide_repairs="not json"))
+    assert bad == [{"repair": "unreadable", "raw": "not json"}]
 
 
 def test_choose_time_bin() -> None:
