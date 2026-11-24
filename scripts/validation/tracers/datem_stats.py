@@ -253,7 +253,7 @@ def _linear(mm: np.ndarray, cc: np.ndarray) -> dict:
     )
 
 
-def _bootstrap_r2(mm_all, cc_all, meas, calc, zero, opt: StatOptions) -> float:
+def _bootstrap_r2(meas, calc, zero, opt: StatOptions) -> float:
     """Mean of r^2 over N passes, each dropping every record with p = 0.2."""
     rng = np.random.default_rng(opt.seed)
     n_rec = len(meas)
@@ -307,7 +307,7 @@ def datem_statistics(
     lin = _linear(mm, cc)
     corl = lin["corl"]
     if opt.bootstrap:
-        corl = math.sqrt(_bootstrap_r2(mm, cc, meas, calc, zero, opt))
+        corl = math.sqrt(_bootstrap_r2(meas, calc, zero, opt))
 
     # BIASES
     k = F(len(mm))

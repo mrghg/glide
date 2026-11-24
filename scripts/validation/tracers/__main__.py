@@ -145,6 +145,7 @@ def main(argv=None) -> int:
         k = atmes2.zero_filter(j, margin=args.margin, last_interval=args.last_interval)
         z = int((k & (j["conc_raw"] == 0)).sum())
         print(f"{int(k.sum())} pairs, {100 * z / k.sum():.1f}% measured zeros")
+        print(atmes2.DEFINITIONS_NOTE)
         return 0
 
     if args.cmd == "atmes2-hysplit":
@@ -160,7 +161,7 @@ def main(argv=None) -> int:
             index=j.index,
         )
         for k, v in atmes2.score_against_jrc(j, pred).items():
-            print(f"{k:20s} {v:.4g}")
+            print(f"{k:20s} {v}" if isinstance(v, str) else f"{k:20s} {v:.4g}")
         return 0
 
     if args.cmd == "score":

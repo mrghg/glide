@@ -213,11 +213,23 @@ def write_datem_predictions(
     ``predicted_raw`` is in the measurement file's units (pg m-3). The
     concentration is written with 6 significant figures rather than
     DATEM's ``F8.1``, so small values are not truncated; ``statmain`` reads
-    the records list-directed, so either works.
+    the records list-directed, so either works. Non-finite predictions are
+    refused: written as ``nan``, pairing would treat them as missing and
+    drop the sample without a word.
     """
     pred = np.asarray(predicted_raw, dtype=float)
     if pred.shape != (len(samples),):
         raise ValueError("one prediction per sample is required")
+    bad = ~np.isfinite(pred)
+    if bad.any():
+        # statmain would read "nan" as a missing value and silently drop the pair.
+        ids = (
+            samples["sample_id"].to_numpy()[bad] if "sample_id" in samples else np.flatnonzero(bad)
+        )
+        raise ValueError(
+            f"{int(bad.sum())} non-finite prediction(s), e.g. {list(ids[:5])}; "
+            "every sample needs a finite prediction"
+        )
     lines = [title, f"year mn dy  shr  dur   lat     lon    {species:>6s}  stn"]
     for (_, r), c in zip(samples.iterrows(), pred, strict=True):
         lines.append(
@@ -236,8 +248,17 @@ ETEX_INTERVAL_ORIGIN = {
     1: pd.Timestamp("1994-10-23 15:00"),
     2: pd.Timestamp("1994-11-14 15:00"),
 }
-#: Release table from ETEX_release?/release?.txt. Source coordinates are not
-#: in the JRC files; they must come from the experiment documentation.
+#: Release table from ETEX_release?/release?.txt (times, mass, the 8 m
+#: chimney). The JRC data files do not give the release site. Release 1's
+#: site is from the JRC ATMES-II pages, "The first ETEX tracer release"
+#: (https://remon.jrc.ec.europa.eu/past_activities/atmes_2/site/11a.htm,
+#: read 2026-11-24): "The source was located at Monterfil (2° 00'30" W;
+#: 48° 03'30" N; 90 m asl) ... 340 kg of [PMCH] were emitted at 8 m agl".
+#: ``height_m`` is above ground, ``site_alt_m`` the ground above sea level.
+#: Release 2 used the same chimney (release2.txt), but no source read here
+#: states its coordinates, so they are left NaN until they are checked
+#: against the experiment documentation (Nodop et al., 1998, Atmos.
+#: Environ. 32, 4095-4108); ETEX-2 is not in the benchmark.
 ETEX_RELEASES = {
     1: dict(
         start=pd.Timestamp("1994-10-23 16:00"),
@@ -245,6 +266,10 @@ ETEX_RELEASES = {
         mass=340.0,
         tracer="PMCH",
         height_m=8.0,
+        site="Monterfil",
+        lat=48.0 + 3.0 / 60.0 + 30.0 / 3600.0,
+        lon=-(2.0 + 0.0 / 60.0 + 30.0 / 3600.0),
+        site_alt_m=90.0,
     ),
     2: dict(
         start=pd.Timestamp("1994-11-14 15:00"),
@@ -252,6 +277,10 @@ ETEX_RELEASES = {
         mass=490.0,
         tracer="PMCP",
         height_m=8.0,
+        site="Monterfil",
+        lat=np.nan,
+        lon=np.nan,
+        site_alt_m=np.nan,
     ),
 }
 _ETEX_FILES = {1: ("pmch.dat", "pmch.cod"), 2: ("pmcp.datv1.2", "pmcp.codv1.2")}
@@ -304,7 +333,8 @@ def _read_etex_grid(path: Path, *, integer: bool) -> tuple[list[str], np.ndarray
 
 
 def read_etex_release(release: int = 1, root: str | Path | None = None) -> pd.DataFrame:
-    """Read one JRC ETEX release table (one row; coordinates NaN, see module)."""
+    """One JRC ETEX release table (one row). The source coordinates come from
+    :data:`ETEX_RELEASES` (JRC ATMES-II pages for release 1; NaN for 2)."""
     r = ETEX_RELEASES[release]
     dur = (r["end"] - r["start"]).total_seconds()
     return pd.DataFrame(
@@ -314,8 +344,10 @@ def read_etex_release(release: int = 1, root: str | Path | None = None) -> pd.Da
                 start=r["start"],
                 end=r["end"],
                 duration_s=dur,
-                lat=np.nan,
-                lon=np.nan,
+                site=r["site"],
+                lat=r["lat"],
+                lon=r["lon"],
+                site_alt_m=r["site_alt_m"],
                 height_m=r["height_m"],
                 mass=r["mass"],
                 mass_unit="kg",

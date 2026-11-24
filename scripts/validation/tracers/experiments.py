@@ -52,8 +52,9 @@ PUBLISHED_EXPERIMENTS = (
 class AssignmentRule:
     """How a sample is assigned to a release.
 
-    ``durations``: ``"all"``, or ``"6h"`` to keep only CAPTEX's 6-hour
-    samples (ANATEX samples are all 24 h and are always kept).
+    ``durations``: ``"all"``, or ``"6h_or_24h"`` to keep only samples of 6 or
+    24 hours: CAPTEX's 6-hour samples (its 3-hour ones are dropped) and
+    ANATEX's samples, which are all 24 h.
     ``assign``: ``"recent"`` — the latest release that started at or before
     the sample start; ``"window_start"`` — the latest release whose
     ``window_h``-hour window from its start contains the sample start;
@@ -63,12 +64,16 @@ class AssignmentRule:
     instead every sample starting on or after the first release's date and
     on or before this date, all credited to the experiment as a whole
     (release 0 = unassigned within it).
+    ``anatex_wrf_domain``: if true, ANATEX samples at sites outside the
+    10 km WRF domain that drove Hegarty et al.'s runs
+    (:func:`inside_anatex_wrf_domain`) are dropped.
     """
 
     durations: str = "all"
     assign: str = "recent"
     window_h: float = 60.0
     anatex_last_start: str | None = None
+    anatex_wrf_domain: bool = False
 
     @property
     def label(self) -> str:
@@ -76,28 +81,91 @@ class AssignmentRule:
         lab = f"{self.durations}/{a}"
         if self.anatex_last_start:
             lab += f"; ANATEX starts to {self.anatex_last_start}"
+        if self.anatex_wrf_domain:
+            lab += "; ANATEX sites inside WRF d02"
         return lab
 
 
 CANDIDATE_RULES = (
     *(
         AssignmentRule(d, a, w)
-        for d in ("6h", "all")
+        for d in ("6h_or_24h", "all")
         for a in ("recent", "window_start", "window_end")
         for w in ((60.0,) if a == "recent" else (48.0, 60.0, 72.0))
     ),
-    *(AssignmentRule("6h", "recent", anatex_last_start=f"1987-01-{d}") for d in (12, 13, 14, 15)),
+    *(
+        AssignmentRule("6h_or_24h", "recent", anatex_last_start=f"1987-01-{d}", anatex_wrf_domain=w)
+        for d in (12, 13, 14, 15)
+        for w in (False, True)
+    ),
 )
 
 #: The rule adopted: closest to Hegarty et al.'s counts (data/tracer-experiments.md §5).
-ADOPTED_RULE = AssignmentRule("6h", "recent", anatex_last_start="1987-01-13")
+ADOPTED_RULE = AssignmentRule("6h_or_24h", "recent", anatex_last_start="1987-01-13")
+
+
+#: The 10 km WRF domain (d02) of Hegarty et al.'s ANATEX runs, from the
+#: header of the ARL-format file they used, posted by NOAA ARL with DATEM:
+#: https://www.ready.noaa.gov/data/archives/datem/anatex/aer_anatex_PBL1A_010600.d02
+#: (first index record, read 2026-11-24): Lambert conformal, true latitudes
+#: 33 and 45 N, reference longitude 100 W, 10 km grid, 454 x 334 points,
+#: grid point (227, 167) at 41.2 N, 98.02 W. ARL's mapping routines use a
+#: sphere of radius 6371.2 km.
+ANATEX_WRF_D02 = dict(
+    lat1=33.0,
+    lat2=45.0,
+    lon0=-100.0,
+    dx_km=10.0,
+    nx=454,
+    ny=334,
+    sync_x=227.0,
+    sync_y=167.0,
+    sync_lat=41.2,
+    sync_lon=-98.02,
+    radius_km=6371.2,
+)
+
+
+def wrf_grid_xy(lat, lon, grid: dict = ANATEX_WRF_D02) -> tuple[np.ndarray, np.ndarray]:
+    """1-based grid coordinates of (lat, lon) on a spherical Lambert
+    conformal grid with two true latitudes (Snyder, 1987, eqs. 15-1 to 15-3)."""
+    rad = np.pi / 180.0
+    p1, p2 = grid["lat1"] * rad, grid["lat2"] * rad
+    n = np.log(np.cos(p1) / np.cos(p2)) / np.log(
+        np.tan(np.pi / 4 + p2 / 2) / np.tan(np.pi / 4 + p1 / 2)
+    )
+    f = np.cos(p1) * np.tan(np.pi / 4 + p1 / 2) ** n / n
+
+    def xy(la, lo):
+        la, lo = np.asarray(la, float) * rad, np.asarray(lo, float)
+        rho = grid["radius_km"] * f / np.tan(np.pi / 4 + la / 2) ** n
+        th = n * (lo - grid["lon0"]) * rad
+        return rho * np.sin(th), -rho * np.cos(th)
+
+    x0, y0 = xy(grid["sync_lat"], grid["sync_lon"])
+    x, y = xy(lat, lon)
+    return grid["sync_x"] + (x - x0) / grid["dx_km"], grid["sync_y"] + (y - y0) / grid["dx_km"]
+
+
+def inside_anatex_wrf_domain(lat, lon, grid: dict = ANATEX_WRF_D02) -> np.ndarray:
+    """True where (lat, lon) lies inside the WRF grid (between its first and
+    last points)."""
+    gx, gy = wrf_grid_xy(lat, lon, grid)
+    return (gx >= 1) & (gx <= grid["nx"]) & (gy >= 1) & (gy <= grid["ny"])
 
 
 def assign_releases(
     samples: pd.DataFrame, releases: pd.DataFrame, rule: AssignmentRule
 ) -> pd.Series:
-    """Release number (1-based) for each sample, or 0 when none."""
+    """Release number (1-based) for each sample, or 0 when none.
+
+    ``releases`` must be in time order (as in DATEM's emit files): the
+    ``"recent"`` rule searches the start times and ``"window_*"`` let later
+    releases win.
+    """
     rs = releases["start"].to_numpy()
+    if len(rs) > 1 and not (np.diff(rs) >= np.timedelta64(0, "s")).all():
+        raise ValueError("releases must be in time order of their start")
     s_start = samples["start"].to_numpy()
     s_end = samples["end"].to_numpy()
     out = np.zeros(len(samples), dtype=int)
@@ -112,7 +180,7 @@ def assign_releases(
                 (t < r0 + w) if rule.assign == "window_start" else (t <= r0 + w)
             )
             out = np.where(inside, rel, out)
-    if rule.durations == "6h":
+    if rule.durations == "6h_or_24h":
         dur = samples["duration_s"].to_numpy()
         out = np.where((dur == 6 * 3600) | (dur == 24 * 3600), out, 0)
     return pd.Series(out, index=samples.index, name="release")
@@ -140,6 +208,8 @@ def split_samples(
             last = pd.Timestamp(rule.anatex_last_start) + pd.Timedelta(days=1)
             keep = (meas["start"] >= first) & (meas["start"] < last)
             r = r.where(r.isin(exp.releases), 0)
+        if exp.datem_dir == "anatex" and rule.anatex_wrf_domain:
+            keep = keep & inside_anatex_wrf_domain(meas["lat"], meas["lon"])
         sel = meas[keep & (meas["conc_raw"] >= 0)].copy()
         sel.insert(0, "release", r[sel.index])
         sel.insert(0, "experiment", exp.name)
