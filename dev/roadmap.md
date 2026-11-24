@@ -278,14 +278,23 @@ Explanations of each item follow each table.
   final position is recorded, as is usual with FLEXPART and FLEXINVERT+. The
   final positions give the concentration of the air the particles started
   in, from a global model.
+  - **Spherical stepping for global runs.** Represent horizontal particle
+    positions during a step as Earth-centred unit vectors. Sample winds in
+    a common Cartesian frame and project onto the local tangent plane at
+    each RK2 evaluation. Transport the horizontal turbulent and meander
+    velocities as the local frame rotates. Keep latitude–longitude for
+    meteorology lookup, footprint cells and reported endpoints.
   - **It waits until the v1 validation is complete.** The validation tests
     the particle physics, which this does not change. Regional runs must
     stay bit-for-bit identical; if any regional result changes, this is a
     physics change and the affected validation tiers are rerun.
   - **It needs its own, smaller validation,** for what the regional
     validation does not cover:
-    - geometry: wrapping in longitude, the poles, and reading global
-      fields;
+    - prescribe solid-body rotation about a tilted axis, with trajectories
+      crossing a pole and the longitude seam. Compare forward and backward
+      positions with the exact rotation in metres as the time step is
+      refined. Shift the seam and check that trajectories and the response
+      to a uniform surface flux are invariant within numerical tolerance;
     - a global run against a regional run with the same random seeds, to
       show the effect of particles that leave the region and return;
     - final positions against FLEXPART's, and transport at ages and
@@ -562,6 +571,7 @@ Until B1, GLIDE's existing download scripts stay in use.
 ## 5. After v1
 
 - **v1.x:**
+  - global transport with spherical particle stepping (4f);
   - combining meteorological sources (3b);
   - UKV nesting (3c);
   - merging far-field particles (6b);

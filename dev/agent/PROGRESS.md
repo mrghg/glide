@@ -9,8 +9,8 @@ pull requests never conflict on it. Per-task records are in
 
 - Physics tag: none yet (pre-freeze).
 - Pre-registration: not yet registered (task A8b, then OSF).
-- Golden fixtures: none yet (task A0).
-- Benchmark baseline: none yet (task A0).
+- Golden fixtures: done
+- Benchmark baseline: 0.125 footprints/s
 - Notes: none.
 
 ## Resume requests
