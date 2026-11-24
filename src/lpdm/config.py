@@ -374,6 +374,11 @@ class OutputGridConfig(_Frozen):
     # length, or residence older than the axis is dropped. Dropping it must be
     # asked for (decision 0016).
     drop_older_ages: bool = False
+    # What each counted particle-second is divided by (decision 0022). `dry_air`:
+    # the dry-air density at the particle, (p - e) / (R_d T), at the step's met
+    # time; the footprint is in s m3 kg-1 of dry air, and M_air / h gives
+    # m2 s mol-1 with no further density. `none`: plain residence seconds.
+    density_weighting: Literal["dry_air", "none"] = "dry_air"
 
     @field_validator("z_edges_m")
     @classmethod

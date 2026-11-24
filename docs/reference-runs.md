@@ -224,14 +224,27 @@ Points to hold to:
 FLEXPART's native backward output with `IND_SOURCE = 1` and
 `IND_RECEPTOR = 2` is in s m³ kg⁻¹, divided per particle by the moist-air
 density $p/(R_d T_v)$. Summed over all output times and multiplied by
-$M_\mathrm{air} / h$, it gives $S$ for moist air; multiplying each cell by
-$p / ((p - e)(1 + 0.608\,q))$, averaged over the period from FLEXPART's
-meteorology, gives it for dry air. NAME's output is its Mixing Ratio in
+$M_\mathrm{air} / h$, it gives $S$ for moist air. For dry air, multiply each
+cell of each hourly output by $p / ((p - e)(1 + 0.608\,q))$ from FLEXPART's
+meteorology at that hour, then sum (`flexpart_to_dry_air_footprint` with a
+time-resolved factor). NAME's output is its Mixing Ratio in
 ppm s, divided per cell by $p/(R_d T)$; ppm s × 10⁻⁶ × cell area ÷ 3,600 s
 gives $S$ for moist air, and multiplying each cell by $p/(p - e)$, from the
-UM, gives it for dry air. In humid summer air the two corrections are about
-1.5% (FLEXPART) and 2.5% (NAME). Each runner records the conversion used, and
-keeps the native output.
+UM and averaged over the period, gives it for dry air. In humid summer air the
+two corrections are about 1.5% (FLEXPART) and 2.5% (NAME). Each runner records
+the conversion used, and keeps the native output.
+
+NAME's output is integrated over the 240 hours, so only a period-mean factor
+can be applied to it (likewise any FLEXPART output that is only available
+summed). That is an approximation: the exact correction is per interval,
+$\sum_t F_t f_t$, and the mean gives $(\sum_t F_t)\,\overline{f}$, which
+differs where residence and humidity vary together. The ratio of the two lies
+between $\min_t f_t/\overline{f}$ and $\max_t f_t/\overline{f}$ in each cell.
+Measured on synthetic hourly series over 240 h at 1013 hPa: a diurnal cycle of
+$q$ = 12 ± 2 g/kg with residence only at night or only by day gives at most
+0.12% (FLEXPART factor) and 0.19% (NAME factor); 12 ± 4 g/kg, 0.17% and 0.27%;
+a synoptic change from 16 to 6 g/kg with all the residence in the humid first
+day, 0.50% and 0.80%.
 
 ## 7. Model settings
 

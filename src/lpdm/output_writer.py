@@ -206,6 +206,9 @@ class OutputWriter:
             ds = ds.assign_coords(dataset_coords)
         if attrs:
             ds.attrs.update(dict(attrs))
+            # Also on the variable, so `ds["footprint"]` (and selections of it)
+            # carry the weighting and units (decision 0022).
+            ds["footprint"].attrs.update(dict(attrs))
 
         if not _is_remote_path(path):
             Path(path).mkdir(parents=True, exist_ok=True)
