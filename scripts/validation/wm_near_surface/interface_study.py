@@ -149,7 +149,7 @@ def column_kwargs(scheme, met, h, ustar, shf, n):
     ft_fields, gb = scheme._free_trop_fields(met, dev, dt_)
     return dict(
         blh=blh, ustar=us, w_star=w_star, h_over_L=blh / L, L=L, lat=full(45.0),
-        lon=full(0.0), ft_fields=ft_fields, grid_bounds=gb, engine=GPUEngine(device="cpu"),
+        x=full(0.0), y=full(45.0), ft_fields=ft_fields, grid_bounds=gb, engine=GPUEngine(device="cpu"),
     )  # fmt: skip
 
 

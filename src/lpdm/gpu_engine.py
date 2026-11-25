@@ -13,11 +13,12 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 import torch
 
+from lpdm.local_frame import DEGREES, HorizontalFrame
 from lpdm.runtime import DEVICE
 
 LOGGER = logging.getLogger(__name__)
@@ -102,6 +103,11 @@ class GridInterpolationBounds:
     """Physical bounds mapping grid index 0 to 1st element, index N-1 to 2nd element.
     Values can be descending (e.g. lat_first > lat_last).
 
+    The ``lon_*`` and ``lat_*`` values are the grid's horizontal end points in
+    the frame the particle positions are held in (``lpdm.local_frame``): degrees
+    in the degrees frame, metres in the runtime's local metric frame. Build them
+    from a met window with ``frame_grid_bounds``.
+
     ``level_agl_m`` is the per-level AGL height array (bbox-mean for the met
     window) and is the source-of-truth for the vertical fractional-index
     lookup used by ``normalize_particle_coordinates`` (F9 fix, audit 2026-05-30).
@@ -121,6 +127,98 @@ class GridInterpolationBounds:
     level_agl_m: tuple[float, ...] | None = None
 
 
+def frame_grid_bounds(metadata, frame: HorizontalFrame = DEGREES) -> GridInterpolationBounds:
+    """Interpolation bounds of a met window's grid, horizontally in ``frame``.
+
+    ``metadata`` is a met window's metadata (``lon``, ``lat``, ``level`` arrays).
+    The horizontal end points are converted to the particle frame here, the
+    reader boundary of task A4: the grid is regular in lon and lat and the frame
+    is affine in them, so the grid is regular in the frame too, and
+    ``normalize_particle_coordinates`` needs nothing else. The per-level AGL
+    array is passed for the piecewise-linear vertical lookup (F9).
+    """
+
+    lon = metadata.lon
+    lat = metadata.lat
+    level = metadata.level
+    return GridInterpolationBounds(
+        lon_first=float(frame.x_from_lon(float(lon[0]))),
+        lon_last=float(frame.x_from_lon(float(lon[-1]))),
+        lat_first=float(frame.y_from_lat(float(lat[0]))),
+        lat_last=float(frame.y_from_lat(float(lat[-1]))),
+        alt_first=float(level[0]),
+        alt_last=float(level[-1]),
+        level_agl_m=tuple(float(v) for v in level),
+    )
+
+
+def trilinear_sample(
+    volumes: Sequence[torch.Tensor], grid_norm: torch.Tensor
+) -> list[torch.Tensor]:
+    """Trilinear samples of ``[C, D, H, W]`` volumes at ``grid_norm`` ``[N, 3]``.
+
+    The coordinates are ``grid_sample``'s with ``align_corners=True`` (x → W,
+    y → H, z → D, each in [-1, 1]; ``normalize_particle_coordinates`` already
+    clamps them there). The volumes may be held in a 16-bit type: the corner
+    indices and weights are computed once in the coordinates' dtype (float32),
+    the eight corner values of every volume are gathered in the volume's dtype,
+    and the weighted sum is formed in float32. Returns one ``[C, N]`` float32
+    tensor per volume. Used for the wind gather when
+    ``simulation.wind_gather_dtype`` is not float32 (task A4); ``grid_sample``
+    would sample a 16-bit volume with 16-bit coordinates, which cannot resolve a
+    position on the met grid.
+    """
+
+    _, d, h, w = volumes[0].shape
+    g = grid_norm.to(torch.float32)
+
+    def axis(coord: torch.Tensor, size: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        pos = (coord + 1.0) * (0.5 * (size - 1))
+        i0 = pos.floor().clamp(0, size - 1)
+        frac = pos - i0
+        i0 = i0.to(torch.long)
+        i1 = (i0 + 1).clamp(max=size - 1)
+        return i0, i1, frac
+
+    x0, x1, fx = axis(g[:, 0], w)
+    y0, y1, fy = axis(g[:, 1], h)
+    z0, z1, fz = axis(g[:, 2], d)
+    gx, gy, gz = 1.0 - fx, 1.0 - fy, 1.0 - fz
+    hw = h * w
+    idx = torch.stack(
+        [
+            z0 * hw + y0 * w + x0,
+            z0 * hw + y0 * w + x1,
+            z0 * hw + y1 * w + x0,
+            z0 * hw + y1 * w + x1,
+            z1 * hw + y0 * w + x0,
+            z1 * hw + y0 * w + x1,
+            z1 * hw + y1 * w + x0,
+            z1 * hw + y1 * w + x1,
+        ]
+    )  # [8, N]
+    wts = torch.stack(
+        [
+            gz * gy * gx,
+            gz * gy * fx,
+            gz * fy * gx,
+            gz * fy * fx,
+            fz * gy * gx,
+            fz * gy * fx,
+            fz * fy * gx,
+            fz * fy * fx,
+        ]
+    )  # [8, N], float32
+    n = g.shape[0]
+    flat_idx = idx.reshape(-1)
+    out = []
+    for vol in volumes:
+        c = vol.shape[0]
+        corners = vol.reshape(c, -1)[:, flat_idx].view(c, 8, n).to(torch.float32)
+        out.append((corners * wts).sum(dim=1))
+    return out
+
+
 class GPUEngine:
     """LPDM GPU compute helper class.
 
@@ -134,9 +232,22 @@ class GPUEngine:
         device: torch.device | str = DEVICE,
         dtype: torch.dtype = torch.float32,
         compile_hot_paths: bool | None = None,
+        frame: HorizontalFrame | None = None,
+        wind_gather_dtype: torch.dtype = torch.float32,
     ) -> None:
         self.device = torch.device(device)
         self.dtype = dtype
+        # Horizontal frame of the particle positions (task A4, `lpdm.local_frame`).
+        # The runtime passes its local metric frame; without one, positions are
+        # (lon, lat) in degrees, exactly as before the frame existed.
+        self.frame = DEGREES if frame is None else frame
+        # dtype the per-window (u, v, w) stacks are held in on the device for the
+        # advection's trilinear gather (`simulation.wind_gather_dtype`). float32
+        # samples with `grid_sample` as always; a 16-bit type samples with
+        # `trilinear_sample` (fp32 weights and accumulation).
+        if wind_gather_dtype not in (torch.float32, torch.bfloat16):
+            raise ValueError(f"unsupported wind_gather_dtype {wind_gather_dtype}")
+        self.wind_gather_dtype = wind_gather_dtype
         # `torch.compile` the elementwise hot-path methods (OU velocity update +
         # displacement + reflection). Each fuses its internal ops into far fewer
         # CUDA kernels, which helps when the run is launch-bound (the regime
@@ -439,8 +550,8 @@ class GPUEngine:
     ) -> torch.Tensor:
         """Apply horizontal displacement from turbulent velocity fluctuations.
 
-        Mirrors `apply_vertical_turbulence` but in lon/lat with the cos-lat correction
-        on lon. `u_prime` is the zonal perturbation in m/s, `v_prime` is meridional.
+        Mirrors `apply_vertical_turbulence` in the engine's horizontal frame, with
+        the cos-lat correction on x. `u_prime` is the zonal perturbation in m/s, `v_prime` is meridional.
         `dt_seconds` may be a scalar or a per-particle tensor (F4 Tier 2 substepping).
         """
 
@@ -462,12 +573,15 @@ class GPUEngine:
         direction = -1.0 if backward else 1.0
         out = state.clone()
 
-        lat_deg = state[:, 1]
-        meters_per_deg_lat = 110540.0
-        meters_per_deg_lon = 111320.0 * torch.cos(torch.deg2rad(lat_deg)).abs().clamp(min=0.05)
+        # Displacements in metres, divided by the frame's metres per unit
+        # (`lpdm.local_frame`): per degree in the degrees frame, ~1 in the metric one.
+        frame = self.frame
+        lat_deg = frame.lat_from_y(state[:, 1])
+        metres_per_y = frame.metres_per_y
+        metres_per_x = frame.metres_per_x(lat_deg)
 
-        out[:, 0] = out[:, 0] + direction * up * dt / meters_per_deg_lon
-        out[:, 1] = out[:, 1] + direction * vp * dt / meters_per_deg_lat
+        out[:, 0] = out[:, 0] + direction * up * dt / metres_per_x
+        out[:, 1] = out[:, 1] + direction * vp * dt / metres_per_y
         return out
 
     def reflect_surface(

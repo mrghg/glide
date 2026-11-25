@@ -24,6 +24,7 @@ from collections.abc import Sequence
 import numpy as np
 import torch
 
+from lpdm.local_frame import DEGREES, HorizontalFrame
 from lpdm.runtime import DEVICE
 
 
@@ -61,6 +62,7 @@ class FootprintGridder:
         n_releases: int = 1,
         device: torch.device | str = DEVICE,
         dtype: torch.dtype = torch.float32,
+        frame: HorizontalFrame = DEGREES,
     ) -> None:
         z_edges_arr = np.asarray(list(z_edges_m), dtype=float)
         if z_edges_arr.ndim != 1 or z_edges_arr.size < 2:
@@ -104,6 +106,9 @@ class FootprintGridder:
         )
 
         self.lon_min, self.lon_max = lon_bounds
+        # Horizontal frame of the positions `accumulate` receives (task A4,
+        # `lpdm.local_frame`); they are converted to degrees there.
+        self.frame = frame
         self.lat_min, self.lat_max = lat_bounds
         # Edge tensor stays on the gridder device so torch.bucketize avoids host syncs.
         self.z_edges = torch.tensor(z_edges_arr, dtype=self.dtype, device=self.device)
@@ -141,7 +146,8 @@ class FootprintGridder:
         bit-equivalent to stage 3's 4D scatter.
 
         Args:
-                particles: float tensor [N, 3] (lon, lat, alt).
+                particles: float tensor [N, 3] (x, y, alt), the horizontal position
+                        in ``self.frame`` (lon, lat in degrees in the degrees frame).
                 active_mask: bool tensor [N].
                 weights: float tensor [N] of per-particle release weights.
                 t_idx: int64 tensor [N] of per-particle time-bin indices in
@@ -162,8 +168,9 @@ class FootprintGridder:
         # queuing (profile 2026-06-26). Invalid/inactive particles get zero weight
         # and a clamped (dummy) cell index, so they scatter 0 and the footprint is
         # identical to the old masked version (adding 0.0 is an exact no-op).
-        lon = particles[:, 0]
-        lat = particles[:, 1]
+        # The gridder boundary of the position frame: degrees from here on.
+        lon = self.frame.lon_from_x(particles[:, 0])
+        lat = self.frame.lat_from_y(particles[:, 1])
         z_coord = particles[:, 2].contiguous()
 
         x_idx = torch.floor(

@@ -15,6 +15,7 @@ import numpy as np
 import pytest
 import torch
 
+from lpdm.local_frame import DEGREES
 from lpdm.turbulence import HannaScheme, get_scheme, list_schemes
 from lpdm.turbulence.hanna import (
     ABOVE_BL_SIGMA_M_S,
@@ -651,7 +652,8 @@ def test_sigma_w_probe_is_bit_identical_to_the_full_profile(
         h_over_L=torch.full((n,), h_over_L),
         L=L,
         lat=torch.linspace(-60.0, 60.0, n),
-        lon=torch.linspace(-1.5, 1.5, n),
+        x=torch.linspace(-1.5, 1.5, n),
+        y=torch.linspace(-60.0, 60.0, n),
         ft_fields=ft_fields,
         grid_bounds=grid_bounds,
         engine=engine,
@@ -719,7 +721,8 @@ def test_basal_zero_gradient_only_below_the_clamp(shf: float) -> None:
             h_over_L=torch.full((n,), h_over_L),
             L=torch.full((n,), 800.0 / h_over_L if h_over_L else 1e10),
             lat=torch.full((n,), 0.0),
-            lon=torch.full((n,), 0.0),
+            x=torch.full((n,), 0.0),
+            y=torch.full((n,), 0.0),
             ft_fields=ft_fields,
             grid_bounds=grid_bounds,
             engine=engine,
@@ -1276,7 +1279,10 @@ def test_meander_alone_gives_the_exact_ou_displacement_variance(static: bool, mo
     monkeypatch.setattr(
         scheme,
         "_meander_sigma_fields",
-        lambda met_window, device, dtype: (const_sigma, HannaScheme._grid_bounds(met_window)),
+        lambda met_window, device, dtype, frame=DEGREES: (
+            const_sigma,
+            HannaScheme._grid_bounds(met_window, frame),
+        ),
     )
 
     def _no_small_scale_turbulence(*, active_xyz, u_prime_in, v_prime_in, w_prime_in, **_):
@@ -1342,7 +1348,8 @@ def _interface_col(scheme: HannaScheme, met, n: int, h_over_L: float, *, blh: fl
         h_over_L=full(h_over_L),
         L=full(blh / h_over_L if h_over_L else 1e10),
         lat=full(0.0),
-        lon=full(0.0),
+        x=full(0.0),
+        y=full(0.0),
         ft_fields=ft_fields,
         grid_bounds=grid_bounds,
         engine=GPUEngine(device="cpu"),

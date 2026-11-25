@@ -68,8 +68,8 @@ Each particle carries four numbers:
 
 | Symbol | Meaning | Units |
 | --- | --- | --- |
-| $\lambda$ | longitude | degrees east |
-| $\phi$ | latitude | degrees north |
+| $\lambda$ | longitude (held as $x$, below) | degrees east |
+| $\phi$ | latitude (held as $y$, below) | degrees north |
 | $z$ | height **above ground level** (AGL) | metres |
 | $m_p$ | mass weight — the share of the release this particle represents | dimensionless |
 
@@ -164,6 +164,44 @@ $$
 
 with $\lvert\cos\phi\rvert$ floored at 0.05 (about 87°) so the polar singularity
 cannot produce an infinite zonal step.
+
+**Positions are held in metres from the met domain's centre** (task A4,
+`lpdm/local_frame.py`): an equirectangular frame with the $x$ axis scaled by the
+cosine of the centre latitude $\phi_0$,
+
+$$
+x = 111320\,\cos\phi_0\,(\lambda - \lambda_0), \qquad y = 110540\,(\phi - \phi_0),
+$$
+
+where $(\lambda_0, \phi_0)$ is the centre of `met_domain`. A $y$ metre is a
+model metre everywhere; an $x$ metre is one at $\phi_0$ and
+$\cos\phi/\cos\phi_0$ of one elsewhere, so the equations of motion in the frame
+are the ones above with the metric applied exactly:
+$\mathrm{d}x/\mathrm{d}t = u\,\cos\phi_0/\lvert\cos\phi\rvert$ (same floor) and
+$\mathrm{d}y/\mathrm{d}t = v$. The frame is affine in $(\lambda, \phi)$, so the
+meteorology grid, regular in longitude and latitude, is regular in it too, and the
+interpolation only needs the grid's end points expressed in metres. There is no
+map-projection error at any latitude or domain size: the motion is the same as in
+degrees, and the frame changes only how float32 rounds a position. Positions are
+converted to degrees where degrees are needed: at release, at the footprint
+gridder, in the endpoint and trajectory-diagnostic outputs (which stay in degrees),
+for the Coriolis parameter, and for $\cos\phi$ in the metric.
+
+One float32 ulp of a position, in true metres (`scripts/validation/a4/precision_table.py`):
+
+| met domain | degrees: median / max | metres from the centre: median / max |
+| --- | --- | --- |
+| EUROPE stores (every shipped ERA5 config) | 0.42 / 0.84 m | 0.25 / 0.69 m |
+| `local_smoke_test.yaml` (California) | 0.67 / 0.71 m | 0.03 / 0.06 m |
+| global (illustrative) | 0.84 / 1.70 m | 0.70 / 2.00 m |
+| Arctic, 50–85° N (illustrative) | 0.84 / 1.09 m | 0.26 / 0.84 m |
+
+The frame's $x$ is stretched by $\cos\phi_0/\cos\phi$ away from $\phi_0$ (0.72 to
+3.7 on the EUROPE domain; up to 20, at the clamp, on a global one), which only
+coarsens the rounding of $x$ there; one frame therefore serves any domain the
+degrees did, and none is split. Changing frame moves particles by float32
+rounding, which turbulence then decorrelates; a run in the old degrees arithmetic
+is available with `GLIDE_POSITION_FRAME=degrees` (architecture.md §8).
 
 ---
 

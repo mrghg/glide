@@ -39,7 +39,8 @@ from __future__ import annotations
 import numpy as np
 import torch
 
-from lpdm.gpu_engine import GPUEngine, GridInterpolationBounds
+from lpdm.gpu_engine import GPUEngine, GridInterpolationBounds, frame_grid_bounds
+from lpdm.local_frame import DEGREES, HorizontalFrame
 from lpdm.met_reader import HourlyMetTensors
 
 GRAVITY_M_S2 = 9.80665
@@ -128,8 +129,10 @@ class ParticleDryAirDensity:
         # Time weight of the window end, refilled each step (0-d, device).
         self._alpha = torch.zeros((), device=self.device, dtype=self.dtype)
 
-    def _refresh(self, met_window: HourlyMetTensors) -> None:
-        key = met_window.metadata.time_start
+    def _refresh(self, met_window: HourlyMetTensors, frame: HorizontalFrame = DEGREES) -> None:
+        # The grid bounds are in the particles' horizontal frame (task A4), a
+        # constant of the run, so the window alone keys the cache.
+        key = (met_window.metadata.time_start, frame)
         if self._window_key == key and self._stack is not None:
             return
         # Copy each channel slice straight to the device (no host-side gather or
@@ -151,17 +154,7 @@ class ParticleDryAirDensity:
         level = np.asarray(met_window.metadata.level, dtype=np.float64)
         self._level_arr = torch.as_tensor(level, device=self.device, dtype=self.dtype)
         self._ascending = bool(level[-1] > level[0])
-        lon = met_window.metadata.lon
-        lat = met_window.metadata.lat
-        self._bounds = GridInterpolationBounds(
-            lon_first=float(lon[0]),
-            lon_last=float(lon[-1]),
-            lat_first=float(lat[0]),
-            lat_last=float(lat[-1]),
-            alt_first=float(level[0]),
-            alt_last=float(level[-1]),
-            level_agl_m=tuple(float(v) for v in level),
-        )
+        self._bounds = frame_grid_bounds(met_window.metadata, frame)
         # A mean/accumulation channel (decision 0020) is held at its window-end
         # value: weight 1 instead of alpha.
         period = getattr(met_window, "period_channels", frozenset())
@@ -179,9 +172,10 @@ class ParticleDryAirDensity:
         t_alpha: float,
         engine: GPUEngine,
     ) -> torch.Tensor:
-        """``1 / rho_d`` (m3 kg-1) at each particle; ``particles_xyz`` is [N, 3]."""
+        """``1 / rho_d`` (m3 kg-1) at each particle; ``particles_xyz`` is [N, 3], the
+        horizontal position in ``engine.frame``."""
 
-        self._refresh(met_window)
+        self._refresh(met_window, engine.frame)
         # fill_ with a host scalar launches a fill; it does not sync the device.
         self._alpha.fill_(float(t_alpha))
         return self._core(

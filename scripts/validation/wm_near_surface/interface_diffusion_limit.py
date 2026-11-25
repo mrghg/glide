@@ -54,7 +54,7 @@ def k_profile(regime: str, z: np.ndarray, ft_n: float) -> tuple[np.ndarray, floa
     ft_fields, gb = scheme._free_trop_fields(met, torch.device("cpu"), torch.float32)
     col = dict(
         blh=blh, ustar=us, w_star=w_star, h_over_L=blh / L, L=L, lat=full(45.0),
-        lon=full(0.0), ft_fields=ft_fields, grid_bounds=gb, engine=GPUEngine(device="cpu"),
+        x=full(0.0), y=full(45.0), ft_fields=ft_fields, grid_bounds=gb, engine=GPUEngine(device="cpu"),
     )  # fmt: skip
     zq = torch.as_tensor(z, dtype=torch.float32).clamp(min=scheme.z_ubl_m)
     _, _, sw, _, _, tlw = scheme._column_turbulence(zq, **col)
