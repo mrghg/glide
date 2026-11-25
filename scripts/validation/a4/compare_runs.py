@@ -29,13 +29,13 @@ import pandas as pd
 
 
 def read_footprint(run: Path) -> tuple[np.ndarray, dict[str, np.ndarray]]:
-    import zarr
+    import xarray as xr
 
-    g = zarr.open_group(str(run / "footprints.zarr"), mode="r")
-    fp = np.asarray(g["footprint"][...], dtype=np.float64)
-    coords = {"release_time": np.asarray(g["release_time"][...])}
-    if "site" in g:
-        coords["site"] = np.asarray(g["site"][...]).astype(str)
+    ds = xr.open_zarr(run / "footprints.zarr")  # decodes the CF-encoded release times
+    fp = np.asarray(ds["footprint"].values, dtype=np.float64)
+    coords = {"release_time": np.asarray(ds["release_time"].values)}
+    if "site" in ds.coords:
+        coords["site"] = np.asarray(ds["site"].values).astype(str)
     return fp, coords
 
 
