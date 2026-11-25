@@ -11,7 +11,6 @@ The CLI surface is intentionally small: a YAML ``--config`` plus a few overrides
 from __future__ import annotations
 
 import argparse
-import contextlib
 import gc
 import logging
 import math
@@ -19,7 +18,7 @@ import os
 import resource
 import sys
 import time
-from collections import OrderedDict, defaultdict
+from collections import OrderedDict
 from collections.abc import Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
@@ -51,6 +50,8 @@ from lpdm.met_reader import (
     TimeBounds,
 )
 from lpdm.output_writer import OutputWriter
+from lpdm.phase_timers import install as install_phase_timer
+from lpdm.phase_timers import make_phase_timer
 from lpdm.release_generator import generate_batch_particles
 from lpdm.runtime import DEVICE
 from lpdm.turbulence import TurbulenceScheme, get_scheme, list_schemes
@@ -187,112 +188,6 @@ def _make_step_profiler(device: torch.device) -> _StepProfiler | None:
         active=int(os.environ.get("GLIDE_PROFILE_STEPS", "20")),
         trace_path=Path(os.environ.get("GLIDE_PROFILE_TRACE", "glide_profile_trace.json")),
         exit_after=os.environ.get("GLIDE_PROFILE_CONTINUE", "") in ("", "0", "false", "False"),
-    )
-
-
-class _PhaseTimer:
-    """Coarse whole-run wall-clock accountant, enabled by ``GLIDE_PHASE_TIMERS``.
-
-    Where ``_StepProfiler`` samples ~20 steps inside a SINGLE met window (so it's blind to
-    per-window met I/O and batch boundaries — the very places the GPU goes idle), this
-    accumulates wall time across the WHOLE run bucketed by phase and prints a breakdown. It
-    answers "where does the wall go over many windows/batches" — chiefly: *is the GPU idling
-    on synchronous met fetches?* The ``met_fetch`` bucket is exact (synchronous CPU/IO, GPU
-    uninvolved), so ``met_fetch / wall`` is a faithful idle-fraction even with no CUDA sync.
-
-    It also logs a running breakdown every ``log_every`` met fetches, so even a job that
-    *times out* (no final summary, no manifest) leaves the split in the log. NOTE: the
-    ``step`` bucket includes the one-time ``torch.compile`` (~tens of s) charged to the first
-    step — negligible on a long run, but run long enough that it washes out (or compile-off).
-
-    Env:
-    * ``GLIDE_PHASE_TIMERS``        — enable (truthy)
-    * ``GLIDE_PHASE_TIMERS_SYNC``   — ``torch.cuda.synchronize()`` at each phase boundary so
-                                      GPU phases (step/gridder) get real device time. This
-                                      SERIALISES the pipeline (perturbs absolute numbers but
-                                      cleans the step-vs-gridder split); off by default.
-    * ``GLIDE_PHASE_TIMERS_EVERY``  — log running breakdown every N met fetches (default 25)
-    """
-
-    _NULLCTX = contextlib.nullcontext()
-
-    def __init__(self, *, enabled: bool, sync_cuda: bool, log_every: int) -> None:
-        self.enabled = enabled
-        self.sync_cuda = sync_cuda
-        self.log_every = max(0, log_every)
-        self.totals: dict[str, float] = defaultdict(float)
-        self.counts: dict[str, int] = defaultdict(int)
-        self.t_start = time.perf_counter()
-        self._fetches = 0
-
-    def phase(self, name: str):
-        """Context manager timing a phase; a cheap shared no-op when disabled."""
-        if not self.enabled:
-            return self._NULLCTX
-        return self._timed(name)
-
-    @contextlib.contextmanager
-    def _timed(self, name: str):
-        if self.sync_cuda:
-            torch.cuda.synchronize()
-        t0 = time.perf_counter()
-        try:
-            yield
-        finally:
-            if self.sync_cuda:
-                torch.cuda.synchronize()
-            self.totals[name] += time.perf_counter() - t0
-            self.counts[name] += 1
-
-    def tick_fetch(self) -> None:
-        """Call after each REAL met fetch (cache miss); logs a running breakdown periodically."""
-        if not self.enabled or self.log_every == 0:
-            return
-        self._fetches += 1
-        if self._fetches % self.log_every == 0:
-            wall = time.perf_counter() - self.t_start
-            parts = ", ".join(
-                f"{n}={t:.1f}s({100 * t / wall:.0f}%)"
-                for n, t in sorted(self.totals.items(), key=lambda kv: kv[1], reverse=True)
-            )
-            LOGGER.info("phase timers @ %d fetches — wall %.1fs: %s", self._fetches, wall, parts)
-
-    def summary(self, *, hour_windows: int) -> None:
-        if not self.enabled:
-            return
-        wall = time.perf_counter() - self.t_start
-        accounted = sum(self.totals.values())
-        note = "  [CUDA-synced]" if self.sync_cuda else "  [no CUDA sync: GPU phases under-counted]"
-        lines = [
-            "=" * 78,
-            f"GLIDE phase timers — total wall {wall:.1f}s  (met fetches: {hour_windows}){note}",
-            "-" * 78,
-            f"  {'phase':<22}{'total_s':>12}{'% wall':>9}{'calls':>11}{'ms/call':>13}",
-        ]
-        for name, total in sorted(self.totals.items(), key=lambda kv: kv[1], reverse=True):
-            c = self.counts[name]
-            pct = 100.0 * total / wall if wall else 0.0
-            per = 1000.0 * total / c if c else 0.0
-            lines.append(f"  {name:<22}{total:>12.2f}{pct:>8.1f}%{c:>11}{per:>13.3f}")
-        resid = wall - accounted
-        lines.append(
-            f"  {'(residual/untimed)':<22}{resid:>12.2f}{(100.0 * resid / wall if wall else 0.0):>8.1f}%"
-        )
-        lines.append("=" * 78)
-        print("\n".join(lines))
-
-
-def _make_phase_timer() -> _PhaseTimer:
-    """Build the phase timer from env; always returns an object (a no-op when disabled, so
-    call sites need no None-checks)."""
-
-    def _truthy(name: str) -> bool:
-        return os.environ.get(name, "") not in ("", "0", "false", "False")
-
-    return _PhaseTimer(
-        enabled=_truthy("GLIDE_PHASE_TIMERS"),
-        sync_cuda=_truthy("GLIDE_PHASE_TIMERS_SYNC") and torch.cuda.is_available(),
-        log_every=int(os.environ.get("GLIDE_PHASE_TIMERS_EVERY", "25")),
     )
 
 
@@ -1316,6 +1211,74 @@ def _seed_global_generators(cfg: RunConfig) -> int | None:
     return int(seed)
 
 
+class _SaturationTally:
+    """Run totals of the particle-steps whose substep count hit the scheme's cap.
+
+    The scheme accumulates the count on the device inside its step (on the graph path
+    inside the captured step, with no host sync); ``poll`` reads it once per met window,
+    when the cursor enters a new window and at the end of each batch, so the run pays
+    one host sync per window. The scheme logs its warning (once per run) when it reads
+    a non-zero count. A scheme without substeps returns None and nothing is recorded.
+    """
+
+    def __init__(self, scheme: TurbulenceScheme) -> None:
+        self.scheme = scheme
+        self._take = getattr(scheme, "take_substep_saturation", None)
+        self.supported = self._take is not None
+        self.window: datetime | None = None
+        self.saturated = 0
+        self.worst_ratio = 0.0
+        self.windows_saturated = 0
+
+    def poll(self, window_start: datetime | None) -> None:
+        """Read the count of the window just left, if the cursor has left one."""
+        if not self.supported or window_start == self.window:
+            return
+        previous, self.window = self.window, window_start
+        if previous is None:
+            return
+        taken = self._take(previous)
+        if taken is None:
+            self.supported = False
+            return
+        count, worst = taken
+        if count > 0:
+            self.saturated += count
+            self.worst_ratio = max(self.worst_ratio, worst)
+            self.windows_saturated += 1
+
+    def metadata(self, active_particle_steps: int) -> dict[str, object] | None:
+        if not self.supported:
+            return None
+        return {
+            "max_substeps": getattr(self.scheme, "max_substeps", None),
+            "substep_c": getattr(self.scheme, "substep_c", None),
+            "saturated_particle_steps": self.saturated,
+            "active_particle_steps": active_particle_steps,
+            "saturated_fraction": (
+                self.saturated / active_particle_steps if active_particle_steps else 0.0
+            ),
+            "worst_sub_dt_over_T_Lw": self.worst_ratio,
+            "met_windows_with_saturation": self.windows_saturated,
+        }
+
+    def log_run_total(self, active_particle_steps: int) -> None:
+        if not self.supported:
+            return
+        level = logging.WARNING if self.saturated else logging.INFO
+        LOGGER.log(
+            level,
+            "substep cap: %d of %d active particle-steps hit max_substeps=%s over the run "
+            "(%.3g%%, in %d met window(s); worst sub_dt/T_Lw=%.2f).",
+            self.saturated,
+            active_particle_steps,
+            getattr(self.scheme, "max_substeps", "?"),
+            100.0 * self.saturated / active_particle_steps if active_particle_steps else 0.0,
+            self.windows_saturated,
+            self.worst_ratio,
+        )
+
+
 def _run(
     cfg: RunConfig,
     *,
@@ -1323,6 +1286,13 @@ def _run(
     scheme: TurbulenceScheme | None = None,
     convection_scheme: ConvectionScheme | None = None,
 ) -> dict[str, object]:
+    # Coarse whole-run phase accountant (GLIDE_PHASE_TIMERS; lpdm.phase_timers). It spans
+    # every window and batch, so it catches per-window met-fetch idle, and it is installed
+    # for the schemes to time their own parts. A shared no-op when disabled.
+    phase_timer = make_phase_timer()
+    install_phase_timer(phase_timer)
+    t_setup_start = time.perf_counter()
+
     sim = cfg.simulation
     mem = cfg.memory
     out_grid = cfg.output_grid
@@ -1423,9 +1393,6 @@ def _run(
     # steps to localise where the per-step time goes (GPU kernels vs host syncs vs
     # CPU/met). None unless GLIDE_PROFILE is set, so normal runs pay nothing.
     step_profiler = _make_step_profiler(device)
-    # Coarse whole-run phase accountant (GLIDE_PHASE_TIMERS). Unlike the step profiler it
-    # spans every window/batch, so it catches per-window met-fetch idle. No-op when disabled.
-    phase_timer = _make_phase_timer()
 
     # M5 stage 5: expand the schedule into batches and validate met coverage over
     # the full schedule. Each batch is integrated independently and its footprint
@@ -1518,12 +1485,21 @@ def _run(
     # 2026-07-16 #2): without it every step paid a full [3, Z, Y, X] host->device
     # copy + reduction just to log a (3,) mean.
     wind_mean_cache: dict = {}
+    # Substep-cap saturation (task A1, PR-F2): the scheme counts saturated particle-steps
+    # on the device; the runtime reads the count once per met window and keeps the run
+    # totals here for run_metadata.json.
+    saturation = _SaturationTally(scheme)
+    # Active particle-steps over the run, the denominator of the saturated fraction.
+    active_particle_steps = 0
 
+    phase_timer.add("setup", time.perf_counter() - t_setup_start)
     for batch in batches:
+        batch_setup_phase = phase_timer.start("batch_setup")
         if device.type == "cuda":
             torch.cuda.reset_peak_memory_stats(device)
         _log_device_memory(f"batch {batch.batch_idx} start", device)
-        particle_batch = generate_batch_particles(batch, device=device_str)
+        with phase_timer.phase("particle_generation"):
+            particle_batch = generate_batch_particles(batch, device=device_str)
         particles = particle_batch.particles
         # release_idx from the batch is global; remap to batch-local for the
         # per-batch gridder, then offset back to global for the region write.
@@ -1552,14 +1528,15 @@ def _run(
             footprint_coords, footprint_attrs = _build_footprint_dataset_metadata(
                 cfg, gridder, all_releases
             )
-            writer.create_footprint_store(
-                outputs.footprints,
-                shape=(total_releases, gridder.n_t, gridder.n_z, gridder.n_y, gridder.n_x),
-                coords=footprint_coords,
-                attrs=footprint_attrs,
-                keep_mantissa_bits=out_grid.footprint_keep_mantissa_bits,
-                zstd_level=out_grid.footprint_zstd_level,
-            )
+            with phase_timer.phase("output_write"):
+                writer.create_footprint_store(
+                    outputs.footprints,
+                    shape=(total_releases, gridder.n_t, gridder.n_z, gridder.n_y, gridder.n_x),
+                    coords=footprint_coords,
+                    attrs=footprint_attrs,
+                    keep_mantissa_bits=out_grid.footprint_keep_mantissa_bits,
+                    zstd_level=out_grid.footprint_zstd_level,
+                )
             footprint_store_created = True
 
         # Per-batch cursor bounds: walk from the latest window-end down to the
@@ -1614,8 +1591,13 @@ def _run(
         zero_wind = torch.zeros(3, device=device, dtype=particles.dtype)
         zero_escaped = torch.zeros((), device=device, dtype=torch.long)
 
+        phase_timer.stop(batch_setup_phase)
+
         t_cursor = batch_cursor_start
         while t_cursor > batch_cursor_terminus:
+            # Every named phase of this step opens inside `loop_overhead`, so its own
+            # (exclusive) time is the Python overhead of the loop between them.
+            loop_phase = phase_timer.start("loop_overhead")
             if step_profiler is not None:
                 step_profiler.before_step()
             # A span that is not a whole number of steps takes its short step FIRST,
@@ -1632,11 +1614,12 @@ def _run(
             # liveness mask. For a single-release batch with no escapes this is
             # identical to the pre-kill release-time check.
             cursor_offset_s = t_cursor.timestamp() - batch_start_ts
-            active_mask = (
-                (release_time_offsets_s >= cursor_offset_s)
-                & (release_time_offsets_s - sim_length_s <= cursor_offset_s)
-                & alive
-            )
+            with phase_timer.phase("mask_liveness"):
+                active_mask = (
+                    (release_time_offsets_s >= cursor_offset_s)
+                    & (release_time_offsets_s - sim_length_s <= cursor_offset_s)
+                    & alive
+                )
             # Per-step body has two device-gated paths (docs/architecture.md S5):
             #   static  - full buffer every step, inactive frozen via torch.where; no
             #             per-step host sync; constant shapes for CUDA-graph capture.
@@ -1649,6 +1632,8 @@ def _run(
                 hour_windows += fetched_windows
                 if fetched_windows:
                     phase_timer.tick_fetch()
+                with phase_timer.phase("saturation_poll"):
+                    saturation.poll(met_window.metadata.time_start)
                 # On the static path HannaScheme folds RK2 advection into its captured
                 # graph (one graph for advect + turbulence), so the runtime must NOT
                 # advect separately. A scheme that does NOT fold advection (e.g. the
@@ -1656,9 +1641,10 @@ def _run(
                 # full-set advection + where-gate here. Either way we need `t_alpha`
                 # (the RK2-midpoint weight, also used for the surface fields) and the
                 # grid-mean wind diagnostic.
-                t_alpha, wind_mean = _advection_alpha_wind_mean(
-                    met_window, t_cursor, delta_s, device, particles.dtype, wind_mean_cache
-                )
+                with phase_timer.phase("wind_mean"):
+                    t_alpha, wind_mean = _advection_alpha_wind_mean(
+                        met_window, t_cursor, delta_s, device, particles.dtype, wind_mean_cache
+                    )
                 if not scheme.step_includes_advection(engine):
                     with phase_timer.phase("advect"):
                         advected_full = _advect_active_particles(
@@ -1696,13 +1682,14 @@ def _run(
                             engine=engine,
                         )
                     last_convection_bracket_start = bracket_start
-                elapsed_s = (release_window_end_offsets_s - cursor_offset_s).clamp_(min=0.0)
-                t_idx = (elapsed_s / time_bin_s).floor().to(torch.int64)
-                # Single-bin footprint = time-integrated: lump ALL residence ages into
-                # bin 0. Multi-bin: leave out-of-range ages for the gridder to DROP
-                # (clamping them into the last bin would contradict time_ago_end_hours).
-                if gridder.n_t == 1:
-                    t_idx.clamp_(max=0)
+                with phase_timer.phase("mask_liveness"):
+                    elapsed_s = (release_window_end_offsets_s - cursor_offset_s).clamp_(min=0.0)
+                    t_idx = (elapsed_s / time_bin_s).floor().to(torch.int64)
+                    # Single-bin footprint = time-integrated: lump ALL residence ages into
+                    # bin 0. Multi-bin: leave out-of-range ages for the gridder to DROP
+                    # (clamping them into the last bin would contradict time_ago_end_hours).
+                    if gridder.n_t == 1:
+                        t_idx.clamp_(max=0)
                 with phase_timer.phase("gridder"):
                     inv_density = (
                         None
@@ -1720,11 +1707,13 @@ def _run(
                         dt_seconds=delta_s,
                         inv_density=inv_density,
                     )
-                newly_escaped = active_mask & ~_within_met_domain(particles, cfg)
-                alive = alive & ~newly_escaped
-                escaped_count = torch.count_nonzero(newly_escaped)
+                with phase_timer.phase("mask_liveness"):
+                    newly_escaped = active_mask & ~_within_met_domain(particles, cfg)
+                    alive = alive & ~newly_escaped
+                    escaped_count = torch.count_nonzero(newly_escaped)
             else:
-                active_count = int(torch.count_nonzero(active_mask).item())
+                with phase_timer.phase("mask_liveness"):
+                    active_count = int(torch.count_nonzero(active_mask).item())
 
                 if active_count > 0:
                     active_particles = particles[active_mask]
@@ -1735,41 +1724,46 @@ def _run(
                     hour_windows += fetched_windows
                     if fetched_windows:
                         phase_timer.tick_fetch()
-                    advected_active, t_alpha, wind_mean = _advect_active_particles(
-                        engine,
-                        device,
-                        active_particles,
-                        met_window,
-                        t_cursor,
-                        delta_s,
-                        particles.dtype,
-                        wind_mean_cache=wind_mean_cache,
-                    )
-                    particles[active_mask] = advected_active
+                    with phase_timer.phase("saturation_poll"):
+                        saturation.poll(met_window.metadata.time_start)
+                    with phase_timer.phase("advect"):
+                        advected_active, t_alpha, wind_mean = _advect_active_particles(
+                            engine,
+                            device,
+                            active_particles,
+                            met_window,
+                            t_cursor,
+                            delta_s,
+                            particles.dtype,
+                            wind_mean_cache=wind_mean_cache,
+                        )
+                        particles[active_mask] = advected_active
 
-                    particles, turbulence_state = scheme.step(
-                        particles=particles,
-                        state=turbulence_state,
-                        met_window=met_window,
-                        t_alpha=t_alpha,
-                        dt_seconds=delta_s,
-                        active_mask=active_mask,
-                        engine=engine,
-                    )
-
-                    # Deep convection - fired ONCE per met-update interval (when the
-                    # cursor crosses into a new hourly bracket), not per timestep.
-                    bracket_start = met_window.metadata.time_start
-                    if bracket_start != last_convection_bracket_start:
-                        particles, convection_state = convection_scheme.maybe_convect(
+                    with phase_timer.phase("step"):
+                        particles, turbulence_state = scheme.step(
                             particles=particles,
-                            state=convection_state,
+                            state=turbulence_state,
                             met_window=met_window,
                             t_alpha=t_alpha,
                             dt_seconds=delta_s,
                             active_mask=active_mask,
                             engine=engine,
                         )
+
+                    # Deep convection - fired ONCE per met-update interval (when the
+                    # cursor crosses into a new hourly bracket), not per timestep.
+                    bracket_start = met_window.metadata.time_start
+                    if bracket_start != last_convection_bracket_start:
+                        with phase_timer.phase("convection"):
+                            particles, convection_state = convection_scheme.maybe_convect(
+                                particles=particles,
+                                state=convection_state,
+                                met_window=met_window,
+                                t_alpha=t_alpha,
+                                dt_seconds=delta_s,
+                                active_mask=active_mask,
+                                engine=engine,
+                            )
                         last_convection_bracket_start = bracket_start
 
                     del active_particles
@@ -1778,40 +1772,44 @@ def _run(
                     wind_mean = zero_wind
 
                 if active_count > 0:
-                    # Per-particle time-ago bin: each particle measures elapsed time
-                    # from *its own* release window's end (stage 3 semantics).
-                    elapsed_s = (release_window_end_offsets_s - cursor_offset_s).clamp_(min=0.0)
-                    t_idx = (elapsed_s / time_bin_s).floor().to(torch.int64)
-                    # Single-bin footprint = time-integrated: lump ALL residence ages into
-                    # bin 0. Multi-bin: leave out-of-range ages for the gridder to DROP
-                    # (clamping them into the last bin would contradict time_ago_end_hours).
-                    if gridder.n_t == 1:
-                        t_idx.clamp_(max=0)
-                    inv_density = (
-                        None
-                        if particle_density is None
-                        else particle_density.inverse_density(
-                            particles[:, :3], met_window, t_alpha, engine
+                    with phase_timer.phase("mask_liveness"):
+                        # Per-particle time-ago bin: each particle measures elapsed time
+                        # from *its own* release window's end (stage 3 semantics).
+                        elapsed_s = (release_window_end_offsets_s - cursor_offset_s).clamp_(min=0.0)
+                        t_idx = (elapsed_s / time_bin_s).floor().to(torch.int64)
+                        # Single-bin footprint = time-integrated: lump ALL residence ages
+                        # into bin 0. Multi-bin: leave out-of-range ages for the gridder to
+                        # DROP (clamping them into the last bin would contradict
+                        # time_ago_end_hours).
+                        if gridder.n_t == 1:
+                            t_idx.clamp_(max=0)
+                    with phase_timer.phase("gridder"):
+                        inv_density = (
+                            None
+                            if particle_density is None
+                            else particle_density.inverse_density(
+                                particles[:, :3], met_window, t_alpha, engine
+                            )
                         )
-                    )
-                    gridder.accumulate(
-                        particles=particles[:, :3],
-                        active_mask=active_mask,
-                        weights=particles[:, 3],
-                        t_idx=t_idx,
-                        release_idx=release_idx_local,
-                        dt_seconds=delta_s,
-                        inv_density=inv_density,
-                    )
+                        gridder.accumulate(
+                            particles=particles[:, :3],
+                            active_mask=active_mask,
+                            weights=particles[:, 3],
+                            t_idx=t_idx,
+                            release_idx=release_idx_local,
+                            dt_seconds=delta_s,
+                            inv_density=inv_density,
+                        )
 
                 # Kill particles that left met_domain this step (drop-and-count). They
                 # accumulated 0 already (outside output_grid -> dropped by valid_mask);
                 # alive excludes them from future steps. Escaped count is a device
                 # tensor summed at batch end.
                 if active_count > 0:
-                    newly_escaped = active_mask & ~_within_met_domain(particles, cfg)
-                    alive = alive & ~newly_escaped
-                    escaped_count = torch.count_nonzero(newly_escaped)
+                    with phase_timer.phase("mask_liveness"):
+                        newly_escaped = active_mask & ~_within_met_domain(particles, cfg)
+                        alive = alive & ~newly_escaped
+                        escaped_count = torch.count_nonzero(newly_escaped)
                 else:
                     escaped_count = zero_escaped
 
@@ -1820,15 +1818,18 @@ def _run(
             # Accumulate diagnostics as device tensors (no host sync this step);
             # materialised once per batch below. active_mask.sum() replaces the
             # former per-step active_count .item() in the diagnostics.
-            diag_pos_means.append(particles[:, :3].mean(dim=0))
-            diag_wind_means.append(wind_mean)
-            diag_escaped.append(escaped_count)
-            diag_active.append(active_mask.sum())
-            diag_host.append((step_count, batch.batch_idx, t_cursor.isoformat()))
+            with phase_timer.phase("diagnostics"):
+                diag_pos_means.append(particles[:, :3].mean(dim=0))
+                diag_wind_means.append(wind_mean)
+                diag_escaped.append(escaped_count)
+                diag_active.append(active_mask.sum())
+                diag_host.append((step_count, batch.batch_idx, t_cursor.isoformat()))
 
             if mem.gc_every_steps > 0 and step_count % mem.gc_every_steps == 0:
-                gc.collect()
+                with phase_timer.phase("gc"):
+                    gc.collect()
 
+            log_guard_phase = phase_timer.start("log_guard")
             if mem.log_every_steps > 0 and step_count % mem.log_every_steps == 0:
                 rss_bytes, allocated, reserved = memory_stats.observe(device)
                 # Materialise the active count just for this log line (runs only every
@@ -1863,22 +1864,32 @@ def _run(
                     reserved,
                 )
 
+            phase_timer.stop(log_guard_phase)
+
             if step_profiler is not None:
                 step_profiler.after_step()
 
             t_cursor = t_prev
+            phase_timer.stop(loop_phase)
+
+        batch_end_phase = phase_timer.start("batch_end")
+        # Saturated particle-steps of this batch's last met window.
+        with phase_timer.phase("saturation_poll"):
+            saturation.poll(None)
 
         # Materialise this batch's per-step diagnostics in ONE host transfer
         # (instead of a `.item()` sync every step). `alive_particles` is the
         # running survivor count = N − cumulative escaped, recovered from the
         # escaped-per-step tensor via cumsum.
         if diag_host:
+            diag_phase = phase_timer.start("batch_diagnostics")
             pos = torch.stack(diag_pos_means).to("cpu").tolist()
             wind = torch.stack(diag_wind_means).to("cpu").tolist()
             escaped_dev = torch.stack(diag_escaped).to("cpu")
             batch_escaped_total = int(escaped_dev.sum().item())
             escaped_each = escaped_dev.tolist()
             active_each = torch.stack(diag_active).to("cpu").tolist()
+            active_particle_steps += int(sum(active_each))
             alive_each = (particles.shape[0] - torch.cumsum(escaped_dev, dim=0)).tolist()
             for (st, bidx, iso), ac, pm, wm, esc, al in zip(
                 diag_host, active_each, pos, wind, escaped_each, alive_each
@@ -1899,18 +1910,20 @@ def _run(
                         "alive_particles": al,
                     }
                 )
+            phase_timer.stop(diag_phase)
 
         # End of batch: stream this batch's footprint slice to disk, then drop the
         # gridder and per-batch tensors so peak footprint memory is one batch's
         # worth, not the whole schedule's. (met_cache + bookkeeping persist.)
-        writer.write_footprint_region(
-            outputs.footprints,
-            gridder.tensor,
-            release_start=batch_release_offset,
-            release_stop=batch_release_offset + len(batch.releases),
-        )
-        endpoint_particles_chunks.append(particles.detach().cpu().clone())
-        endpoint_release_idx_chunks.append(particle_batch.release_idx.detach().cpu().clone())
+        with phase_timer.phase("output_write"):
+            writer.write_footprint_region(
+                outputs.footprints,
+                gridder.tensor,
+                release_start=batch_release_offset,
+                release_stop=batch_release_offset + len(batch.releases),
+            )
+            endpoint_particles_chunks.append(particles.detach().cpu().clone())
+            endpoint_release_idx_chunks.append(particle_batch.release_idx.detach().cpu().clone())
         _log_device_memory(f"batch {batch.batch_idx} end (pre-reclaim)", device)
         del gridder
         del particles
@@ -1931,7 +1944,9 @@ def _run(
         _log_device_memory(f"batch {batch.batch_idx} end (post-reclaim)", device)
         _maybe_dump_mem_snapshot(batch.batch_idx, device)
         run_escaped_total += batch_escaped_total
+        phase_timer.stop(batch_end_phase)
 
+    final_phase = phase_timer.start("output_write")
     prefetcher.shutdown()
     for cached in met_cache.values():
         del cached
@@ -1984,6 +1999,9 @@ def _run(
             # Each meteorology store's provenance (format version, producer,
             # source, recipe...): which inputs a run used (task B1).
             met_stores=(reader.store_provenance() if hasattr(reader, "store_provenance") else []),
+            # Particle-steps whose substep count hit the scheme's cap (task A1), or
+            # None for a scheme without substeps.
+            substep_saturation=saturation.metadata(active_particle_steps),
         ),
         "schedule": {
             "n_batches": len(batches),
@@ -2002,8 +2020,11 @@ def _run(
         "footprint_units": _footprint_units_doc(cfg),
     }
     writer.write_metadata_json(outputs.metadata, metadata)
+    phase_timer.stop(final_phase)
 
+    saturation.log_run_total(active_particle_steps)
     phase_timer.summary(hour_windows=hour_windows)
+    install_phase_timer(None)
     return metadata
 
 

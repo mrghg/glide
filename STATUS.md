@@ -86,14 +86,19 @@ meteorology is a smaller share).
 On a representative multi-site run the per-step phase is now only ~18–23% of
 wall. What remains:
 
-- **The untimed per-step "residual"** is the standout consumer — the wind-mean
-  diagnostic, mask/liveness bookkeeping, per-batch particle generation and output
-  writes, and Python loop overhead. This, not more graph work, is the next lever.
-  First step is to sub-time it to see what is actually in it (task A1).
-- **Convection is not a top consumer.** Re-profiled in task A02 on the A01
-  comparison config (GH200, 72 releases, EUROPE domain of ~151,000 columns):
-  63 ms per met window with the old bbox-mean column, 78 ms with every column
-  diagnosed (about 1% of wall either way; meteorology fetch is ~82%).
+- **The residual is now named** (task A1; [VALIDATION.md §8](docs/VALIDATION.md#phase-breakdown-with-sub-phases-task-a1)).
+  On `ab_multisite_perf` (GH200, GPU synchronised at each phase, 1,154 s,
+  0.125 footprints/s) the two largest consumers are **meteorology fetch,
+  833 s (72.7%)**, and **the gridder, 91 s (7.9%)**, ahead of the step (74 s,
+  6.5%). Of what used to be the residual, the largest are **`gc.collect` every
+  50 steps, 48 s (4.2%; 138 ms a call, 271 ms without synchronisation)** and
+  **mask and liveness bookkeeping, 44 s (3.8%)**; the wind-mean diagnostic,
+  per-step diagnostics, logging, output writes and Python loop overhead are
+  each under 1%, and the untimed rest is under 0.1%.
+- **Convection is not a top consumer.** Re-profiled in task A1 on the same
+  run: 16.9 s (1.5% of wall), 58.6 ms per met window, of which the vectorised
+  parcel lift is 38.7 ms. (Task A02 measured 63–78 ms per window on the A01
+  comparison config.)
 
 ---
 

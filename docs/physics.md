@@ -561,11 +561,31 @@ velocity-dependent $(1 + w'^2/\sigma_w^2)$ factor is not.
 
 $c = 0.5$ rather than Stohl & Thomson's 0.05 because the sub-step count is capped
 at `max_substeps` to bound the per-step cost; the cap, not $c$, is the binding
-constraint for the most demanding particles. A once-per-run warning fires if the
-cap saturates. With the FLEXPART $T_{Lw} \ge 30$ s floor in force (the default,
-see [turbulence.md](turbulence.md)) it rarely does — at $\Delta t = 60$ s the
-required count is $\lceil 60/(0.5 \times 30)\rceil = 4$, which is why the shipped
-configs set `max_substeps: 6`.
+constraint for the most demanding particles. Every step counts the active
+particles whose $k_p$ reached the cap, on both execution paths: on the CUDA
+graph path the count is taken inside the captured step and kept on the device
+(no host synchronisation), and the runtime reads it once per met window. A
+once-per-run warning fires the first time the count is non-zero, with the same
+wording on both paths, and `run_metadata.json` records the run total under
+`runtime.substep_saturation` (saturated and active particle-steps, their ratio,
+the worst $\Delta t_{\mathrm{sub}}/T_{Lw}$ and the number of met windows
+affected). A particle counts when $k_p = k_{\max}$, so one that needed exactly
+$k_{\max}$ sub-steps, and so still met the target, is counted too. With the
+FLEXPART $T_{Lw} \ge 30$ s floor in force (the default,
+see [turbulence.md](turbulence.md)) it rarely does inside the boundary layer — at
+$\Delta t = 60$ s the required count is $\lceil 60/(0.5 \times 30)\rceil = 4$,
+which is why the shipped configs set `max_substeps: 6`. The floor is not applied
+above the boundary layer, where $T_{Lw} = 0.5/N$ falls to a few seconds in strong
+inversions, so the cap does bind there. Reaching a cap of 6 needs
+$T_{Lw} \le 20$ s, below the boundary-layer floor, so with the default settings
+every saturated particle is above the boundary layer. On the reference multi-site run
+(`configs/ab_multisite_perf.yaml`, January) 2.6% of active particle-steps
+reached it, the worst at $\Delta t_{\mathrm{sub}}/T_{Lw} = 1.58$ (task A1).
+The count measures **reaching the cap**, not exceeding the target: it cannot say
+what fraction of particle-steps had $\Delta t_{\mathrm{sub}} > c\,T_{Lw}$, only
+(through the worst ratio) that some did. A direct count of target exceedances,
+split between boundary layer and free troposphere, is part of the sub-stepping
+rework that follows this task.
 
 **Rogue-trajectory clip.** At the end of each sub-step's velocity update,
 
