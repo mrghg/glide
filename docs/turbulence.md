@@ -506,7 +506,9 @@ setting: the default keeps the near-surface well-mixed error within the tested
 tolerance at `dt_seconds: 60`. If you change `dt_seconds`, keep
 `dt_seconds / n_substeps` at or below 7.5 s. The step's GPU cost grows in
 proportion to it. The keys `substep_c` and `max_substeps` of the old per-particle
-adaptive schedule are refused.
+adaptive schedule are refused. How often a sub-step is long compared with
+$T_{Lw}$ is recorded for every run in `run_metadata.json` under
+`runtime.substep_exceedance` ([physics.md](physics.md) §6).
 
 **Extra meteorology required by `hanna_1982`:**
 

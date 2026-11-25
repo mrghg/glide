@@ -72,6 +72,7 @@ from lpdm.convection.base import (
 )
 from lpdm.gpu_engine import GPUEngine
 from lpdm.met_reader import HourlyMetTensors
+from lpdm.phase_timers import phase
 
 LOGGER = logging.getLogger(__name__)
 
@@ -894,7 +895,8 @@ class EmanuelReducedConvection(ConvectionScheme):
         pressure_pa = pressure_pa.contiguous()
         height_col = height_col.contiguous()
 
-        i_lcl, i_lnb, cape, dtv = compute_lcl_lnb_cape_columns(t_col, q_col, pressure_pa)
+        with phase("convection.lift"):
+            i_lcl, i_lnb, cape, dtv = compute_lcl_lnb_cape_columns(t_col, q_col, pressure_pa)
 
         # Trigger (Forster 2007 Eq 34, CAPE floor, deep cloud only). Thresholds
         # are compared in float64, as the single-column code compared Python floats.
@@ -956,10 +958,12 @@ class EmanuelReducedConvection(ConvectionScheme):
             return particles, state
         device, dtype = engine.device, engine.dtype
 
-        # 1-3) Parcel lift, trigger and closure in every column.
-        cols = self.column_state(met_window, t_alpha=t_alpha, device=device, dtype=dtype)
-        fire_idx = cols.fires.nonzero().squeeze(1)
-        n_fire = int(fire_idx.numel())
+        # 1-3) Parcel lift, trigger and closure in every column. The `convection.*`
+        # sub-phases are charged to the run's phase timers when those are on.
+        with phase("convection.columns"):
+            cols = self.column_state(met_window, t_alpha=t_alpha, device=device, dtype=dtype)
+            fire_idx = cols.fires.nonzero().squeeze(1)
+            n_fire = int(fire_idx.numel())
         if n_fire == 0:
             return particles, state
 
@@ -970,65 +974,68 @@ class EmanuelReducedConvection(ConvectionScheme):
         # tens of GB for columns no particle uses. Each particle's matrix is the
         # same as when every firing column's was built (the construction is
         # column by column).
-        n_col = cols.fires.numel()
-        particle_col = nearest_column_index(
-            particles[:, 0], particles[:, 1], met_window.metadata.lon, met_window.metadata.lat
-        )
-        occupied = torch.zeros(n_col, dtype=torch.bool, device=device)
-        occupied[particle_col[active_mask]] = True
-        use_idx = (cols.fires & occupied).nonzero().squeeze(1)
-        n_use = int(use_idx.numel())
-
-        # 5) Mass-flux matrices of the occupied firing columns (kg/m² per event:
-        # the flux times the met interval, which follows the store's cadence).
-        if n_use > 0:
-            fmass = compute_mass_flux_matrices(
-                cols.pressure_pa[use_idx],
-                cols.i_lcl[use_idx],
-                cols.i_lnb[use_idx],
-                (cols.m_b[use_idx] * cols.interval_s).to(dtype),
+        with phase("convection.matrices"):
+            n_col = cols.fires.numel()
+            particle_col = nearest_column_index(
+                particles[:, 0], particles[:, 1], met_window.metadata.lon, met_window.metadata.lat
             )
-            layer_mass = _layer_masses_per_area(cols.pressure_pa[use_idx]).clamp(min=1e-6)
-            prob = backward_transition_matrices(fmass, layer_mass)  # [U, Z, Z]
-            del fmass, layer_mass
-        else:
-            # No active particle under convection: nothing moves, and (as when
-            # no particle is eligible) no random number is drawn.
-            prob = torch.zeros((0, 0, 0), dtype=dtype, device=device)
+            occupied = torch.zeros(n_col, dtype=torch.bool, device=device)
+            occupied[particle_col[active_mask]] = True
+            use_idx = (cols.fires & occupied).nonzero().squeeze(1)
+            n_use = int(use_idx.numel())
 
-        # 6) Each particle is moved with the matrix of the column it is in.
-        col_slot = torch.full((n_col,), -1, dtype=torch.long, device=device)
-        col_slot[use_idx] = torch.arange(n_use, device=device)
-        particle_slot = col_slot[particle_col]
-        particles_out, n_displaced = self._redistribute_particles(
-            particles=particles,
-            eligible=active_mask & (particle_slot >= 0),
-            particle_col=particle_col,
-            particle_slot=particle_slot,
-            height_col=cols.height_m,
-            prob=prob,
-            generator=generator,
-            device=device,
-            dtype=dtype,
-        )
+            # 5) Mass-flux matrices of the occupied firing columns (kg/m² per event:
+            # the flux times the met interval, which follows the store's cadence).
+            if n_use > 0:
+                fmass = compute_mass_flux_matrices(
+                    cols.pressure_pa[use_idx],
+                    cols.i_lcl[use_idx],
+                    cols.i_lnb[use_idx],
+                    (cols.m_b[use_idx] * cols.interval_s).to(dtype),
+                )
+                layer_mass = _layer_masses_per_area(cols.pressure_pa[use_idx]).clamp(min=1e-6)
+                prob = backward_transition_matrices(fmass, layer_mass)  # [U, Z, Z]
+                del fmass, layer_mass
+            else:
+                # No active particle under convection: nothing moves, and (as when
+                # no particle is eligible) no random number is drawn.
+                prob = torch.zeros((0, 0, 0), dtype=dtype, device=device)
 
-        if LOGGER.isEnabledFor(logging.INFO):
-            fired_cape = cols.cape[fire_idx]
-            LOGGER.info(
-                "Emanuel convection at %s: fires in %d / %d columns "
-                "(CAPE median %.0f, max %.0f J/kg; M_b max %.3f kg/m²/s; interval %.0f s); "
-                "%d hold active particles. Displaced %d / %d active particles.",
-                met_window.metadata.time_start,
-                n_fire,
-                n_col,
-                float(fired_cape.median()),
-                float(fired_cape.max()),
-                float(cols.m_b.max()),
-                cols.interval_s,
-                n_use,
-                n_displaced,
-                int(active_mask.sum().item()),
+        with phase("convection.redistribute"):
+            # 6) Each particle is moved with the matrix of the column it is in.
+            col_slot = torch.full((n_col,), -1, dtype=torch.long, device=device)
+            col_slot[use_idx] = torch.arange(n_use, device=device)
+            particle_slot = col_slot[particle_col]
+            particles_out, n_displaced = self._redistribute_particles(
+                particles=particles,
+                eligible=active_mask & (particle_slot >= 0),
+                particle_col=particle_col,
+                particle_slot=particle_slot,
+                height_col=cols.height_m,
+                prob=prob,
+                generator=generator,
+                device=device,
+                dtype=dtype,
             )
+
+        with phase("convection.log"):
+            if LOGGER.isEnabledFor(logging.INFO):
+                fired_cape = cols.cape[fire_idx]
+                LOGGER.info(
+                    "Emanuel convection at %s: fires in %d / %d columns "
+                    "(CAPE median %.0f, max %.0f J/kg; M_b max %.3f kg/m²/s; interval %.0f s); "
+                    "%d hold active particles. Displaced %d / %d active particles.",
+                    met_window.metadata.time_start,
+                    n_fire,
+                    n_col,
+                    float(fired_cape.median()),
+                    float(fired_cape.max()),
+                    float(cols.m_b.max()),
+                    cols.interval_s,
+                    n_use,
+                    n_displaced,
+                    int(active_mask.sum().item()),
+                )
         return particles_out, state
 
     # ----- Particle redistribution -----
