@@ -805,8 +805,8 @@ def finish(T: Tallies, args, extra: dict) -> None:
         **extra,
     }
     summary["scores"] = summarise(T, ref)
-    T.save(out.with_suffix(".npz"))
-    out.with_suffix(".json").write_text(json.dumps(summary, indent=1))
+    T.save(Path(f"{out}.npz"))
+    Path(f"{out}.json").write_text(json.dumps(summary, indent=1))
     s = summary["scores"]["w"]["rel"]
     keys = (
         "z0_ring0",
