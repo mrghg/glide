@@ -70,6 +70,64 @@ def test_source_box_weights_cover_partial_cells() -> None:
         concentration.source_box_weights(edges, edges, 5.0, 5.0, 0.25)
 
 
+def _one_degree_source_case(lat_edges, lon_edges) -> np.ndarray:
+    """The 2026-11-25 test review's case: a 1° source box centred on (0, 0), 40 m
+    deep, emitting 60 kg over 60 s (1 kg/s); two 60 s age bins, the older one
+    emitting; 10 s of residence in the cell east of the source centre in that bin."""
+
+    lon_c = 0.5 * (np.asarray(lon_edges[:-1]) + np.asarray(lon_edges[1:]))
+    fp = np.zeros((1, 2, len(lat_edges) - 1, len(lon_edges) - 1))
+    fp[0, 1, :, np.flatnonzero((lon_c > 0.0) & (lon_c < 0.5))] = 10.0
+    end = np.array(["2000-01-01T12:00"], dtype="datetime64[ns]")
+    # Bin 1 covers (11:58, 11:59]; the source emits 11:58-11:59.
+    e = Emission(T("2000-01-01 11:58"), T("2000-01-01 11:59"), mass=60.0, lat=0.0, lon=0.0)
+    return concentration.predict(
+        fp,
+        window_end=end,
+        age_start_s=np.array([0.0, 60.0]),
+        age_end_s=np.array([60.0, 120.0]),
+        lat_edges=np.asarray(lat_edges, dtype=float),
+        lon_edges=np.asarray(lon_edges, dtype=float),
+        layer_depth_m=40.0,
+        emissions=[e],
+        source_deg=1.0,
+        basis="ambient",
+    )
+
+
+def test_source_box_partly_outside_the_grid_is_refused() -> None:
+    """A source box the footprint grid only partly covers is refused, rather than
+    credited to the smaller covered volume (2026-11-25 test review)."""
+
+    # Fully covered: c = Q τ / V with Q = 1 kg/s, τ = 10 s and V the whole 1° box,
+    # 40 m deep. In the model's metric (110540 m per degree of latitude, 111320 cos φ
+    # m per degree of longitude) the box's area is 110540 × 111320 × ∫cos φ dφ over
+    # ±0.5°, i.e. 110540 × 111320 × 2 sin(0.5°) / (π/180) m² (1.2305e10 m²).
+    area = 110540.0 * 111320.0 * 2.0 * math.sin(math.radians(0.5)) / math.radians(1.0)
+    expected = 1.0 * 10.0 / (area * 40.0)
+    assert expected == pytest.approx(2.0316685743e-11, rel=1e-10)
+    c = _one_degree_source_case([-0.5, 0.5], [-0.5, 0.0, 0.5])
+    np.testing.assert_allclose(c, [expected], rtol=1e-12)
+
+    # Removing the empty western cell would halve the volume and double c: refused.
+    with pytest.raises(ValueError, match="only partly inside the footprint grid"):
+        _one_degree_source_case([-0.5, 0.5], [0.0, 0.5])
+    # Likewise a grid cut short in latitude, or a box overhanging the grid's edge.
+    with pytest.raises(ValueError, match="only partly inside"):
+        _one_degree_source_case([-0.25, 0.5], [-0.5, 0.0, 0.5])
+    edges = np.array([-0.375, -0.125, 0.125, 0.375])
+    with pytest.raises(ValueError, match="only partly inside"):
+        concentration.source_box_weights(edges, edges, 0.3, 0.0, 0.25)
+
+
+def test_fully_covered_source_unchanged_by_empty_cells_around_it() -> None:
+    """Extra empty cells around a fully covered box leave the prediction as it was."""
+
+    exact = _one_degree_source_case([-0.5, 0.5], [-0.5, 0.0, 0.5])
+    wider = _one_degree_source_case([-1.0, -0.5, 0.5, 1.0], [-1.0, -0.5, 0.0, 0.5, 1.0])
+    np.testing.assert_allclose(wider, exact, rtol=1e-12)
+
+
 def test_emission_overlap_follows_ages_back_from_the_window_end() -> None:
     # Window ends 12:00; 30-minute bins: bin k covers (12:00 - (k+1)30 min, 12:00 - k 30 min].
     end = np.array(["2000-01-01T12:00"], dtype="datetime64[ns]")

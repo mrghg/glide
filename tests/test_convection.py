@@ -1092,6 +1092,32 @@ def test_matrices_only_for_occupied_columns_give_identical_positions() -> None:
     assert torch.equal(out[~active], particles[~active])
 
 
+def test_backward_transition_points_from_current_layer_to_source_layer() -> None:
+    """The backward matrix is the upstream source distribution of the air now in a
+    layer, not the forward destination distribution (2026-11-25 test review).
+
+    Three layers with masses 2, 3, 4 and one unit of forward mass flux on each link
+    of the cycle 0→1→2→0, so fmass[i, j] (mass from i to j) is 1 for (0,1), (1,2),
+    (2,0). The retained mass closes each row: 1, 2, 3. After the event layer 0
+    holds its own retained unit and the unit that came up from layer 2, so a
+    particle in layer 0 came from 0 or 2 with probability 1/2 each; layer 1 holds
+    1 unit from 0 and 2 of its own; layer 2 holds 1 unit from 1 and 3 of its own.
+    The forward matrix (rows: where layer i's air goes) differs in six entries, so
+    comparing all nine values distinguishes the two operators.
+    """
+
+    fmass = torch.tensor([[[0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]]], dtype=torch.float64)
+    layer_mass = torch.tensor([[2.0, 3.0, 4.0]], dtype=torch.float64)
+    prob = emanuel_module.backward_transition_matrices(fmass, layer_mass)
+
+    # Rows: the particle's current layer; columns: the layer its air came from.
+    expected = torch.tensor(
+        [[[1 / 2, 0.0, 1 / 2], [1 / 3, 2 / 3, 0.0], [0.0, 1 / 4, 3 / 4]]], dtype=torch.float64
+    )
+    assert prob.shape == (1, 3, 3)
+    torch.testing.assert_close(prob, expected, rtol=0.0, atol=1e-15)
+
+
 def test_nearest_column_index_handles_descending_latitude() -> None:
     lon = np.array([-10.0, -9.75, -9.5])
     lat = np.array([54.0, 53.75])  # descending, as ERA5 stores it
