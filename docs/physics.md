@@ -742,9 +742,15 @@ taking $\sigma_w$ from the full profile,
 `test_sigma_w_probe_is_bit_identical_to_the_full_profile`) and one density
 lookup per sub-step. On the same run, GPU-synchronised phase
 timers, the step took 4.49 ms (code before this decision, 6 iterations without
-re-evaluation), 5.18, 9.66 and 11.72 ms at $n$ = 4, 8 and 16: at $n = 16$,
-125 s more over the run, about 11% of its 1,157 s wall time. Reading
-meteorology still dominates (57–71% of wall time).
+re-evaluation), 5.18, 9.66 and 11.72 ms at $n$ = 4, 8 and 16 with decision
+0027 alone. The boundary-layer-top interface of decision 0028 (two σ
+evaluations per outer step, a uniform random number and a few element-wise
+operations per sub-step) adds 1.6 ms at $n = 16$: 11.92 against 13.50 ms run
+back to back on a quiet node, and 13.29–13.50 ms over three runs (8.67–8.69 ms
+at $n = 8$; `outputs/agents/WM/interface/bench/timing_table.md`). At $n = 16$
+the step costs about 155 s more over the run than before decision 0027, about
+13% of its wall time (1,233–1,340 s, against 1,157 s), and about 80 s more
+than $n = 8$. Reading meteorology still dominates (52–62% of wall time).
 
 **Effect on footprints.** The reference run (`configs/ab_multisite_perf.yaml`,
 144 releases at three sites, 5 days back) against its golden fixture, made with

@@ -90,6 +90,12 @@ column acts at the lid (reverting only the stencil reproduces them: convective
 $n = 16$; 1.078 / 1.068, 1.011 / 1.009 and 0.938 / 0.910 at $n = 8$; 1.021 /
 1.022, 1.006 / 1.009 and 0.987 / 0.983 at $n = 32$. $n = 16$ is still the
 smallest count tested within ±0.05 in every regime, and remains the default.
+On real meteorology the near-surface footprint is now converged between
+$n = 8$ and 16 (reference config, 3 seeds: 0–40 m within 0.4% median, at most
+1.2% in any site's day or night releases), so the closed-column criterion,
+not the footprints, is what sets the count; 16 costs 4.7 ms more per step than
+8 (13.4 against 8.7 ms, about 80 s or 7% of the reference run's wall time;
+decision 0028 adds 1.6 ms per step at $n = 16$).
 The BL half of the exceedance counter is structurally zero under the defaults
 ($T_{Lw} \ge 30$ s in the boundary layer, so $\Delta t_{\mathrm{sub}} > 0.5\,T_{Lw}$
 needs $\Delta t/n > 15$ s, i.e. $n < 4$ at 60 s); it is kept for runs with
