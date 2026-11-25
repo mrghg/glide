@@ -34,7 +34,6 @@ release:
 
 turbulence:
   scheme: hanna_1982
-  n_substeps: 8  # sub-steps per outer step, the same for every particle: 7.5 s at dt=60 (decision 0026)
   meander:                              # unresolved-mesoscale horizontal turbulence
     enabled: true                       #   (Maryon 1998 / FLEXPART §4.5)
     coefficient: 0.16                   # FLEXPART `turbmesoscale`; σ = 0.16 × local grid-wind std

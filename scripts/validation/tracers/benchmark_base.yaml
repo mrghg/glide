@@ -15,7 +15,6 @@ simulation:
 
 turbulence:
   scheme: hanna_1982
-  n_substeps: 8  # sub-steps per outer step, the same for every particle: 7.5 s at dt=60 (decision 0026)
   meander:
     enabled: true
     coefficient: 0.16
