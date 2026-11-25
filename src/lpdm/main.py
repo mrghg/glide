@@ -1172,7 +1172,6 @@ def _scheme_kwargs(cfg: RunConfig) -> dict[str, object]:
         "meander_coefficient": m.coefficient,
         "meander_stencil_radius": m.stencil_radius,
         "n_substeps": cfg.turbulence.n_substeps,
-        "exceedance_c": cfg.turbulence.exceedance_c,
         "flexpart_tl_floors": cfg.turbulence.flexpart_tl_floors,
         "surface_layer_override": cfg.turbulence.surface_layer_override,
         "blh_min_m": cfg.turbulence.boundary_layer_depth_min_m,
@@ -1317,26 +1316,26 @@ def _seed_global_generators(cfg: RunConfig) -> int | None:
 
 
 class _ExceedanceTally:
-    """Run totals of the turbulence sub-steps longer than the reporting threshold.
+    """Run totals of the turbulence sub-steps that are long compared with T_Lw.
 
     The scheme counts, on the device and inside its step (on the graph path inside
-    the captured step, with no host sync), the active particle-sub-steps whose
-    ``sub_dt > exceedance_c · T_Lw``, with the denominators, split boundary layer /
-    free troposphere (decision 0026). ``poll`` reads them once per met window, when
-    the cursor enters a new window, and ``flush`` at the end of each batch, so the
-    run pays one host sync per window. A scheme without sub-steps returns None and
-    nothing is recorded.
+    the captured step, with no host sync), the active particle-sub-steps, those
+    with ``sub_dt > exceedance_c · T_Lw`` and those with ``sub_dt > T_Lw``, split
+    boundary layer / free troposphere (decision 0027). ``poll`` reads them once per
+    met window, when the cursor enters a new window, and ``flush`` at the end of
+    each batch, so the run pays one host sync per window. A scheme without
+    sub-steps returns None and nothing is recorded.
     """
 
-    _KEYS = ("exceeded_bl", "substeps_bl", "exceeded_ft", "substeps_ft")
+    _LAYERS = (("boundary_layer", "bl"), ("free_troposphere", "ft"))
+    _COUNTS = ("substeps", "exceeded", "over_T_L")
 
     def __init__(self, scheme: TurbulenceScheme) -> None:
         self.scheme = scheme
         self.supported = True
         self.window: datetime | None = None
-        self.totals = dict.fromkeys(self._KEYS, 0)
-        self.worst_bl = 0.0
-        self.worst_ft = 0.0
+        self.totals = {f"{c}_{s}": 0 for _, s in self._LAYERS for c in self._COUNTS}
+        self.worst = {s: 0.0 for _, s in self._LAYERS}
         self.windows_exceeded = 0
 
     def poll(self, window_start: datetime) -> None:
@@ -1358,10 +1357,10 @@ class _ExceedanceTally:
         if taken is None:
             self.supported = False
             return
-        for k in self._KEYS:
+        for k in self.totals:
             self.totals[k] += int(taken[k])
-        self.worst_bl = max(self.worst_bl, float(taken["worst_bl"]))
-        self.worst_ft = max(self.worst_ft, float(taken["worst_ft"]))
+        for _, s in self._LAYERS:
+            self.worst[s] = max(self.worst[s], float(taken[f"worst_{s}"]))
         if taken["exceeded_bl"] or taken["exceeded_ft"]:
             self.windows_exceeded += 1
 
@@ -1373,25 +1372,27 @@ class _ExceedanceTally:
         def frac(num: int, den: int) -> float:
             return num / den if den else 0.0
 
-        return {
+        meta: dict[str, object] = {
             "n_substeps": getattr(self.scheme, "n_substeps", None),
             "exceedance_c": getattr(self.scheme, "exceedance_c", None),
-            "criterion": "sub_dt > exceedance_c * T_Lw, T_Lw at the sub-step's height",
+            "criterion": (
+                "exceeded: sub_dt > exceedance_c * T_Lw; over_T_L: sub_dt > T_Lw; "
+                "T_Lw at the sub-step's starting height; boundary layer z <= h"
+            ),
             "unit": "active particle-sub-steps",
-            "boundary_layer": {
-                "exceeded": t["exceeded_bl"],
-                "substeps": t["substeps_bl"],
-                "fraction": frac(t["exceeded_bl"], t["substeps_bl"]),
-                "worst_sub_dt_over_T_Lw": self.worst_bl,
-            },
-            "free_troposphere": {
-                "exceeded": t["exceeded_ft"],
-                "substeps": t["substeps_ft"],
-                "fraction": frac(t["exceeded_ft"], t["substeps_ft"]),
-                "worst_sub_dt_over_T_Lw": self.worst_ft,
-            },
-            "met_windows_with_exceedance": self.windows_exceeded,
         }
+        for name, s in self._LAYERS:
+            n = t[f"substeps_{s}"]
+            meta[name] = {
+                "substeps": n,
+                "exceeded": t[f"exceeded_{s}"],
+                "exceeded_fraction": frac(t[f"exceeded_{s}"], n),
+                "over_T_L": t[f"over_T_L_{s}"],
+                "over_T_L_fraction": frac(t[f"over_T_L_{s}"], n),
+                "worst_sub_dt_over_T_Lw": self.worst[s],
+            }
+        meta["met_windows_with_exceedance"] = self.windows_exceeded
+        return meta
 
     def log_run_total(self) -> None:
         meta = self.metadata()
@@ -1400,18 +1401,19 @@ class _ExceedanceTally:
         bl, ft = meta["boundary_layer"], meta["free_troposphere"]
         LOGGER.info(
             "sub-step exceedance (sub_dt > %s T_Lw, n_substeps=%s): boundary layer %d of %d "
-            "(%.3g%%, worst %.2f); free troposphere %d of %d (%.3g%%, worst %.2f); "
-            "%d met window(s).",
+            "(%.3g%%, worst %.2f); free troposphere %d of %d (%.3g%%, worst %.2f; "
+            "sub_dt > T_Lw in %.3g%%); %d met window(s).",
             meta["exceedance_c"],
             meta["n_substeps"],
             bl["exceeded"],
             bl["substeps"],
-            100.0 * bl["fraction"],
+            100.0 * bl["exceeded_fraction"],
             bl["worst_sub_dt_over_T_Lw"],
             ft["exceeded"],
             ft["substeps"],
-            100.0 * ft["fraction"],
+            100.0 * ft["exceeded_fraction"],
             ft["worst_sub_dt_over_T_Lw"],
+            100.0 * ft["over_T_L_fraction"],
             meta["met_windows_with_exceedance"],
         )
 
@@ -1618,7 +1620,7 @@ def _run(
     # 2026-07-16 #2): without it every step paid a full [3, Z, Y, X] host->device
     # copy + reduction just to log a (3,) mean.
     wind_mean_cache: dict = {}
-    # Sub-step exceedance counter (decision 0026): counted on the device inside the
+    # Sub-step exceedance counter (decision 0027): counted on the device inside the
     # step, read here once per met window, recorded in run_metadata.json.
     exceedance = _ExceedanceTally(scheme)
 

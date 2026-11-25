@@ -20,6 +20,7 @@ from lpdm.turbulence.hanna import (
     ABOVE_BL_SIGMA_M_S,
     ABOVE_BL_T_L_S,
     EARTH_ROTATION_RATE_S,
+    EXCEEDANCE_COUNT_KEYS,
     FT_KZ_CEIL_M2_S,
     FT_KZ_FLOOR_M2_S,
     air_density,
@@ -439,11 +440,11 @@ def _step_n(scheme: HannaScheme, met, z0: float, *, n: int = 8, steps: int = 3, 
 
 @pytest.mark.parametrize("static", [False, True], ids=["dynamic", "static"])
 def test_exceedance_counter_reports_short_T_L(static: bool) -> None:
-    """Decision 0026: the scheme counts the particle-sub-steps whose sub_dt exceeds
-    ``exceedance_c · T_Lw``, with the denominator, and reports them once through
-    ``take_substep_exceedance`` (which resets the counts). The legacy near-surface
-    treatment (1 s T_L floor + MO surface-layer override) gives T_Lw ~ 1 s at
-    z = 1 m, so 300 s / 8 = 37.5 s sub-steps exceed the 0.5 target."""
+    """Decision 0027: the scheme counts the particle-sub-steps whose sub_dt exceeds
+    ``exceedance_c · T_Lw`` (and T_Lw), with the denominator, and reports them once
+    through ``take_substep_exceedance`` (which resets the counts). The legacy
+    near-surface treatment (1 s T_L floor + MO surface-layer override) gives
+    T_Lw ~ 1 s at z = 1 m, so 300 s / 8 = 37.5 s sub-steps exceed the 0.5 target."""
 
     scheme = HannaScheme(
         flexpart_tl_floors=False, surface_layer_override=True, static_substeps=static
@@ -452,11 +453,11 @@ def test_exceedance_counter_reports_short_T_L(static: bool) -> None:
     taken = scheme.take_substep_exceedance(None)
     # Every active particle-sub-step is counted once, in the BL or the FT.
     assert taken["substeps_bl"] + taken["substeps_ft"] == 8 * 3 * scheme.n_substeps
-    assert taken["exceeded_bl"] > 0
-    assert taken["worst_bl"] > scheme.exceedance_c
+    assert 0 < taken["over_T_L_bl"] <= taken["exceeded_bl"] <= taken["substeps_bl"]
+    assert taken["worst_bl"] > 1.0
     # Read and reset.
     again = scheme.take_substep_exceedance(None)
-    assert again["substeps_bl"] == again["substeps_ft"] == again["exceeded_bl"] == 0
+    assert all(again[k] == 0 for k in EXCEEDANCE_COUNT_KEYS)
 
 
 def test_flexpart_tl_floors_bound_the_boundary_layer_exceedance() -> None:
@@ -472,37 +473,47 @@ def test_flexpart_tl_floors_bound_the_boundary_layer_exceedance() -> None:
     _step_n(scheme, _uniform_met(), z0=1.0, n=8, steps=3, dt=60.0)
     taken = scheme.take_substep_exceedance(None)
     assert taken["substeps_bl"] == 8 * 3 * scheme.n_substeps
-    assert taken["exceeded_bl"] == 0
+    assert taken["exceeded_bl"] == taken["over_T_L_bl"] == 0
     assert 0.0 < taken["worst_bl"] <= 60.0 / scheme.n_substeps / 30.0 + 1e-6
 
 
 @pytest.mark.parametrize("static", [False, True], ids=["dynamic", "static"])
 def test_exceedance_counter_hand_computed(static: bool) -> None:
     """Hand-computed counts on synthetic inputs: dt = 60 s, n = 4 (15 s sub-steps),
-    T_Lw = 1000 / 10 / 2 s (ratios 0.015 / 1.5 / 7.5); the third particle is above
-    its boundary layer. The static path also carries an inactive particle, which
-    must not be counted."""
+    T_Lw = 1000 / 10 / 2 / 20 s (ratios 0.015 / 1.5 / 7.5 / 0.75); the third
+    particle is above its boundary layer. The static path also carries an inactive
+    particle (the fifth), which must not be counted."""
 
     from lpdm.gpu_engine import GPUEngine
 
     scheme = HannaScheme(n_substeps=4)
-    tlw = torch.tensor([1000.0, 10.0, 2.0, 5.0])
-    inp = _substep_inputs(4, T_Lw=tlw, seed=2)
-    inp["active_xyz"][:, 2] = torch.tensor([50.0, 50.0, 500.0, 50.0])
-    inp["sigma_u"] = inp["sigma_v"] = inp["sigma_w"] = torch.full((4,), 0.01)
+    tlw = torch.tensor([1000.0, 10.0, 2.0, 20.0, 5.0])
+    inp = _substep_inputs(5, T_Lw=tlw, seed=2)
+    inp["active_xyz"][:, 2] = torch.tensor([50.0, 50.0, 500.0, 50.0, 50.0])
+    inp["sigma_u"] = inp["sigma_v"] = inp["sigma_w"] = torch.full((5,), 0.01)
     inp["sigma_w_sq"] = inp["sigma_w"].pow(2)
-    blh = torch.tensor([1000.0, 1000.0, 100.0, 1000.0])
+    blh = torch.tensor([1000.0, 1000.0, 100.0, 1000.0, 1000.0])
     if static:
-        active = torch.tensor([True, True, True, False])
+        active = torch.tensor([True, True, True, True, False])
         out = scheme._integrate_vertical_substeps(
             engine=GPUEngine(device="cpu"), blh=blh, active_mask=active, **inp
         )
-        assert torch.equal(out[0][3], inp["active_xyz"][3])  # inactive: frozen
+        assert torch.equal(out[0][4], inp["active_xyz"][4])  # inactive: frozen
     else:
-        sub = {k: (v[:3] if isinstance(v, torch.Tensor) else v) for k, v in inp.items()}
-        out = scheme._integrate_vertical_substeps(engine=GPUEngine(device="cpu"), blh=blh[:3], **sub)
+        sub = {k: (v[:4] if isinstance(v, torch.Tensor) else v) for k, v in inp.items()}
+        out = scheme._integrate_vertical_substeps(
+            engine=GPUEngine(device="cpu"), blh=blh[:4], **sub
+        )
     counts, worst = out[4], out[5]
-    assert counts.tolist() == [4, 8, 4, 4]  # [exceeded BL, all BL, exceeded FT, all FT]
+    # BL: 3 particles x 4 sub-steps, 2 above 0.5 T_Lw, 1 above T_Lw; FT: 1 x 4, above both.
+    assert dict(zip(EXCEEDANCE_COUNT_KEYS, counts.tolist(), strict=True)) == {
+        "substeps_bl": 12,
+        "exceeded_bl": 8,
+        "over_T_L_bl": 4,
+        "substeps_ft": 4,
+        "exceeded_ft": 4,
+        "over_T_L_ft": 4,
+    }
     assert worst.tolist() == pytest.approx([1.5, 7.5])
 
 
@@ -531,7 +542,7 @@ def test_static_and_dynamic_substeps_bit_identical_when_all_active(n_substeps: i
     for a, b in zip(dyn, stat):
         assert torch.equal(a, b)
     assert torch.isfinite(dyn[0]).all()
-    assert int(dyn[4][1] + dyn[4][3]) == n * n_substeps
+    assert int(dyn[4][0] + dyn[4][3]) == n * n_substeps  # substeps_bl + substeps_ft
 
 
 @pytest.mark.parametrize("static", [False, True])
@@ -579,7 +590,9 @@ def test_n_substeps_validated() -> None:
 
 @pytest.mark.parametrize("override", [False, True])
 @pytest.mark.parametrize("h_over_L", [-50.0, -0.5, 0.0, 0.5, 20.0])
-def test_sigma_w_probe_is_bit_identical_to_the_full_profile(override: bool, h_over_L: float) -> None:
+def test_sigma_w_probe_is_bit_identical_to_the_full_profile(
+    override: bool, h_over_L: float
+) -> None:
     """The drift's finite-difference probes evaluate σ_w only
     (``_column_sigma_w``). It must equal ``_column_turbulence(...)[2]`` bit for bit
     in every regime (stable, neutral, convective), with and without the
@@ -611,6 +624,7 @@ def test_sigma_w_probe_is_bit_identical_to_the_full_profile(override: bool, h_ov
     full = scheme._column_turbulence(z, **col)[2]
     probe = scheme._column_sigma_w(z, **col)
     assert torch.equal(full, probe)
+
 
 def test_ubl_holds_sigma_constant_below_z_ubl() -> None:
     """F5/F15 (audit 2026-05-30): the "unresolved basal layer" (Wilson & Flesch
@@ -858,6 +872,7 @@ def test_ou_and_displacement_are_noops_at_zero_dt() -> None:
 # ---------------------------------------------------------------------------
 # CUDA-graph wiring.
 # ---------------------------------------------------------------------------
+
 
 def test_graph_compile_gating(monkeypatch) -> None:
     """Phase 3 wiring: the substep-loop graph compile engages ONLY on the static
@@ -1186,10 +1201,10 @@ def test_meander_alone_gives_the_exact_ou_displacement_variance(static: bool, mo
     )
 
     def _no_small_scale_turbulence(*, active_xyz, u_prime_in, v_prime_in, w_prime_in, **_):
-        return active_xyz, u_prime_in, v_prime_in, w_prime_in
+        counts = torch.zeros(len(EXCEEDANCE_COUNT_KEYS), dtype=torch.int64)
+        return active_xyz, u_prime_in, v_prime_in, w_prime_in, counts, torch.zeros(2)
 
     monkeypatch.setattr(scheme, "_integrate_vertical_substeps", _no_small_scale_turbulence)
-    monkeypatch.setattr(scheme, "_integrate_vertical_substeps_static", _no_small_scale_turbulence)
 
     engine = GPUEngine(device="cpu")
     torch.manual_seed(2024)

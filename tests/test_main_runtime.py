@@ -1873,7 +1873,7 @@ def test_graph_compile_substep_path_runs_on_cpu(monkeypatch) -> None:
     GLIDE_COMPILE=1) and confirm the fixed-count substep loop actually compiles +
     runs + stays finite, with the per-method engine compile suppressed (no nesting).
     CUDA graphs are CUDA-only, so on CPU this checks the loop is *traceable* — the
-    sm% / capture payoff is validated on the GH200, not here. max_substeps=2 keeps
+    sm% / capture payoff is validated on the GH200, not here. n_substeps=2 keeps
     the unrolled loop small so the one-time compile is quick."""
 
     monkeypatch.setenv("GLIDE_STATIC_SUBSTEPS", "1")
@@ -1885,7 +1885,7 @@ def test_graph_compile_substep_path_runs_on_cpu(monkeypatch) -> None:
     torch.manual_seed(3)
     engine = GPUEngine(device="cpu")
     assert engine._compile_hot_paths is False  # per-method compile off on the graph path
-    scheme = HannaScheme(max_substeps=2)
+    scheme = HannaScheme(n_substeps=2)
     met = _wmc_met_window(blh_m=1500.0, ustar_m_s=0.4)
 
     n = 32
@@ -1949,9 +1949,7 @@ def test_step_core_traces_as_one_graph_no_breaks() -> None:
     torch._dynamo.config.suppress_errors = False  # make breaks raise, don't swallow
     try:
         engine = GPUEngine(device="cpu")
-        scheme = HannaScheme(
-            meander_enabled=True, max_substeps=4
-        )  # meander on → trace that path too
+        scheme = HannaScheme(meander_enabled=True, n_substeps=4)  # meander on → trace that path too
         met = _wmc_met_window(blh_m=2000.0, ustar_m_s=0.4)
 
         n = 48
@@ -1973,11 +1971,11 @@ def test_step_core_traces_as_one_graph_no_breaks() -> None:
             v_meander=state["v_meander"],
             active_mask=active,
             dt_seconds=60.0,
-            n_substeps=scheme.max_substeps,
             engine=engine,
             **inputs,
         )
-        assert len(out) == 6 and all(torch.isfinite(o).all() for o in out)
+        # State (6) + this step's sub-step exceedance counts and worst ratios.
+        assert len(out) == 8 and all(torch.isfinite(o).all() for o in out)
     finally:
         torch._dynamo.config.suppress_errors = prev
         torch._dynamo.reset()
@@ -2003,7 +2001,7 @@ def test_step_core_does_not_recompile_per_step() -> None:
     torch._dynamo.config.error_on_recompile = True
     try:
         engine = GPUEngine(device="cpu")
-        scheme = HannaScheme(meander_enabled=True, max_substeps=4)
+        scheme = HannaScheme(meander_enabled=True, n_substeps=4)
         n = 48
         compiled = torch.compile(scheme._step_core, fullgraph=True, backend="eager")
 
@@ -2025,7 +2023,6 @@ def test_step_core_does_not_recompile_per_step() -> None:
                 v_meander=state["v_meander"],
                 active_mask=active,
                 dt_seconds=60.0,
-                n_substeps=scheme.max_substeps,
                 engine=engine,
                 **inputs,
             )

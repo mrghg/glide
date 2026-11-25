@@ -92,9 +92,10 @@ export OPENBLAS_NUM_THREADS="${GLIDE_NUM_THREADS}"
 #     "WON'T CONVERT" warnings (⇒ the loop captured rather than fell back);
 #   - the end-of-run sm% summary climbs well above the ~0–37% launch-bound range;
 #   - per-batch wall time drops.
-# TUNE: on the graph path `turbulence.max_substeps` is the FIXED per-step iteration
-# count (the loop is unrolled to it), so set it to the smallest physically-converged
-# value (≈15–25), not the default 50 — it is now a direct per-step cost.
+# COST: `turbulence.n_substeps` is the per-step sub-step count of every particle (the
+# loop is unrolled to it, and every sub-step re-evaluates the turbulence profile), so
+# the step's GPU time grows in proportion to it. It is a physics setting (decision
+# 0027, docs/physics.md §6), not a performance knob: do not lower it to save time.
 
 # Fail fast before the long preflight if the venv torch can't see the GPU.
 if ! "${PYTHON}" -c "import torch, sys; sys.exit(0 if torch.cuda.is_available() else 1)"; then
@@ -190,7 +191,7 @@ fi
 #     and met cache that bound CPU runs are not the constraint here. Particle
 #     count per batch is the main GPU-memory knob (state is (N, 4) float32 plus a
 #     few per-particle work tensors).
-#   - If you see the substep-cap WARNING in the log ("hit max_substeps"), the
-#     near-surface Δt/τ bias is only partly controlled — lower simulation.dt_seconds
-#     or raise turbulence max_substeps; unrelated to device.
+#   - run_metadata.json `substep_exceedance` (and the end-of-run log line) gives the
+#     share of particle-sub-steps longer than 0.5 T_Lw (and T_Lw), boundary layer
+#     and free troposphere separately; unrelated to device.
 # =============================================================================

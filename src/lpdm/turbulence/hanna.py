@@ -106,20 +106,28 @@ MEANDER_COEFFICIENT_DEFAULT = 0.16  # FLEXPART `turbmesoscale`
 MEANDER_STENCIL_RADIUS_DEFAULT = 1  # 3x3 neighbourhood
 MEANDER_TIMESCALE_S_DEFAULT = 1800.0  # half of the hourly ERA5 field interval
 
-# Sub-stepping (decision 0026, docs/physics.md §6). Every particle takes the same
+# Sub-stepping (decision 0027, docs/physics.md §6). Every particle takes the same
 # fixed number of equal sub-steps per outer step, and every coefficient (σ, T_L,
 # ∂σ_w²/∂z, density drift) is re-evaluated at the particle's current height at
 # the start of each sub-step. A sub-step length chosen per particle from its T_Lw
 # (the old adaptive schedule) is itself a spurious drift towards where steps are
 # short — the ground — so the count is a configured constant, never data-dependent.
-# The default makes the sub-step 7.5 s at the shipped 60 s outer step, a quarter
-# of the boundary-layer T_Lw floor (30 s).
 N_SUBSTEPS_DEFAULT = 8
 # Reporting threshold only: a particle-sub-step with sub_dt > EXCEEDANCE_C · T_Lw
 # (T_Lw at that sub-step's height) is counted in run_metadata.json
-# (`substep_exceedance`), split boundary layer / free troposphere. It does not
-# change the integration. 0.5 is the old adaptive scheme's target ratio.
+# (`substep_exceedance`), split boundary layer / free troposphere, together with
+# those with sub_dt > T_Lw. It does not change the integration. 0.5 is the old
+# adaptive scheme's target ratio.
 EXCEEDANCE_C_DEFAULT = 0.5
+# The order of the counts the sub-step loop returns (`_integrate_vertical_substeps`).
+EXCEEDANCE_COUNT_KEYS = (
+    "substeps_bl",
+    "exceeded_bl",
+    "over_T_L_bl",
+    "substeps_ft",
+    "exceeded_ft",
+    "over_T_L_ft",
+)
 
 # F5/F15 — "unresolved basal layer" (W&F 1993 §7b). Hold σ_w, T_L (and the
 # density-gradient piece) CONSTANT for any particle below this height by
@@ -511,6 +519,7 @@ class HannaScheme(TurbulenceScheme):
         n_substeps: int = N_SUBSTEPS_DEFAULT,
         exceedance_c: float = EXCEEDANCE_C_DEFAULT,
         z_ubl_m: float = Z_UBL_DEFAULT_M,
+        basal_zero_gradient: bool = False,
         static_substeps: bool | None = None,
         flexpart_tl_floors: bool = True,
         surface_layer_override: bool = False,
@@ -522,7 +531,7 @@ class HannaScheme(TurbulenceScheme):
         block. See ``docs/turbulence.md`` §7.
 
         ``n_substeps`` is the number of equal sub-steps of the OU + displacement +
-        reflection that EVERY particle takes in each outer step (decision 0026,
+        reflection that EVERY particle takes in each outer step (decision 0027,
         docs/physics.md §6); all coefficients are re-evaluated at the particle's
         current height at the start of each sub-step after the first. The count is a
         constant of the run, never chosen per particle or per batch: a sub-step
@@ -530,6 +539,13 @@ class HannaScheme(TurbulenceScheme):
         towards the ground. ``exceedance_c`` is a reporting threshold only: sub-steps
         with ``sub_dt > exceedance_c · T_Lw`` are counted (``take_substep_exceedance``).
         Meander has τ ≈ 1800 s so always runs at the outer dt.
+
+        ``basal_zero_gradient``: below ``z_ubl_m`` every coefficient is sampled at
+        ``z_ubl_m``, so the profile the particle sees is flat there. When True, the
+        well-mixed drift's ``∂σ_w²/∂z`` is zero strictly below ``z_ubl_m``,
+        consistent with that flat profile; when False, the finite-difference
+        stencil, clamped to ``[z_ubl, z_ubl + δ]``, returns the one-sided gradient
+        just above the clamp there. The density drift is the same either way.
 
         ``flexpart_tl_floors`` (default True) applies FLEXPART v11's Lagrangian-
         timescale floors (T_Lu, T_Lv ≥ 10 s; T_Lw ≥ 30 s) after the profile
@@ -593,16 +609,16 @@ class HannaScheme(TurbulenceScheme):
         self.blh_min_m = float(blh_min_m)
         self.blh_max_m = None if blh_max_m is None else float(blh_max_m)
         # A construction-time constant: the compiled step's loop trip count
-        # (decision 0004), and the same for every particle and step (decision 0026).
+        # (decision 0004), and the same for every particle and step (decision 0027).
         self.n_substeps = int(n_substeps)
         self.exceedance_c = float(exceedance_c)
         # Zero ∂σ_w²/∂z strictly below the basal clamp (`_vertical_coefficients`).
-        self.basal_zero_gradient = False
+        self.basal_zero_gradient = bool(basal_zero_gradient)
         self.flexpart_tl_floors = bool(flexpart_tl_floors)
         self.surface_layer_override = bool(surface_layer_override)
         self._static_substeps = static_substeps
         # Device-side running totals of the sub-step exceedance counter (decision
-        # 0026): `[exceeded BL, all BL, exceeded FT, all FT]` active particle-sub-steps
+        # 0027): active particle-sub-steps in the order of `EXCEEDANCE_COUNT_KEYS`
         # (int64) and the worst sub_dt/T_Lw `[BL, FT]`. Accumulated inside the step
         # with no host sync, on both paths; the runtime reads and resets them once
         # per met window (`take_substep_exceedance`). Allocated on first use.
@@ -1353,7 +1369,7 @@ class HannaScheme(TurbulenceScheme):
     ) -> tuple[torch.Tensor, ...]:
         """The sub-step loop: OU velocity update + displacement + ground reflection,
         ``self.n_substeps`` equal sub-steps of ``dt / n_substeps`` for every particle
-        (decision 0026, docs/physics.md §6).
+        (decision 0027, docs/physics.md §6).
 
         **Coefficients.** The coefficients passed in are those at the start of the
         outer step and drive the first sub-step. When ``coeffs_at`` is given (as it
@@ -1385,11 +1401,11 @@ class HannaScheme(TurbulenceScheme):
         substep from the current ``w'``.
 
         **Exceedance counter.** Every sub-step is checked against
-        ``sub_dt > exceedance_c · T_Lw`` with T_Lw at the sub-step's own height,
-        split by whether that height is in the boundary layer (``z ≤ h``, needs
-        ``blh``) or the free troposphere. Returns, after the state,
-        ``counts = [exceeded BL, all BL, exceeded FT, all FT]`` (active
-        particle-sub-steps, int64) and ``worst = [max sub_dt/T_Lw in BL, in FT]``,
+        ``sub_dt > exceedance_c · T_Lw`` and ``sub_dt > T_Lw``, with T_Lw at the
+        sub-step's own height, split by whether that height is in the boundary
+        layer (``z ≤ h``, needs ``blh``) or the free troposphere. Returns, after the
+        state, ``counts`` (active particle-sub-steps, int64, in the order of
+        ``EXCEEDANCE_COUNT_KEYS``) and ``worst = [max sub_dt/T_Lw in BL, in FT]``,
         as device tensors (no host sync). Without ``blh`` everything counts as BL.
 
         Ground reflection (W&F §6) is applied inside the loop, so a particle that
@@ -1411,6 +1427,8 @@ class HannaScheme(TurbulenceScheme):
         n_ft = torch.zeros(T_Lw.shape, dtype=torch.int32, device=T_Lw.device)
         ex_bl = torch.zeros_like(n_ft)
         ex_ft = torch.zeros_like(n_ft)
+        over_bl = torch.zeros_like(n_ft)
+        over_ft = torch.zeros_like(n_ft)
         worst_bl = torch.zeros_like(sub_dt)
         worst_ft = torch.zeros_like(sub_dt)
         c_exceed = self.exceedance_c
@@ -1431,15 +1449,20 @@ class HannaScheme(TurbulenceScheme):
                     density_drift_backward,
                 ) = coeffs_at(xyz[:, 2])
 
+            # Exceedance of this sub-step (inactive particles: sub_dt = 0, never).
             ratio = sub_dt / T_Lw
             if blh is None:
                 in_ft = torch.zeros(T_Lw.shape, dtype=torch.bool, device=T_Lw.device)
             else:
                 in_ft = xyz[:, 2] > blh
+            in_bl = ~in_ft
             exceeded = ratio > c_exceed
+            over = ratio > 1.0
             n_ft += in_ft
-            ex_bl += exceeded & ~in_ft
+            ex_bl += exceeded & in_bl
             ex_ft += exceeded & in_ft
+            over_bl += over & in_bl
+            over_ft += over & in_ft
             worst_bl = torch.maximum(worst_bl, torch.where(in_ft, 0.0, ratio))
             worst_ft = torch.maximum(worst_ft, torch.where(in_ft, ratio, 0.0))
 
@@ -1490,10 +1513,12 @@ class HannaScheme(TurbulenceScheme):
         n_ft_total = n_ft.sum(dtype=torch.int64)
         counts = torch.stack(
             [
-                ex_bl.sum(dtype=torch.int64),
                 n_active.to(torch.int64) * n - n_ft_total,
-                ex_ft.sum(dtype=torch.int64),
+                ex_bl.sum(dtype=torch.int64),
+                over_bl.sum(dtype=torch.int64),
                 n_ft_total,
+                ex_ft.sum(dtype=torch.int64),
+                over_ft.sum(dtype=torch.int64),
             ]
         )
         if worst_bl.numel():
@@ -1507,8 +1532,8 @@ class HannaScheme(TurbulenceScheme):
         (no host sync)."""
 
         if self._exceed_counts is None or self._exceed_counts.device != counts.device:
-            self._exceed_counts = torch.zeros(4, dtype=torch.int64, device=counts.device)
-            self._exceed_worst = torch.zeros(2, dtype=worst.dtype, device=worst.device)
+            self._exceed_counts = torch.zeros_like(counts)
+            self._exceed_worst = torch.zeros_like(worst)
         self._exceed_counts += counts
         torch.maximum(self._exceed_worst, worst, out=self._exceed_worst)
 
@@ -1516,34 +1541,26 @@ class HannaScheme(TurbulenceScheme):
         """Read and reset the sub-step exceedance totals (one host sync).
 
         Called by the runtime once per met window (and at the end of each batch).
-        Returns the active particle-sub-steps in the boundary layer and the free
-        troposphere, how many of each had ``sub_dt > exceedance_c · T_Lw``, and the
-        worst ratio in each, since the last call.
+        Returns, since the last call, the active particle-sub-steps in the boundary
+        layer and the free troposphere (``substeps_*``), how many of each had
+        ``sub_dt > exceedance_c · T_Lw`` (``exceeded_*``) and ``sub_dt > T_Lw``
+        (``over_T_L_*``), and the worst ``sub_dt / T_Lw`` in each (``worst_*``).
         """
 
         del window_start
         if self._exceed_counts is None:
-            return {
-                "exceeded_bl": 0,
-                "substeps_bl": 0,
-                "exceeded_ft": 0,
-                "substeps_ft": 0,
-                "worst_bl": 0.0,
-                "worst_ft": 0.0,
-            }
-        ex_bl, n_bl, ex_ft, n_ft, worst_bl, worst_ft = torch.cat(
+            out: dict[str, float] = dict.fromkeys(EXCEEDANCE_COUNT_KEYS, 0)
+            out.update(worst_bl=0.0, worst_ft=0.0)
+            return out
+        values = torch.cat(
             [self._exceed_counts.to(torch.float64), self._exceed_worst.to(torch.float64)]
         ).tolist()
         self._exceed_counts.zero_()
         self._exceed_worst.zero_()
-        return {
-            "exceeded_bl": int(ex_bl),
-            "substeps_bl": int(n_bl),
-            "exceeded_ft": int(ex_ft),
-            "substeps_ft": int(n_ft),
-            "worst_bl": float(worst_bl),
-            "worst_ft": float(worst_ft),
-        }
+        n = len(EXCEEDANCE_COUNT_KEYS)
+        out = {k: int(v) for k, v in zip(EXCEEDANCE_COUNT_KEYS, values[:n], strict=True)}
+        out.update(worst_bl=float(values[n]), worst_ft=float(values[n + 1]))
+        return out
 
     def _column_turbulence(
         self,

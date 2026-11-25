@@ -346,23 +346,24 @@ class MeanderConfig(_Frozen):
     )
 
 
+# Hanna turbulence sub-steps per outer step (decision 0027); the same value as
+# `lpdm.turbulence.hanna.N_SUBSTEPS_DEFAULT` (tests/test_main_config.py checks).
+N_SUBSTEPS_DEFAULT = 8
+
+
 class TurbulenceConfig(_Frozen):
     scheme: str = Field(..., min_length=1)
     meander: MeanderConfig = MeanderConfig()
-    # Hanna sub-stepping (decision 0026, docs/physics.md §6). Every particle takes
+    # Hanna sub-stepping (decision 0027, docs/physics.md §6). Every particle takes
     # n_substeps equal sub-steps per outer step, with all coefficients
     # re-evaluated at the current height each sub-step. The count is a constant
-    # of the run: never per particle, per step or per batch. Ignored by non-Hanna
-    # schemes.
+    # of the run: never per particle, per step or per batch. A new field rather
+    # than a reinterpreted `max_substeps`, so that no config silently changes
+    # meaning (the removed keys are refused below). Ignored by non-Hanna schemes.
     n_substeps: int = Field(
-        8,
+        N_SUBSTEPS_DEFAULT,
         ge=1,
-        description="Sub-steps per outer step, the same for every particle (sub-step = dt / n_substeps). 8 gives 7.5 s at dt = 60 s.",
-    )
-    exceedance_c: float = Field(
-        0.5,
-        gt=0,
-        description="Reporting threshold only: sub-steps with sub_dt > exceedance_c · T_Lw are counted in run_metadata.json (substep_exceedance), split boundary layer / free troposphere.",
+        description="Turbulence sub-steps per outer step, the same for every particle and step (sub-step = dt_seconds / n_substeps).",
     )
     # Near-surface mixing controls (2026-07-02 physics-review follow-up). Defaults
     # are the FLEXPART-v11-matching "improved" behaviour; the legacy combination
@@ -394,17 +395,20 @@ class TurbulenceConfig(_Frozen):
     @model_validator(mode="before")
     @classmethod
     def _reject_adaptive_substep_keys(cls, data: Any) -> Any:
-        # Removed with the adaptive schedule (decision 0026). Refuse rather than
-        # ignore them: a config that sets them expects a behaviour GLIDE no longer has.
+        # Removed with the adaptive schedule (decision 0027). Refused with a
+        # migration message rather than ignored: a config that sets them expects a
+        # behaviour GLIDE no longer has.
         if isinstance(data, dict):
-            old = sorted(k for k in ("substep_c", "max_substeps") if k in data)
+            old = [k for k in ("substep_c", "max_substeps") if k in data]
             if old:
                 raise ValueError(
-                    f"turbulence.{' and turbulence.'.join(old)} no longer exist: the "
-                    "adaptive per-particle sub-step schedule was replaced by a fixed "
-                    "count for every particle (decision 0026). Remove "
-                    f"{' and '.join(old)} and set turbulence.n_substeps instead "
-                    "(default 8, i.e. a 7.5 s sub-step at dt_seconds = 60)."
+                    f"turbulence.{' and turbulence.'.join(old)} no longer "
+                    f"exist{'s' if len(old) == 1 else ''}: the per-particle adaptive "
+                    "sub-step schedule was replaced by one fixed count for every "
+                    "particle (decision 0027, docs/physics.md §6). Remove "
+                    f"{' and '.join(old)}; set turbulence.n_substeps to choose the "
+                    f"count (default {N_SUBSTEPS_DEFAULT}, a sub-step of "
+                    f"{60.0 / N_SUBSTEPS_DEFAULT:g} s at dt_seconds = 60)."
                 )
         return data
 
