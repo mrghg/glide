@@ -28,7 +28,9 @@ uniform at any sub-step count:
 
 The PR's fine-step reference for the open-top column (boundary-layer share
 1.00 at 0.9375 s) was therefore itself biased, and its 10 m finite-difference
-probe reversed the bias rather than removing it (TBD numbers). Matt chose, on
+probe reversed the bias rather than removing it (convective, $n = 16$: the 50 m
+above $h$ at 0.33 and the 50 m below at 1.34 of their uniform shares, 3 seeds;
+its boundary-layer retention of 0.998 came from pumping particles down). Matt chose, on
 25 Nov 2026, a well-mixed-consistent crossing of $h$ (option a), not
 FLEXPART-style reflection.
 
@@ -132,7 +134,9 @@ horizontal advection part: the same term along the mean flow).
 
 **Other boundaries** (*argued* unless marked):
 - *Ground reflection and the near-surface fix* (decision 0027): unchanged code;
-  the closed-column gate passes (*measured*, TBD).
+  the closed-column gate (`tests/test_near_surface_well_mixed.py`) passes
+  (*measured*). The closed-column numbers themselves moved, because the old
+  stencil also straddled the lid there: see decision 0027, "Revised".
 - *Basal clamp* ($z < z_{\mathrm{ubl}}$): $\sigma$ is continuous there (flat
   continuation), only its gradient has a kink; no interface needed. Measured in
   0027 (zeroing the gradient below the clamp: ≤ 0.003).
@@ -155,7 +159,39 @@ horizontal advection part: the same term along the mean flow).
   whose side changes between steps is not transmitted or reflected (it did
   not cross, the interface moved), and the carry rescales its velocities.
 
-**Measured** (`outputs/agents/WM/interface/study/tables.md`; TBD).
+**Measured** (`outputs/agents/WM/interface/study/tables.md`; 20,000 particles
+per seed, 60 s outer step, records every 15 min from 2 to 6 h; mean ± standard
+error over seeds, seed sd in the tables; the steady columns ran at 83c2d1e,
+before the carry, which changes their same-seed results by at most 0.0009):
+
+| | stable | neutral | convective |
+| --- | --- | --- | --- |
+| uniform $[0, 2h]$, $h - 50$ … $h$ / $h$ … $h + 50$, $n = 8$ (5 seeds) | 0.944 / 0.968 | 0.983 / 0.992 | 0.985 / 0.981 |
+| same, $n = 16$ | 0.967 / 0.977 | 0.980 / 0.985 | 0.979 / 0.995 |
+| same, $n = 32$ | 0.984 / 0.973 | 0.982 / 1.006 | 0.992 / 0.997 |
+| same, PR #69 head, $n = 16$ (3 seeds) | 0.922 / 1.102 | 1.261 / 0.484 | 0.893 / 5.969 |
+| same, main (3 seeds) | 0.680 / 0.531 | 0.450 / 4.592 | 0.275 / 9.871 |
+| start $[0, h]$, open top: BL share 2–6 h, $n$ = 4 … 32 (5 seeds) | 0.992–0.995 | 0.975–0.976 | 0.974–0.975 |
+| diffusion limit, same | 0.929 (not applicable: $T_{Lw} \to \infty$ at $h$) | 0.973 | 0.972 |
+| $h$ moving, max deviation of the near-$h$ bands, no carry / carry, $n = 16$ (3 seeds) | 0.135 / 0.016 | 0.200 / 0.014 | 0.235 / 0.016 |
+
+Seed standard deviations: 0.003–0.025 for the 50 m bands of this branch, 0.001
+for the BL shares. Mechanism (*measured* by switching one part at a time, 3
+seeds, $n = 64$): with the one-sided stencil but no crossing rule the 50 m
+above $h$ hold 0.42 (stable), 5.8 (neutral) and 14.8 (convective) of their
+share, so the crossing rule is necessary; NOSTENCIL_MECH. The stable residual
+below $h$ falls as the sub-step shrinks ($-0.056$, $-0.033$, $-0.016$ at
+$n$ = 8, 16, 32), the same first-order error that over-fills the bottom of the
+stable column; the 10 m just above $h$ follow it (0.940 ± 0.011), as a
+continuous concentration across a consistent interface requires (*argued*;
+starting the velocities from $N(0, \sigma^2)$ or lowering the $\sigma$ floor to
+0.1 mm s⁻¹ moves that band to 0.960–0.981, within 1–2 standard errors of the
+band below).
+
+On real meteorology (*measured*): CPU smoke (Mace Head, one release, 1 day,
+3 seeds): 0–40 m footprint +92.0% / +94.4% / +95.8% (seed sd 0.4–0.6) against
+the fixture at $n$ = 8, 16, 32, total −6.6%; $n = 8$ against 16, same seed,
+−1.2 ± 0.2% in 0–40 m. Reference config: REFCONFIG_SUMMARY.
 
 **Rejected alternatives.**
 - *Reflection at $h$, no turbulent exchange* (as FLEXPART reflects inside its
@@ -165,7 +201,7 @@ horizontal advection part: the same term along the mean flow).
   25 Nov 2026.
 - *A wider finite-difference step* (10 m, PR #69's probe). Still straddles $h$
   and differences the jump, only over a wider band; it reverses the bias
-  rather than removing it (TBD).
+  rather than removing it (convective h … h + 50 m at 0.33 of uniform, above).
 - *A smooth transition layer* between the profiles. Adds a thickness parameter
   and a strong gradient that the sub-step must resolve; the jump is a property
   of the parameterisation, and TPM handle it exactly.

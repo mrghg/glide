@@ -111,7 +111,7 @@ RunConfig (YAML)
                fetch the meteorology hour   (from cache; next hour fetched in background)
                advection                 ─┐
                turbulence                 ├─ one combined operation on the GPU
-               ground reflection         ─┘
+               BL-top interface, ground  ─┘   (decision 0028)
                convection                   once per meteorology interval, every column
                accumulate the footprint
                retire particles that have left the domain
@@ -281,8 +281,9 @@ Setting a particle's timestep to zero is exactly equivalent to leaving it alone,
 which is what makes the uniform path give the same answer: the memory factor
 becomes $r = e^0 = 1$ so the velocity is unchanged, the noise amplitude
 $\sigma^2(1-r^2) = 0$ so no randomness is added, the displacement $w'\cdot 0 = 0$
-so the position is unchanged, and reflecting a particle already above ground does
-nothing. Every active particle takes the same `n_substeps` sub-steps on both
+so the position is unchanged, reflecting a particle already above ground does
+nothing, and a particle that did not move cannot cross the boundary-layer top,
+so the interface rule (decision 0028) leaves it alone too. Every active particle takes the same `n_substeps` sub-steps on both
 paths (decision 0027), so with every particle active the two paths do the same
 arithmetic and draw the same random numbers, and agree bit for bit. Inactive
 particles are held still by *multiplying* by zero rather than by being excluded

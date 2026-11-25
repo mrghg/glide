@@ -1756,7 +1756,8 @@ def test_static_step_freezes_inactive_particles() -> None:
     state = scheme.initialize_state(n, device=torch.device("cpu"), dtype=torch.float32)
     # Seed nonzero state so "unchanged" is a real assertion (not 0 == 0).
     for k in state:
-        state[k] = torch.randn(n) * 0.1
+        state[k] = torch.randn(state[k].shape) * 0.1
+    state["sigma_last"] = state["sigma_last"].abs() + 0.1  # a σ: positive
 
     active = torch.zeros(n, dtype=torch.bool)
     active[: n // 2] = True  # first half active, second half frozen
@@ -1919,6 +1920,7 @@ def test_step_core_traces_as_one_graph_no_breaks() -> None:
             u_prime=state["u_prime"],
             v_prime=state["v_prime"],
             w_prime=state["w_prime"],
+            sigma_last=state["sigma_last"],
             u_meander=state["u_meander"],
             v_meander=state["v_meander"],
             active_mask=active,
@@ -1926,8 +1928,8 @@ def test_step_core_traces_as_one_graph_no_breaks() -> None:
             engine=engine,
             **inputs,
         )
-        # State (6) + this step's sub-step exceedance counts and worst ratios.
-        assert len(out) == 8 and all(torch.isfinite(o).all() for o in out)
+        # State (7, with sigma_last) + this step's sub-step exceedance counts and worst ratios.
+        assert len(out) == 9 and all(torch.isfinite(o).all() for o in out)
     finally:
         torch._dynamo.config.suppress_errors = prev
         torch._dynamo.reset()
@@ -1971,6 +1973,7 @@ def test_step_core_does_not_recompile_per_step() -> None:
                 u_prime=state["u_prime"],
                 v_prime=state["v_prime"],
                 w_prime=state["w_prime"],
+                sigma_last=state["sigma_last"],
                 u_meander=state["u_meander"],
                 v_meander=state["v_meander"],
                 active_mask=active,
