@@ -574,7 +574,7 @@ def test_static_and_dynamic_steps_bit_identical_when_all_active() -> None:
         results.append((particles, state, scheme.take_substep_exceedance(None)))
     (p_dyn, s_dyn, x_dyn), (p_stat, s_stat, x_stat) = results
     assert torch.equal(p_dyn, p_stat)
-    for key in ("u_prime", "v_prime", "w_prime"):
+    for key in ("u_prime", "v_prime", "w_prime", "sigma_last"):
         assert torch.equal(s_dyn[key], s_stat[key])
     assert x_dyn == x_stat
     assert x_dyn["substeps_bl"] > 0 and x_dyn["substeps_ft"] > 0
@@ -753,12 +753,12 @@ def test_meander_state_keys_only_when_enabled() -> None:
     off = HannaScheme(meander_enabled=False).initialize_state(
         4, device=torch.device("cpu"), dtype=torch.float32
     )
-    assert set(off) == {"u_prime", "v_prime", "w_prime"}
+    assert set(off) == {"u_prime", "v_prime", "w_prime", "sigma_last"}
 
     on = HannaScheme(meander_enabled=True).initialize_state(
         4, device=torch.device("cpu"), dtype=torch.float32
     )
-    assert set(on) == {"u_prime", "v_prime", "w_prime", "u_meander", "v_meander"}
+    assert set(on) == {"u_prime", "v_prime", "w_prime", "sigma_last", "u_meander", "v_meander"}
 
 
 def _make_meander_test_window(t0, u_start_val: float, u_end_val: float):

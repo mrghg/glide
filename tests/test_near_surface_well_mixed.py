@@ -82,6 +82,15 @@ def _met(blh_m: float, ustar: float, shf: float) -> HourlyMetTensors:
     )
 
 
+class _LidHanna(HannaScheme):
+    """The production scheme with the boundary-layer-top crossing rule off: in
+    this harness the lid at h replaces the interface (decision 0028), so a
+    particle that crosses h is reflected by the lid with its w' unchanged."""
+
+    def _cross_interface(self, z_from, xyz, w_p, u_p, v_p, blh, interface_sigmas):
+        return xyz, w_p, u_p, v_p
+
+
 class _LidEngine(GPUEngine):
     """Ground reflection plus a reflecting lid at ``lid_m``, in every sub-step."""
 
@@ -102,7 +111,7 @@ def test_near_surface_well_mixed_at_60_s(regime: str) -> None:
     blh, ustar, shf = REGIMES[regime]
     torch.manual_seed(20261125)
     engine = _LidEngine(blh, device="cpu")
-    scheme = HannaScheme(meander_enabled=False, static_substeps=False)  # default n_substeps
+    scheme = _LidHanna(meander_enabled=False, static_substeps=False)  # default n_substeps
     met = _met(blh, ustar, shf)
 
     n = 20_000

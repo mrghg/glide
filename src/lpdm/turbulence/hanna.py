@@ -699,6 +699,10 @@ class HannaScheme(TurbulenceScheme):
             "u_prime": torch.zeros(n_particles, device=device, dtype=dtype),
             "v_prime": torch.zeros(n_particles, device=device, dtype=dtype),
             "w_prime": torch.zeros(n_particles, device=device, dtype=dtype),
+            # (σ_u, σ_v, σ_w) at the particle's position at the end of its last
+            # step, with that step's meteorology; 0 before its first step
+            # (decision 0028, `_carry_velocities`).
+            "sigma_last": torch.zeros(n_particles, 3, device=device, dtype=dtype),
         }
         if self.meander_enabled:
             state["u_meander"] = torch.zeros(n_particles, device=device, dtype=dtype)
@@ -737,11 +741,12 @@ class HannaScheme(TurbulenceScheme):
                 # the framework that a new invocation is beginning so it doesn't treat
                 # the previous run's output buffers as live inputs for the current step.
                 torch.compiler.cudagraph_mark_step_begin()
-            particles, u_p, v_p, w_p, u_m, v_m, exceed_counts, exceed_worst = core_fn(
+            particles, u_p, v_p, w_p, s_last, u_m, v_m, exceed_counts, exceed_worst = core_fn(
                 particles=particles,
                 u_prime=state["u_prime"],
                 v_prime=state["v_prime"],
                 w_prime=state["w_prime"],
+                sigma_last=state["sigma_last"],
                 u_meander=state.get("u_meander"),
                 v_meander=state.get("v_meander"),
                 active_mask=active_mask,
@@ -759,6 +764,7 @@ class HannaScheme(TurbulenceScheme):
             state["u_prime"] = u_p.clone()
             state["v_prime"] = v_p.clone()
             state["w_prime"] = w_p.clone()
+            state["sigma_last"] = s_last.clone()
             if self.meander_enabled:
                 state["u_meander"] = u_m.clone()
                 state["v_meander"] = v_m.clone()
@@ -826,6 +832,15 @@ class HannaScheme(TurbulenceScheme):
             half_dsig2_dz_backward,
             density_drift_backward,
         ) = coeffs_at(z_agl)
+        u_prime_in, v_prime_in, w_prime_in = self._carry_velocities(
+            u_prime_in,
+            v_prime_in,
+            w_prime_in,
+            state["sigma_last"][active_mask],
+            sigma_u,
+            sigma_v,
+            sigma_w,
+        )
 
         (
             moved,
@@ -855,6 +870,7 @@ class HannaScheme(TurbulenceScheme):
             interface_sigmas=self._interface_sigmas(**col_kwargs),
         )
         self._accumulate_exceedance(exceed_counts, exceed_worst)
+        sigma_last_active = self._sigmas_at(moved[:, 2], **col_kwargs)
 
         if self.meander_enabled:
             meander_fields, meander_bounds = self._meander_sigma_fields(met_window, device, dtype)
@@ -881,6 +897,7 @@ class HannaScheme(TurbulenceScheme):
         state["u_prime"][active_mask] = u_prime_active
         state["v_prime"][active_mask] = v_prime_active
         state["w_prime"][active_mask] = w_prime_active
+        state["sigma_last"][active_mask] = sigma_last_active
         if self.meander_enabled:
             state["u_meander"][active_mask] = u_meander_active
             state["v_meander"][active_mask] = v_meander_active
@@ -1112,6 +1129,7 @@ class HannaScheme(TurbulenceScheme):
         u_prime,
         v_prime,
         w_prime,
+        sigma_last,
         u_meander,
         v_meander,
         active_mask,
@@ -1138,7 +1156,8 @@ class HannaScheme(TurbulenceScheme):
         are passed in (gathered by `_gather_static_inputs`) so nothing here touches the met
         window. Operates on the FULL particle buffer; inactive particles are gated back to
         their ORIGINAL (pre-advection) state at the end. Returns the full state (inactive
-        unchanged), plus this step's sub-step exceedance counts (see
+        unchanged; ``sigma_last`` is σ at each particle's end-of-step position, decision
+        0028), plus this step's sub-step exceedance counts (see
         `_integrate_vertical_substeps`). The sub-step loop has the fixed trip count
         `self.n_substeps`, so the same code runs eager and captured."""
         # RK2 advection first (full set). Keep the pre-advection particles for the gate so
@@ -1206,6 +1225,9 @@ class HannaScheme(TurbulenceScheme):
             half_dsig2_dz_backward,
             density_drift_backward,
         ) = coeffs_at(z_agl)
+        u_prime_in, v_prime_in, w_prime_in = self._carry_velocities(
+            u_prime, v_prime, w_prime, sigma_last, sigma_u, sigma_v, sigma_w
+        )
 
         (
             moved,
@@ -1216,9 +1238,9 @@ class HannaScheme(TurbulenceScheme):
             exceed_worst,
         ) = self._integrate_vertical_substeps(
             active_xyz=particles,
-            u_prime_in=u_prime,
-            v_prime_in=v_prime,
-            w_prime_in=w_prime,
+            u_prime_in=u_prime_in,
+            v_prime_in=v_prime_in,
+            w_prime_in=w_prime_in,
             sigma_u=sigma_u,
             sigma_v=sigma_v,
             sigma_w=sigma_w,
@@ -1235,6 +1257,7 @@ class HannaScheme(TurbulenceScheme):
             active_mask=active_mask,
             interface_sigmas=self._interface_sigmas(**col_kwargs),
         )
+        sigma_last_new = self._sigmas_at(moved[:, 2], **col_kwargs)
 
         u_meander_new, v_meander_new = u_meander, v_meander
         if self.meander_enabled:
@@ -1273,6 +1296,7 @@ class HannaScheme(TurbulenceScheme):
         u_prime_new = torch.where(active_mask, u_prime_new, u_prime)
         v_prime_new = torch.where(active_mask, v_prime_new, v_prime)
         w_prime_new = torch.where(active_mask, w_prime_new, w_prime)
+        sigma_last_new = torch.where(am, sigma_last_new, sigma_last)
         if self.meander_enabled:
             u_meander_new = torch.where(active_mask, u_meander_new, u_meander)
             v_meander_new = torch.where(active_mask, v_meander_new, v_meander)
@@ -1281,6 +1305,7 @@ class HannaScheme(TurbulenceScheme):
             u_prime_new,
             v_prime_new,
             w_prime_new,
+            sigma_last_new,
             u_meander_new,
             v_meander_new,
             exceed_counts,
@@ -1745,6 +1770,45 @@ class HannaScheme(TurbulenceScheme):
         )[0]
         sigma_w = torch.where(above_bl, ft_sw, sigma_w)
         return sigma_w.clamp(min=SIGMA_MIN_M_S)
+
+    def _sigmas_at(self, z_agl: torch.Tensor, **col_kwargs) -> torch.Tensor:
+        """(σ_u, σ_v, σ_w) at height ``z_agl`` (basal clamp applied), ``[N, 3]``:
+        the same values ``_vertical_coefficients`` would give there."""
+
+        su, sv, sw, *_ = self._column_turbulence(z_agl.clamp(min=self.z_ubl_m), **col_kwargs)
+        return torch.stack([su, sv, sw], dim=1)
+
+    @staticmethod
+    def _carry_velocities(
+        u_p: torch.Tensor,
+        v_p: torch.Tensor,
+        w_p: torch.Tensor,
+        sigma_last: torch.Tensor,
+        sigma_u: torch.Tensor,
+        sigma_v: torch.Tensor,
+        sigma_w: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Carry u'/σ_u, v'/σ_v and w'/σ_w across the outer step (decision 0028).
+
+        Between the end of one outer step and the start of the next, σ at a
+        particle changes because the meteorology was interpolated to a new time
+        and the particle was advected by the mean wind; within a step σ changes
+        only along the turbulent displacement, which the drift accounts for.
+        Scaling each velocity by σ(now)/σ(end of last step) is the exact
+        integral of the nonstationary term (w/2σ²)·∂σ²/∂t of the Gaussian
+        well-mixed drift (Thomson 1987) over that change, and it is the
+        treatment of step changes in time that STILT attributes to Thomson,
+        Physick & Maryon (1997). It matters at h: when h moves past a particle,
+        σ_w at it jumps between the boundary-layer and free-troposphere values.
+        ``sigma_last`` is 0 before a particle's first step (no scaling). In a
+        steady column σ(now) and σ(end of last step) are the same computation, so
+        the ratio is exactly 1."""
+
+        now = torch.stack([sigma_u, sigma_v, sigma_w], dim=1)
+        ratio = torch.where(
+            sigma_last > 0.0, now / sigma_last.clamp(min=SIGMA_MIN_M_S), torch.ones_like(now)
+        )
+        return u_p * ratio[:, 0], v_p * ratio[:, 1], w_p * ratio[:, 2]
 
     def _interface_sigmas(
         self,

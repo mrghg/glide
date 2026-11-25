@@ -41,6 +41,10 @@ Variants (``--variant``):
   of a particle whose side of h changed because h moved are scaled by the
   ratio of σ at h on its new side to its old side (no reflection: the
   interface moved, the particle did not cross it).
+* ``carry`` (``hvar`` only): ``prod`` plus, before each step, every particle's
+  u', v', w' scaled by σ at its height with this step's h over σ at its height
+  with the previous step's h (w'/σ carried across steps, the treatment of step
+  changes in time that STILT attributes to Thomson et al. 1997).
 """
 
 from __future__ import annotations
@@ -128,13 +132,13 @@ def build_scheme(variant: str, n: int) -> HannaScheme:
     kw = dict(meander_enabled=False, static_substeps=False)
     if variant == "old":
         return HannaScheme(**kw)
-    cls = {"prod": HannaScheme, "rescale": HannaScheme, "nocross": NoCross,
+    cls = {"prod": HannaScheme, "rescale": HannaScheme, "carry": HannaScheme, "nocross": NoCross,
            "nostencil": NoStencil}[variant]  # fmt: skip
     return cls(n_substeps=n, **kw)
 
 
-def column_sigmas(scheme, met, h, ustar, shf, n):
-    """σ (u, v, w) at h on the BL and FT side for the uniform column, ``[2, 3, n]``."""
+def column_kwargs(scheme, met, h, ustar, shf, n):
+    """``col_kwargs`` of the uniform column with boundary-layer depth ``h``."""
     dev, dt_ = torch.device("cpu"), torch.float32
     full = lambda v: torch.full((n,), float(v))  # noqa: E731
     sp, tk = full(101325.0), full(280.0)
@@ -143,10 +147,22 @@ def column_sigmas(scheme, met, h, ustar, shf, n):
     L = hanna_mod.obukhov_length(us, full(shf), tk, sp)
     w_star = hanna_mod.convective_velocity(blh, full(shf), tk, sp, blh_min_m=scheme.blh_min_m)
     ft_fields, gb = scheme._free_trop_fields(met, dev, dt_)
-    return scheme._interface_sigmas(
-        blh=blh, ustar=us, w_star=w_star, h_over_L=blh / L, lat=full(45.0), lon=full(0.0),
-        ft_fields=ft_fields, grid_bounds=gb, engine=GPUEngine(device="cpu"),
+    return dict(
+        blh=blh, ustar=us, w_star=w_star, h_over_L=blh / L, L=L, lat=full(45.0),
+        lon=full(0.0), ft_fields=ft_fields, grid_bounds=gb, engine=GPUEngine(device="cpu"),
     )  # fmt: skip
+
+
+def column_sigmas(scheme, met, h, ustar, shf, n):
+    """σ (u, v, w) at h on the BL and FT side for the uniform column, ``[2, 3, n]``."""
+    return scheme._interface_sigmas(**column_kwargs(scheme, met, h, ustar, shf, n))
+
+
+def sigmas_at(scheme, met, h, ustar, shf, z):
+    """σ (u, v, w) at heights ``z`` in the uniform column with depth ``h``, ``[3, n]``."""
+    col = column_kwargs(scheme, met, h, ustar, shf, z.numel())
+    su, sv, sw, *_ = scheme._column_turbulence(z.clamp(min=scheme.z_ubl_m), **col)
+    return torch.stack([su, sv, sw])
 
 
 def h_of_t(t: float, h0: float) -> float:
@@ -227,6 +243,15 @@ def run(a) -> dict:
                     r = s_new / s_old
                     for k, key in enumerate(("u_prime", "v_prime", "w_prime")):
                         state[key] = torch.where(flip, state[key] * r[k], state[key])
+                if a.variant == "carry" and h_prev is not None:
+                    # w'/σ carried across the step: σ at the particle's height
+                    # with this step's h over σ there with the previous step's.
+                    z = p[:, 2]
+                    r = sigmas_at(scheme, met, h_now, ustar, shf, z) / sigmas_at(
+                        scheme, met, h_prev, ustar, shf, z
+                    )
+                    for k, key in enumerate(("u_prime", "v_prime", "w_prime")):
+                        state[key] = state[key] * r[k]
                 h_prev = h_now
             else:
                 met, alpha = static_met, 0.5
