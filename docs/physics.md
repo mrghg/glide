@@ -681,13 +681,15 @@ meteorology still dominates (57–71% of wall time).
 
 **Effect on footprints.** The same run against its golden fixture (made with
 the code before this decision; median over the 144 releases, single seed):
-the 0–40 m footprint changes by −28%, −16% and +15% at $n$ = 4, 8 and 16, the
-40–1,000 m layer by +26% at $n = 8$ and +69% at $n = 16$, the 1–5 km layer by
-−5% and −15%, the total by −0.1 to −2%. The share of sub-steps spent above the
-boundary layer falls from 76% to 72% to 61% as $n$ goes from 4 to 16. So on real
-meteorology the near-surface footprint is not yet converged in $n$: as in the
+the 0–40 m footprint changes by −28%, −16%, +15% and +81% at $n$ = 4, 8, 16
+and 32, the 40–1,000 m layer by +7%, +26%, +69% and +155%, the 1–5 km layer by
+−1%, −5%, −15% and −40%, the total by −0.1% to −6%. The share of sub-steps
+spent above the boundary layer falls from 76% to 72%, 61% and 43%. So on real
+meteorology the near-surface footprint is far from converged in $n$: as in the
 open-top column, how many particles stay in the boundary layer depends on the
-sub-step, through the boundary-layer top (§8). The smoke run (Mace Head, one
+sub-step, through the boundary-layer top (§8). Until that is resolved the
+default count is the one that passes the closed-column test, not a converged
+choice for footprints. The smoke run (Mace Head, one
 release, one day) changes by +29% in 0–40 m and −3.7% in total at $n = 16$.
 
 **Rogue-trajectory clip.** At the end of each sub-step's velocity update,
@@ -811,7 +813,7 @@ Stated plainly, because they bound what the model can be trusted for.
 | --- | --- |
 | Gaussian vertical velocity PDF everywhere — no skewed convective-boundary-layer PDF | Under-represents the updraft/downdraft asymmetry of a strongly convective BL. Thomson (1987, §5.2) found ground-level concentration relatively insensitive to skewness even where dispersion aloft is sensitive, so this is defensible for a surface-flux footprint model — but it is a modelling choice, not a free lunch. |
 | A fixed sub-step count, $n = 16$ at $\Delta t = 60$ s (3.75 s) | Near-surface well-mixed error, closed boundary layer: +3.5% (stable), +0.6% (neutral), −0.6% / −1.3% (convective, lowest 5% / 0–40 m), particle noise about ±1% (§6). In the free troposphere $T_{Lw}$ can fall below the sub-step; how often is recorded per run (`runtime.substep_exceedance`). |
-| The boundary-layer top is a jump of $\sigma_w$ and $T_{Lw}$ to the free-troposphere closure, seen by the drift through a 1 m finite difference | Too many particles cross from a convective boundary layer into a quiescent free troposphere at practical sub-steps: in a synthetic column, 25% of them after 2–6 h at $n = 16$ against 6% at $\Delta t$ = 1.875 s and none at 0.9375 s (§6). Stable and neutral columns are unaffected. Not yet treated; to be decided with the free-troposphere integration. |
+| The boundary-layer top is a jump of $\sigma_w$ and $T_{Lw}$ to the free-troposphere closure, seen by the drift through a 1 m finite difference | Too many particles cross from a convective boundary layer into a quiescent free troposphere at practical sub-steps: in a synthetic column, 25% of them after 2–6 h at $n = 16$ against 6% at $\Delta t$ = 1.875 s and none at 0.9375 s (§6). Stable and neutral columns are unaffected. On the reference multi-site run the 0–40 m footprint is not converged in the sub-step count (−28% to +81% against the old code for $n$ = 4 to 32, §6). Not yet treated; to be decided before the freeze. |
 | Turbulence support fields ($\rho$, free-troposphere $\sigma/T_L$, meander $\sigma$) built once per meteorology hour at the window midpoint | A met-cadence approximation (<1%/hr drift), matching how FLEXPART-class models refresh turbulence fields. Per-particle interpolation through those fields is unchanged. |
 | Deep convection assigns each particle to the nearest meteorology column | Each (lon, lat) column has its own parcel lift, trigger and matrix (task A02), fired once per meteorology interval read from the store. A particle near a column boundary takes the nearest column's matrix rather than a blend. See [convection.md](convection.md) §1 and §7. |
 | Initial $u', v', w' = 0$ rather than sampled from the local $\sigma$ | Particles equilibrate within one $T_L$ (typically ~100 s), which is shorter than the release window. |

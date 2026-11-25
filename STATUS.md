@@ -188,8 +188,8 @@ relevant docs page with its consequence.
   particles in 2–6 h at 16 sub-steps, against none at a 0.94 s step: the
   well-mixed drift sees the jump of $\sigma_w$ at $h$ only through a 1 m
   finite difference (physics.md §6 and §8). On the reference multi-site run
-  the 0–40 m footprint moves by −28%, −16% and +15% (median over releases,
-  against the old code) at 4, 8 and 16 sub-steps, with less time spent above
+  the 0–40 m footprint moves by −28%, −16%, +15% and +81% (median over
+  releases, against the old code) at 4, 8, 16 and 32 sub-steps, with less time spent above
   the boundary layer as the count grows: real footprints are not yet
   converged in the sub-step, and the boundary-layer top is the likely reason.
   To be settled before the freeze, and the fixtures regenerated after it.

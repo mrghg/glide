@@ -70,8 +70,8 @@ particles leave a convective boundary layer at practical sub-steps (25% after
 drift's finite-difference step from 1 m to 10 m alone removes it, which locates
 it at the $\sigma_w$ jump at $h$. That is a boundary-layer-top question for a
 follow-up, not part of this change. (3) On the reference config the 0–40 m
-footprint moves by −28%, −16% and +15% (median over releases) at $n$ = 4, 8 and
-16 against the old code, with the share of time above the boundary layer
+footprint moves by −28%, −16%, +15% and +81% (median over releases) at
+$n$ = 4, 8, 16 and 32 against the old code, with the share of time above the boundary layer
 falling as $n$ grows: real footprints are not yet converged in $n$, and the
 boundary-layer top is the likely reason (argued from the open-top study, not
 isolated on real meteorology). The default of 16 is therefore the best of the
