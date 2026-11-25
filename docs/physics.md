@@ -532,72 +532,163 @@ constraint on $\Delta t$ comes from two other places:
   $\Delta t \le 0.05\ T_L$.
 - the **reflection bias**, whose magnitude also scales with $\Delta t/T_L$.
 
-Near-surface $T_{Lw}$ can fall to tens of seconds, so the turbulence is
-**sub-stepped** within the outer step (advection is not):
+Near-surface $T_{Lw}$ falls to tens of seconds, so the turbulence is
+**sub-stepped** within the outer step (advection is not). Every particle takes
+the same number of equal sub-steps in every outer step (decision 0027):
 
 $$
-k = \max_p \left\lceil \frac{\Delta t}{c\  T_{Lw,p}} \right\rceil,
-\qquad
-\Delta t_{\mathrm{sub}} = \frac{\Delta t}{k},
-\qquad
-c = 0.5,\quad k \le k_{\max}
+\Delta t_{\mathrm{sub}} = \frac{\Delta t}{n},
+\qquad n = \texttt{turbulence.n\_substeps}\ (\text{default } 16)
 $$
-
-The subscript $p$ is the particle (not a direction, as $i$ was in §3). Each
-particle's own requirement is the count that brings its sub-step under a
-fraction $c$ of the vertical timescale $T_{Lw,p}$ it sits in; **every** active
-particle then takes the largest of these, up to the cap $k_{\max}$
-(`max_substeps`), so all particles share one sub-step length.
 
 Inside the sub-step loop, the OU update, the displacement, and the ground
 reflection all run at $\Delta t_{\mathrm{sub}}$, so a particle that crosses the
 ground mid-step is reflected before the next sub-step rather than at the end of
-the outer step. At the start of every sub-step $\sigma$, $T_L$,
+the outer step. At the start of every sub-step after the first, $\sigma$, $T_L$,
 $\partial\sigma_w^2/\partial z$ and the density term are re-evaluated at the
-particle's current height, as in FLEXPART, and the $(1 + w'^2/\sigma_w^2)$
-factor uses the current $w'$.
+particle's current height (its horizontal position, and so the column, are those
+of the start of the outer step), as in FLEXPART, and the
+$(1 + w'^2/\sigma_w^2)$ factor uses the current $w'$.
 
-Both rules are needed for the well-mixed condition at the shipped
-$\Delta t = 60$ s. Each was measured by the occupancy of the lowest 5% of a
-horizontally uniform boundary layer relative to its well-mixed share
-(`scripts/validation/wm_near_surface/`, 2026-11-25):
+**Why one fixed count, re-evaluated every sub-step.** Both parts are needed for
+the well-mixed condition at the shipped $\Delta t = 60$ s. Measured by the
+occupancy of the lowest 5% of a horizontally uniform boundary layer relative to
+its well-mixed share (WM investigation, `outputs/agents/WM/`, 2026-11-25):
 
-- **Coefficients held at their outer-step values** (GLIDE until 2026-11) make
-  the sub-steps a random walk with the diffusivity $\sigma_w^2 T_{Lw}$ of the
-  *starting* height and no compensating drift, which collects particles where
-  $T_{Lw}$ is short — at the ground. Neutral boundary layer: 1.67 at
-  $\Delta t = 60$ s, getting *worse* as $c$ shrinks (1.16 with no
-  sub-stepping), against 1.03 at $\Delta t = 15$ s.
+- **Coefficients held at their outer-step values** (GLIDE until decision 0027)
+  make the sub-steps a random walk with the diffusivity $\sigma_w^2 T_{Lw}$ of
+  the *starting* height and no compensating drift, which collects particles
+  where $T_{Lw}$ is short — at the ground. Neutral boundary layer: 1.67 at
+  $\Delta t = 60$ s, getting *worse* as the sub-steps shrank, against 1.03 at
+  $\Delta t = 15$ s. Re-evaluating $T_L$ alone brought it to 1.33.
 - **A sub-step length that depends on the particle's height** (each particle
-  its own count, or a count re-chosen every sub-step as FLEXPART does) gives
-  1.31 even with the coefficients re-evaluated, falling only in proportion to
-  $c$: the scheme's first-order error is then the same fraction $c$ of $T_{Lw}$
-  everywhere in the column, including where $T_{Lw}$ grows with height.
+  its own count $\lceil \Delta t/(c\,T_{Lw,p}) \rceil$ from its starting
+  $T_{Lw}$, as GLIDE did, or a count re-chosen every sub-step, as FLEXPART does)
+  gives 1.31 even with the coefficients re-evaluated, falling only in
+  proportion to $c$. A count that only *adds* sub-steps where
+  $T_{Lw}$ is short biases too: with
+  $k_p = \max(n, \lceil \Delta t/(0.125\,T_{Lw,p}) \rceil)$ (16 at the 30 s
+  floor) the neutral lowest 5% is 1.090 for $n = 4$ and 1.035 for $n = 8$, above
+  both the fixed count it starts from (1.038, 1.018) and the fixed $n = 16$ it
+  refines to near the ground (1.006); same-seed differences from the fixed
+  count +0.052 ± 0.006 and +0.017 ± 0.007 (5 seeds; convective +0.136 and
+  +0.033, stable −0.044 and −0.001, where under-resolution at the ground
+  dominates).
+- A count shared by all particles but taken as the batch maximum (the WM
+  prototype) fixed the bias, but made a release's footprint depend on which
+  other releases share its batch; a fixed count is deterministic per release,
+  needs no data-dependent loop bound, and is what the CUDA-graph path runs
+  anyway (decision 0004).
 
-With both, a 60 s outer step gives the same answer as a 15 s one, and the
-error falls monotonically with $c$:
+**Choosing $n$.** The target is the well-mixed share within ±0.05 in the
+lowest 5% of the boundary layer and in the 0–40 m layer where footprints are
+counted, after particle noise. Measured on B7's three regimes (§3 of
+`outputs/agents/WM/SUBSTEPPING-SUMMARY.md`) with the boundary-layer top a
+reflecting lid applied inside every sub-step, $\Delta t = 60$ s, 20,000
+particles, 5 seeds, records every 15 min from 2 to 6 h
+(`scripts/validation/wm_near_surface/fixcount_study.py`; tables in
+`outputs/agents/WM/fixcount/study/tables.md`). Mean over seeds ± its standard
+error; the seed-to-seed standard deviation is 0.001–0.02:
 
-| $c$ ($k$ at the 30 s floor) | 1 (2) | 0.5 (4) | 0.25 (8) | 0.125 (16) |
-| --- | --- | --- | --- | --- |
-| neutral ($h$ 1,500 m, $u_{\ast}$ 0.4 m s⁻¹) | 1.11 | 1.03 | 1.01 | 1.00 |
-| stable ($h$ 400 m, $H$ −20 W m⁻²) | 1.37 | 1.15 | 1.07 | 1.03 |
-| convective ($h$ 1,500 m, $H$ +200 W m⁻²) | 0.66 | 0.89 | 0.97 | 0.99 |
+| | stable ($h$ 400 m, $H$ −20 W m⁻²) | neutral ($h$ 1,500 m, $u_\ast$ 0.4 m s⁻¹) | convective ($h$ 1,500 m, $H$ +200 W m⁻²) |
+| --- | --- | --- | --- |
+| before decision 0027 (cap 6) | 1.787 / 1.750 | 1.660 / 1.788 | 0.965 / 0.905 |
+| $n = 4$ (15 s) | 1.156 / 1.141 | 1.038 / 1.043 | 0.882 / 0.815 |
+| $n = 8$ (7.5 s) | 1.074 / 1.064 | 1.018 / 1.018 | 0.970 / 0.940 |
+| **$n = 16$ (3.75 s)** | **1.035 / 1.035** | **1.006 / 1.008** | **0.994 / 0.987** |
+| $\Delta t$ = 1.875 s | 1.017 / 1.018 | 1.004 / 1.010 | 0.997 / 0.993 |
+| $\Delta t$ = 0.9375 s (3 seeds) | 1.001 / 1.007 | 0.994 / 0.993 | 0.978 / 0.982 |
 
-(10,000 particles, 2–6 h, standard error 0.01–0.02; reflection at the
-boundary-layer top inside the sub-step loop.) What remains at $c = 0.5$ is the
-scheme's own $\Delta t_{\mathrm{sub}}/T_L$ error at the ground, where
-$\sigma_w$ has its strongest gradient (Wilson & Flesch 1993): positive where
-$\sigma_w$ falls with height, negative where it rises. Stohl & Thomson (1999)
-recommend $c = 0.05$.
+(lowest 5% / 0–40 m; standard errors 0.001–0.008.) Only $n = 16$ meets the
+target in every regime: $n = 8$ leaves the stable lowest 5% at +0.074 ± 0.005
+and the convective 0–40 m at −0.060 ± 0.006. The error is first order in
+$\Delta t_{\mathrm{sub}}$, positive where $\sigma_w$ falls with height (stable)
+and negative where it rises near the ground (convective), as Wilson & Flesch
+(1993) predict. The two finer references agree with each other and with 1 to
+within 0.025, so they are converged at that level. In this column, without mean
+wind, 16 sub-steps of a 60 s step and 16 outer steps of 3.75 s are nearly the
+same calculation; seed by seed they agree to within 0.003.
 
-The re-evaluation costs one column-turbulence evaluation (three profile
-evaluations, for $\sigma$ and the finite-difference gradient, and one density
-lookup) per sub-step instead of one per outer step. A once-per-run warning
-fires if the cap saturates. With the FLEXPART $T_{Lw} \ge 30$ s floor in force
-(the default, see [turbulence.md](turbulence.md)) the boundary layer needs
-$\lceil 60/(0.5 \times 30)\rceil = 4$ at $\Delta t = 60$ s, which is why the
-shipped configs set `max_substeps: 6`; a free-troposphere particle with a
-shorter $T_{Lw}$ raises the count for all.
+With an **open top** (no lid; above $h$ a stably stratified free troposphere,
+$N$ = 0.015 s⁻¹, no wind, so $K_z$ is the closure's 0.1 m² s⁻¹ floor), the
+stable and neutral columns behave as the closed one (stable +0.017 ± 0.009,
+neutral −0.003 ± 0.008 against $\Delta t$ = 1.875 s at $n = 16$). The
+convective column does not converge at any practical sub-step: the share of
+particles still in the boundary layer after 2–6 h is 0.45, 0.60 and 0.75 at
+$n$ = 4, 8 and 16, 0.94 at $\Delta t$ = 1.875 s and 1.00 at 0.9375 s, while the
+occupancy of the lowest 5% *of the particles in the boundary layer* is within
+0.05 of the reference at $n \ge 8$. Particles cross into the free troposphere
+too easily when a sub-step's displacement is large compared with the
+finite-difference step $\delta$ = 1 m over which the well-mixed drift sees the
+jump of $\sigma_w$ at $h$: with only $\delta$ changed to 10 m, the share still
+in the boundary layer is 0.998 at $n = 8$ and 0.999 at $n = 16$ (3 seeds,
+`outputs/agents/WM/fixcount/study/open_fd10.jsonl`). The code before this
+decision lost far more: 0.33 (convective) and 0.79 (neutral) of the particles
+were still in the boundary layer (3 seeds, `study/old_open.jsonl`), so the
+change also keeps more particles in a convective or neutral boundary layer. How
+GLIDE treats the boundary-layer top is outside this decision and is listed in
+§8.
+
+**The basal clamp.** Below $z_{\mathrm{ubl}}$ (§5) every coefficient is
+sampled at $z_{\mathrm{ubl}}$, so the profile the particle sees is flat there.
+Below $z_{\mathrm{ubl}}$ the finite-difference
+stencil, clamped to $[z_{\mathrm{ubl}}, z_{\mathrm{ubl}} + \delta]$, nevertheless
+returns the one-sided gradient just above the clamp, a drift where the profile is
+flat. `HannaScheme(basal_zero_gradient=True)` sets $\partial\sigma_w^2/\partial z$
+to zero strictly below the clamp, leaving the density drift unchanged
+(`test_basal_zero_gradient_only_below_the_clamp`). Same-seed differences from the
+default in the closed column, at $n = 8$ and at $\Delta t$ = 1.875 s, are at most
+0.003 in the lowest 5% and the 0–40 m layer in all three regimes (5 seeds; in
+0–2 m, within ±0.025 and its noise), so the default keeps the stencil as it was
+and the switch stays for comparisons.
+
+**Sub-steps long compared with $T_{Lw}$.** In the boundary layer the FLEXPART
+floor $T_{Lw} \ge 30$ s bounds $\Delta t_{\mathrm{sub}}/T_{Lw}$ by
+$\Delta t/(30\,n)$, 0.125 at the defaults. Above the boundary layer there is no
+floor: the free-troposphere closure gives $T_{Lw} = 0.5/N$, a few seconds in
+strong inversions. Every sub-step of every active particle is checked against
+$\Delta t_{\mathrm{sub}} > 0.5\,T_{Lw}$ and $\Delta t_{\mathrm{sub}} > T_{Lw}$,
+with $T_{Lw}$ at the sub-step's own height, and counted as boundary layer
+($z \le h$) or free troposphere. On the CUDA-graph path the counts are taken
+inside the captured step and kept on the device (no host synchronisation); the
+runtime reads them once per met window and `run_metadata.json` records the run
+totals under `runtime.substep_exceedance` (sub-steps, exceedances of each
+threshold and their fractions, the worst ratio, per layer, and the number of met
+windows with an exceedance). The integration does not change where the ratio is
+large: the OU velocity update stays exact, but the displacement
+$w'\,\Delta t_{\mathrm{sub}}$ over-states the variance of the exact integrated
+OU displacement, $2\sigma_w^2T_L^2(r - 1 + e^{-r})$ with
+$r = \Delta t_{\mathrm{sub}}/T_L$, by the factor $r^2/[2(r-1+e^{-r})]$ (1.59 at
+$r = 1.58$). On the reference multi-site run
+(`configs/ab_multisite_perf.yaml`, January, 144 releases; GH200, 25 Nov 2026)
+no boundary-layer sub-step exceeded $0.5\,T_{Lw}$ at $n$ = 4, 8 or 16 (worst
+ratio $60/(30n)$, as the floor implies), and in the free troposphere 11.6%,
+0.0039% and 0.00005% of sub-steps did at $n$ = 4, 8 and 16 (worst ratios 2.28,
+1.16 and 0.83; $\Delta t_{\mathrm{sub}} > T_{Lw}$ in 0.0027%, 0.000012% and
+none). This count replaced task A1's count of
+particle-steps that reached the old cap of 6 (2.6% on the same run, worst ratio
+1.58), which could not say how many exceeded the target.
+
+**Cost.** The re-evaluation is one full profile evaluation, two
+$\sigma_w$-only evaluations for the finite-difference gradient (bit-identical to
+taking $\sigma_w$ from the full profile,
+`test_sigma_w_probe_is_bit_identical_to_the_full_profile`) and one density
+lookup per sub-step. On the same run, GPU-synchronised phase
+timers, the step took 4.49 ms (code before this decision, 6 iterations without
+re-evaluation), 5.18, 9.66 and 11.72 ms at $n$ = 4, 8 and 16: at $n = 16$,
+125 s more over the run, about 11% of its 1,157 s wall time. Reading
+meteorology still dominates (57–71% of wall time).
+
+**Effect on footprints.** The same run against its golden fixture (made with
+the code before this decision; median over the 144 releases, single seed):
+the 0–40 m footprint changes by −28%, −16% and +15% at $n$ = 4, 8 and 16, the
+40–1,000 m layer by +26% at $n = 8$ and +69% at $n = 16$, the 1–5 km layer by
+−5% and −15%, the total by −0.1 to −2%. The share of sub-steps spent above the
+boundary layer falls from 76% to 72% to 61% as $n$ goes from 4 to 16. So on real
+meteorology the near-surface footprint is not yet converged in $n$: as in the
+open-top column, how many particles stay in the boundary layer depends on the
+sub-step, through the boundary-layer top (§8). The smoke run (Mace Head, one
+release, one day) changes by +29% in 0–40 m and −3.7% in total at $n = 16$.
 
 **Rogue-trajectory clip.** At the end of each sub-step's velocity update,
 
@@ -606,8 +697,8 @@ $$
 $$
 
 A true Gaussian exceeds $4\sigma$ with probability $\sim 6\times10^{-5}$, so this
-is a safety net, not a physics change. It exists because where the sub-step cap
-binds *and* $\sigma_w$ sits near its numerical floor — the stable boundary-layer
+is a safety net, not a physics change. It exists because where a sub-step is
+long compared with $T_{Lw}$ *and* $\sigma_w$ sits near its numerical floor — the stable boundary-layer
 top, where $\sigma_w \to 0$ — the $(1 + w'^2/\sigma_w^2)$ factor can snowball the
 drift into a NaN. FLEXPART has the equivalent clip.
 
@@ -719,7 +810,8 @@ Stated plainly, because they bound what the model can be trusted for.
 | Approximation | Consequence |
 | --- | --- |
 | Gaussian vertical velocity PDF everywhere — no skewed convective-boundary-layer PDF | Under-represents the updraft/downdraft asymmetry of a strongly convective BL. Thomson (1987, §5.2) found ground-level concentration relatively insensitive to skewness even where dispersion aloft is sensitive, so this is defensible for a surface-flux footprint model — but it is a modelling choice, not a free lunch. |
-| Sub-step fraction $c = 0.5$ rather than Stohl & Thomson's 0.05 | Near-surface well-mixed error (lowest 5% of the boundary layer) of +15% in a stable and −11% in a convective boundary layer, +3% neutral; +3%, −1% and 0% at $c = 0.125$, for four times the turbulence work (§6). |
+| A fixed sub-step count, $n = 16$ at $\Delta t = 60$ s (3.75 s) | Near-surface well-mixed error, closed boundary layer: +3.5% (stable), +0.6% (neutral), −0.6% / −1.3% (convective, lowest 5% / 0–40 m), particle noise about ±1% (§6). In the free troposphere $T_{Lw}$ can fall below the sub-step; how often is recorded per run (`runtime.substep_exceedance`). |
+| The boundary-layer top is a jump of $\sigma_w$ and $T_{Lw}$ to the free-troposphere closure, seen by the drift through a 1 m finite difference | Too many particles cross from a convective boundary layer into a quiescent free troposphere at practical sub-steps: in a synthetic column, 25% of them after 2–6 h at $n = 16$ against 6% at $\Delta t$ = 1.875 s and none at 0.9375 s (§6). Stable and neutral columns are unaffected. Not yet treated; to be decided with the free-troposphere integration. |
 | Turbulence support fields ($\rho$, free-troposphere $\sigma/T_L$, meander $\sigma$) built once per meteorology hour at the window midpoint | A met-cadence approximation (<1%/hr drift), matching how FLEXPART-class models refresh turbulence fields. Per-particle interpolation through those fields is unchanged. |
 | Deep convection assigns each particle to the nearest meteorology column | Each (lon, lat) column has its own parcel lift, trigger and matrix (task A02), fired once per meteorology interval read from the store. A particle near a column boundary takes the nearest column's matrix rather than a blend. See [convection.md](convection.md) §1 and §7. |
 | Initial $u', v', w' = 0$ rather than sampled from the local $\sigma$ | Particles equilibrate within one $T_L$ (typically ~100 s), which is shorter than the release window. |

@@ -154,7 +154,7 @@ CI:
 | `test_well_mixed_condition_drift_keeps_uniform_distribution` | the drift term alone preserves a uniform distribution |
 | `test_well_mixed_uniformity_in_periodic_turbulence` | uniformity in a periodic domain (rel-RMS < 0.12) |
 | `test_v1_well_mixed_hanna_backward_path` | a flat distribution stays flat through the **production backward scheme** at constant $\rho$ — parametrised over both the static and dynamic paths |
-| `test_near_surface_well_mixed_at_60_s` (`test_near_surface_well_mixed.py`) | at the shipped $\Delta t = 60$ s and the default sub-step count, a closed boundary layer (lid inside every sub-step) keeps its lowest 5% and its 0–40 m layer within ±0.1 of their well-mixed share, stable, neutral and convective (decision 0027; the code before it gave 1.6–1.8 in the lowest 5%) |
+| `test_near_surface_well_mixed_at_60_s` (`test_near_surface_well_mixed.py`) | at the shipped $\Delta t = 60$ s and the default sub-step count, a closed boundary layer (lid inside every sub-step) keeps its lowest 5% and its 0–40 m layer within ±0.09 of their well-mixed share, stable, neutral and convective (decision 0027; the code before it gave 1.66–1.79 in the lowest 5% and fails it in all three regimes) |
 | `test_v1_density_weighted_well_mixed_with_F2` | a $\rho$-weighted distribution stays $\rho$-weighted under varying $\rho$ |
 | `test_hanna_well_mixed_no_runaway_lofting` | no systematic upward drift (this caught the frozen $(1+w'^2/\sigma_w^2)$ factor) |
 | `test_reflect_surface_w_flip_resolves_one_way_downward_drift` | the joint $(z, w')$ reflection removes the post-reflection downward bias |

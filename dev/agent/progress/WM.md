@@ -5,13 +5,26 @@
 - started: 2026-11-25   updated: 2026-11-25
 - plan: Pre-freeze physics fix approved by Matt on 25 Nov 2026 (outputs/agents/WM/SUBSTEPPING-SUMMARY.md §9/§12). Brings over agent/WM-near-surface (0032313: all Hanna coefficients re-evaluated at the current height every sub-step) and replaces the batch-max / per-particle adaptive count with one configured count `turbulence.n_substeps` for every particle and step (substep_c / max_substeps removed with a migration error). σ_w-only finite-difference probes. No-sync exceedance counter (δt > c·T_Lw per particle-sub-step, BL/FT, with denominators), read once per met window, in run_metadata.json. Basal-clamp gradient test (fix if it matters). Adaptivity test (k_i = max(n, adaptive k_i) vs fixed n). Accuracy study n = 4/8/16, neutral/stable/convective, ≥3 seeds, closed column (lid per sub-step) and open top, lowest 5% and 0–40 m, against a 1.875 s reference. GPU timing on ab_multisite_perf for main and n = 4/8/16 (one run at a time, ~54 GB host peak). CI near-surface gate at Δt = 60 s. Docs: physics.md §6, turbulence.md, STATUS.md, decision record 0027 (0026 is taken by A2's open PR #66). Files: src/lpdm/turbulence/hanna.py, base.py, config.py, main.py, configs/*.yaml, tests/test_hanna.py, tests/test_main_runtime.py, tests/test_main_config.py, scripts/validation/wm_near_surface/. Outputs: outputs/agents/WM/fixcount/. Golden fixtures not regenerated.
 - done:
-- verified:
-- docs:
-- handoff:
+  - Reviewed the stopped agent's WIP (f8b1360): kept the fixed-count loop, σ_w-only probes, migration validator, runtime tally and most tests; changed the counter (two thresholds, 0.5 T_Lw and T_Lw, BL/FT, key order in one constant), dropped `exceedance_c` from the config (a diagnostic, now a scheme constant), made `basal_zero_gradient` a constructor switch, removed the investigation prototypes that only ran on the old API (they stay on agent/WM-near-surface 0032313), fixed tests that monkeypatched removed methods.
+  - `turbulence.n_substeps` (default 16); `substep_c`/`max_substeps` refused with a migration message; shipped and validation configs no longer set a count.
+  - Coefficients re-evaluated at the current height every sub-step after the first; static and dynamic paths bit-identical with all particles active (loop and whole-step tests).
+  - Exceedance counter in `run_metadata.json` `runtime.substep_exceedance`, replacing A1's `runtime.substep_saturation` (merged main 20db902 into the branch; A1's tests migrated; B7's tier0 figure sweeps n_substeps).
+  - Accuracy study (closed and open top, 3 regimes, 5 seeds x 20k particles), adaptivity test, basal-clamp test, FD-step probe; CI gate tests/test_near_surface_well_mixed.py; decision 0027; docs.
+- verified: see the PR. Study: outputs/agents/WM/fixcount/study/tables.md. CI gate fails on main 20db902 in all three regimes (outputs/agents/WM/fixcount/ci_gate_old/pytest_main-20db902.log). GPU benches: outputs/agents/WM/fixcount/bench/. Golden: outputs/agents/WM/fixcount/golden/.
+- docs: docs/physics.md §6, §8; docs/turbulence.md §5, §9; docs/architecture.md §5, §8; docs/VALIDATION.md §2, §4; STATUS.md; dev/decisions/0027.
+- handoff: Golden fixtures and the benchmark baseline are NOT regenerated (by instruction); they must be regenerated once after A2. Suggested PROGRESS.md "Current state" line: sub-stepping fixed (decision 0027, default 16 sub-steps at 60 s); the boundary-layer top under convection is the next physics question.
 - proposed follow-ups:
+  - Boundary-layer top: the σ_w/T_Lw jump to the free-troposphere closure is seen by the drift only through a 1 m finite difference, so particles cross out of a convective BL too easily at practical sub-steps (open-top study; δ = 10 m removes it). Decide a treatment (smooth transition layer, or another interface rule) before the freeze, measured on footprints.
+  - Old against new dynamics on the smoke and reference configs with seed spread (revised plan step 3): this PR has single-seed numbers only.
+  - A2: score the counting rules on fine-time trajectories from the fixed dynamics.
 - reference issues: none
 - incidents:
-- question:
+  - The Hanna sub-stepping held σ, T_L and the drift at outer-step values and chose a per-particle count: 1.66-1.79x the well-mixed share in the lowest 5% at 60 s (found by B7's figure, isolated by WM); affects every footprint and the golden fixtures.
+  - A1's saturation counter counted particles reaching the cap (2.6% on the reference run) and was read as an exceedance rate; the direct count at n = 8 is 3.9e-5 of free-troposphere sub-steps over 0.5 T_Lw (caught by the review of the WM summary).
+  - The pre-0027 code also let particles leave a convective/neutral boundary layer far too easily (open-top harness: 0.33/0.79 still in the BL against 1.00 at a fine step); found by this study.
+  - The BL-top crossing is still under-resolved at 16 sub-steps (found by this study; not fixed).
+  - Own mistake: after a session disconnect I queued the n = 4/16 benchmarks twice while the original queue survived, so three reference runs ran at once on the GPU for ~8 minutes; caught by checking the process list, all three stopped and their outputs set aside as *.aborted-concurrent, then rerun one at a time.
+- question: none
 - handled:
   - in-session: 2026-11-25 coordinator: A1 (#68), B7 (#67) and #65 merged; bring the branch up to date, replace A1's cap-reached counter with the exceedance counter (migrate runtime.substep_saturation readers and A1's docs), adjust the step-core output test, benchmark the main baseline at the new main HEAD. Done by merging origin/main (20db902), not rebasing: the branch was already pushed and §5 forbids rewriting it.
   - in-session: 2026-11-25 coordinator brief (Matt approved the work on 25 Nov 2026): fixed configured count, exceedance counter, clamp and adaptivity tests, n = 4/8/16 study, GPU timing, CI gate; no fixture regeneration.

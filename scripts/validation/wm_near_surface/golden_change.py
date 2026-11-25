@@ -27,6 +27,28 @@ def totals(fp: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return f.sum(axis=(1, 2, 3, 4)), f.sum(axis=(1, 3, 4))
 
 
+def release_groups(run: Path) -> dict[str, np.ndarray]:
+    """Release indices by site and by day (09-15 UTC) / night (19-05 UTC)."""
+    store = run / "footprints.zarr"
+    if not store.exists():
+        return {}
+    import xarray as xr
+
+    ds = xr.open_zarr(store)
+    if "site" not in ds.coords:
+        return {}
+    site = np.asarray(ds["site"].values).astype(str)
+    hour = ds["release_time"].dt.hour.values
+    day, night = (hour >= 9) & (hour <= 15), (hour >= 19) | (hour <= 5)
+    out = {}
+    for s in sorted(set(site)):
+        for label, m in (("all", np.ones_like(day)), ("day", day), ("night", night)):
+            idx = np.flatnonzero((site == s) & m)
+            if idx.size:
+                out[f"{s} {label}"] = idx
+    return out
+
+
 def main() -> None:
     fixture, *runs = (Path(a) for a in sys.argv[1:])
     manifest = json.loads((fixture / gc.MANIFEST_FILE).read_text())
@@ -49,6 +71,15 @@ def main() -> None:
                 f"{name}: median {np.median(v):+.4f}, mean {v.mean():+.4f}, "
                 f"min {v.min():+.4f}, max {v.max():+.4f}"
             )
+        groups = release_groups(run)
+        if groups:
+            print("bin0 (0-40 m) and total by site and time of day (release hour UTC):")
+            for label, idx in groups.items():
+                v0, vt = d_z[idx, 0], d_tot[idx]
+                print(
+                    f"  {label:24s} n={idx.size:3d}  bin0 median {np.median(v0):+.4f} "
+                    f"[{v0.min():+.4f}, {v0.max():+.4f}]  total median {np.median(vt):+.4f}"
+                )
 
 
 if __name__ == "__main__":

@@ -24,11 +24,11 @@ def main() -> None:
     root = Path(sys.argv[1])
     head = (
         "| run | wall (s) | footprints/s | step total (s) | step ms/step | step % wall "
-        "| met_fetch (s) | BL sub-steps > 0.5 T_Lw | FT sub-steps > 0.5 T_Lw "
+        "| met_fetch (s) | gc (s) | BL sub-steps > 0.5 T_Lw | FT sub-steps > 0.5 T_Lw "
         "| FT sub-steps > T_Lw | FT share of sub-steps | worst ratio BL / FT |"
     )
     print(head)
-    print("|" + "---|" * 12)
+    print("|" + "---|" * 13)
     for label in sys.argv[2:]:
         b = json.loads((root / f"{label}.bench.json").read_text())
         meta = json.loads((root / label / "run_metadata.json").read_text())
@@ -40,9 +40,9 @@ def main() -> None:
             bl, ft = exc["boundary_layer"], exc["free_troposphere"]
             n_all = bl["substeps"] + ft["substeps"]
             cols = [
-                f"{bl['exceeded_fraction']:.2%} of {bl['substeps']:.3g}",
-                f"{ft['exceeded_fraction']:.2%} of {ft['substeps']:.3g}",
-                f"{ft['over_T_L_fraction']:.2%}",
+                f"{100 * bl['exceeded_fraction']:.3g}% of {bl['substeps']:.3g}",
+                f"{100 * ft['exceeded_fraction']:.3g}% of {ft['substeps']:.3g}",
+                f"{100 * ft['over_T_L_fraction']:.3g}%",
                 f"{ft['substeps'] / n_all:.1%}",
                 f"{bl['worst_sub_dt_over_T_Lw']:.2f} / {ft['worst_sub_dt_over_T_Lw']:.2f}",
             ]
@@ -59,7 +59,9 @@ def main() -> None:
         print(
             f"| {label} | {b['process_wall_s']:.0f} | {b['footprints_per_s']:.4f} "
             f"| {step['total_s']:.1f} | {step['ms_per_call']:.2f} | {step['pct_wall']:.1f} "
-            f"| {fetch['total_s']:.0f} | " + " | ".join(cols) + " |"
+            f"| {fetch['total_s']:.0f} | {phase(t, 'gc')['total_s']:.0f} | "
+            + " | ".join(cols)
+            + " |"
         )
 
 

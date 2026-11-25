@@ -5,7 +5,7 @@ what GLIDE is, see [README.md](README.md); for the physics and engineering, see
 [docs/](docs/); for why the major choices were made, see
 [dev/decisions/](dev/decisions/). Narrative history lives in git.
 
-_Last updated: 2026-11-20._
+_Last updated: 2026-11-25._
 
 > **Research code under active development. The physics has not been validated
 > against other models or observations. Not for production use.**
@@ -16,7 +16,7 @@ _Last updated: 2026-11-20._
 
 | Area | State |
 | --- | --- |
-| **Core backward LPDM** | RK2 advection, exact-OU Langevin turbulence with the full Thomson well-mixed drift and Stohl–Thomson density correction, ground reflection, adaptive sub-stepping (one shared sub-step, coefficients re-evaluated every sub-step). Mass-conserving. ([docs/physics.md](docs/physics.md)) |
+| **Core backward LPDM** | RK2 advection, exact-OU Langevin turbulence with the full Thomson well-mixed drift and Stohl–Thomson density correction, ground reflection, turbulence sub-stepping with one fixed count for every particle (16 at the 60 s step), every coefficient re-evaluated each sub-step (decision 0027). Mass-conserving. ([docs/physics.md](docs/physics.md)) |
 | **Turbulence** | Hanna (1982) in three regimes, aligned to FLEXPART v11; gradient-Richardson free-troposphere closure; Maryon meander. Behind a swappable `TurbulenceScheme` interface. ([docs/turbulence.md](docs/turbulence.md)) |
 | **Convection** | Reduced Emanuel mass-flux scheme, non-divergent matrix, in each meteorology column, once per meteorology interval. ([docs/convection.md](docs/convection.md)) |
 | **Terrain-following vertical coordinate** | Meteorology resampled onto a fixed AGL grid per window, with slope-corrected vertical velocity. Fixed the zero-surface-footprint problem over high terrain. |
@@ -174,11 +174,25 @@ relevant docs page with its consequence.
 
 - **Per-column vertical interpolation.** Uses the bounding-box mean. Convection
   now works column by column (task A02, decision 0023).
-- **Sub-step fraction $c$.** With per-sub-step re-evaluation and a shared
-  sub-step (branch `agent/WM-near-surface`), the default $c = 0.5$ leaves the
-  lowest 5% of the boundary layer +15% over-occupied (stable) and −11% under
-  (convective); $c = 0.125$ brings both within 3%, for four times the
-  turbulence work ([docs/physics.md](docs/physics.md) §6). Not yet decided.
+- **Near-surface well-mixed error at the 60 s step: fixed (decision 0027).**
+  Holding the turbulence coefficients over the sub-steps and choosing a
+  sub-step count per particle put 1.66–1.79 times the well-mixed share of
+  particles in the lowest 5% of neutral and stable boundary layers, in every
+  footprint made so far, the golden fixtures included. One fixed count for
+  every particle, 16 at the 60 s step, with every coefficient re-evaluated each
+  sub-step, brings all three regimes within 0.035 of 1 in the lowest 5% and in
+  0–40 m ([docs/physics.md](docs/physics.md) §6). The golden fixtures are not
+  yet regenerated (planned once, after the A2 residence-counting decision).
+- **The boundary-layer top under convection.** With an open top into a
+  quiescent free troposphere, a convective boundary layer loses 25% of its
+  particles in 2–6 h at 16 sub-steps, against none at a 0.94 s step: the
+  well-mixed drift sees the jump of $\sigma_w$ at $h$ only through a 1 m
+  finite difference (physics.md §6 and §8). On the reference multi-site run
+  the 0–40 m footprint moves by −28%, −16% and +15% (median over releases,
+  against the old code) at 4, 8 and 16 sub-steps, with less time spent above
+  the boundary layer as the count grows: real footprints are not yet
+  converged in the sub-step, and the boundary-layer top is the likely reason.
+  To be settled before the freeze, and the fixtures regenerated after it.
 - **Forward/backward reciprocity test.** It tests the backward formulation
   directly, which nothing else does. Planned as task A6.
 - **The source of u\*.** From the surface stresses for v1; ERA5's `zust` is
