@@ -443,6 +443,18 @@ class ConvectionConfig(_Frozen):
     emanuel: EmanuelConvectionConfig = EmanuelConvectionConfig()
 
 
+class DepositionConfig(_Frozen):
+    """Where in a step each particle's residence is counted (task A2, [PR-F4])."""
+
+    # `endpoint`: at the particle's position after the step's advection, turbulence
+    # and convection (endpoint quadrature; the long-standing behaviour). `midpoint`:
+    # at the RK2 advection's midpoint (predictor) position, x - dt/2 * u(x), the
+    # position at the step's mid-time under the mean wind; the step's turbulent and
+    # convective displacement is not included. Kernel deposition (decision 0012) is
+    # deferred to after v1.
+    position: Literal["endpoint", "midpoint"] = "endpoint"
+
+
 class OutputGridConfig(_Frozen):
     """Grid onto which residence-time footprints are accumulated."""
 
@@ -465,6 +477,8 @@ class OutputGridConfig(_Frozen):
     # time; the footprint is in s m3 kg-1 of dry air, and M_air / h gives
     # m2 s mol-1 with no further density. `none`: plain residence seconds.
     density_weighting: Literal["dry_air", "none"] = "dry_air"
+    # Where in each step residence is counted (task A2); default endpoint.
+    deposition: DepositionConfig = DepositionConfig()
     # Footprint storage (task B2). Both None (default) keep the store's default
     # encoding, so existing output is unchanged. `footprint_keep_mantissa_bits`
     # rounds each value to that many float32 mantissa bits before compression

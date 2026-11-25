@@ -1881,14 +1881,16 @@ def test_step_profiler_captures_window_and_exits(tmp_path: Path, monkeypatch) ->
     assert trace.exists() and trace.stat().st_size > 0  # trace was written before exit
 
 
-def test_step_core_traces_as_one_graph_no_breaks() -> None:
+@pytest.mark.parametrize("return_midpoint", [False, True], ids=["endpoint", "midpoint"])
+def test_step_core_traces_as_one_graph_no_breaks(return_midpoint: bool) -> None:
     """The whole per-step core must trace as ONE graph (no graph breaks) so it captures
     as a single CUDA graph on GPU — otherwise the eager glue between sub-graphs keeps the
     run launch-bound (the phase-4 failure mode). `fullgraph=True` + `backend="eager"`
     surfaces any data-dependent break (a tensor `.item()`/`bool()`/Python control flow on
     tensor data) as a hard error here on CPU — no GPU and no C++ codegen needed. Guards
     against regressions like the F9 `ascending = bool(level_arr[...])` break (fixed
-    2026-06-26)."""
+    2026-06-26). Also traced with the RK2 midpoint as a seventh output (midpoint
+    deposition, task A2)."""
 
     import torch._dynamo
 
@@ -1926,9 +1928,11 @@ def test_step_core_traces_as_one_graph_no_breaks() -> None:
             dt_seconds=60.0,
             n_substeps=scheme.max_substeps,
             engine=engine,
+            return_midpoint=return_midpoint,
             **inputs,
         )
-        assert len(out) == 6 and all(torch.isfinite(o).all() for o in out)
+        assert len(out) == (7 if return_midpoint else 6)
+        assert all(torch.isfinite(o).all() for o in out)
     finally:
         torch._dynamo.config.suppress_errors = prev
         torch._dynamo.reset()

@@ -310,7 +310,9 @@ class GPUEngine:
         particles: torch.Tensor,
         dt_seconds: float,
         wind_fn: Callable[[torch.Tensor], torch.Tensor],
-    ) -> torch.Tensor:
+        *,
+        return_midpoint: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """Backward-integrate particle positions with 2nd-order Runge-Kutta.
 
         Args:
@@ -318,6 +320,9 @@ class GPUEngine:
                 dt_seconds: Positive timestep length in seconds.
                 wind_fn: Callable receiving xyz tensor (N, 3) and returning velocity
                         tensor (N, 3) with [u, v, w].
+                return_midpoint: also return the predictor midpoint
+                        ``xyz - dt/2 * u(xyz)``, shape (N, 3), the position the second
+                        wind evaluation is made at (midpoint deposition, task A2).
         """
 
         if particles.ndim != 2 or particles.shape[1] != 4:
@@ -340,6 +345,8 @@ class GPUEngine:
         xyz_new = xyz - float(dt_seconds) * v2
         out = state.clone()
         out[:, :3] = xyz_new
+        if return_midpoint:
+            return out, x_temp
         return out
 
     def update_langevin_velocity(

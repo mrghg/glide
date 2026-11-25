@@ -321,12 +321,36 @@ def _density_weighting_met_keys(cfg: RunConfig) -> tuple[str, ...]:
     return ()
 
 
+DEPOSITION_POSITION_DOC = {
+    "endpoint": (
+        "each step's residence is counted at the particle's position at the end of the "
+        "step (after advection, turbulence and convection)"
+    ),
+    "midpoint": (
+        "each step's residence is counted at the RK2 advection midpoint x - dt/2 u(x) "
+        "(the step's mid-time under the mean wind, reflected at the ground); the step's "
+        "turbulent and convective displacement is not included"
+    ),
+}
+
+
+def _deposition_attrs(cfg: RunConfig) -> dict[str, str]:
+    """Deposition settings for the footprint store attributes (task A2)."""
+
+    position = cfg.output_grid.deposition.position
+    return {
+        "deposition_position": position,
+        "deposition_position_description": DEPOSITION_POSITION_DOC[position],
+    }
+
+
 def _footprint_units_doc(cfg: RunConfig) -> dict[str, object]:
     """`footprint_units` block of run_metadata.json for the run's weighting."""
 
     weighting = cfg.output_grid.density_weighting
     doc: dict[str, object] = dict(FOOTPRINT_UNITS_DOC)
     doc.update(DENSITY_WEIGHTING_ATTRS[weighting])
+    doc.update(_deposition_attrs(cfg))
     if weighting == "dry_air":
         doc["value"] = (
             "Σ over active particles in cell of (weight_i × dt_step_seconds / rho_d,i), "
@@ -549,7 +573,10 @@ def _build_footprint_dataset_metadata(
         )
     # The weighting and units of the values (decision 0022), for downstream code
     # (e.g. `comparison.to_stilt_surface_footprint`) to read, not assume.
-    return coords, dict(DENSITY_WEIGHTING_ATTRS[cfg.output_grid.density_weighting])
+    return coords, {
+        **DENSITY_WEIGHTING_ATTRS[cfg.output_grid.density_weighting],
+        **_deposition_attrs(cfg),
+    }
 
 
 def _validate_meteorology_space_coverage(reader: MetReader, cfg: RunConfig) -> None:
@@ -1089,6 +1116,18 @@ def _advection_alpha_wind_mean(
     return alpha, wind_mean
 
 
+def _midpoint_deposition_position(x_mid: torch.Tensor) -> torch.Tensor:
+    """The RK2 predictor midpoint ``x - dt/2 * u(x)`` as a deposition position (task A2).
+
+    The predictor is not reflected at the ground, so a particle near the surface in a
+    sinking (backward: rising) flow can have a midpoint height below 0, which the
+    gridder would drop. Reflect it, as the step reflects the particle itself (z -> -z
+    for z < 0), so no residence is lost. Lon and lat are used as they are.
+    """
+
+    return torch.cat((x_mid[:, :2], x_mid[:, 2:3].abs()), dim=1)
+
+
 def _advect_active_particles(
     engine: GPUEngine,
     device: torch.device,
@@ -1098,12 +1137,16 @@ def _advect_active_particles(
     delta_s: float,
     dtype: torch.dtype,
     wind_mean_cache: dict | None = None,
+    midpoint_out: list[torch.Tensor] | None = None,
 ) -> tuple[torch.Tensor, float, torch.Tensor]:
     """RK2 backward advection on the active particle subset (dynamic / CPU path).
 
     The third return is the grid-mean (u, v, w) wind as a device tensor — NOT
     materialised to floats here, so the trajectory diagnostics can be transferred
     to the host once per batch rather than syncing every step (matters on CUDA).
+
+    ``midpoint_out``, when given, receives the RK2 predictor midpoint (N, 3) of the
+    particles advected (midpoint deposition, task A2).
     """
 
     alpha, diag_wind_mean = _advection_alpha_wind_mean(
@@ -1147,9 +1190,15 @@ def _advect_active_particles(
         out[:, 2] = v_interp[:, 2]
         return out
 
-    advected_active = engine.rk2_advect_backward(
-        active_particles, dt_seconds=delta_s, wind_fn=wind_fn
-    )
+    if midpoint_out is None:
+        advected_active = engine.rk2_advect_backward(
+            active_particles, dt_seconds=delta_s, wind_fn=wind_fn
+        )
+    else:
+        advected_active, midpoint = engine.rk2_advect_backward(
+            active_particles, dt_seconds=delta_s, wind_fn=wind_fn, return_midpoint=True
+        )
+        midpoint_out.append(midpoint)
 
     del m_start
     del m_end
@@ -1415,6 +1464,11 @@ def _run(
             compile_core=use_static and bool(getattr(engine, "_compile_requested", False)),
         )
     LOGGER.info("footprint density weighting: %s", cfg.output_grid.density_weighting)
+    # Where each step's residence is counted (task A2): the endpoint (default), or the
+    # RK2 advection midpoint, which the scheme keeps when it advects (static path).
+    deposit_midpoint = cfg.output_grid.deposition.position == "midpoint"
+    scheme.record_advection_midpoint = deposit_midpoint
+    LOGGER.info("footprint deposition position: %s", cfg.output_grid.deposition.position)
     if use_static:
         LOGGER.info("runtime: static-shape per-step path (full-set, mask-gated)")
     _start_mem_history(device)
@@ -1659,6 +1713,7 @@ def _run(
                 t_alpha, wind_mean = _advection_alpha_wind_mean(
                     met_window, t_cursor, delta_s, device, particles.dtype, wind_mean_cache
                 )
+                midpoint_out: list[torch.Tensor] | None = [] if deposit_midpoint else None
                 if not scheme.step_includes_advection(engine):
                     with phase_timer.phase("advect"):
                         advected_full = _advect_active_particles(
@@ -1670,6 +1725,7 @@ def _run(
                             delta_s,
                             particles.dtype,
                             wind_mean_cache=wind_mean_cache,
+                            midpoint_out=midpoint_out,
                         )[0]
                         particles = torch.where(active_mask.unsqueeze(1), advected_full, particles)
                 with phase_timer.phase("step"):
@@ -1704,15 +1760,21 @@ def _run(
                 if gridder.n_t == 1:
                     t_idx.clamp_(max=0)
                 with phase_timer.phase("gridder"):
+                    if deposit_midpoint:
+                        deposit_xyz = _midpoint_deposition_position(
+                            midpoint_out[0] if midpoint_out else scheme.advection_midpoint
+                        )
+                    else:
+                        deposit_xyz = particles[:, :3]
                     inv_density = (
                         None
                         if particle_density is None
                         else particle_density.inverse_density(
-                            particles[:, :3], met_window, t_alpha, engine
+                            deposit_xyz, met_window, t_alpha, engine
                         )
                     )
                     gridder.accumulate(
-                        particles=particles[:, :3],
+                        particles=deposit_xyz,
                         active_mask=active_mask,
                         weights=particles[:, 3],
                         t_idx=t_idx,
@@ -1735,6 +1797,7 @@ def _run(
                     hour_windows += fetched_windows
                     if fetched_windows:
                         phase_timer.tick_fetch()
+                    midpoint_out = [] if deposit_midpoint else None
                     advected_active, t_alpha, wind_mean = _advect_active_particles(
                         engine,
                         device,
@@ -1744,7 +1807,13 @@ def _run(
                         delta_s,
                         particles.dtype,
                         wind_mean_cache=wind_mean_cache,
+                        midpoint_out=midpoint_out,
                     )
+                    if deposit_midpoint:
+                        # Full-buffer deposition positions; inactive rows are never
+                        # counted (the gridder masks them), so their value is moot.
+                        deposit_xyz = particles[:, :3].clone()
+                        deposit_xyz[active_mask] = _midpoint_deposition_position(midpoint_out[0])
                     particles[active_mask] = advected_active
 
                     particles, turbulence_state = scheme.step(
@@ -1787,15 +1856,17 @@ def _run(
                     # (clamping them into the last bin would contradict time_ago_end_hours).
                     if gridder.n_t == 1:
                         t_idx.clamp_(max=0)
+                    if not deposit_midpoint:
+                        deposit_xyz = particles[:, :3]
                     inv_density = (
                         None
                         if particle_density is None
                         else particle_density.inverse_density(
-                            particles[:, :3], met_window, t_alpha, engine
+                            deposit_xyz, met_window, t_alpha, engine
                         )
                     )
                     gridder.accumulate(
-                        particles=particles[:, :3],
+                        particles=deposit_xyz,
                         active_mask=active_mask,
                         weights=particles[:, 3],
                         t_idx=t_idx,

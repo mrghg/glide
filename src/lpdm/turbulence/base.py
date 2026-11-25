@@ -28,6 +28,13 @@ class TurbulenceScheme(ABC):
 
     name: ClassVar[str]
 
+    # Midpoint deposition (task A2). When the runtime sets `record_advection_midpoint`
+    # and `step` performs the advection itself (`step_includes_advection`), `step`
+    # leaves the RK2 predictor midpoint of every particle, (N, 3), in
+    # `advection_midpoint`. Schemes that never advect ignore both.
+    record_advection_midpoint: bool = False
+    advection_midpoint: torch.Tensor | None = None
+
     @abstractmethod
     def required_met_keys(self) -> tuple[str, ...]:
         """Logical met-variable keys this scheme reads from `HourlyMetTensors`.

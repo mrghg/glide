@@ -211,3 +211,139 @@ def test_stilt_conversion_scales_raw_footprint_exactly(plume: dict) -> None:
     )
     expected = plume["raw"] * m_air / (H_SURF * rho)
     assert np.allclose(stilt.values, expected, rtol=1e-12, atol=0.0)
+
+
+# ---------------------------------------------------------------------------
+# Deposition position (task A2, [PR-F4]): endpoint vs RK2 midpoint
+# ---------------------------------------------------------------------------
+
+POS_N_PART = 50_000
+POS_DX_M = 500.0  # 100 s of travel: a whole number of steps at DT and at 4 DT
+POS_NX = 41
+POS_X0_M = -POS_NX * POS_DX_M
+POS_T_END = N_STEPS * DT
+
+
+def _surface_columns_by_position(dt: float, seed: int) -> dict[str, np.ndarray]:
+    """One backward plume at step `dt`, deposited at both positions from the SAME
+    particles (paired, so the comparison is not swamped by particle noise). Returns
+    the crosswind-integrated surface-layer residence per along-wind cell."""
+
+    from lpdm.main import _midpoint_deposition_position
+
+    torch.manual_seed(seed)
+    engine = GPUEngine(device="cpu", dtype=torch.float64)
+    gridders = {
+        position: FootprintGridder(
+            lon_bounds=(POS_X0_M / M_PER_DEG_LON, (POS_X0_M + POS_NX * POS_DX_M) / M_PER_DEG_LON),
+            lat_bounds=(Y0_M / M_PER_DEG_LAT, (Y0_M + NY * DY_M) / M_PER_DEG_LAT),
+            z_edges_m=(0.0, H_SURF, 10000.0),
+            n_time_bins=1,
+            n_y=NY,
+            n_x=POS_NX,
+            device="cpu",
+            dtype=torch.float64,
+        )
+        for position in ("endpoint", "midpoint")
+    }
+    n = POS_N_PART
+    particles = torch.zeros((n, 4), dtype=torch.float64)
+    particles[:, 2] = Z_R
+    particles[:, 3] = 1.0 / n
+    sigma = math.sqrt(SIGMA2)
+    v_prime = torch.randn(n, dtype=torch.float64) * sigma
+    w_prime = torch.randn(n, dtype=torch.float64) * sigma
+    u_zero = torch.zeros(n, dtype=torch.float64)
+    zeros_idx = torch.zeros(n, dtype=torch.int64)
+    active = torch.ones(n, dtype=torch.bool)
+
+    def wind_fn(xyz: torch.Tensor) -> torch.Tensor:
+        out = torch.zeros_like(xyz)
+        out[:, 0] = U_MS / M_PER_DEG_LON
+        return out
+
+    for _ in range(int(round(POS_T_END / dt))):
+        particles, x_mid = engine.rk2_advect_backward(
+            particles, dt_seconds=dt, wind_fn=wind_fn, return_midpoint=True
+        )
+        v_prime = engine.update_langevin_velocity(
+            v_prime, t_lagrangian=T_L, sigma_w2=SIGMA2, dt_seconds=dt
+        )
+        w_prime = engine.update_langevin_velocity(
+            w_prime, t_lagrangian=T_L, sigma_w2=SIGMA2, dt_seconds=dt
+        )
+        particles = engine.apply_horizontal_turbulence(
+            particles, u_zero, v_prime, dt_seconds=dt, backward=True
+        )
+        particles = engine.apply_vertical_turbulence(
+            particles, w_prime, dt_seconds=dt, backward=True
+        )
+        particles, w_prime = engine.reflect_surface(particles, w_prime, z_surface=0.0)
+        positions = {
+            "endpoint": particles[:, :3],
+            "midpoint": _midpoint_deposition_position(x_mid),
+        }
+        for position, gridder in gridders.items():
+            gridder.accumulate(
+                particles=positions[position],
+                active_mask=active,
+                weights=particles[:, 3],
+                t_idx=zeros_idx,
+                release_idx=zeros_idx,
+                dt_seconds=dt,
+            )
+    return {p: g.tensor[0, 0, 0].numpy().sum(axis=0) for p, g in gridders.items()}
+
+
+def _analytic_surface_columns() -> np.ndarray:
+    """Crosswind-integrated surface residence per along-wind cell, integrated over the
+    cell in x (travel time) by a fine trapezoid, so it carries no quadrature error of
+    its own at this resolution."""
+
+    edges = np.arange(POS_NX + 1) * POS_DX_M + POS_X0_M
+    out = np.zeros(POS_NX)
+    for j in range(POS_NX):
+        lo, hi = edges[j], min(edges[j + 1], 0.0)
+        if lo >= 0.0:
+            continue
+        xs = np.linspace(lo, hi, 2001)
+        s_z = np.array([_taylor_sigma(max(-x / U_MS, 1e-6)) for x in xs])
+        s_z = np.maximum(s_z, 1e-9)
+        p_z = (ndtr((H_SURF - Z_R) / s_z) - ndtr(-Z_R / s_z)) + (
+            ndtr((H_SURF + Z_R) / s_z) - ndtr(Z_R / s_z)
+        )
+        out[j] = np.trapezoid(p_z, xs) / U_MS
+    return out
+
+
+def _position_test_columns(analytic: np.ndarray) -> np.ndarray:
+    """Cells upwind of the receptor that the simulation covers completely (the
+    farthest cell's upwind edge lies beyond the distance travelled, U x T)."""
+
+    lower_edges = np.arange(POS_NX) * POS_DX_M + POS_X0_M
+    return np.where((analytic > 0) & (lower_edges >= -U_MS * POS_T_END))[0]
+
+
+def test_midpoint_deposition_no_worse_at_dt_and_better_at_4dt() -> None:
+    """A2 acceptance ([PR-F4]): the mean relative error of the crosswind-integrated
+    surface footprint, against the cell-integrated analytic plume, is no larger with
+    `midpoint` deposition than with `endpoint` at the reference step DT, and smaller at
+    4 DT. Observed (25 Nov 2026, 50,000 particles, seeds 9021 / 1234 / 7): at DT
+    endpoint 0.0099 / 0.0133 / 0.0117, midpoint 0.0070 / 0.0086 / 0.0086; at 4 DT
+    endpoint 0.0262 / 0.0271 / 0.0233, midpoint 0.0132 / 0.0121 / 0.0111. In the near
+    field alone (travel time < 2 T_L) midpoint is clearly better at 4 DT (0.067-0.075
+    against 0.082-0.091) but not at DT (0.018-0.026 against 0.015-0.021): the RK2
+    midpoint carries the step's along-wind motion but not its turbulent displacement,
+    so its height is the step's starting height."""
+
+    analytic = _analytic_surface_columns()
+    cols = _position_test_columns(analytic)
+    errors = {}
+    for factor in (1, 4):
+        got = _surface_columns_by_position(DT * factor, seed=9021)
+        errors[factor] = {
+            p: float(np.mean(np.abs(v[cols] - analytic[cols]) / analytic[cols]))
+            for p, v in got.items()
+        }
+    assert errors[1]["midpoint"] <= errors[1]["endpoint"], errors
+    assert errors[4]["midpoint"] < 0.75 * errors[4]["endpoint"], errors
