@@ -92,5 +92,11 @@ def test_table_parses_and_rows_add_up_to_wall() -> None:
     assert set(names) == {"setup", "step", "loop_overhead", "(residual/untimed)"}
     total = sum(p["total_s"] for p in parsed["phases"])
     assert total == pytest.approx(parsed["total_wall_s"], abs=0.02)
-    # Inclusive totals are printed after the table, not parsed as rows.
+    # Inclusive totals are printed after the table and parsed apart from the rows.
     assert "loop_overhead (incl.)" in text
+    assert [p["phase"] for p in parsed["inclusive"]] == ["loop_overhead"]
+    step = next(p for p in parsed["phases"] if p["phase"] == "step")
+    own = next(p for p in parsed["phases"] if p["phase"] == "loop_overhead")
+    assert parsed["inclusive"][0]["total_s"] == pytest.approx(
+        own["total_s"] + step["total_s"], abs=0.011
+    )

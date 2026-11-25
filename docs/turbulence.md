@@ -501,7 +501,9 @@ turbulence:
 is a **fixed** per-step iteration count rather than a cap, so every particle pays
 it — the default of 50 in code is far more than the $T_L$ floors require, and the
 shipped configs set 6. Raise it only if you lower `simulation.dt_seconds` or
-`substep_c`, or turn the floors off.
+`substep_c`, or turn the floors off. Whether the cap bound is recorded for
+every run, on both paths, in `run_metadata.json` under
+`runtime.substep_saturation` ([physics.md](physics.md), sub-stepping).
 
 **Extra meteorology required by `hanna_1982`:**
 

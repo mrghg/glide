@@ -29,6 +29,10 @@ import golden_common as gc  # noqa: E402
 _HEADER = re.compile(
     r"GLIDE phase timers\s+\S\s+total wall\s+(?P<wall>[\d.]+)s\s+\(met fetches:\s*(?P<fetches>\d+)\)"
 )
+_INCL_ROW = re.compile(
+    r"^\s+(?P<name>\S+) \(incl\.\)\s+(?P<total>-?[\d.]+)\s+(?P<pct>-?[\d.]+)%"
+    r"(?:\s+(?P<calls>\d+)\s+(?P<ms>[\d.]+))?\s*$"
+)
 _ROW = re.compile(
     r"^\s+(?P<name>\S+)\s+(?P<total>-?[\d.]+)\s+(?P<pct>-?[\d.]+)%"
     r"(?:\s+(?P<calls>\d+)\s+(?P<ms>[\d.]+))?\s*$"
@@ -50,22 +54,33 @@ def parse_phase_table(text: str) -> dict | None:
         "met_fetches": int(m.group("fetches")),
         "gpu_synced": "no CUDA sync" not in lines[start],
         "phases": [],
+        "inclusive": [],
     }
-    for line in lines[start + 1 :]:
-        if line.startswith("=="):
+
+    def row(r: re.Match) -> dict:
+        return {
+            "phase": r.group("name"),
+            "total_s": float(r.group("total")),
+            "pct_wall": float(r.group("pct")),
+            "calls": int(r.group("calls")) if r.group("calls") else None,
+            "ms_per_call": float(r.group("ms")) if r.group("ms") else None,
+        }
+
+    end = len(lines)
+    for i in range(start + 1, len(lines)):
+        if lines[i].startswith("=="):
+            end = i
             break
-        r = _ROW.match(line)
-        if not r or r.group("name") == "phase":
-            continue
-        table["phases"].append(
-            {
-                "phase": r.group("name"),
-                "total_s": float(r.group("total")),
-                "pct_wall": float(r.group("pct")),
-                "calls": int(r.group("calls")) if r.group("calls") else None,
-                "ms_per_call": float(r.group("ms")) if r.group("ms") else None,
-            }
-        )
+        r = _ROW.match(lines[i])
+        if r and r.group("name") != "phase":
+            table["phases"].append(row(r))
+    # Phases with sub-phases: their inclusive totals follow the table (lpdm.phase_timers).
+    if end + 1 < len(lines) and lines[end + 1].startswith("Inclusive totals"):
+        for line in lines[end + 2 :]:
+            r = _INCL_ROW.match(line)
+            if not r:
+                break
+            table["inclusive"].append(row(r))
     return table
 
 
@@ -156,6 +171,19 @@ def to_markdown(s: dict, title: str = "GLIDE benchmark") -> str:
         lines.append(
             f"| {ph['phase']} | {ph['total_s']:.2f} | {ph['pct_wall']:.1f} | {calls} | {ms} |"
         )
+    if t.get("inclusive"):
+        lines.append("")
+        lines.append("Each row is the phase's own time (its sub-phases are rows of their own).")
+        lines.append("Inclusive totals of the phases that have sub-phases:")
+        lines.append("")
+        lines.append("| phase (with sub-phases) | total (s) | % wall | calls | ms/call |")
+        lines.append("| --- | ---: | ---: | ---: | ---: |")
+        for ph in t["inclusive"]:
+            calls = "" if ph["calls"] is None else str(ph["calls"])
+            ms = "" if ph["ms_per_call"] is None else f"{ph['ms_per_call']:.3f}"
+            lines.append(
+                f"| {ph['phase']} | {ph['total_s']:.2f} | {ph['pct_wall']:.1f} | {calls} | {ms} |"
+            )
     return "\n".join(lines) + "\n"
 
 
