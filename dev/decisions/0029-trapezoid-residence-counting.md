@@ -64,6 +64,9 @@ indicator: score the rules against fine-time residence on the same trajectories.
 
   Plain residence seconds (no density) give the same numbers to 0.04 points
   (`tables/scores_smoke_u.md`).
+  The same release at 12 UTC (daytime, 3 seeds, `tables/scores_smokeday_w.md`):
+  receptor cell −7.69% / +0.59% / −0.28%, 0–40 m total −0.60% / −0.48% / −0.02%,
+  rings within ±0.06% for `trapezoid`, −0.1 to −1.4% for `step_mean`.
 - *Measured, synthetic Hanna plumes* (production step, 10 m release, 25 km
   cells, 8 m s⁻¹, 6 h, 3 seeds; `tables/scores_synth_w.md`): receptor cell
   `endpoint` −2.7% (stable) to −11.0% (convective), `step_mean` −9.8% to +0.7%,

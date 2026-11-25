@@ -904,7 +904,10 @@ three seeds, 0–40 m unless stated, mean over seeds; the s.d. over seeds is
 
 (Rings are Chebyshev distances in cells from the receptor's cell; "first hour" is
 the first hourly time-ago bin; the L1 error is Σ|rule − reference| over the
-0–40 m cells divided by the reference's 0–40 m total.)
+0–40 m cells divided by the reference's 0–40 m total.) The same release at 12 UTC
+(daytime; `tables/scores_smokeday_w.md`, three seeds): `endpoint` −7.69% in the
+receptor's cell and −0.60% in total, `step_mean` +0.59% and −0.1 to −1.4% in the
+rings, `trapezoid` −0.28% and within ±0.06% elsewhere (L1 0.88 / 0.80 / 0.28%).
 
 - `endpoint` misses about one step of release residence in the receptor's cell
   and is unbiased elsewhere. The right-rectangle rule on the sub-step positions
