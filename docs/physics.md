@@ -343,10 +343,19 @@ systematically under-drifts freshly released particles, whose $w'$ is still near
 zero — a real bug caught by `test_hanna_well_mixed_no_runaway_lofting`.
 
 $\partial\sigma_w^2/\partial z$ is a central finite difference (±1 m) of the
-**fully assembled** $\sigma_w$ profile, so it spans the seams between regimes —
-boundary layer, optional surface layer, free troposphere — rather than
-differentiating one branch in isolation. This is what keeps the well-mixed
-condition intact across a regime boundary.
+assembled $\sigma_w$ profile **on the particle's own side of the
+boundary-layer top** $h$: below $h$ the boundary-layer profile (with the
+optional surface layer), above it the free-troposphere closure. Within 1 m of
+$h$ the stencil stops at $h$ and evaluates that side's profile there
+(decision 0028). $\sigma_w$ jumps at $h$ (in a convective boundary layer from
+about 0.7 to 0.05 m s⁻¹), and the drift must not difference the jump: a
+stencil straddling it turns the jump into a drift of order
+$(\sigma_{BL}^2 - \sigma_{FT}^2)/(2\delta)$ on the particles within $\delta$ of
+$h$. Until decision 0028 the stencil did straddle it, and in a column started
+uniform the 50 m above $h$ ended up holding from 0.4 to 11.5 times its share,
+depending on the sub-step. The jump is handled instead by the interface rule
+of §5. (The optional surface layer's seam at $0.1h$ is still differenced
+across; it is off by default.)
 
 **The density term** exists because the well-mixed condition is enforced in
 Cartesian $z$, but the equilibrium distribution of air is $\propto \rho(z)$. Over
@@ -484,6 +493,41 @@ opposite of the "artificial unattainability" schemes that clamp particles to
 $z = 0$ or restrict $\Delta t$ to prevent crossings; those always violate the
 well-mixed condition, and GLIDE contains none of them.
 
+**The boundary-layer top: an interface** (decision 0028). At $h$ the
+turbulence switches from the boundary-layer profile to the free-troposphere
+closure, and $\sigma_w$, $\sigma_{u,v}$ and $T_L$ jump. GLIDE treats $h$ as an
+interface after Thomson, Physick & Maryon (1997). Inside every sub-step, after
+the displacement and before the ground reflection, a particle whose
+displacement crossed $h$ from side $A$ to side $B$ is
+
+- **transmitted** with probability $\min(1, \sigma_{wB}/\sigma_{wA})$, with
+  $w'$ scaled by $\sigma_{wB}/\sigma_{wA}$, $u'$ and $v'$ by their own ratios,
+  and the part of the displacement beyond $h$ by $\sigma_{wB}/\sigma_{wA}$ (the
+  rest of the sub-step flown at the new speed);
+- otherwise **reflected**: $z \to 2h - z$, $w' \to -w'$.
+
+$\sigma_A$ and $\sigma_B$ are the one-sided limits at $h$: the boundary-layer
+profile at $h$ and the closure at $h$, evaluated once per outer step from the
+particle's column. The transmission probabilities balance the flux through $h$
+in each direction in a well-mixed state ($\alpha_{AB}\sigma_A = \alpha_{BA}\sigma_B$),
+and the scaling maps the flux-weighted velocity distribution of one side onto
+the other's, so a uniform column stays uniform for any sub-step when $\sigma$
+is constant on each side; the derivation is in decision 0028. The rule depends
+only on the direction of the displacement and on $|w'|$, so the backward model
+(which is the forward model written for $-w'$, §4) uses it unchanged. Air
+density is continuous at $h$, so TPM's density factor is 1.
+
+Between outer steps $h$ moves (time interpolation of the meteorology, advection
+into another column) and a particle can find itself on the other side without
+having crossed. It is neither transmitted nor reflected. Instead every
+particle's $u'$, $v'$, $w'$ are scaled at the start of each step by $\sigma$ at
+its position now over $\sigma$ at its position at the end of its last step,
+with that step's meteorology (`sigma_last` in the scheme state). This is the
+exact integral of the nonstationary term $(w'/2\sigma_w^2)\,\partial_t\sigma_w^2$
+of the Gaussian well-mixed drift (Thomson 1987) over the change between steps;
+it also covers changes of regime, $u_\ast$ or $w_\ast$ and convective
+redistribution. In a steady column the ratio is 1 to within $10^{-4}$.
+
 **Domain edges: drop and count.** A particle leaving the horizontal `met_domain`
 bounding box, or rising above `met_domain.alt_max_m`, has no valid meteorology —
 the coordinate normalisation would clamp it to the grid edge and it would be
@@ -582,52 +626,68 @@ its well-mixed share (WM investigation, `outputs/agents/WM/`, 2026-11-25):
 
 **Choosing $n$.** The target is the well-mixed share within ±0.05 in the
 lowest 5% of the boundary layer and in the 0–40 m layer where footprints are
-counted, after particle noise. Measured on B7's three regimes (§3 of
-`outputs/agents/WM/SUBSTEPPING-SUMMARY.md`) with the boundary-layer top a
-reflecting lid applied inside every sub-step, $\Delta t = 60$ s, 20,000
-particles, 5 seeds, records every 15 min from 2 to 6 h
-(`scripts/validation/wm_near_surface/fixcount_study.py`; tables in
-`outputs/agents/WM/fixcount/study/tables.md`). Mean over seeds ± its standard
-error; the seed-to-seed standard deviation is 0.001–0.02:
+counted, after particle noise. Measured on B7's three regimes with the
+boundary-layer top a reflecting lid applied inside every sub-step (the lid
+replaces the interface of §5 there), $\Delta t = 60$ s, 20,000 particles,
+5 seeds, records every 15 min from 2 to 6 h
+(`scripts/validation/wm_near_surface/interface_study.py`, harness `closed`;
+`outputs/agents/WM/interface/study/tables.md`, code of decision 0028). Mean over
+seeds; standard errors 0.002–0.008, seed standard deviation 0.002–0.017:
 
 | | stable ($h$ 400 m, $H$ −20 W m⁻²) | neutral ($h$ 1,500 m, $u_\ast$ 0.4 m s⁻¹) | convective ($h$ 1,500 m, $H$ +200 W m⁻²) |
 | --- | --- | --- | --- |
 | before decision 0027 (cap 6) | 1.787 / 1.750 | 1.660 / 1.788 | 0.965 / 0.905 |
-| $n = 4$ (15 s) | 1.156 / 1.141 | 1.038 / 1.043 | 0.882 / 0.815 |
-| $n = 8$ (7.5 s) | 1.074 / 1.064 | 1.018 / 1.018 | 0.970 / 0.940 |
-| **$n = 16$ (3.75 s)** | **1.035 / 1.035** | **1.006 / 1.008** | **0.994 / 0.987** |
-| $\Delta t$ = 1.875 s | 1.017 / 1.018 | 1.004 / 1.010 | 0.997 / 0.993 |
-| $\Delta t$ = 0.9375 s (3 seeds) | 1.001 / 1.007 | 0.994 / 0.993 | 0.978 / 0.982 |
+| $n = 4$ (15 s) | 1.160 / 1.145 | 1.024 / 1.028 | 0.850 / 0.787 |
+| $n = 8$ (7.5 s) | 1.078 / 1.068 | 1.011 / 1.009 | 0.938 / 0.910 |
+| **$n = 16$ (3.75 s)** | **1.039 / 1.040** | **1.004 / 1.007** | **0.971 / 0.964** |
+| $n = 32$ (1.875 s) | 1.021 / 1.022 | 1.006 / 1.009 | 0.987 / 0.983 |
 
-(lowest 5% / 0–40 m; standard errors 0.001–0.008.) Only $n = 16$ meets the
-target in every regime: $n = 8$ leaves the stable lowest 5% at +0.074 ± 0.005
-and the convective 0–40 m at −0.060 ± 0.006. The error is first order in
-$\Delta t_{\mathrm{sub}}$, positive where $\sigma_w$ falls with height (stable)
-and negative where it rises near the ground (convective), as Wilson & Flesch
-(1993) predict. The two finer references agree with each other and with 1 to
-within 0.025, so they are converged at that level. In this column, without mean
-wind, 16 sub-steps of a 60 s step and 16 outer steps of 3.75 s are nearly the
-same calculation; seed by seed they agree to within 0.003.
+(lowest 5% / 0–40 m.) $n = 16$ is the smallest count that meets the target in
+every regime: $n = 8$ leaves the stable lowest 5% at +0.078 ± 0.005 and the
+convective 0–40 m at −0.090 ± 0.007. The error is first order in
+$\Delta t_{\mathrm{sub}}$ (it roughly halves from $n = 16$ to 32), positive where
+$\sigma_w$ falls with height (stable) and negative where it rises near the
+ground (convective), as Wilson & Flesch (1993) predict. Decision 0027 first
+reported smaller convective errors (0.994 / 0.987 at $n = 16$): those runs used
+the drift stencil that straddled $h$, which in this closed column acts at the
+lid. With only the stencil reverted to the straddling one, this code gives
+0.994 / 0.987 (convective, $n = 16$) and 0.971 / 0.940 ($n = 8$) again (5 seeds,
+`study/closed_nostencil.jsonl`), so the stencil alone accounts for the change.
+That it does so by adding a spurious drift at the lid that depletes the top of
+the column, and with it raises every other level, is argued, not measured.
 
-With an **open top** (no lid; above $h$ a stably stratified free troposphere,
-$N$ = 0.015 s⁻¹, no wind, so $K_z$ is the closure's 0.1 m² s⁻¹ floor), the
-stable and neutral columns behave as the closed one (stable +0.017 ± 0.009,
-neutral −0.003 ± 0.008 against $\Delta t$ = 1.875 s at $n = 16$). The
-convective column does not converge at any practical sub-step: the share of
-particles still in the boundary layer after 2–6 h is 0.45, 0.60 and 0.75 at
-$n$ = 4, 8 and 16, 0.94 at $\Delta t$ = 1.875 s and 1.00 at 0.9375 s, while the
-occupancy of the lowest 5% *of the particles in the boundary layer* is within
-0.05 of the reference at $n \ge 8$. Particles cross into the free troposphere
-too easily when a sub-step's displacement is large compared with the
-finite-difference step $\delta$ = 1 m over which the well-mixed drift sees the
-jump of $\sigma_w$ at $h$: with only $\delta$ changed to 10 m, the share still
-in the boundary layer is 0.998 at $n = 8$ and 0.999 at $n = 16$ (3 seeds,
-`outputs/agents/WM/fixcount/study/open_fd10.jsonl`). The code before this
-decision lost far more: 0.33 (convective) and 0.79 (neutral) of the particles
-were still in the boundary layer (3 seeds, `study/old_open.jsonl`), so the
-change also keeps more particles in a convective or neutral boundary layer. How
-GLIDE treats the boundary-layer top is outside this decision and is listed in
-§8.
+**The boundary-layer top** (decision 0028; harnesses `open2h`, `openbl`,
+`hvar`, same column, above $h$ a stably stratified free troposphere,
+$N$ = 0.015 s⁻¹, no wind, so $K_z$ is the closure's 0.1 m² s⁻¹ floor):
+
+- *Uniform in $[0, 2h]$, lid at $2h$.* The exact answer is uniform. With the
+  interface, each of the bands $h - 200$ … $h - 50$, $h - 50$ … $h$,
+  $h$ … $h + 50$ and $h + 50$ … $h + 200$ m holds 0.94–1.03 of its share at
+  $n$ = 8, 16 and 32 in all three regimes (5 seeds; the stable
+  residual below and just above $h$, −0.056, −0.033, −0.016 in $h - 50$ … $h$
+  at $n$ = 8, 16, 32, falls with the sub-step like the near-surface error, and
+  the 10 m just above $h$ follow the concentration just below, as a consistent
+  interface should). Before (PR #69 head) the 50 m above $h$ held 11.5, 9.0,
+  6.0, 1.8 and 0.44 times its share in the convective column at $n$ = 4, 8,
+  16, 32 and 64 (trapped above $h$ at long sub-steps, pumped down at short
+  ones), 3.3 to 0.39 in the neutral column, 0.96–1.12 in the stable one; main
+  was worse (convective 9.9, neutral 4.6, stable 0.53).
+- *Uniform in $[0, h]$, open top.* After 2–6 h, 0.974–0.976 of the particles
+  are still in a convective or neutral boundary layer at every $n$ from 4 to
+  32, within 0.003 of the diffusion limit (0.973, from
+  $\partial_t c = \partial_z(K\partial_z c)$ with the scheme's own
+  $K = \sigma_w^2 T_{Lw}$, `interface_diffusion_limit.py`). The stable boundary
+  layer keeps 0.992–0.995, more than the diffusion limit's 0.93, which does not
+  apply there ($T_{Lw}$ grows without bound as $\sigma_w \to 0$ at $h$).
+- *$h$ moving* (a triangle wave between 0.75 and 1.25 $h_0$, 2-h period).
+  Without carrying $u'/\sigma$ across steps the 10 m below $h$ held 1.20
+  (neutral), 1.15 (convective) and 0.87 (stable) of their share; with it, all
+  bands are within 0.016 of 1 (3 seeds, $n = 16$).
+
+The PR #69 code's own "fine-step reference" for the open top (all particles
+still in the boundary layer at a 0.9375 s step) was therefore biased, and its
+10 m finite-difference probe reversed the bias rather than removing it (in
+the uniform column the 50 m above $h$ then held 0.33 of its share, 3 seeds).
 
 **The basal clamp.** Below $z_{\mathrm{ubl}}$ (§5) every coefficient is
 sampled at $z_{\mathrm{ubl}}$, so the profile the particle sees is flat there.
@@ -812,8 +872,8 @@ Stated plainly, because they bound what the model can be trusted for.
 | Approximation | Consequence |
 | --- | --- |
 | Gaussian vertical velocity PDF everywhere — no skewed convective-boundary-layer PDF | Under-represents the updraft/downdraft asymmetry of a strongly convective BL. Thomson (1987, §5.2) found ground-level concentration relatively insensitive to skewness even where dispersion aloft is sensitive, so this is defensible for a surface-flux footprint model — but it is a modelling choice, not a free lunch. |
-| A fixed sub-step count, $n = 16$ at $\Delta t = 60$ s (3.75 s) | Near-surface well-mixed error, closed boundary layer: +3.5% (stable), +0.6% (neutral), −0.6% / −1.3% (convective, lowest 5% / 0–40 m), particle noise about ±1% (§6). In the free troposphere $T_{Lw}$ can fall below the sub-step; how often is recorded per run (`runtime.substep_exceedance`). |
-| The boundary-layer top is a jump of $\sigma_w$ and $T_{Lw}$ to the free-troposphere closure, seen by the drift through a 1 m finite difference | Too many particles cross from a convective boundary layer into a quiescent free troposphere at practical sub-steps: in a synthetic column, 25% of them after 2–6 h at $n = 16$ against 6% at $\Delta t$ = 1.875 s and none at 0.9375 s (§6). Stable and neutral columns are unaffected. On the reference multi-site run the 0–40 m footprint is not converged in the sub-step count (−28% to +81% against the old code for $n$ = 4 to 32, §6). Not yet treated; to be decided before the freeze. |
+| A fixed sub-step count, $n = 16$ at $\Delta t = 60$ s (3.75 s) | Near-surface well-mixed error, closed boundary layer: +3.9% / +4.0% (stable, lowest 5% / 0–40 m), +0.4% / +0.7% (neutral), −2.9% / −3.6% (convective), particle noise about ±1% (§6); the same first-order error leaves the top 50 m of a stable boundary layer 3% short. In the free troposphere $T_{Lw}$ can fall below the sub-step; how often is recorded per run (`runtime.substep_exceedance`). |
+| The boundary-layer top is a jump of $\sigma_w$ and $T_{Lw}$ to the free-troposphere closure, treated as a Thomson–Physick–Maryon interface (§5, decision 0028) | Well-mixed-consistent for any sub-step if $\sigma$ were constant on each side; the interface does not smooth the jump, which is a property of the two parameterisations, not of the atmosphere. $h$ is fixed per particle within an outer step. Horizontal velocities are scaled on transmission like $w'$. The optional surface layer's seam at $0.1h$ is not treated as an interface. |
 | Turbulence support fields ($\rho$, free-troposphere $\sigma/T_L$, meander $\sigma$) built once per meteorology hour at the window midpoint | A met-cadence approximation (<1%/hr drift), matching how FLEXPART-class models refresh turbulence fields. Per-particle interpolation through those fields is unchanged. |
 | Deep convection assigns each particle to the nearest meteorology column | Each (lon, lat) column has its own parcel lift, trigger and matrix (task A02), fired once per meteorology interval read from the store. A particle near a column boundary takes the nearest column's matrix rather than a blend. See [convection.md](convection.md) §1 and §7. |
 | Initial $u', v', w' = 0$ rather than sampled from the local $\sigma$ | Particles equilibrate within one $T_L$ (typically ~100 s), which is shorter than the release window. |
@@ -846,6 +906,10 @@ real atmosphere. See [VALIDATION.md](VALIDATION.md) and
   Soc.* 20, 196–212.
 - Thomson, D. J. (1987). Criteria for the selection of stochastic models of
   particle trajectories in turbulent flows. *J. Fluid Mech.* 180, 529–556.
+- Thomson, D. J., Physick, W. L., Maryon, R. H. (1997). Treatment of interfaces
+  in random walk dispersion models. *J. Appl. Meteor.* 36, 1284–1295. (Not
+  read for decision 0028; the scheme was taken from STILT's implementation of
+  it, which cites it.)
 - Wilson, J. D., Flesch, T. K. (1993). Flow boundaries in random-flight
   dispersion models: enforcing the well-mixed condition. *J. Appl. Meteor.* 32,
   1695–1707.

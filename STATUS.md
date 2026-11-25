@@ -16,7 +16,7 @@ _Last updated: 2026-11-25._
 
 | Area | State |
 | --- | --- |
-| **Core backward LPDM** | RK2 advection, exact-OU Langevin turbulence with the full Thomson well-mixed drift and Stohl–Thomson density correction, ground reflection, turbulence sub-stepping with one fixed count for every particle (16 at the 60 s step), every coefficient re-evaluated each sub-step (decision 0027). Mass-conserving. ([docs/physics.md](docs/physics.md)) |
+| **Core backward LPDM** | RK2 advection, exact-OU Langevin turbulence with the full Thomson well-mixed drift and Stohl–Thomson density correction, ground reflection, turbulence sub-stepping with one fixed count for every particle (16 at the 60 s step), every coefficient re-evaluated each sub-step (decision 0027); the boundary-layer top treated as a Thomson–Physick–Maryon interface (decision 0028). Mass-conserving. ([docs/physics.md](docs/physics.md)) |
 | **Turbulence** | Hanna (1982) in three regimes, aligned to FLEXPART v11; gradient-Richardson free-troposphere closure; Maryon meander. Behind a swappable `TurbulenceScheme` interface. ([docs/turbulence.md](docs/turbulence.md)) |
 | **Convection** | Reduced Emanuel mass-flux scheme, non-divergent matrix, in each meteorology column, once per meteorology interval. ([docs/convection.md](docs/convection.md)) |
 | **Terrain-following vertical coordinate** | Meteorology resampled onto a fixed AGL grid per window, with slope-corrected vertical velocity. Fixed the zero-surface-footprint problem over high terrain. |
@@ -180,19 +180,23 @@ relevant docs page with its consequence.
   particles in the lowest 5% of neutral and stable boundary layers, in every
   footprint made so far, the golden fixtures included. One fixed count for
   every particle, 16 at the 60 s step, with every coefficient re-evaluated each
-  sub-step, brings all three regimes within 0.035 of 1 in the lowest 5% and in
+  sub-step, brings all three regimes within 0.04 of 1 in the lowest 5% and in
   0–40 m ([docs/physics.md](docs/physics.md) §6). The golden fixtures are not
   yet regenerated (planned once, after the A2 residence-counting decision).
-- **The boundary-layer top under convection.** With an open top into a
-  quiescent free troposphere, a convective boundary layer loses 25% of its
-  particles in 2–6 h at 16 sub-steps, against none at a 0.94 s step: the
-  well-mixed drift sees the jump of $\sigma_w$ at $h$ only through a 1 m
-  finite difference (physics.md §6 and §8). On the reference multi-site run
-  the 0–40 m footprint moves by −28%, −16%, +15% and +81% (median over
-  releases, against the old code) at 4, 8, 16 and 32 sub-steps, with less time spent above
-  the boundary layer as the count grows: real footprints are not yet
-  converged in the sub-step, and the boundary-layer top is the likely reason.
-  To be settled before the freeze, and the fixtures regenerated after it.
+- **The boundary-layer top: fixed (decision 0028).** $\sigma_w$ jumps at $h$
+  between the boundary-layer profile and the free-troposphere closure. The
+  drift's ±1 m finite difference straddled the jump and a crossing particle kept
+  its $w'$, so a column started uniform did not stay uniform at any sub-step
+  count: in a convective column the 50 m above $h$ held 0.4–11.5 times its
+  share depending on the count, and main was worse (found by an independent
+  review of PR #69). $h$ is now an interface (Thomson, Physick & Maryon 1997):
+  one-sided drift stencil, transmission or reflection with velocity rescaling
+  inside every sub-step, and velocities carried as $u'/\sigma$ across steps so
+  that a moving $h$ rescales them. The column stays uniform near $h$, and a
+  boundary layer loses particles to the free troposphere at the diffusion-limit
+  rate, at every count tested ([docs/physics.md](docs/physics.md) §5, §6). On
+  real meteorology the near-surface footprint roughly doubles against the
+  fixtures (FOOTPRINT_SUMMARY). The golden fixtures are not yet regenerated.
 - **Forward/backward reciprocity test.** It tests the backward formulation
   directly, which nothing else does. Planned as task A6.
 - **The source of u\*.** From the surface stresses for v1; ERA5's `zust` is

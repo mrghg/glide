@@ -61,22 +61,39 @@ on 25 Nov 2026 (coordinator's note `outputs/agents/WM/SUBSTEPPING-SUMMARY.md`
 
 **Measured, not decided here.** (1) A per-particle count that only *adds*
 sub-steps near the ground, $k_p = \max(n, \lceil 60/(0.125\,T_{Lw,p}) \rceil)$,
-still moves occupancy towards the ground: neutral lowest 5% +0.052 ± 0.006
-($n = 4$) and +0.017 ± 0.007 ($n = 8$) against the fixed count, above the fixed
-$n = 16$ it refines to. So adaptivity itself biases, as argued for A3 (decision
-0011). (2) With an open top into a quiescent free troposphere, too many
-particles leave a convective boundary layer at practical sub-steps (25% after
-2–6 h at $n = 16$, 6% at a 1.875 s step, none at 0.9375 s); widening the
-drift's finite-difference step from 1 m to 10 m alone removes it, which locates
-it at the $\sigma_w$ jump at $h$. That is a boundary-layer-top question for a
-follow-up, not part of this change. (3) On the reference config the 0–40 m
-footprint moves by −28%, −16%, +15% and +81% (median over releases) at
-$n$ = 4, 8, 16 and 32 against the old code, with the share of time above the boundary layer
-falling as $n$ grows: real footprints are not yet converged in $n$, and the
-boundary-layer top is the likely reason (argued from the open-top study, not
-isolated on real meteorology). The default of 16 is therefore the best of the
-counts tested, not a converged value; the boundary-layer top should be settled
-before the freeze and the fixtures regenerated after it.
+moves the neutral lowest 5% towards the ground: +0.052 ± 0.006 ($n = 4$) and
++0.017 ± 0.007 ($n = 8$) against the fixed count, above the fixed $n = 16$ it
+refines to. That holds **for the neutral column only**: in the stable and
+convective columns the same refinement brings the lowest 5% *closer* to 1
+(stable −0.044 ± 0.005 from 1.156 at $n = 4$, −0.001 at $n = 8$; convective
++0.136 ± 0.003 from 0.882 and +0.033 ± 0.008 from 0.970), because there the
+fixed count's under-resolution at the ground dominates. So adaptivity can
+bias (neutral), as argued for A3 (decision 0011), but it is not shown to bias
+in every regime. (2) The open-top result recorded here when this decision was
+first written (too many particles leaving a convective boundary layer at
+practical sub-steps, none at 0.9375 s, removed by a 10 m finite difference) was
+wrong in its premises: the boundary-layer top was not well mixed at any
+sub-step, the 0.9375 s "reference" was itself biased, and the 10 m probe
+reversed the bias rather than removing it (independent review of PR #69,
+re-measured with 3 seeds). Settled by decision 0028, which treats $h$ as an
+interface. (3) On the reference config, with the code of this decision alone,
+the 0–40 m footprint moved by −28%, −16%, +15% and +81% (median over releases,
+single seed) at $n$ = 4, 8, 16 and 32 against the old code: not converged in
+$n$, as (2) explains. With decision 0028 see that record.
+
+**Revised with decision 0028 (25 Nov 2026).** The closed-column numbers above
+were measured with the drift stencil that straddled $h$, which in the closed
+column acts at the lid (reverting only the stencil reproduces them: convective
+0.994 / 0.987 at $n = 16$, 5 seeds, `study/closed_nostencil.jsonl`). With the one-sided stencil of decision 0028 (5 seeds of 20,000, 2–6 h;
+`outputs/agents/WM/interface/study/tables.md`) the lowest 5% / 0–40 m are
+1.039 / 1.040 (stable), 1.004 / 1.007 (neutral) and 0.971 / 0.964 (convective) at
+$n = 16$; 1.078 / 1.068, 1.011 / 1.009 and 0.938 / 0.910 at $n = 8$; 1.021 /
+1.022, 1.006 / 1.009 and 0.987 / 0.983 at $n = 32$. $n = 16$ is still the
+smallest count tested within ±0.05 in every regime, and remains the default.
+The BL half of the exceedance counter is structurally zero under the defaults
+($T_{Lw} \ge 30$ s in the boundary layer, so $\Delta t_{\mathrm{sub}} > 0.5\,T_{Lw}$
+needs $\Delta t/n > 15$ s, i.e. $n < 4$ at 60 s); it is kept for runs with
+`flexpart_tl_floors: false`, a longer step or fewer sub-steps, where it is not.
 
 **Rejected alternatives.**
 - *The largest per-particle count over the batch* (the WM prototype, commit

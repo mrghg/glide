@@ -71,8 +71,10 @@ per-step call; it never inlines these away.
 `_column_turbulence(z)` returns
 $(\sigma_u, \sigma_v, \sigma_w, T_{Lu}, T_{Lv}, T_{Lw})$ at any height, for
 every particle at once. It is callable at arbitrary
-$z$ because the well-mixed drift needs to finite-difference $\sigma_w$ through
-the profile, including across regime seams. The order of operations matters:
+$z$ because the well-mixed drift finite-differences $\sigma_w$ through the
+profile (`_column_sigma_w`, which evaluates $\sigma_w$ alone and can be told
+which side of $h$ to use: the drift's stencil never crosses $h$, decision
+0028, [physics.md §3.3 and §5](physics.md)). The order of operations matters:
 
 ```
 1. Boundary-layer profile        in_bl_sigma_TL(z, h, u*, w*, h/L, lat)
@@ -335,6 +337,17 @@ when it was corrected (seed-to-seed noise 0.5%; decision 0025). The resulting
 $\sigma/T_L$ fields are built once per meteorology hour on the grid, then
 interpolated trilinearly to each particle above the boundary layer.
 
+**The jump at $h$.** Nothing makes the closure meet the boundary-layer profile
+at $h$: in a convective boundary layer $\sigma_w$ drops from about 0.7 to
+0.05 m s⁻¹ there, in a stable one it rises from the profile's 1 mm s⁻¹ floor
+to the closure's value. GLIDE does not smooth the jump. It treats $h$ as an
+interface (decision 0028, [physics.md §5](physics.md)): the drift is differenced on each
+side separately, a particle crossing $h$ inside a sub-step is transmitted with
+probability $\min(1, \sigma_{wB}/\sigma_{wA})$ (velocities scaled by the ratio
+of the $\sigma$ on the two sides) or reflected, and velocities are carried as
+$u'/\sigma$ across outer steps so that a moving $h$ rescales them. The $\sigma$
+on each side of $h$ come from `_interface_sigmas`, once per outer step.
+
 The air density of the well-mixed density drift ([physics.md §3](physics.md)),
 $\rho = p/(R_d T)$, and its vertical gradient are built the same way: once per
 window on the grid, from each column's own pressure and the local $T$, with
@@ -473,7 +486,9 @@ of §5 are applied afterwards, so enabling both still bounds $T_L$.
 
 Two reasons it is off. First, $T_L = \kappa z/\sigma$ falls to seconds as
 $z \to 0$, undercutting the floors that §5 exists to impose. Second, it puts a
-discontinuity in $K$ at the $0.1h$ seam.
+discontinuity in $\sigma_w$ and $K$ at the $0.1h$ seam, which the drift's finite
+difference straddles. That is the same defect decision 0028 removed at $h$, and
+the seam is not treated as an interface: enabling the override reintroduces it.
 
 The stable branch being **constant in height** is itself a correction. An earlier
 form, $1.3u_\ast(1 + 5z/L)$, *grew* with stability — that expression is the $\phi_m$
@@ -503,8 +518,11 @@ turbulence:
 outer step, with every coefficient re-evaluated at the particle's height at the
 start of each (decision 0027, [physics.md](physics.md) §6). It is a physics
 setting: the default keeps the near-surface well-mixed error within the tested
-tolerance at `dt_seconds: 60`. If you change `dt_seconds`, keep
-`dt_seconds / n_substeps` at or below 3.75 s. The step's GPU cost grows in
+tolerance at `dt_seconds: 60`. It is a **count, not a length**: the sub-step is
+`dt_seconds / n_substeps`, so changing `dt_seconds` changes it. If you change
+`dt_seconds`, keep `dt_seconds / n_substeps` at or below 3.75 s; the run logs the
+sub-step length, warns when it is longer than 3.75 s, and records it in
+`run_metadata.json` (`runtime.substep_exceedance.substep_seconds`). The step's GPU cost grows in
 proportion to it. The keys `substep_c` and `max_substeps` of the old per-particle
 adaptive schedule are refused. How often a sub-step is long compared with
 $T_{Lw}$ is recorded for every run in `run_metadata.json` under

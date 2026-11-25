@@ -111,7 +111,9 @@ def main() -> None:
     refs = {}
     if dl.exists():
         lim = json.loads(dl.read_text())
-        refs = {r: {"frac_bl": v["frac_bl_2_6h"], "frac_bl_6h": v["frac_bl_6h"]} for r, v in lim.items()}
+        refs = {
+            r: {"frac_bl": v["frac_bl_2_6h"], "frac_bl_6h": v["frac_bl_6h"]} for r, v in lim.items()
+        }
     ob = sort_n(load(d / "openbl.jsonl"))
     print(
         table(
@@ -127,7 +129,20 @@ def main() -> None:
         for r, v in refs.items():
             print(f"- {r}: 2–6 h mean {v['frac_bl']:.4f}, 6 h {v['frac_bl_6h']:.4f}")
         print()
-    cl = sort_n(load(d / "closed.jsonl"))
+    for name, title in (
+        ("initsigma_open2h.jsonl", "Probe: uniform in [0, 2h], velocities started from N(0, σ²)"),
+        (
+            "stable_probe.jsonl",
+            "Probe, stable: 12 h (long12) and σ floor 1e-4 m/s (floor1e-4), both started from N(0, σ²)",
+        ),
+        ("verify_pr_fd10.jsonl", "PR #69 head with the drift's finite difference widened to 10 m"),
+    ):
+        rows = sort_n(load(d / name))
+        if rows:
+            g = ("variant", "n", "tag", "harness")
+            ks = keys + ["frac_bl"]
+            print(table(rows, ks, labels + ["BL share (openbl)"], group=g, title=title))
+    cl = sort_n(load(d / "closed.jsonl")) + sort_n(load(d / "closed_nostencil.jsonl"))
     print(
         table(
             cl,
@@ -136,7 +151,11 @@ def main() -> None:
             title="Closed column (lid at h every sub-step, crossing rule off), start uniform in [0, h]",
         )
     )
-    hv = sort_n(load(d / "hvar.jsonl"))
+    hv = load(d / "hvar.jsonl")
+    for r in load(d / "hvar_269b7a0.jsonl"):
+        r["variant"] = "prod with carry (269b7a0)"
+        hv.append(r)
+    hv = sort_n(hv)
     if hv:
         print(
             table(
@@ -146,6 +165,22 @@ def main() -> None:
                 title="Moving h (0.75–1.25 h0, 2-h period), uniform in [0, 2h0], bins relative to h(t)",
             )
         )
+
+    bc = load(d / "bitcheck_269b7a0.jsonl")
+    if bc:
+        print("### Same seed, 83c2d1e (no carry) against 269b7a0 (carry), steady columns\n")
+        ref = {}
+        for name in ("open2h.jsonl", "closed.jsonl", "openbl.jsonl"):
+            for r in load(d / name):
+                ref[(r["regime"], r["harness"], r["n"], r["seed"])] = r["metrics"]
+        print("| regime | harness | n | seed | largest difference over metrics |")
+        print("|---|---|---|---|---|")
+        for r in bc:
+            m0 = ref.get((r["regime"], r["harness"], r["n"], r["seed"]))
+            if m0 is None:
+                continue
+            diff = max(abs(r["metrics"][k] - m0[k]) for k in m0)
+            print(f"| {r['regime']} | {r['harness']} | {r['n']} | {r['seed']} | {diff:.4f} |")
 
 
 if __name__ == "__main__":

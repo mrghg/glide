@@ -61,6 +61,7 @@ share no state and run order is irrelevant. Stochastic tests are seeded.
 | `test_terrain_transport.py` | Terrain-following transport end-to-end | 2 |
 | `test_diffusion_pde.py` | Langevin diffusion limit vs a PDE reference | 2 |
 | `test_near_surface_well_mixed.py` | Near-surface well-mixed gate through the production Hanna scheme at $\Delta t = 60$ s, three regimes | 3 |
+| `test_bl_top_well_mixed.py` | Boundary-layer-top well-mixed gate: open column uniform in $[0, 2h]$ through the production Hanna scheme at $\Delta t = 60$ s, three regimes | 3 |
 
 ---
 
@@ -155,6 +156,8 @@ CI:
 | `test_well_mixed_uniformity_in_periodic_turbulence` | uniformity in a periodic domain (rel-RMS < 0.12) |
 | `test_v1_well_mixed_hanna_backward_path` | a flat distribution stays flat through the **production backward scheme** at constant $\rho$ — parametrised over both the static and dynamic paths |
 | `test_near_surface_well_mixed_at_60_s` (`test_near_surface_well_mixed.py`) | at the shipped $\Delta t = 60$ s and the default sub-step count, a closed boundary layer (lid inside every sub-step) keeps its lowest 5% and its 0–40 m layer within ±0.09 of their well-mixed share, stable, neutral and convective (decision 0027; the code before it gave 1.66–1.79 in the lowest 5% and fails it in all three regimes) |
+| `test_uniform_column_stays_uniform_across_the_boundary_layer_top` (`test_bl_top_well_mixed.py`) | at the shipped $\Delta t = 60$ s and the default sub-step count, a column started uniform in $[0, 2h]$, open at $h$ to the free-troposphere closure and closed by a lid at $2h$, keeps the 50 m bands from $h - 100$ to $h + 100$ m within ±TOL of uniform, stable, neutral and convective (decision 0028; PR #69's head and main fail it) |
+| `test_drift_stencil_stays_on_the_particles_side_of_h`, `test_interface_crossing_rule_backward`, `test_carry_is_one_in_a_steady_column_and_tracks_a_moving_h` (`test_hanna.py`) | the drift never differences the jump at $h$; the transmission probability, velocity and overshoot scaling and reflection at $h$ in backward time; $u'/\sigma$ carried across steps (decision 0028) |
 | `test_v1_density_weighted_well_mixed_with_F2` | a $\rho$-weighted distribution stays $\rho$-weighted under varying $\rho$ |
 | `test_hanna_well_mixed_no_runaway_lofting` | no systematic upward drift (this caught the frozen $(1+w'^2/\sigma_w^2)$ factor) |
 | `test_reflect_surface_w_flip_resolves_one_way_downward_drift` | the joint $(z, w')$ reflection removes the post-reflection downward bias |

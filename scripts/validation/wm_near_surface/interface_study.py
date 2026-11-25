@@ -181,6 +181,9 @@ def run(a) -> dict:
     h0, ustar, shf = REGIMES[a.regime]
     torch.set_num_threads(a.threads)
     torch.manual_seed(a.seed)
+    if a.sigma_floor is not None:
+        # Probe: the σ floor of the profiles (module constant, read at call time).
+        hanna_mod.SIGMA_MIN_M_S = float(a.sigma_floor)
     scheme = build_scheme(a.variant, a.n)
     if a.fd_delta is not None:
         scheme.DRIFT_FD_DELTA_M = float(a.fd_delta)
@@ -277,7 +280,7 @@ def run(a) -> dict:
         regime=a.regime, harness=a.harness, dt=a.dt, n=None if a.variant == "old" else a.n,
         variant=a.variant, seed=a.seed, particles=n, steps=steps, ft_n=ft_n, tag=a.tag,
         fd_delta=a.fd_delta, src=os.path.dirname(hanna_mod.__file__), h0=h0,
-        init_sigma=a.init_sigma,
+        init_sigma=a.init_sigma, sigma_floor=a.sigma_floor,
     )  # fmt: skip
     m = {}
     if a.harness == "closed":
@@ -342,6 +345,7 @@ def main() -> None:
     ap.add_argument("--threads", type=int, default=2)
     ap.add_argument("--tag", default="")
     ap.add_argument("--init-sigma", action="store_true", help="probe: w' etc. start ~ N(0, σ²)")
+    ap.add_argument("--sigma-floor", type=float, default=None, help="probe: σ floor (m/s)")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
     rec = run(a)
