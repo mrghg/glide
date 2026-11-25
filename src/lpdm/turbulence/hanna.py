@@ -151,6 +151,13 @@ Z_UBL_DEFAULT_M = 2.0
 # implementation (see flexpart.f90 in their turbulence routines).
 W_PRIME_SIGMA_RATIO_MAX = 4.0
 
+# Boundary-layer top interface (decision 0028, docs/physics.md §6). A particle
+# transmitted into, or reflected back into, the free troposphere is placed at
+# least this far above h, so that rounding never leaves it at z = h, which
+# counts as boundary layer. 1 cm is far below any resolved scale and well above
+# the float32 spacing at h ≤ 80 km.
+INTERFACE_SIDE_EPS_M = 1e-2
+
 
 # ---------------------------------------------------------------------------
 # Free physics functions (testable in isolation)
@@ -845,6 +852,7 @@ class HannaScheme(TurbulenceScheme):
             blh=blh,
             dt_seconds=dt_seconds,
             engine=engine,
+            interface_sigmas=self._interface_sigmas(**col_kwargs),
         )
         self._accumulate_exceedance(exceed_counts, exceed_worst)
 
@@ -893,11 +901,23 @@ class HannaScheme(TurbulenceScheme):
         z_eval = z_agl.clamp(min=self.z_ubl_m)
         sigma_u, sigma_v, sigma_w, T_Lu, T_Lv, T_Lw = self._column_turbulence(z_eval, **col_kwargs)
 
-        # ∂σ_w²/∂z by finite difference; the probes need σ_w only.
+        # ∂σ_w²/∂z by finite difference; the probes need σ_w only. The stencil
+        # stays on the particle's own side of the boundary-layer top h (decision
+        # 0028): a boundary-layer particle's probes lie in [z_ubl, h], a
+        # free-troposphere particle's in [h, ∞), each evaluated with its own
+        # side's profile (at z = h too). A stencil that straddled h would
+        # difference the jump between the boundary-layer profile and the
+        # free-troposphere closure into a spurious drift of order
+        # (σ_BL² − σ_FT²)/(2δ); the jump is handled by the interface rule in the
+        # sub-step loop instead. More than δ from h this is the centred stencil.
+        blh = col_kwargs["blh"]
+        side_ft = z_eval > blh
         z_hi = z_eval + self.DRIFT_FD_DELTA_M
         z_lo = (z_eval - self.DRIFT_FD_DELTA_M).clamp(min=self.z_ubl_m)
-        sw_hi = self._column_sigma_w(z_hi, **col_kwargs)
-        sw_lo = self._column_sigma_w(z_lo, **col_kwargs)
+        z_hi = torch.where(side_ft, z_hi, torch.minimum(z_hi, blh))
+        z_lo = torch.where(side_ft, torch.maximum(z_lo, blh), z_lo)
+        sw_hi = self._column_sigma_w(z_hi, side_ft=side_ft, **col_kwargs)
+        sw_lo = self._column_sigma_w(z_lo, side_ft=side_ft, **col_kwargs)
         dsig2_dz = (sw_hi.pow(2) - sw_lo.pow(2)) / (z_hi - z_lo).clamp(min=self.DRIFT_FD_DELTA_M)
         if self.basal_zero_gradient:
             # Below the basal clamp σ_w is sampled at z_ubl, i.e. flat in z, so its
@@ -1213,6 +1233,7 @@ class HannaScheme(TurbulenceScheme):
             dt_seconds=dt_seconds,
             engine=engine,
             active_mask=active_mask,
+            interface_sigmas=self._interface_sigmas(**col_kwargs),
         )
 
         u_meander_new, v_meander_new = u_meander, v_meander
@@ -1366,6 +1387,7 @@ class HannaScheme(TurbulenceScheme):
         coeffs_at: Callable[[torch.Tensor], tuple[torch.Tensor, ...]] | None = None,
         blh: torch.Tensor | None = None,
         active_mask: torch.Tensor | None = None,
+        interface_sigmas: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, ...]:
         """The sub-step loop: OU velocity update + displacement + ground reflection,
         ``self.n_substeps`` equal sub-steps of ``dt / n_substeps`` for every particle
@@ -1407,6 +1429,13 @@ class HannaScheme(TurbulenceScheme):
         state, ``counts`` (active particle-sub-steps, int64, in the order of
         ``EXCEEDANCE_COUNT_KEYS``) and ``worst = [max sub_dt/T_Lw in BL, in FT]``,
         as device tensors (no host sync). Without ``blh`` everything counts as BL.
+
+        **Boundary-layer top.** With ``blh`` and ``interface_sigmas`` (σ at h on
+        each side, ``_interface_sigmas``; ``step`` passes both), a particle whose
+        sub-step displacement crosses h is transmitted or reflected by the
+        Thomson, Physick & Maryon (1997) rule (``_cross_interface``, decision
+        0028) before the ground reflection. Without them h is not treated (the
+        synthetic-input unit tests).
 
         Ground reflection (W&F §6) is applied inside the loop, so a particle that
         crosses z=0 within a substep is reflected before the next substep.
@@ -1498,10 +1527,17 @@ class HannaScheme(TurbulenceScheme):
             u_new = torch.clamp(u_new, min=-u_max, max=u_max)
             v_new = torch.clamp(v_new, min=-v_max, max=v_max)
 
+            z_from = xyz[:, 2]
             xyz = engine.apply_vertical_turbulence(xyz, w_new, dt_seconds=sub_dt, backward=True)
             xyz = engine.apply_horizontal_turbulence(
                 xyz, u_new, v_new, dt_seconds=sub_dt, backward=True
             )
+            if interface_sigmas is not None and blh is not None:
+                # Boundary-layer top (decision 0028): transmit or reflect the
+                # particles whose displacement crossed h in this sub-step.
+                xyz, w_new, u_new, v_new = self._cross_interface(
+                    z_from, xyz, w_new, u_new, v_new, blh, interface_sigmas
+                )
             # W&F §6 smooth-wall reflection: joint (z, w') flip on those that
             # crossed the surface within this substep.
             xyz, w_new = engine.reflect_surface(xyz, w_new, z_surface=0.0)
@@ -1678,18 +1714,25 @@ class HannaScheme(TurbulenceScheme):
         engine: GPUEngine,
         level_arr: torch.Tensor | None = None,
         ascending: bool | None = None,
+        side_ft: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """σ_w alone at ``z_query``: bit-identical to ``_column_turbulence(...)[2]``
         (same regime selection, surface-layer override and free-troposphere
         override; the T_L floors never touch σ), but it evaluates only the σ_w
         expressions and samples only the σ_w channel of the free-troposphere stack.
-        Used for the two finite-difference probes of ∂σ_w²/∂z."""
+        Used for the two finite-difference probes of ∂σ_w²/∂z and for σ_w on
+        either side of h at the interface.
+
+        ``side_ft`` (bool per particle) forces the side: True takes the
+        free-troposphere closure, False the boundary-layer profile, whatever
+        ``z_query`` is (so a probe at exactly ``z = h`` can be evaluated on
+        either side). ``None`` selects by ``z_query > h``, as the profile does."""
 
         sigma_w = in_bl_sigma_w(z_query, blh, ustar, w_star, h_over_L, lat)
         if self.surface_layer_override:
             in_sl = z_query < SURFACE_LAYER_FRACTION * blh
             sigma_w = torch.where(in_sl, surface_layer_sigma_w(z_query, ustar, L), sigma_w)
-        above_bl = z_query > blh
+        above_bl = z_query > blh if side_ft is None else side_ft
         ft_sw = self._interp_3d_field(
             ft_fields[:1],
             grid_bounds,
@@ -1702,6 +1745,93 @@ class HannaScheme(TurbulenceScheme):
         )[0]
         sigma_w = torch.where(above_bl, ft_sw, sigma_w)
         return sigma_w.clamp(min=SIGMA_MIN_M_S)
+
+    def _interface_sigmas(
+        self,
+        *,
+        blh: torch.Tensor,
+        ustar: torch.Tensor,
+        w_star: torch.Tensor,
+        h_over_L: torch.Tensor,
+        lat: torch.Tensor,
+        lon: torch.Tensor,
+        ft_fields: torch.Tensor,
+        grid_bounds: GridInterpolationBounds,
+        engine: GPUEngine,
+        level_arr: torch.Tensor | None = None,
+        ascending: bool | None = None,
+        **_unused: object,
+    ) -> torch.Tensor:
+        """(σ_u, σ_v, σ_w) at the boundary-layer top on each side, ``[2, 3, N]``:
+        index 0 the boundary-layer profile at z = h (the value ``_column_turbulence``
+        gives at h), index 1 the free-troposphere closure at z = h (the limit of
+        its value from above), both floored as the profile is. They depend on the
+        column only (h, u*, w*, h/L at the particle's outer-step position and
+        time), so they are evaluated once per outer step (decision 0028)."""
+
+        su, sv, sw, *_ = in_bl_sigma_TL(blh, blh, ustar, w_star, h_over_L, lat)
+        ft = self._interp_3d_field(
+            ft_fields[:2],
+            grid_bounds,
+            lon,
+            lat,
+            blh,
+            engine,
+            level_arr=level_arr,
+            ascending=ascending,
+        )
+        bl_side = torch.stack([su, sv, sw])
+        ft_side = torch.stack([ft[1], ft[1], ft[0]])
+        return torch.stack([bl_side, ft_side]).clamp(min=SIGMA_MIN_M_S)
+
+    def _cross_interface(
+        self,
+        z_from: torch.Tensor,
+        xyz: torch.Tensor,
+        w_p: torch.Tensor,
+        u_p: torch.Tensor,
+        v_p: torch.Tensor,
+        blh: torch.Tensor,
+        interface_sigmas: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Transmit or reflect the particles whose sub-step displacement crossed h
+        (Thomson, Physick & Maryon 1997; decision 0028, docs/physics.md §6).
+
+        A particle moving from side A to side B is transmitted with probability
+        ``min(1, σ_wB/σ_wA)`` (σ at h on each side; the TPM factor ρ_B/ρ_A is 1
+        because the density is continuous at h), its velocity scaled by σ_B/σ_A
+        (w' by the σ_w ratio, u' and v' by the σ_u and σ_v ratios) and the part of
+        the displacement beyond h scaled by the σ_w ratio (the rest of the
+        sub-step flown at the new speed). Otherwise it is reflected: z → 2h − z,
+        w' → −w', u' and v' unchanged. The rule uses only the direction of the
+        displacement and |w'|, so it is the same in backward time, where the
+        displacement is −w'·dt. Particles that did not cross are untouched.
+        """
+
+        z_to = xyz[:, 2]
+        from_ft = z_from.clamp(min=self.z_ubl_m) > blh
+        to_ft = z_to.clamp(min=self.z_ubl_m) > blh
+        cross = from_ft != to_ft
+        sig_a = torch.where(from_ft, interface_sigmas[1], interface_sigmas[0])
+        sig_b = torch.where(from_ft, interface_sigmas[0], interface_sigmas[1])
+        ratio = sig_b / sig_a  # [3, N]: u, v, w
+        r_w = ratio[2]
+        transmit = torch.rand_like(r_w) < r_w
+        z_new = torch.where(transmit, blh + (z_to - blh) * r_w, 2.0 * blh - z_to)
+        # Land strictly on the intended side (rounding could leave it at h).
+        end_ft = torch.where(transmit, to_ft, from_ft)
+        z_new = torch.where(
+            end_ft,
+            torch.maximum(z_new, blh + INTERFACE_SIDE_EPS_M),
+            torch.minimum(z_new, blh),
+        )
+        through = cross & transmit
+        out = xyz.clone()
+        out[:, 2] = torch.where(cross, z_new, z_to)
+        w_out = torch.where(cross, torch.where(transmit, w_p * r_w, -w_p), w_p)
+        u_out = torch.where(through, u_p * ratio[0], u_p)
+        v_out = torch.where(through, v_p * ratio[1], v_p)
+        return out, w_out, u_out, v_out
 
     def _cached_window_field(
         self,
