@@ -745,6 +745,55 @@ def test_v1_well_mixed_hanna_backward_path(static_substeps: bool) -> None:
     )
 
 
+@pytest.mark.parametrize("static_substeps", [False, True])
+def test_near_surface_well_mixed_at_shipped_outer_step(static_substeps: bool) -> None:
+    """Near-surface well-mixed check at the shipped 60 s outer step, where the
+    Hanna scheme sub-steps (k = 4 at the 30 s T_Lw floor).
+
+    Neutral BL (h 1,500 m, u* 0.4), uniform density, reflection at the BL top:
+    the lowest 5% of the BL must hold its share of particles. When σ, T_L and
+    the drift were held at their outer-step values across sub-steps, and each
+    particle chose its own sub-step count, it held 1.67 times its share (and
+    1.03 at a 15 s outer step); with re-evaluation every sub-step and one shared
+    count it holds 1.01 (docs/physics.md §6). The test's own noise is a few per
+    cent; the tolerance is set well above that and well below the old bias.
+    """
+
+    from lpdm.gpu_engine import GPUEngine
+    from lpdm.turbulence import HannaScheme
+
+    torch.manual_seed(20261125)
+    blh = 1500.0
+    engine = GPUEngine(device="cpu")
+    scheme = HannaScheme(meander_enabled=False, static_substeps=static_substeps)
+    met = _wmc_density_met_window(blh_m=blh, p_top_hpa=999.0)  # ρ ≈ uniform
+
+    n = 4000
+    particles = torch.zeros(n, 4, dtype=torch.float32)
+    particles[:, 1] = 45.0
+    particles[:, 2] = torch.rand(n, dtype=torch.float32) * blh
+    particles[:, 3] = 1.0 / n
+    state = scheme.initialize_state(n, device=torch.device("cpu"), dtype=torch.float32)
+    active = torch.ones(n, dtype=torch.bool)
+
+    dt = 60.0
+    samples = []
+    for step in range(1, 241):  # 4 h; sample every 15 min from 1 h
+        particles, state = scheme.step(
+            particles, state, met, t_alpha=0.5, dt_seconds=dt, active_mask=active, engine=engine
+        )
+        above = particles[:, 2] > blh
+        particles[above, 2] = 2.0 * blh - particles[above, 2]
+        state["w_prime"][above] = -state["w_prime"][above]
+        if step >= 60 and step % 15 == 0:
+            samples.append(particles[:, 2].clone())
+    z = torch.stack(samples)
+    occupancy = float((z < 0.05 * blh).float().mean()) / 0.05
+    assert abs(occupancy - 1.0) < 0.15, (
+        f"lowest 5% of the BL holds {occupancy:.2f}× its well-mixed share at dt=60 s"
+    )
+
+
 def _wmc_density_met_window(
     *,
     blh_m: float = 5000.0,

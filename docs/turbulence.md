@@ -253,7 +253,7 @@ This was measured, not theorised. GLIDE's v2 validation over-estimated mean CH�
 enhancements, worst at polluted low-inlet sites, on stable nights: near-surface
 $K$ was running 3–8× below FLEXPART's. Turning the floors on was the fix.
 
-A convenient side effect: with $T_{Lw} \ge 30$ s, the per-particle sub-step count
+A convenient side effect: with $T_{Lw} \ge 30$ s, the boundary-layer sub-step count
 at $\Delta t = 60$ s is $\lceil 60/(0.5 \times 30) \rceil = 4$, so the
 `max_substeps` cap rarely binds.
 
@@ -485,7 +485,7 @@ nocturnal near-surface layer.
 turbulence:
   scheme: hanna_1982          # required; or placeholder_constant_ou
   substep_c: 0.5              # sub_dt target: sub_dt < substep_c · T_Lw
-  max_substeps: 6             # cap on per-particle sub-steps per outer step
+  max_substeps: 6             # cap on the (shared) sub-step count per outer step
   flexpart_tl_floors: true    # §5 — leave on
   surface_layer_override: false   # §8 — leave off
   boundary_layer_depth_min_m: 50    # §2; validation runs: 100

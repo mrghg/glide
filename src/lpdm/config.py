@@ -350,7 +350,7 @@ class TurbulenceConfig(_Frozen):
     scheme: str = Field(..., min_length=1)
     meander: MeanderConfig = MeanderConfig()
     # Hanna F4 Tier 2 adaptive substepping (audit 2026-05-30). Each particle runs
-    # k_i = ceil(dt / (substep_c · T_Lw_i)) substeps, capped at max_substeps. These
+    # k = max_i ceil(dt / (substep_c · T_Lw_i)) substeps (shared), capped at max_substeps. These
     # default to the historical hardcoded values, so existing configs are
     # unchanged. They are also a performance knob: on GPU the substep loop is the
     # dominant kernel-launch source, so lowering max_substeps (or raising
