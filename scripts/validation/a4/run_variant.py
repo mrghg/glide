@@ -39,6 +39,8 @@ def main() -> None:
 
     import lpdm.main as lm
 
+    print(f"run_variant: lpdm from {lm.__file__}", file=sys.stderr, flush=True)
+
     if args.variant == "shifted_origin":
         from lpdm.local_frame import HorizontalFrame
 

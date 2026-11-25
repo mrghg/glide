@@ -31,6 +31,13 @@ for run in "$@"; do
   esac
   name=ref-$run
   [ -e "$OUT/$name" ] && { echo "skip $name (exists)"; continue; }
-  # shellcheck disable=SC2086
-  flock "$LOCK" "$BENCH" "$dir" "$OUT" "$name" A4_CONFIG=$cfg $extra
+  # A4_HOLD_LOCK=1: the caller already holds the lock for the whole group (runs
+  # compared for timing go back to back, under the same conditions).
+  if [ "${A4_HOLD_LOCK:-0}" = 1 ]; then
+    # shellcheck disable=SC2086
+    "$BENCH" "$dir" "$OUT" "$name" A4_CONFIG=$cfg $extra
+  else
+    # shellcheck disable=SC2086
+    flock "$LOCK" "$BENCH" "$dir" "$OUT" "$name" A4_CONFIG=$cfg $extra
+  fi
 done

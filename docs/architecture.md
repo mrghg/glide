@@ -344,6 +344,22 @@ insist on a single unbroken unit and fails if anything splits it, and
 while $\alpha$, the meteorology values and the level heights all change. Both
 faults are silent in production, which is what makes the tests worth having.
 
+### Half-precision winds (optional, off)
+
+`simulation.wind_gather_dtype: bfloat16` holds the window's two `[3, Z, Y, X]`
+wind stacks on the device in bfloat16 (task A4). They cannot go through
+`grid_sample`, which samples a bfloat16 volume at bfloat16 coordinates (eight
+bits of mantissa cannot place a particle on a 551-point grid), so
+`gpu_engine.trilinear_sample` computes the corner indices and weights in float32,
+gathers the eight corners of both stacks in bfloat16, and sums in float32; both
+step paths share it. Its error is the bfloat16 rounding of the winds, at most
+2⁻⁸ of a value (on an ERA5 window 0.02 m s⁻¹ rms in u, unbiased). The gather alone,
+compiled, on 1.44 million particles: 0.56 ms for float32 `grid_sample`, 0.37 ms
+for the bfloat16 gather. That is the only part of the run it changes: the
+meteorology fetch, which dominates, reads and resamples on the host before any
+of this. The A/B on `ab_multisite_perf`, and why it stays off, are in
+dev/agent/progress/A4.md.
+
 ### Where the time goes now
 
 With the per-step path handled, it is no longer the dominant cost. On a
