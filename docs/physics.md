@@ -631,6 +631,33 @@ dropped rather than clamped, so the axis labels stay honest.
 Particles outside the grid horizontally, vertically, in time-ago, or in release
 index contribute nothing.
 
+**Where in the step a particle is counted.** `output_grid.deposition.position`
+(task A2) chooses the position at which each step's $\Delta f$ is deposited, and
+at which $\rho_d$ is evaluated:
+
+- `endpoint` (the default): the particle's position at the end of the step, after
+  advection, turbulence, reflection and convection. Each particle-step is counted
+  at one end of its interval: a right-endpoint rule in time. A particle that
+  crosses cell or vertical-bin edges during the step credits only the cell it
+  ends in.
+- `midpoint`: the RK2 advection's predictor position
+  $\mathbf{x}_{1/2} = \mathbf{x} - \tfrac{\Delta t}{2}\,\mathbf{u}(\mathbf{x}, t_{1/2})$,
+  the particle's position at the step's mid-time under the mean wind (§3.1),
+  reflected at the ground if the half step takes it below zero. It does not
+  include the step's turbulent or convective displacement, so its height is the
+  starting height plus half the mean vertical advection. On the static (CUDA)
+  path the scheme returns it from the captured step as an extra output, so the
+  graph is unchanged in shape and step count (decision 0004).
+
+On the analytic plume (`tests/test_plume_footprint.py`, 50,000 particles, three
+seeds) the mean relative error of the crosswind-integrated surface footprint was
+0.010–0.013 with `endpoint` and 0.007–0.009 with `midpoint` at the reference
+Δt = 5 s, and 0.023–0.027 against 0.011–0.013 at 4Δt. Within two Lagrangian
+timescales of the receptor `midpoint` was the better at 4Δt but not at Δt, where
+the starting height it carries matters as much as the along-wind half step.
+Kernel deposition (decision 0012) is deferred to after v1; deposition is a delta
+at the chosen position.
+
 **The dry-air density at the particle.** $\rho_d = (p - e)/(R_d T)$ with
 $R_d = 287.05$ J kg⁻¹ K⁻¹ and the vapour pressure $e = q p / (0.622 + 0.378 q)$
 from the specific humidity $q$. $T$, $q$ and the surface pressure $p_s$ are
@@ -690,6 +717,7 @@ Stated plainly, because they bound what the model can be trusted for.
 | $\sigma$, $T_L$ and the profile gradients held fixed across the sub-steps of one outer step | FLEXPART re-evaluates per sub-step. The change in $\sigma$ across one 60 s outer step is moderate; the velocity-dependent part of the drift *is* re-evaluated. A documented follow-up. |
 | Turbulence support fields ($\rho$, free-troposphere $\sigma/T_L$, meander $\sigma$) built once per meteorology hour at the window midpoint | A met-cadence approximation (<1%/hr drift), matching how FLEXPART-class models refresh turbulence fields. Per-particle interpolation through those fields is unchanged. |
 | Deep convection assigns each particle to the nearest meteorology column | Each (lon, lat) column has its own parcel lift, trigger and matrix (task A02), fired once per meteorology interval read from the store. A particle near a column boundary takes the nearest column's matrix rather than a blend. See [convection.md](convection.md) §1 and §7. |
+| Each step's residence is counted at one position: the step's end (`output_grid.deposition.position: endpoint`, the default; endpoint quadrature) or the RK2 advection midpoint (`midpoint`) | A first-order (rectangle-rule) quadrature of the time a particle spends in each cell. A particle crossing cell or vertical-bin edges during a step credits only one cell, and with `endpoint` the counted positions lag the step's mid-time by Δt/2 of travel. The error grows with Δt and is largest where the footprint changes fastest, near the receptor: on the analytic plume it more than doubled from Δt to 4Δt with `endpoint`. `midpoint` corrects the along-wind half step but not the turbulent displacement (§7). |
 | Initial $u', v', w' = 0$ rather than sampled from the local $\sigma$ | Particles equilibrate within one $T_L$ (typically ~100 s), which is shorter than the release window. |
 | Virtual temperature approximated as $T$ in the Obukhov length | Humidity correction is small; deferred. |
 | Free-troposphere horizontal turbulence treated as isotropic with the vertical | The unresolved-mesoscale horizontal spread is carried separately by the meander process. |
