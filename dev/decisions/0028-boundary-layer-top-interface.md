@@ -179,7 +179,10 @@ Seed standard deviations: 0.003–0.025 for the 50 m bands of this branch, 0.001
 for the BL shares. Mechanism (*measured* by switching one part at a time, 3
 seeds, $n = 64$): with the one-sided stencil but no crossing rule the 50 m
 above $h$ hold 0.42 (stable), 5.8 (neutral) and 14.8 (convective) of their
-share, so the crossing rule is necessary; NOSTENCIL_MECH. The stable residual
+share, so the crossing rule is necessary; with the crossing rule but the
+straddling stencil the 10 m above $h$ hold 0.10–0.12 (neutral, convective) and
+the stable 50 m above $h$ 1.11, at $n$ = 16 and 64, so the one-sided stencil is
+necessary too. The stable residual
 below $h$ falls as the sub-step shrinks ($-0.056$, $-0.033$, $-0.016$ at
 $n$ = 8, 16, 32), the same first-order error that over-fills the bottom of the
 stable column; the 10 m just above $h$ follow it (0.940 ± 0.011), as a
