@@ -838,74 +838,115 @@ dropped rather than clamped, so the axis labels stay honest.
 Particles outside the grid horizontally, vertically, in time-ago, or in release
 index contribute nothing.
 
-**Where in the step a particle is counted.** `output_grid.deposition.position`
-(task A2, decision 0026) chooses the position at which each step's $\Delta f$ is
-deposited, and at which $\rho_d$ is evaluated:
+**Where in the step a particle is counted.** Each step's $\Delta f$ stands for
+the time integral of the cell indicator over the step,
+$\int 1[\mathbf{x}(t)\in\text{cell}]\,m_p/\rho_d\,dt$, which the gridder
+approximates from the positions it has. `output_grid.deposition.position`
+(task A2; decisions 0026 and 0029) chooses how:
 
-- `endpoint` (the default): the particle's position at the end of the step, after
-  advection, turbulence, reflection and convection. Each particle-step is counted
-  at one end of its interval: a right-endpoint rule in time. A particle that
-  crosses cell or vertical-bin edges during the step credits only the cell it
-  ends in.
-- `step_mean`: the mean of the particle's positions at the start and at the end
-  of the step, $\tfrac12(\mathbf{x}_n + \mathbf{x}_{n-1})$, where the end
-  $\mathbf{x}_{n-1}$ is the end-of-step position above, so the step's advection,
-  turbulent displacement, reflection and convection are all included. Both ends
-  are particle positions with heights already reflected at the ground, so the
-  mean height is $\ge 0$ and needs no handling of its own; a particle whose step
-  ends above the met domain's top is killed after the step as before, and its
-  mean position is counted if it lies inside the output grid. Longitude is
-  averaged along the shorter arc (the difference taken into [−180°, 180°)), so a
-  step across the dateline is centred on it; the runtime does not wrap particle
-  longitudes today (a particle leaving the met domain's longitude box is killed),
-  so this only guards future periodic domains. The runtime keeps a copy of the
-  start positions outside the captured step, so the static (CUDA) step's graph,
-  shapes and outputs are the same as for `endpoint` (decision 0004).
+- `endpoint` (the default): all of $\Delta t$ at the particle's position at the
+  end of the step, after advection, turbulence, reflection and convection, with
+  $\rho_d$ there at the step's mid-time: a right-rectangle rule in time. A
+  particle's first step is counted where it ends, never at its release point.
+- `step_mean`: all of $\Delta t$ at the mean of the particle's start and end
+  positions, $\tfrac12(\mathbf{x}_n + \mathbf{x}_{n-1})$, with $\rho_d$ there at
+  the step's mid-time (decision 0026). Longitude is averaged along the shorter
+  arc (the difference taken into [−180°, 180°)); the runtime does not wrap
+  particle longitudes today, so this only guards future periodic domains.
+- `trapezoid`: $\Delta t/2$ at the start position and $\Delta t/2$ at the end
+  position, as two deposits (decision 0029). Each half has its own time-ago bin
+  (the start half the age at the start of the step, the end half the age half a
+  step later, just as `endpoint` bins the whole step by its starting age; with
+  steps aligned to the bins both halves fall in the step's bin) and its own
+  $\rho_d$, at its own position and time (the start at $t$, the end at
+  $t-\Delta t$, in the step's met window). A particle's first step is counted
+  half at its release point; a particle that leaves the met domain keeps the
+  start half of its last step, and the end half is dropped, like `endpoint`'s,
+  if it lies outside the output grid.
 
-`step_mean` is a midpoint rule in time for the mean motion (with uniform wind it
-puts every deposit exactly $U\Delta t/2$ downwind of `endpoint`'s), and it
-includes the step's turbulent displacement, so it does not count a particle's
-first step at its release height. An earlier draft of this option used the RK2
-advection predictor $\mathbf{x} - \tfrac{\Delta t}{2}\mathbf{u}$ (the spec's
-`midpoint`); that position leaves out the turbulent and convective displacement,
-so its height is the step's starting height, and it added +5.0% to the 0–40 m
-total of the smoke run, almost all in the receptor's cell (decision 0026).
+For `step_mean` and `trapezoid` the runtime copies the start positions before the
+step, outside the captured graph, so the static (CUDA) step's graph, shapes and
+outputs are the same for all three (decision 0004). Summed over consecutive
+steps, `trapezoid` is `endpoint` plus $\Delta t/2$ at each particle's first
+position minus $\Delta t/2$ at its last, because each interior position is the
+end of one step and the start of the next (*derived*); the only other
+differences are that each half carries the density at its own time and, where a
+step straddles a time-ago edge, its own bin. In space, then, `endpoint` and
+`trapezoid` sample the same interior positions with the same weights; what
+`endpoint` lacks is the first half step at the release point. Kernel deposition
+(decision 0012) is deferred to after v1; deposition is a delta at the chosen
+position(s).
 
-On the analytic plume (`tests/test_plume_footprint.py`, 50,000 particles, seeds
-9021 / 1234 / 7, paired particles) the mean relative error of the
-crosswind-integrated surface footprint was 0.0099 / 0.0133 / 0.0117 with
-`endpoint` and 0.0056 / 0.0081 / 0.0076 with `step_mean` at the reference
-Δt = 5 s, and 0.0262 / 0.0271 / 0.0233 against 0.0113 / 0.0104 / 0.0069 at 4Δt.
-Within two Lagrangian timescales of the receptor the errors were 0.015–0.021
-(`endpoint`) and 0.0014–0.011 (`step_mean`) at Δt, and 0.082–0.091 against
-0.0024–0.011 at 4Δt. On the smoke run (Mace Head, 10 m inlet, Δt = 60 s, 1 day)
-`step_mean` changes the 0–40 m total by −2.19% (CPU) / −2.33% (CUDA) against
-`endpoint` and the all-layer total by −5.4 × 10⁻⁵: the receptor's own cell gains
-+11.7% (+26.3 of 224.1, the first steps counted half a step nearer the receptor
-and not at the release height), and every ring of cells around it loses, by 3.6%
-next to it and 8.0% beyond 10 cells. The RK2 predictor had added +20.5% to the
-receptor's cell and +0.1–1.3% elsewhere. Kernel deposition (decision 0012) is deferred to after v1;
-deposition is a delta at the chosen position.
+**Scored against fine-time residence** (decision 0029;
+`scripts/validation/score_residence_counting.py`, outputs in
+`$GLIDE_AGENT_OUTPUTS/agents/A2/counting/`). The scorer measures each rule's
+counting error apart from the trajectory error. It records the production
+step's sub-step positions (60 s outer step, 16 sub-steps of 3.75 s), rebuilds
+each particle's path at the sub-step times (advection and meander spread
+uniformly over the step), and takes as reference the midpoint rule on that path
+with 8 samples per sub-step (0.47 s), each sample binned by its own cell and age
+and divided by its own $\rho_d$. The three rules are counted from the same
+trajectories. The reference is converged: 1, 2 and 4 samples per sub-step differ
+from 8 by ≤ 0.025% in every region of the smoke run and the synthetic columns, and the composite trapezoid on the sub-step positions by ≤ 0.1%.
+The offline tallies of each rule match production runs of that rule, same seed,
+to the float32 accumulation of the production grid (exactly, with a float64
+grid), and the hooked run is bit-identical to an unhooked one.
 
-**`step_mean` is biased low in the surface layer when one step's vertical
-displacement is comparable to the layer.** The endpoints of a stationary
-particle chain have the chain's stationary height distribution, so `endpoint`
-counts the right fraction of particles in the 0–40 m bin far from the receptor.
-The mean of two heights does not: when the start and end of a step are far apart
-compared with the bin (strong near-surface turbulence and a step much longer than
-$T_L$), the mean is pulled away from the ground. In a horizontally uniform neutral
-Hanna boundary layer at Δt = 60 s (`$GLIDE_AGENT_OUTPUTS/agents/A2/step-mean/wellmixed_*`)
-the two agree to 0.3–1% for $u_* = 0.4$ m s⁻¹ (rms step displacement of the
-particles ending below 40 m: 21 m), but with $u_* = 1.0$ m s⁻¹ (rms 52–63 m)
-`step_mean` counts 18% fewer particle-steps below 40 m than `endpoint`
-(0.0526 against 0.0640 of the particles for a 1,000 m boundary layer, 0.134
-against 0.165 for 300 m). At Δt = 5 s both give 0.0439 and 0.148, so at
-Δt = 60 s `endpoint` is 46% and 11% high there (the near-surface well-mixed
-excess of the Hanna sub-stepping, under separate investigation) and `step_mean`
-20% high and 9% low: neither is right at Δt = 60 s in strong turbulence. On the
-smoke run the same effect lowers the 0–40 m footprint outside the receptor's
-cell by 4–8% (above). The analytic plume ($T_L$ = 100 s, Δt ≤ 20 s) does not
-exercise it.
+Error against the reference on the smoke run (Mace Head, 10 m inlet, 1 day, CPU,
+three seeds, 0–40 m unless stated, mean over seeds; the s.d. over seeds is
+≤ 0.27 percentage points; `tables/scores_smoke_w.md`):
+
+| rule | receptor cell | ring 1 | rings 2–3 | rings 4–10 | beyond 10 | 0–40 m total | 40–1000 m | first hour | cell-wise L1 |
+|---|---|---|---|---|---|---|---|---|---|
+| `endpoint` | −10.77% | +0.17% | −0.12% | +0.03% | +0.07% | −1.25% | +0.04% | −7.59% | 1.62% |
+| `step_mean` | +0.74% | −2.87% | −3.85% | −4.91% | −4.02% | −3.46% | +0.21% | +0.09% | 3.64% |
+| `trapezoid` | −0.44% | +0.17% | −0.12% | +0.03% | +0.02% | −0.03% | +0.00% | −0.34% | 0.35% |
+
+(Rings are Chebyshev distances in cells from the receptor's cell; "first hour" is
+the first hourly time-ago bin; the L1 error is Σ|rule − reference| over the
+0–40 m cells divided by the reference's 0–40 m total.)
+
+- `endpoint` misses about one step of release residence in the receptor's cell
+  and is unbiased elsewhere. The right-rectangle rule on the sub-step positions
+  has a receptor-cell error proportional to its spacing (−0.66, −1.32, −2.6,
+  −5.2% at 3.75, 7.5, 15 and 30 s), which locates the error at the first step.
+- `step_mean` gets the first step about right but undercounts the surface layer
+  everywhere else: the mean of two heights a layer-depth apart lies above the
+  layer the particle spent its time in. In horizontally uniform, equilibrated
+  Hanna columns at Δt = 60 s (no receptor, so nothing but this mechanism) it
+  undercounts 0–40 m by 14.6% ($u_*$ = 1 m s⁻¹, $h$ = 300 m and 1,000 m), 6.4%
+  (convective, $h$ = 1,500 m) and 0.9% ($u_*$ = 0.4 m s⁻¹), while `endpoint`
+  and `trapezoid` are within 0.1%.
+- `trapezoid` is within 0.5% of the reference in every region of the smoke run
+  and of the synthetic plumes from a 10 m release (neutral, convective, stable;
+  25 km cells), with cell-wise L1 errors of 0.05–0.35%.
+- Where cells are only a few steps wide, single crossings show: with 1 km cells
+  and a 3 m s⁻¹ wind (5.5 steps per cell) `trapezoid` is −2.0% in the receptor's
+  cell and +1.9% in the next ring, `step_mean` +3.6% and −0.9%, `endpoint`
+  −23% and +1.9%; the 0–40 m totals of `trapezoid` and `step_mean` are within
+  0.01%, and the L1 errors are 0.72%, 0.94% and 3.25%.
+- The analytic plume (`tests/test_plume_footprint.py`: homogeneous OU, $u' = 0$,
+  release at 50 m, 500 m cells = 100 s of travel; run here with 16 OU sub-steps
+  per outer step) cannot rank the rules. Its release is above the 0–40 m layer,
+  so `trapezoid` and `endpoint` count the same 0–40 m residence (*derived* above;
+  *measured* equal). With deterministic along-wind motion, the cell indicator is
+  sampled at fixed phases, so the column errors are aliasing, and which of
+  `endpoint` and `step_mean` wins depends on where the cell edges fall: near the
+  receptor (< 2 $T_L$), mean relative column error against the reference,
+  `endpoint` / `step_mean`, three seeds, is 2.0% / 0.0% at Δt = 5 s with the
+  test's geometry (edges on step times) and 0.4% / 2.0% with the receptor 0.63
+  of a cell from the edge; 8.4% / 0.8% and 7.6% / 4.0% at 20 s; 21% / 38% and
+  41% / 21% at 60 s, where every rule is 26% off in the far field (one or two
+  samples per 100 s column). The reference itself is within 1–2% of the closed
+  form at every Δt (`tables/scores_synth_u.md`). The A2 acceptance test ("`step_mean`
+  no worse at Δt, better at 4Δt") passes partly because of that alignment: with
+  the edges moved, `step_mean` is still better at 20 s but worse at 5 s.
+
+Against `endpoint` on production runs (same seeds, so the changes are paired;
+`tables/production_*.md`): on the smoke run `trapezoid` adds +11.66% (s.d. over
+seeds 0.03) to the receptor's 0–40 m cell and +1.25% to the 0–40 m total, and
+changes every ring by ≤ 0.05%; `step_mean` gives +12.9% in the cell, −3.0 to
+−4.9% in the rings and −2.24% in total. Reference-config (GPU) results: in progress at the time of writing.
 
 **The dry-air density at the particle.** $\rho_d = (p - e)/(R_d T)$ with
 $R_d = 287.05$ J kg⁻¹ K⁻¹ and the vapour pressure $e = q p / (0.622 + 0.378 q)$
@@ -967,7 +1008,7 @@ Stated plainly, because they bound what the model can be trusted for.
 | The boundary-layer top is a jump of $\sigma_w$ and $T_{Lw}$ to the free-troposphere closure, treated as a Thomson–Physick–Maryon interface (§5, decision 0028) | Well-mixed-consistent for any sub-step if $\sigma$ were constant on each side; the interface does not smooth the jump, which is a property of the two parameterisations, not of the atmosphere. $h$ is fixed per particle within an outer step. Horizontal velocities are scaled on transmission like $w'$. The optional surface layer's seam at $0.1h$ is not treated as an interface. |
 | Turbulence support fields ($\rho$, free-troposphere $\sigma/T_L$, meander $\sigma$) built once per meteorology hour at the window midpoint | A met-cadence approximation (<1%/hr drift), matching how FLEXPART-class models refresh turbulence fields. Per-particle interpolation through those fields is unchanged. |
 | Deep convection assigns each particle to the nearest meteorology column | Each (lon, lat) column has its own parcel lift, trigger and matrix (task A02), fired once per meteorology interval read from the store. A particle near a column boundary takes the nearest column's matrix rather than a blend. See [convection.md](convection.md) §1 and §7. |
-| Each step's residence is counted at one position: the step's end (`output_grid.deposition.position: endpoint`, the default; endpoint quadrature) or the mean of the step's start and end positions (`step_mean`) | With `endpoint`, a first-order (rectangle-rule) quadrature of the time a particle spends in each cell. A particle crossing cell or vertical-bin edges during a step credits only one cell, and with `endpoint` the counted positions lag the step's mid-time by Δt/2 of travel. The error grows with Δt and is largest where the footprint changes fastest, near the receptor: on the analytic plume it more than doubled from Δt to 4Δt with `endpoint`. `step_mean` (a midpoint rule for the mean motion that includes the step's turbulent displacement) roughly halves the error at Δt and keeps it from growing at 4Δt (§7), but still credits one cell per step, and it undercounts the surface layer when one step's vertical displacement is comparable to the layer (18% low against `endpoint` at Δt = 60 s, $u_*$ = 1 m s⁻¹; §7). |
+| Each step's residence is counted from at most two positions: the step's end (`output_grid.deposition.position: endpoint`, the default), the mean of its start and end (`step_mean`), or half at each end (`trapezoid`; decision 0029) | The cell indicator is sampled at 60 s, so a particle crossing a cell or bin edge during a step is credited by where its sample points fall, not by when it crossed. Scored against fine-time residence on the same trajectories (§7): `endpoint` misses the first half step at the release point (−10.8% in the receptor's 0–40 m cell and −1.25% on the 0–40 m total of the smoke run) and is otherwise within ±0.2%; `step_mean` undercounts the 0–40 m layer wherever a step's vertical displacement is comparable to it (−3 to −5% outside the receptor's cell on the smoke run, up to −15% in strong turbulence); `trapezoid` is within 0.5% in every region scored. Where cells are only a few steps wide, single crossings leave errors of a few per cent per cell for every rule (±2% with 1 km cells at 3 m s⁻¹), and with deterministic along-wind motion (the analytic plume) they alias. |
 | Initial $u', v', w' = 0$ rather than sampled from the local $\sigma$ | Particles equilibrate within one $T_L$ (typically ~100 s), which is shorter than the release window. |
 | Virtual temperature approximated as $T$ in the Obukhov length | Humidity correction is small; deferred. |
 | Free-troposphere horizontal turbulence treated as isotropic with the vertical | The unresolved-mesoscale horizontal spread is carried separately by the meander process. |

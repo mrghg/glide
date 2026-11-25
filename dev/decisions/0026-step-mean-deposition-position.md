@@ -95,3 +95,10 @@ use `step_mean` where the spec said `midpoint`; QUEUE.md is updated. Still a
 delta deposit at one position per step, so a particle crossing several cells
 in one step credits one of them; kernel deposition (decision 0012) remains
 after v1.
+
+**Update (decision 0029).** Scored against fine-time residence on the same
+trajectories, after decisions 0027 and 0028, `step_mean` undercounts the 0–40 m
+layer outside the receptor's cell by 3–5% on the smoke run and by up to 15% in
+an equilibrated column with $u_*$ = 1 m s⁻¹; the surface-layer bias above is
+real, not an artefact of comparing with a biased `endpoint`. Decision 0029 adds
+`trapezoid` and proposes it as the default.

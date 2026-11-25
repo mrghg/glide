@@ -329,7 +329,10 @@ def test_step_mean_deposition_no_worse_at_dt_and_better_at_4dt() -> None:
     decision 0026): the mean relative error of the crosswind-integrated surface
     footprint, against the cell-integrated analytic plume, is no larger with
     `step_mean` deposition than with `endpoint` at the reference step DT, and smaller
-    at 4 DT. Observed values for three seeds are in docs/physics.md section 7."""
+    at 4 DT. Observed values for three seeds are in decision 0026. This case does not
+    rank the rules in general: with u' = 0 the cell edges here fall on step times, and
+    with the edges moved the result reverses at DT (docs/physics.md section 7,
+    decision 0029)."""
 
     analytic = _analytic_surface_columns()
     cols = _position_test_columns(analytic)

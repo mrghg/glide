@@ -38,3 +38,4 @@ alternatives → Status**, with a pointer to the relevant `docs/` page.
 | [0026](0026-step-mean-deposition-position.md) | Optional deposition at the mean of each step's start and end positions, replacing the specified RK2-predictor midpoint |
 | [0027](0027-fixed-substep-count.md) | Hanna turbulence: one fixed sub-step count for every particle (default 16), coefficients re-evaluated every sub-step |
 | [0028](0028-boundary-layer-top-interface.md) | Hanna turbulence: the boundary-layer top as a Thomson, Physick & Maryon (1997) interface; one-sided drift stencil; velocities carried as u'/σ across steps |
+| [0029](0029-trapezoid-residence-counting.md) | Trapezoid residence counting (half of each step at each end), scored against fine-time residence; proposed as the default |

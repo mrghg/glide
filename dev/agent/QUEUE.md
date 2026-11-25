@@ -379,7 +379,9 @@ Model: Opus 5.5, high effort. Run strictly in order unless a task is BLOCKED.
   at the start and end of the step, advection, turbulence and convection
   included ([decision 0026](../decisions/0026-step-mean-deposition-position.md);
   this replaced the RK2-predictor `midpoint` first specified here, which leaves
-  out the step's turbulent displacement).
+  out the step's turbulent displacement). `trapezoid` (half of each step at each
+  end) was added after scoring all three against fine-time residence, and is
+  proposed as the default ([decision 0029](../decisions/0029-trapezoid-residence-counting.md)).
   List endpoint quadrature under known approximations in `docs/physics.md`
   regardless of the default.
 - **Acceptance.** New tests:
@@ -470,8 +472,8 @@ Model: Opus 5.5, high effort. Run strictly in order unless a task is BLOCKED.
 - **Size:** M. **Depends on:** A2, A3, A4, A4b.
 - **Scope.** Sweeps on the analytic plume and on one real-met case from the
   case library: Δt and Δt_max (multi-rate), sub-step accuracy target, particle
-  count, vertical ladder, kernel bandwidth, and deposition position (endpoint
-  vs step_mean) [PR-F4]. Report sub-step saturation counts from A1 [PR-F2] for
+  count, vertical ladder, kernel bandwidth, and deposition position (endpoint,
+  step_mean, trapezoid) [PR-F4]. Report sub-step saturation counts from A1 [PR-F2] for
   every sweep point. Produce error-against-parameter
   figures with expected slopes (Tier 0 figure set) and a table. Propose the v1
   defaults with the converged values. Grade as `docs/validation-plan.md` §3
