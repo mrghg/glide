@@ -572,9 +572,15 @@ the worst $\Delta t_{\mathrm{sub}}/T_{Lw}$ and the number of met windows
 affected). A particle counts when $k_p = k_{\max}$, so one that needed exactly
 $k_{\max}$ sub-steps, and so still met the target, is counted too. With the
 FLEXPART $T_{Lw} \ge 30$ s floor in force (the default,
-see [turbulence.md](turbulence.md)) it rarely does — at $\Delta t = 60$ s the
-required count is $\lceil 60/(0.5 \times 30)\rceil = 4$, which is why the shipped
-configs set `max_substeps: 6`.
+see [turbulence.md](turbulence.md)) it rarely does inside the boundary layer — at
+$\Delta t = 60$ s the required count is $\lceil 60/(0.5 \times 30)\rceil = 4$,
+which is why the shipped configs set `max_substeps: 6`. The floor is not applied
+above the boundary layer, where $T_{Lw} = 0.5/N$ falls to a few seconds in strong
+inversions, so the cap does bind there. Reaching a cap of 6 needs
+$T_{Lw} \le 20$ s, below the boundary-layer floor, so with the default settings
+every saturated particle is above the boundary layer. On the reference multi-site run
+(`configs/ab_multisite_perf.yaml`, January) 2.6% of active particle-steps
+reached it, the worst at $\Delta t_{\mathrm{sub}}/T_{Lw} = 1.58$ (task A1).
 
 **Rogue-trajectory clip.** At the end of each sub-step's velocity update,
 
