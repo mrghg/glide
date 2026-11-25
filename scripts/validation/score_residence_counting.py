@@ -61,6 +61,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import sys
 import time
 from dataclasses import dataclass, field
@@ -259,6 +260,9 @@ def score_step(
             T.add(f"rect_k{k}", P[b_i], w * (k * sub), ib, age_a)
 
 
+Z_FLOOR_STATS = {"nodes": 0, "below": 0}
+
+
 def build_path(x0, xa, subs, xm) -> torch.Tensor:
     """P_i = x0 + (i/n)(xa - x0) + (s_i - xa) + (i/n)(xm - s_n), heights clamped at 0."""
 
@@ -274,7 +278,16 @@ def build_path(x0, xa, subs, xm) -> torch.Tensor:
         + (s - xa.unsqueeze(0))
         + frac * (xm - s[-1]).unsqueeze(0)
     )
-    P[..., 2] = P[..., 2].clamp(min=0.0)
+    # Below-ground reconstructed heights (upward mean advection added linearly to a
+    # turbulent path that touched the ground): clamp at 0 (default) or reflect.
+    # The count is kept so the effect can be reported (Z_FLOOR_STATS).
+    neg = P[..., 2] < 0.0
+    Z_FLOOR_STATS["nodes"] += int(neg.numel())
+    Z_FLOOR_STATS["below"] += int(neg.sum())
+    if os.environ.get("GLIDE_SCORER_Z_FLOOR", "clamp") == "reflect":
+        P[..., 2] = P[..., 2].abs()
+    else:
+        P[..., 2] = P[..., 2].clamp(min=0.0)
     return P
 
 
@@ -805,6 +818,7 @@ def finish(T: Tallies, args, extra: dict) -> None:
         **extra,
     }
     summary["scores"] = summarise(T, ref)
+    summary["z_floor"] = {**Z_FLOOR_STATS, "mode": os.environ.get("GLIDE_SCORER_Z_FLOOR", "clamp")}
     T.save(Path(f"{out}.npz"))
     Path(f"{out}.json").write_text(json.dumps(summary, indent=1))
     s = summary["scores"]["w"]["rel"]
