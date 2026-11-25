@@ -1454,7 +1454,9 @@ class HannaScheme(TurbulenceScheme):
             if blh is None:
                 in_ft = torch.zeros(T_Lw.shape, dtype=torch.bool, device=T_Lw.device)
             else:
-                in_ft = xyz[:, 2] > blh
+                # The same test that selects the free-troposphere coefficients
+                # (`_column_turbulence` on the clamped height).
+                in_ft = xyz[:, 2].clamp(min=self.z_ubl_m) > blh
             in_bl = ~in_ft
             exceeded = ratio > c_exceed
             over = ratio > 1.0
