@@ -129,7 +129,14 @@ def box_overlap(edges: np.ndarray, lo: float, hi: float) -> np.ndarray:
 def source_box_weights(
     lat_edges: np.ndarray, lon_edges: np.ndarray, lat: float, lon: float, size_deg: float
 ) -> np.ndarray:
-    """Fraction of each footprint cell inside the ``size_deg`` box centred on the source."""
+    """Fraction of each footprint cell inside the ``size_deg`` box centred on the source.
+
+    The whole box must lie inside the grid. :func:`predict` divides by the volume
+    of the box's overlap with the grid, so a box the grid only partly covers would
+    be credited to a smaller volume and its concentration overestimated (cropping
+    away empty cells raised the prediction; 2026-11-25 test review). Such a box is
+    refused.
+    """
 
     h = 0.5 * size_deg
     # Put the source in the grid's longitude convention (0..360 or -180..180).
@@ -143,6 +150,15 @@ def source_box_weights(
     if not np.any(w > 0):
         raise ValueError(
             f"the {size_deg}° source box at ({lat}, {lon}) does not overlap the footprint grid"
+        )
+    # Degrees of the box each axis's cells cover; the full box spans size_deg on both.
+    covered_y = float(np.sum(wy * np.abs(np.diff(np.asarray(lat_edges, dtype=np.float64)))))
+    covered_x = float(np.sum(wx * np.abs(np.diff(np.asarray(lon_edges, dtype=np.float64)))))
+    if min(covered_y, covered_x) < size_deg * (1.0 - 1e-9):
+        raise ValueError(
+            f"the {size_deg}° source box at ({lat}, {lon}) is only partly inside the "
+            f"footprint grid ({covered_y:.6g}° of latitude and {covered_x:.6g}° of "
+            "longitude covered); the predictor needs the whole source volume on the grid"
         )
     return w
 

@@ -7,6 +7,7 @@ accumulation, output writing) without depending on remote ERA5 data.
 from __future__ import annotations
 
 import dataclasses
+import json
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -1207,6 +1208,49 @@ def test_multi_site_run_emits_per_site_footprint_coords(tmp_path: Path) -> None:
     assert cube.sizes["release_time"] == 2
 
 
+def test_multi_site_footprint_rows_stay_with_their_named_receptor(tmp_path: Path) -> None:
+    """Each written footprint row belongs to its labelled site (2026-11-25 test review).
+
+    Still air and no turbulence: every particle stays at its release point, so all of
+    a release's residence lies in the output cell containing its site. The sites sit
+    at the centres of different 0.25° cells, so a permutation of footprint rows under
+    the original labels (e.g. a reversed batch-local release index in the gridder)
+    puts a site's residence in the other site's cell.
+    """
+
+    sites = {
+        "MHD": {"lon": -0.875, "lat": 0.125, "alt_agl_m": 100.0},
+        "RGL": {"lon": 1.125, "lat": -0.625, "alt_agl_m": 300.0},
+    }
+    raw = _make_multi_site_config(
+        output_uri=str(tmp_path / "out"), n_releases=2, n_particles_per_release=64
+    ).model_dump(mode="json")
+    raw["release"]["sites"] = [{"name": k, **v} for k, v in sites.items()]
+    cfg = RunConfig.model_validate(raw)
+    reader = _make_multi_release_reader(cfg, wind_fn=lambda _: (0.0, 0.0, 0.0))
+    scheme = PlaceholderConstantOU()
+    scheme.sigma_w2 = 0.0  # no vertical turbulence; the placeholder has no horizontal
+    _run(cfg, reader=reader, scheme=scheme)
+
+    fp = xr.open_zarr(tmp_path / "out" / "footprints.zarr").load()
+    assert list(fp["site"].values) == ["MHD", "RGL", "MHD", "RGL"]
+    lat_c, lon_c = fp["latitude"].values, fp["longitude"].values
+    per_cell = (
+        fp["footprint"].sum(["time_ago", "z_bin"]).transpose("release", "latitude", "longitude")
+    )
+    for r, name in enumerate(fp["site"].values):
+        iy = int(np.argmin(np.abs(lat_c - sites[name]["lat"])))
+        ix = int(np.argmin(np.abs(lon_c - sites[name]["lon"])))
+        assert abs(lat_c[iy] - sites[name]["lat"]) < 1e-9  # the site is a cell centre
+        assert abs(lon_c[ix] - sites[name]["lon"]) < 1e-9
+        cells = per_cell.isel(release=r).values
+        own = float(cells[iy, ix])
+        assert own > 0.0, f"release {r} ({name}): no residence in its own cell"
+        assert own == pytest.approx(float(cells.sum()), rel=1e-12), (
+            f"release {r} ({name}): residence outside its own cell"
+        )
+
+
 def test_periodic_release_run_completes_and_emits_5d_footprint(tmp_path: Path) -> None:
     """End-to-end periodic_point run: outputs land, shape is 5D with the right release_time coord."""
 
@@ -1755,7 +1799,8 @@ def test_static_step_freezes_inactive_particles() -> None:
     state = scheme.initialize_state(n, device=torch.device("cpu"), dtype=torch.float32)
     # Seed nonzero state so "unchanged" is a real assertion (not 0 == 0).
     for k in state:
-        state[k] = torch.randn(n) * 0.1
+        state[k] = torch.randn(state[k].shape) * 0.1
+    state["sigma_last"] = state["sigma_last"].abs() + 0.1  # a σ: positive
 
     active = torch.zeros(n, dtype=torch.bool)
     active[: n // 2] = True  # first half active, second half frozen
@@ -1824,7 +1869,7 @@ def test_graph_compile_substep_path_runs_on_cpu(monkeypatch) -> None:
     GLIDE_COMPILE=1) and confirm the fixed-count substep loop actually compiles +
     runs + stays finite, with the per-method engine compile suppressed (no nesting).
     CUDA graphs are CUDA-only, so on CPU this checks the loop is *traceable* — the
-    sm% / capture payoff is validated on the GH200, not here. max_substeps=2 keeps
+    sm% / capture payoff is validated on the GH200, not here. n_substeps=2 keeps
     the unrolled loop small so the one-time compile is quick."""
 
     monkeypatch.setenv("GLIDE_STATIC_SUBSTEPS", "1")
@@ -1836,7 +1881,7 @@ def test_graph_compile_substep_path_runs_on_cpu(monkeypatch) -> None:
     torch.manual_seed(3)
     engine = GPUEngine(device="cpu")
     assert engine._compile_hot_paths is False  # per-method compile off on the graph path
-    scheme = HannaScheme(max_substeps=2)
+    scheme = HannaScheme(n_substeps=2)
     met = _wmc_met_window(blh_m=1500.0, ustar_m_s=0.4)
 
     n = 32
@@ -1900,9 +1945,7 @@ def test_step_core_traces_as_one_graph_no_breaks() -> None:
     torch._dynamo.config.suppress_errors = False  # make breaks raise, don't swallow
     try:
         engine = GPUEngine(device="cpu")
-        scheme = HannaScheme(
-            meander_enabled=True, max_substeps=4
-        )  # meander on → trace that path too
+        scheme = HannaScheme(meander_enabled=True, n_substeps=4)  # meander on → trace that path too
         met = _wmc_met_window(blh_m=2000.0, ustar_m_s=0.4)
 
         n = 48
@@ -1920,15 +1963,16 @@ def test_step_core_traces_as_one_graph_no_breaks() -> None:
             u_prime=state["u_prime"],
             v_prime=state["v_prime"],
             w_prime=state["w_prime"],
+            sigma_last=state["sigma_last"],
             u_meander=state["u_meander"],
             v_meander=state["v_meander"],
             active_mask=active,
             dt_seconds=60.0,
-            n_substeps=scheme.max_substeps,
             engine=engine,
             **inputs,
         )
-        assert len(out) == 6 and all(torch.isfinite(o).all() for o in out)
+        # State (7, with sigma_last) + this step's sub-step exceedance counts and worst ratios.
+        assert len(out) == 9 and all(torch.isfinite(o).all() for o in out)
     finally:
         torch._dynamo.config.suppress_errors = prev
         torch._dynamo.reset()
@@ -1954,7 +1998,7 @@ def test_step_core_does_not_recompile_per_step() -> None:
     torch._dynamo.config.error_on_recompile = True
     try:
         engine = GPUEngine(device="cpu")
-        scheme = HannaScheme(meander_enabled=True, max_substeps=4)
+        scheme = HannaScheme(meander_enabled=True, n_substeps=4)
         n = 48
         compiled = torch.compile(scheme._step_core, fullgraph=True, backend="eager")
 
@@ -1972,11 +2016,11 @@ def test_step_core_does_not_recompile_per_step() -> None:
                 u_prime=state["u_prime"],
                 v_prime=state["v_prime"],
                 w_prime=state["w_prime"],
+                sigma_last=state["sigma_last"],
                 u_meander=state["u_meander"],
                 v_meander=state["v_meander"],
                 active_mask=active,
                 dt_seconds=60.0,
-                n_substeps=scheme.max_substeps,
                 engine=engine,
                 **inputs,
             )
@@ -2385,3 +2429,146 @@ def test_each_particle_stops_its_own_length_after_its_release(
     steps_per_hour = 3600 // cfg.simulation.dt_seconds
     expected = [n] * (2 * steps_per_hour) + [2 * n] * steps_per_hour + [n] * (2 * steps_per_hour)
     assert active[active > 0].tolist() == expected
+
+
+# --- Sub-step exceedance counter (decision 0027; replaced A1's cap counter) ---------
+
+
+@pytest.mark.parametrize("path", ["dynamic", "static", "graph"])
+def test_substep_exceedance_counted_on_every_path(
+    tmp_path: Path, monkeypatch, caplog, path: str
+) -> None:
+    """Every active particle-sub-step is counted once, in the boundary layer or the
+    free troposphere, on the dynamic path, the static eager path and the static
+    graph-compiled path (on CPU the compiled core is traced and run, without CUDA
+    graphs), and the totals reach run_metadata.json (``runtime.substep_exceedance``)
+    and the end-of-run log. A reporting threshold of 1e-6 makes every sub-step
+    exceed it."""
+
+    import logging
+
+    from lpdm.turbulence import HannaScheme
+
+    monkeypatch.setenv("GLIDE_STATIC_SUBSTEPS", "0" if path == "dynamic" else "1")
+    monkeypatch.setenv("GLIDE_COMPILE", "1" if path == "graph" else "0")
+    cfg = _make_run_config(
+        output_uri=str(tmp_path / "out"),
+        turbulence_scheme="hanna_1982",
+        simulation_length_seconds=7200,
+        n_particles=64,
+    )
+    reader = _make_hanna_reader(cfg, wind_fn=lambda _: (5.0, 0.0, 0.0))
+    scheme = HannaScheme(n_substeps=3, exceedance_c=1e-6)
+    with caplog.at_level(logging.INFO):
+        metadata = _run(cfg, reader=reader, scheme=scheme)
+    if path == "graph":
+        assert scheme._graph_compile_state == "ok"
+
+    exc = metadata["runtime"]["substep_exceedance"]
+    traj = pd.read_parquet(tmp_path / "out" / "trajectory_diagnostics.parquet")
+    active_steps = int(traj["active_particles"].sum())
+    assert active_steps > 0
+    assert exc["n_substeps"] == 3 and exc["exceedance_c"] == 1e-6
+    # n_substeps is a count: the sub-step length follows dt_seconds, is recorded,
+    # and a sub-step longer than the validated 60 s / 16 is warned about.
+    assert exc["substep_seconds"] == pytest.approx(cfg.simulation.dt_seconds / 3)
+    assert cfg.simulation.dt_seconds / 3 > 3.75
+    assert [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "sub-step (dt_seconds" in r.getMessage()
+    ]
+    bl, ft = exc["boundary_layer"], exc["free_troposphere"]
+    assert bl["substeps"] + ft["substeps"] == 3 * active_steps
+    assert bl["exceeded"] == bl["substeps"] and ft["exceeded"] == ft["substeps"]
+    assert bl["over_T_L"] <= bl["exceeded"] and ft["over_T_L"] <= ft["exceeded"]
+    assert exc["met_windows_with_exceedance"] >= 2  # 2 h back: at least two windows
+    assert bl["worst_sub_dt_over_T_Lw"] > 0.0
+    assert [r for r in caplog.records if r.getMessage().startswith("sub-step exceedance")]
+    on_disk = json.loads((tmp_path / "out" / "run_metadata.json").read_text())
+    assert on_disk["runtime"]["substep_exceedance"] == exc
+
+
+@pytest.mark.parametrize("static", [False, True])
+def test_substep_exceedance_zero_in_the_boundary_layer_with_short_substeps(
+    tmp_path: Path, monkeypatch, static: bool
+) -> None:
+    """With the FLEXPART floor (T_Lw ≥ 30 s in the boundary layer) and 7.5 s
+    sub-steps (dt 300 s, 40 sub-steps), no boundary-layer sub-step exceeds 0.5 T_Lw;
+    the denominator is still recorded."""
+
+    from lpdm.turbulence import HannaScheme
+
+    monkeypatch.setenv("GLIDE_STATIC_SUBSTEPS", "1" if static else "0")
+    cfg = _make_run_config(
+        output_uri=str(tmp_path / "out"),
+        turbulence_scheme="hanna_1982",
+        simulation_length_seconds=7200,
+        n_particles=64,
+    )
+    reader = _make_hanna_reader(cfg, wind_fn=lambda _: (5.0, 0.0, 0.0))
+    metadata = _run(cfg, reader=reader, scheme=HannaScheme(n_substeps=40))
+    bl = metadata["runtime"]["substep_exceedance"]["boundary_layer"]
+    assert bl["substeps"] > 0
+    assert bl["exceeded"] == bl["over_T_L"] == 0
+    assert 0.0 < bl["worst_sub_dt_over_T_Lw"] <= 7.5 / 30.0 + 1e-6
+
+
+def test_substep_exceedance_absent_for_scheme_without_substeps(tmp_path: Path) -> None:
+    """A scheme with no sub-steps records None (the key is still present)."""
+
+    cfg = _make_run_config(output_uri=str(tmp_path / "out"))
+    metadata = _run(cfg, reader=_make_reader(cfg, wind_fn=lambda _: (5.0, 0.0, 0.0)))
+    assert metadata["runtime"]["substep_exceedance"] is None
+
+
+def test_static_and_dynamic_exceedance_counts_agree_with_inactive_particles() -> None:
+    """With one sub-step the counts depend only on T_Lw at the start of the step, so
+    one step from the same state counts the same particle-sub-steps on both paths,
+    with a quarter of the particles inactive (never counted on either)."""
+
+    from lpdm.gpu_engine import GPUEngine
+    from lpdm.turbulence import HannaScheme
+
+    met = _wmc_met_window(blh_m=1500.0, ustar_m_s=0.4)
+    n = 64
+    torch.manual_seed(5)
+    z0 = torch.rand(n) * 2400.0 + 1.0
+    counts = {}
+    for static in (False, True):
+        engine = GPUEngine(device="cpu")
+        # Legacy near-surface treatment: T_Lw falls to ~1 s near the ground, so with
+        # 300 s sub-steps the low particles exceed T_Lw and the high ones do not.
+        scheme = HannaScheme(
+            n_substeps=1,
+            flexpart_tl_floors=False,
+            surface_layer_override=True,
+            static_substeps=static,
+        )
+        particles = torch.zeros(n, 4, dtype=torch.float32)
+        particles[:, 1] = 45.0
+        particles[:, 2] = z0
+        particles[:, 3] = 1.0
+        state = scheme.initialize_state(n, device=torch.device("cpu"), dtype=torch.float32)
+        active = torch.ones(n, dtype=torch.bool)
+        active[: n // 4] = False  # inactive particles are never counted
+        scheme.step(
+            particles, state, met, t_alpha=0.5, dt_seconds=300.0, active_mask=active,
+            engine=engine,
+        )  # fmt: skip
+        counts[static] = scheme.take_substep_exceedance("w")
+        # Read-and-reset: a second read is zero.
+        assert scheme.take_substep_exceedance("w")["substeps_bl"] == 0
+    dyn, stat = counts[False], counts[True]
+    assert dyn["substeps_bl"] + dyn["substeps_ft"] == 3 * n // 4
+    assert 0 < dyn["over_T_L_bl"] < dyn["substeps_bl"]
+    for key in (
+        "substeps_bl",
+        "exceeded_bl",
+        "over_T_L_bl",
+        "substeps_ft",
+        "exceeded_ft",
+        "over_T_L_ft",
+    ):
+        assert dyn[key] == stat[key]
+    assert dyn["worst_bl"] == pytest.approx(stat["worst_bl"])

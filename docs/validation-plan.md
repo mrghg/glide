@@ -1301,6 +1301,9 @@ The standard cases (§4) are used throughout.
 
 ## 6. Figure infrastructure and design rules
 
+The infrastructure below is implemented in `scripts/validation/figures/`
+([VALIDATION.md §10](VALIDATION.md#10-validation-figures-and-the-gallery)).
+
 - Figures are produced by **scripts, not notebooks**, under
   `scripts/validation/`, directly from the run outputs. Scripts can be rerun
   automatically, so every figure is regenerated whenever the physics tag

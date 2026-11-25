@@ -16,8 +16,9 @@ the STILT unit conversion is then checked as an exact scale factor.
 
 One simulation (module fixture, ~10 s, n=200k) feeds all assertions. Observed
 agreement at seed 9021: total magnitude ratio 0.992; crosswind-integrated column
-error max 0.4% (2-5 T_L band), worst-case ~10% in far-field low-occupancy columns
-(statistical); correlation >= 0.9985; sigma_y within 1.1% of Taylor. Tolerances
+error max 0.4% (2-5 T_L band), worst-case ~10% in single columns beyond 5 T_L that
+receive 9 or 11 time samples instead of 10 (along-wind motion is deterministic and
+particle positions fall on cell edges; not particle noise); correlation >= 0.9985; sigma_y within 1.1% of Taylor. Tolerances
 are set at ~2-3x observed.
 """
 
@@ -147,7 +148,7 @@ def test_footprint_matches_analytic_gaussian_plume(plume: dict) -> None:
     beyond the near field, and the 2-D pattern correlates > 0.995."""
     for t_lo, t_hi, tol_max, tol_mean in [
         (2 * T_L, 5 * T_L, 0.05, 0.02),  # obs max 0.004
-        (5 * T_L, 10 * T_L, 0.15, 0.05),  # obs max 0.102 (far-field statistics)
+        (5 * T_L, 10 * T_L, 0.15, 0.05),  # obs max 0.102 (a 9-or-11-sample column)
         (10 * T_L, N_STEPS * DT, 0.15, 0.05),
     ]:
         cols = _band(plume, t_lo, t_hi)

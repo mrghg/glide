@@ -428,9 +428,8 @@ def test_scheme_kwargs_forwards_meander_only_for_hanna() -> None:
         "meander_coefficient": 0.2,
         "meander_stencil_radius": 2,
         "meander_timescale_seconds": 900.0,
-        # Substepping knobs default to the historical hardcoded values.
-        "substep_c": 0.5,
-        "max_substeps": 50,
+        # One fixed sub-step count for every particle (decision 0027).
+        "n_substeps": 16,
         # Near-surface mixing knobs default to the FLEXPART-matching behaviour
         # (T_L floors on, legacy surface-layer override off).
         "flexpart_tl_floors": True,
@@ -446,6 +445,44 @@ def test_scheme_kwargs_forwards_meander_only_for_hanna() -> None:
         _base_dict(turbulence={"scheme": "placeholder_constant_ou", "meander": {"enabled": True}})
     )
     assert _scheme_kwargs(cfg_placeholder) == {}
+
+
+def test_n_substeps_default_matches_the_scheme_and_is_validated() -> None:
+    """The config default is the scheme's default, and the count must be ≥ 1."""
+
+    from lpdm.config import N_SUBSTEPS_DEFAULT
+    from lpdm.turbulence import hanna
+
+    assert N_SUBSTEPS_DEFAULT == hanna.N_SUBSTEPS_DEFAULT
+    cfg = RunConfig.model_validate(_base_dict(turbulence={"scheme": "hanna_1982"}))
+    assert cfg.turbulence.n_substeps == N_SUBSTEPS_DEFAULT
+    cfg = RunConfig.model_validate(
+        _base_dict(turbulence={"scheme": "hanna_1982", "n_substeps": 16})
+    )
+    assert cfg.turbulence.n_substeps == 16
+    for bad in (0, -2, 2.5):
+        with pytest.raises(ValidationError):
+            RunConfig.model_validate(
+                _base_dict(turbulence={"scheme": "hanna_1982", "n_substeps": bad})
+            )
+
+
+@pytest.mark.parametrize(
+    "removed", [{"max_substeps": 6}, {"substep_c": 0.5}, {"substep_c": 0.5, "max_substeps": 6}]
+)
+def test_removed_adaptive_substep_keys_fail_with_a_migration_message(removed: dict) -> None:
+    """``substep_c`` and ``max_substeps`` belonged to the adaptive per-particle
+    schedule (decision 0027). A config that still sets them is refused, with a
+    message naming each removed key and its replacement, rather than silently
+    running a different schedule."""
+
+    with pytest.raises(ValidationError) as err:
+        RunConfig.model_validate(_base_dict(turbulence={"scheme": "hanna_1982", **removed}))
+    msg = str(err.value)
+    for key in removed:
+        assert f"turbulence.{key}" in msg
+    assert "turbulence.n_substeps" in msg
+    assert "decision 0027" in msg
 
 
 def test_point_release_back_compat_isinstance_check() -> None:

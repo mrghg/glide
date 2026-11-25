@@ -111,7 +111,7 @@ RunConfig (YAML)
                fetch the meteorology hour   (from cache; next hour fetched in background)
                advection                 ─┐
                turbulence                 ├─ one combined operation on the GPU
-               ground reflection         ─┘
+               BL-top interface, ground  ─┘   (decision 0028)
                convection                   once per meteorology interval, every column
                accumulate the footprint
                retire particles that have left the domain
@@ -273,7 +273,7 @@ GLIDE therefore carries two implementations, chosen automatically by device:
 | --- | --- | --- |
 | Which particles are processed | only the currently active ones, selected out of the array | all of them, every step |
 | Inactive particles | skipped | processed, but with their timestep set to zero, so nothing about them changes |
-| Sub-step loop | runs as many times as the busiest particle needs | always runs the maximum number of times |
+| Sub-step loop | `n_substeps` times, for the active particles | `n_substeps` times, for every particle |
 | Waiting on the GPU for a number | a few times per step; cheap on a CPU | never, inside the recorded region |
 | Role | **the reference behaviour** | the fast path |
 
@@ -281,14 +281,16 @@ Setting a particle's timestep to zero is exactly equivalent to leaving it alone,
 which is what makes the uniform path give the same answer: the memory factor
 becomes $r = e^0 = 1$ so the velocity is unchanged, the noise amplitude
 $\sigma^2(1-r^2) = 0$ so no randomness is added, the displacement $w'\cdot 0 = 0$
-so the position is unchanged, and reflecting a particle already above ground does
-nothing. Every particle still takes exactly its own $k_p$ real sub-steps; the
-extra iterations do nothing at all. Inactive particles are held still by
-*multiplying* by zero rather than by being excluded from the array — that is what
-keeps the array sizes fixed.
+so the position is unchanged, reflecting a particle already above ground does
+nothing, and a particle that did not move cannot cross the boundary-layer top,
+so the interface rule (decision 0028) leaves it alone too. Every active particle takes the same `n_substeps` sub-steps on both
+paths (decision 0027), so with every particle active the two paths do the same
+arithmetic and draw the same random numbers, and agree bit for bit. Inactive
+particles are held still by *multiplying* by zero rather than by being excluded
+from the array — that is what keeps the array sizes fixed.
 
-The trade-off is explicit: the uniform path performs *more* arithmetic (finished
-and departed particles are still processed) in exchange for far fewer
+The trade-off is explicit: the uniform path performs *more* arithmetic (departed
+and not-yet-released particles are still processed) in exchange for far fewer
 instructions. It wins because instruction overhead was the problem. On a CPU,
 where issuing work is free, the trade reverses — hence choosing by device.
 
@@ -435,7 +437,7 @@ All of these are environment variables, and all are optional.
 | `GLIDE_COMPILE=0/1` | Turn compilation and step recording off or on. Off avoids the one-off compilation cost at startup — useful when debugging. |
 | `GLIDE_STATIC_SUBSTEPS=0/1` | Force the uniform or selective step path (§5), overriding the automatic choice by device. |
 | `GLIDE_PROFILE=1` | Record about 20 steps in detail, print how busy the GPU was, where it waited, and which operations ran most often, write a timeline file viewable in a browser, then exit. `GLIDE_PROFILE_STEPS` / `_WARMUP` / `_TRACE` / `_CONTINUE` adjust it. |
-| `GLIDE_PHASE_TIMERS=1` | Break the whole run's elapsed time down by phase (meteorology fetch / advection / step / convection / gridding). `_EVERY` and `_SYNC` adjust it. |
+| `GLIDE_PHASE_TIMERS=1` | Break the whole run's elapsed time down by phase: set-up, meteorology fetch, the step, convection and its parts (`convection.columns`, `.lift`, `.matrices`, `.redistribute`, `.log`), gridding, the wind-mean diagnostic, mask and liveness bookkeeping, per-step diagnostics, logging and memory guards, garbage collection, particle generation, batch set-up and end, output writes, and the Python overhead of the step loop (`loop_overhead`). Phases nest and each row is the phase's own time, so the rows add up to the wall time; the untimed residual is what falls between them. `_EVERY` adjusts the running log; `_SYNC=1` synchronises the GPU at every phase boundary, so GPU work is charged to the phase that issued it (otherwise to whichever phase next waits for the GPU). Code in `lpdm/phase_timers.py`. |
 | `GLIDE_NUM_THREADS=N` | How many CPU cores PyTorch uses within a single operation (CPU runs only). About 16 measured best on a 48-core node; using all 48 was the *slowest* option, ~25% worse, because the arrays are small enough that the cores spend more time coordinating than working. |
 | `GLIDE_VALIDATE_ENGINE=1` | Re-enable per-call checking of input values in the innermost routines. Off by default, because each check makes the CPU wait for an answer from the GPU, and the sub-step loop calls them hundreds of times per step. |
 | `GLIDE_MEM_SNAPSHOT=1` | Dump a detailed GPU memory snapshot (`_BATCH`, `_PATH` adjust it). |
@@ -443,8 +445,9 @@ All of these are environment variables, and all are optional.
 
 **Reading a GPU run.** The `*.gpu.log` sidecar reports GPU utilisation. Low and
 bursty means the run is limited by instruction overhead rather than computation.
-Confirm it the way §5 did: lower `max_substeps` and see whether the elapsed time
-falls while utilisation does not. In a `GLIDE_PROFILE` timeline, many tiny GPU
+Confirm it the way §5 did: lower `turbulence.n_substeps` (for the diagnosis only;
+it is a physics setting) and see whether the elapsed time falls while utilisation
+does not. In a `GLIDE_PROFILE` timeline, many tiny GPU
 operations point the same way; a lot of time in `cudaStreamSynchronize` means the
 CPU is still waiting on the GPU somewhere; long stretches of CPU-only activity
 mean the bottleneck is Python or meteorology reading. If the CPU time is

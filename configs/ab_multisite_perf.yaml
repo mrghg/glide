@@ -46,7 +46,6 @@ release:
 
 turbulence:
   scheme: hanna_1982
-  max_substeps: 6
   meander:
     enabled: true
     coefficient: 0.16

@@ -996,6 +996,63 @@ def test_terrain_following_slope_corrects_w() -> None:
     assert np.all(ws[0] < wf[0] - 1e-9)
 
 
+def test_terrain_following_w_uses_the_northward_slope_on_descending_latitude() -> None:
+    """Near-surface terrain-following w over a plane rising northward (2026-11-25
+    test review): the meridional term of ``w - u dh/dx - v dh/dy``.
+
+    The store's latitude descends (12, 11, 10, as ERA5 stores it); the terrain rises
+    100 m per degree north and is flat in longitude; u = 0, v = +10 m/s (northward,
+    up the slope), omega = 0, so w = 0. A northward wind climbing the slope must sink
+    in the terrain-following frame. The reader's metric is 110,540 m per degree of
+    latitude (``vertical_grid._M_PER_DEG_LAT``, also the advection's), so
+    dh/dy = 100 / 110540 and, at 0 m AGL where the taper is 1,
+    w_agl = -10 * 100 / 110540 = -0.0090465 m/s in every column.
+    """
+
+    from lpdm import vertical_grid
+
+    m_per_deg_lat = 110540.0
+    assert m_per_deg_lat == vertical_grid._M_PER_DEG_LAT, "the reader's metric changed"
+
+    ds = _build_mock_era5_dataset()
+    lat = np.array([12.0, 11.0, 10.0])
+    lon = ds["longitude"].values
+    rise_m_per_deg = 100.0
+    terrain_m = 150.0 + rise_m_per_deg * (lat - 10.0)  # [Y]; highest at 12 N (index 0)
+    g = 9.80665
+    nt, nl = ds.sizes["time"], ds.sizes["level"]
+    z_sfc = np.broadcast_to((terrain_m * g)[None, :, None], (nt, lat.size, lon.size)).copy()
+    z = np.empty((nt, nl, lat.size, lon.size))
+    z[:, 0] = z_sfc + 900.0 * g  # AGL stays [900, 1000] m in every column
+    z[:, 1] = z_sfc + 1000.0 * g
+    shape_4d, shape_3d = z.shape, z_sfc.shape
+    # Three copies of the mock's first row (attrs and units kept), relabelled.
+    plane = ds.isel(latitude=[0, 0, 0]).assign_coords(latitude=lat)
+    plane["u_component_of_wind"].values[:] = np.zeros(shape_4d)
+    plane["v_component_of_wind"].values[:] = np.full(shape_4d, 10.0)
+    plane["vertical_velocity"].values[:] = np.zeros(shape_4d)
+    plane["geopotential"].values[:] = z
+    plane["geopotential_at_surface"].values[:] = z_sfc
+    assert plane["boundary_layer_height"].shape == shape_3d
+
+    reader = _InMemoryArcoReader(plane, terrain_following=True)
+    request = BoundingBoxRequest(
+        spatial=SpatialBounds(
+            lon_min=19.5, lon_max=21.5, lat_min=9.5, lat_max=12.5, z_min=0.0, z_max=1050.0
+        ),
+        time=_tf_request().time,
+    )
+    result = reader.fetch_hourly_window(request)
+
+    assert result.metadata.level[0] == 0.0
+    vi, wi = (reader.channel_names.index(k) for k in ("v", "w"))
+    for field in (result.hour_start, result.hour_end):
+        np.testing.assert_allclose(field[vi].cpu().numpy(), 10.0)
+        w0 = field[wi, 0].cpu().numpy()  # 0 m AGL, every column
+        assert w0.shape == (lat.size, lon.size)
+        np.testing.assert_allclose(w0, -10.0 * rise_m_per_deg / m_per_deg_lat, rtol=1e-9)
+
+
 def _three_hour_mock_dataset() -> xr.Dataset:
     """The standard mock extended to three hourly steps (02:00 duplicates 01:00's
     fields; values are irrelevant — these tests assert caching/sharing)."""

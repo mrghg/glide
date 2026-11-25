@@ -71,8 +71,10 @@ per-step call; it never inlines these away.
 `_column_turbulence(z)` returns
 $(\sigma_u, \sigma_v, \sigma_w, T_{Lu}, T_{Lv}, T_{Lw})$ at any height, for
 every particle at once. It is callable at arbitrary
-$z$ because the well-mixed drift needs to finite-difference $\sigma_w$ through
-the profile, including across regime seams. The order of operations matters:
+$z$ because the well-mixed drift finite-differences $\sigma_w$ through the
+profile (`_column_sigma_w`, which evaluates $\sigma_w$ alone and can be told
+which side of $h$ to use: the drift's stencil never crosses $h$, decision
+0028, [physics.md §3.3 and §5](physics.md)). The order of operations matters:
 
 ```
 1. Boundary-layer profile        in_bl_sigma_TL(z, h, u*, w*, h/L, lat)
@@ -253,9 +255,12 @@ This was measured, not theorised. GLIDE's v2 validation over-estimated mean CH�
 enhancements, worst at polluted low-inlet sites, on stable nights: near-surface
 $K$ was running 3–8× below FLEXPART's. Turning the floors on was the fix.
 
-A convenient side effect: with $T_{Lw} \ge 30$ s, the per-particle sub-step count
-at $\Delta t = 60$ s is $\lceil 60/(0.5 \times 30) \rceil = 4$, so the
-`max_substeps` cap rarely binds.
+The floor also bounds the sub-step ratio in the boundary layer: with
+$T_{Lw} \ge 30$ s, a sub-step of $\Delta t/n$ is at most $\Delta t/(30n)$ of
+$T_{Lw}$ there, 0.125 at the default $n = 16$ and $\Delta t = 60$ s
+([physics.md](physics.md) §6). Above the boundary layer there is no such floor;
+`runtime.substep_exceedance` in `run_metadata.json` reports how often the sub-step is long
+compared with $T_{Lw}$ there.
 
 Set `flexpart_tl_floors: false` only to reproduce legacy A/B comparisons; it
 reverts to a 1 s floor.
@@ -331,6 +336,17 @@ mattered: $N^2$ was 5–55% too low between 0.5 and 10 km over the Jungfraujoch
 when it was corrected (seed-to-seed noise 0.5%; decision 0025). The resulting
 $\sigma/T_L$ fields are built once per meteorology hour on the grid, then
 interpolated trilinearly to each particle above the boundary layer.
+
+**The jump at $h$.** Nothing makes the closure meet the boundary-layer profile
+at $h$: in a convective boundary layer $\sigma_w$ drops from about 0.7 to
+0.05 m s⁻¹ there, in a stable one it rises from the profile's 1 mm s⁻¹ floor
+to the closure's value. GLIDE does not smooth the jump. It treats $h$ as an
+interface (decision 0028, [physics.md §5](physics.md)): the drift is differenced on each
+side separately, a particle crossing $h$ inside a sub-step is transmitted with
+probability $\min(1, \sigma_{wB}/\sigma_{wA})$ (velocities scaled by the ratio
+of the $\sigma$ on the two sides) or reflected, and velocities are carried as
+$u'/\sigma$ across outer steps so that a moving $h$ rescales them. The $\sigma$
+on each side of $h$ come from `_interface_sigmas`, once per outer step.
 
 The air density of the well-mixed density drift ([physics.md §3](physics.md)),
 $\rho = p/(R_d T)$, and its vertical gradient are built the same way: once per
@@ -470,7 +486,9 @@ of §5 are applied afterwards, so enabling both still bounds $T_L$.
 
 Two reasons it is off. First, $T_L = \kappa z/\sigma$ falls to seconds as
 $z \to 0$, undercutting the floors that §5 exists to impose. Second, it puts a
-discontinuity in $K$ at the $0.1h$ seam.
+discontinuity in $\sigma_w$ and $K$ at the $0.1h$ seam, which the drift's finite
+difference straddles. That is the same defect decision 0028 removed at $h$, and
+the seam is not treated as an interface: enabling the override reintroduces it.
 
 The stable branch being **constant in height** is itself a correction. An earlier
 form, $1.3u_\ast(1 + 5z/L)$, *grew* with stability — that expression is the $\phi_m$
@@ -484,8 +502,7 @@ nocturnal near-surface layer.
 ```yaml
 turbulence:
   scheme: hanna_1982          # required; or placeholder_constant_ou
-  substep_c: 0.5              # sub_dt target: sub_dt < substep_c · T_Lw
-  max_substeps: 6             # cap on per-particle sub-steps per outer step
+  n_substeps: 16              # sub-steps per outer step, every particle (physics.md §6)
   flexpart_tl_floors: true    # §5 — leave on
   surface_layer_override: false   # §8 — leave off
   boundary_layer_depth_min_m: 50    # §2; validation runs: 100
@@ -497,11 +514,19 @@ turbulence:
     timescale_seconds: null   # null → half the store's met interval (1800 s hourly)
 ```
 
-`max_substeps` is a genuine performance/accuracy knob. On the GPU graph path it
-is a **fixed** per-step iteration count rather than a cap, so every particle pays
-it — the default of 50 in code is far more than the $T_L$ floors require, and the
-shipped configs set 6. Raise it only if you lower `simulation.dt_seconds` or
-`substep_c`, or turn the floors off.
+`n_substeps` is the number of equal sub-steps every particle takes in every
+outer step, with every coefficient re-evaluated at the particle's height at the
+start of each (decision 0027, [physics.md](physics.md) §6). It is a physics
+setting: the default keeps the near-surface well-mixed error within the tested
+tolerance at `dt_seconds: 60`. It is a **count, not a length**: the sub-step is
+`dt_seconds / n_substeps`, so changing `dt_seconds` changes it. If you change
+`dt_seconds`, keep `dt_seconds / n_substeps` at or below 3.75 s; the run logs the
+sub-step length, warns when it is longer than 3.75 s, and records it in
+`run_metadata.json` (`runtime.substep_exceedance.substep_seconds`). The step's GPU cost grows in
+proportion to it. The keys `substep_c` and `max_substeps` of the old per-particle
+adaptive schedule are refused. How often a sub-step is long compared with
+$T_{Lw}$ is recorded for every run in `run_metadata.json` under
+`runtime.substep_exceedance` ([physics.md](physics.md) §6).
 
 **Extra meteorology required by `hanna_1982`:**
 

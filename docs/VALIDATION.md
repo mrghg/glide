@@ -22,6 +22,7 @@ comparison against another model yourself.
 7. [Comparing against FLEXPART, NAME and STILT](#7-comparing-against-flexpart-name-and-stilt)
 8. [Golden fixtures](#8-golden-fixtures)
 9. [Adding a physics test](#9-adding-a-physics-test)
+10. [Validation figures and the gallery](#10-validation-figures-and-the-gallery)
 
 ---
 
@@ -59,6 +60,8 @@ share no state and run order is irrelevant. Stochastic tests are seeded.
 | `test_dispersion_analytic.py` | OU autocorrelation, Taylor dispersion, solid-body rotation | 4 |
 | `test_terrain_transport.py` | Terrain-following transport end-to-end | 2 |
 | `test_diffusion_pde.py` | Langevin diffusion limit vs a PDE reference | 2 |
+| `test_near_surface_well_mixed.py` | Near-surface well-mixed gate through the production Hanna scheme at $\Delta t = 60$ s, three regimes | 3 |
+| `test_bl_top_well_mixed.py` | Boundary-layer-top well-mixed gate: open column uniform in $[0, 2h]$ through the production Hanna scheme at $\Delta t = 60$ s, three regimes | 3 |
 
 ---
 
@@ -91,7 +94,7 @@ reflection, the gridder, and the unit conversion.
 
 | Test | Asserts | Tolerance (observed) |
 | --- | --- | --- |
-| `test_footprint_matches_analytic_gaussian_plume` | crosswind-integrated columns per travel-time band; 2-D correlation | 2–5 $T_L$: max < 5% (obs 0.4%); ≥ 5 $T_L$: max < 15% (obs ≤ 10%, statistical); corr > 0.995 (obs 0.9985) |
+| `test_footprint_matches_analytic_gaussian_plume` | crosswind-integrated columns per travel-time band; 2-D correlation | 2–5 $T_L$: max < 5% (obs 0.4%); ≥ 5 $T_L$: max < 15% (obs ≤ 10%: single columns that receive 9 or 11 time samples instead of 10, because along-wind motion is deterministic and particle positions fall on cell edges; not particle noise); corr > 0.995 (obs 0.9985) |
 | `test_footprint_absolute_magnitude_matches_plume` | total surface residence vs analytic | ratio within ±3% (obs 0.992) |
 | `test_footprint_crosswind_width_matches_taylor` | moment-based $\sigma_y$ (Sheppard-corrected) at ~6 distances | < 5% (obs ≤ 1.1%) |
 | `test_stilt_conversion_scales_raw_footprint_exactly` | STILT field = raw × $m_{\mathrm{air}}/(h\rho)$ | exact (rtol $10^{-12}$) |
@@ -152,6 +155,9 @@ CI:
 | `test_well_mixed_condition_drift_keeps_uniform_distribution` | the drift term alone preserves a uniform distribution |
 | `test_well_mixed_uniformity_in_periodic_turbulence` | uniformity in a periodic domain (rel-RMS < 0.12) |
 | `test_v1_well_mixed_hanna_backward_path` | a flat distribution stays flat through the **production backward scheme** at constant $\rho$ — parametrised over both the static and dynamic paths |
+| `test_near_surface_well_mixed_at_60_s` (`test_near_surface_well_mixed.py`) | at the shipped $\Delta t = 60$ s and the default sub-step count, a closed boundary layer (lid inside every sub-step) keeps its lowest 5% and its 0–40 m layer within ±0.09 of their well-mixed share, stable, neutral and convective (decision 0027; the code before it gave 1.66–1.79 in the lowest 5% and fails it in all three regimes) |
+| `test_uniform_column_stays_uniform_across_the_boundary_layer_top` (`test_bl_top_well_mixed.py`) | at the shipped $\Delta t = 60$ s and the default sub-step count, a column started uniform in $[0, 2h]$, open at $h$ to the free-troposphere closure and closed by a lid at $2h$, keeps each 50 m band from $h - 100$ to $h + 100$ m within ±0.08 of uniform and the occupancy continuous across $h$ (jump within ±0.08), stable, neutral and convective (decision 0028; PR #69's head and main fail it in all three regimes) |
+| `test_drift_stencil_stays_on_the_particles_side_of_h`, `test_interface_crossing_rule_backward`, `test_carry_is_one_in_a_steady_column_and_tracks_a_moving_h` (`test_hanna.py`) | the drift never differences the jump at $h$; the transmission probability, velocity and overshoot scaling and reflection at $h$ in backward time; $u'/\sigma$ carried across steps (decision 0028) |
 | `test_v1_density_weighted_well_mixed_with_F2` | a $\rho$-weighted distribution stays $\rho$-weighted under varying $\rho$ |
 | `test_hanna_well_mixed_no_runaway_lofting` | no systematic upward drift (this caught the frozen $(1+w'^2/\sigma_w^2)$ factor) |
 | `test_reflect_surface_w_flip_resolves_one_way_downward_drift` | the joint $(z, w')$ reflection removes the post-reflection downward bias |
@@ -417,6 +423,74 @@ This run is also the run the reference fixture was made from (the phase timers d
 and gridder times are under-counted and the residual holds the rest. Compare
 like with like: same node type, same cache settings, nothing else on the GPU.
 
+### Phase breakdown with sub-phases (task A1)
+
+Since task A1 the phases nest and each row is the phase's own time
+(`lpdm/phase_timers.py`; [architecture.md §8](architecture.md#8-diagnostics-and-knobs)),
+so the former 8.7% residual is now named. The same config and settings as the
+baseline, 25 Nov 2026, at `src/` of 4388a6e, with `GLIDE_PHASE_TIMERS_SYNC=1`
+(the GPU synchronised at every phase boundary, so each phase carries its own
+GPU work; another agent's small job shared the GPU):
+
+| quantity | value |
+| --- | --- |
+| process wall time | 1154.1 s |
+| **footprints per second** | **0.1248** (baseline 0.1252) |
+| peak host RSS | 53.0 GB |
+
+| phase | total (s) | % wall | calls | ms/call |
+| --- | ---: | ---: | ---: | ---: |
+| met_fetch | 832.76 | 72.7 | 17280 | 48.192 |
+| gridder | 90.57 | 7.9 | 17280 | 5.242 |
+| step | 73.93 | 6.5 | 17280 | 4.278 |
+| gc | 47.67 | 4.2 | 345 | 138.188 |
+| mask_liveness | 44.06 | 3.8 | 51840 | 0.850 |
+| convection.lift | 11.08 | 1.0 | 286 | 38.727 |
+| loop_overhead | 10.44 | 0.9 | 17280 | 0.604 |
+| setup | 7.59 | 0.7 | 1 | 7589.972 |
+| wind_mean | 7.49 | 0.7 | 17280 | 0.433 |
+| diagnostics | 5.01 | 0.4 | 17280 | 0.290 |
+| output_write | 2.79 | 0.2 | 4 | 696.400 |
+| saturation_poll | 2.26 | 0.2 | 17282 | 0.131 |
+| convection.matrices | 2.11 | 0.2 | 286 | 7.362 |
+| convection.columns | 1.82 | 0.2 | 286 | 6.372 |
+| batch_setup | 1.15 | 0.1 | 2 | 572.830 |
+| convection.redistribute | 1.03 | 0.1 | 286 | 3.616 |
+| log_guard | 0.99 | 0.1 | 17280 | 0.058 |
+| convection.log | 0.54 | 0.0 | 286 | 1.877 |
+| batch_end, convection (own), particle_generation, batch_diagnostics | 0.89 | 0.1 | | |
+| (residual/untimed) | 0.56 | 0.0 |  |  |
+
+Convection with its parts is 16.9 s (1.5% of wall, 58.6 ms per met window);
+the parcel lift is two thirds of it (38.7 ms per window). The same run without
+GPU synchronisation (1371.0 s, 0.1050 footprints/s, slower met fetch at 59.3
+ms/call on a cold file cache) charged 93.4 s to `gc` (271 ms per
+`gc.collect`) and 37.4 s to `mask_liveness`; with or without
+synchronisation the untimed residual is below 0.1% of wall. The per-call cost
+of `gc` is Python's full collection over the run's object graph, every 50 steps
+(`memory.gc_every_steps`); `mask_liveness` is the active mask, the time-ago
+bins and the met-domain escape check, three small elementwise passes over the
+1.44 million-particle buffer every step.
+
+**Changing the compiled step changes the CUDA random realisation.** Task A1
+added two scalar outputs to the captured step (the substep-saturation count).
+On the smoke config the footprint still met the CUDA tolerance and the endpoint
+particles were identical, but on `ab_multisite_perf` every particle's
+trajectory changed, so the comparison with the reference fixture fails (largest
+cell |a−b|/bound 9.0e4). The eager static path is unchanged bit for bit (a
+12-hour, 12-release cut of the config, main against the branch, on CUDA with
+`GLIDE_COMPILE=0`), and even returning `active_mask.sum()` from the core alters
+the compiled result: Inductor generates the step's random numbers per kernel,
+so a different kernel layout (here, a reduction over 1.44 million particles
+that splits differently from one over 20,000) gives a different, equally valid
+stream. Two runs of the new code were identical. Against the fixture the
+change is the size of a different random seed: release totals differ by a
+median 2.9e-5 (largest 4.5e-4) relative, the 0–40 m layer by a median 0.04%
+(largest 0.45%) per release, and summed over each site's 48 releases by
+−0.005%, +0.023% and +0.006% (MHD, RGL, TAC). Any later edit to the captured
+step will do the same; the reference CUDA fixture then has to be regenerated,
+and the CUDA tolerance only covers unchanged compiled code.
+
 ---
 
 ## 9. Adding a physics test
@@ -439,3 +513,50 @@ accumulator:
 
 Tests must not depend on the restricted validation data; the synthetic fixtures
 have to be sufficient.
+
+---
+
+## 10. Validation figures and the gallery
+
+The figures of [validation-plan.md §5](validation-plan.md#5-the-figure-set) are
+made by scripts in `scripts/validation/figures/`, which implement the design
+rules of §6 once:
+
+- `style.py`: one palette and set of colour scales for every tier (the
+  project's validated reference palette). GLIDE is blue, a reference model
+  orange, an exact or numerical reference solution black and dashed.
+- `core.py`: the title stamp (physics tag and a 10-digit hash of the exact
+  configuration), log₁₀ ratios on one diverging scale, footprints on a
+  logarithmic scale in STILT units, and particle-noise bands. A band is the
+  statistic recomputed on 10 random disjoint particle subsets: the standard
+  error of the full-sample value is the subset spread over √10, drawn at ±2
+  standard errors. Each figure is saved with a JSON file holding the tag, the
+  hash, the configuration itself, the git revision and headline metrics.
+- `tier0.py`: the Tier 0 set, recomputed from the analytic tests of §3–4 with
+  their parameters, seeds and reference solutions (imported from the tests
+  where the tests expose them): Taylor dispersion, the well-mixed test in three
+  stability regimes with the drift switched off as a companion, the analytic
+  plume, the diffusion limit, a convergence preview (time step, sub-step
+  target, particle count; the full study is task A5) and terrain. The
+  reciprocity figure waits for the forward mode (task A6).
+- `gallery.py`: writes `docs/validation/gallery.md`, keyed by physics tag, with
+  an index that has one column per tag so a figure can be compared across
+  versions, and lists the figures still pending.
+- `explorer.py`: a static footprint explorer, one self-contained HTML page per
+  run (no server, network or libraries), with GLIDE beside a reference and
+  their log ratio for each release. The exportable form of
+  `notebooks/footprint_explorer.ipynb` for supplementary material.
+
+Regenerate every figure and the gallery (CPU, about eight minutes on 8 threads, well under
+2 GB):
+
+```bash
+.venv/bin/python scripts/validation/figures/make_all.py [--root DIR] [--only ID ...]
+.venv/bin/python scripts/validation/figures/explorer.py RUN_DIR --reference REF_DIR --out page.html
+```
+
+Figures go to `<root>/figures/<physics tag>/tier<N>/`; the default root is
+`docs/validation`. Before the freeze tag exists the tag reads
+`pre-freeze-<revision>`. A validation task that adds figures adds a builder
+to its tier's module and an entry to its `FIGURES` list, so the gallery shows
+the gap until the figure exists.
