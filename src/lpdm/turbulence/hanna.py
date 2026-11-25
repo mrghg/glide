@@ -1797,8 +1797,8 @@ class HannaScheme(TurbulenceScheme):
         Scaling each velocity by σ(now)/σ(end of last step) is the exact
         integral of the nonstationary term (w/2σ²)·∂σ²/∂t of the Gaussian
         well-mixed drift (Thomson 1987) over that change, and it is the
-        treatment of step changes in time that STILT attributes to Thomson,
-        Physick & Maryon (1997). It matters at h: when h moves past a particle,
+        treatment of step changes in time of Thomson, Physick & Maryon (1997,
+        §4: keep w/σ_w fixed across a time discontinuity; §5 extends it to u_H). It matters at h: when h moves past a particle,
         σ_w at it jumps between the boundary-layer and free-troposphere values.
         ``sigma_last`` is 0 before a particle's first step (no scaling). In a
         steady, motionless column the ratio is 1 to within the change of σ over

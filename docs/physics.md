@@ -515,7 +515,12 @@ the other's, so a uniform column stays uniform for any sub-step when $\sigma$
 is constant on each side; the derivation is in decision 0028. The rule depends
 only on the direction of the displacement and on $|w'|$, so the backward model
 (which is the forward model written for $-w'$, §4) uses it unchanged. Air
-density is continuous at $h$, so TPM's density factor is 1.
+density is continuous at $h$, so TPM's density factor is 1. This is the
+"alternative approach" of TPM's §3, the one of their two Gaussian schemes that
+stays accurate at long steps; it assumes, as TPM state, that exchange across
+$h$ is limited by diffusion on either side rather than by weaker turbulence
+within the inversion itself. Decision 0028 compares every element of GLIDE's
+implementation with the paper and records the reasons for each choice.
 
 Between outer steps $h$ moves (time interpolation of the meteorology, advection
 into another column) and a particle can find itself on the other side without
@@ -924,9 +929,9 @@ real atmosphere. See [VALIDATION.md](VALIDATION.md) and
 - Thomson, D. J. (1987). Criteria for the selection of stochastic models of
   particle trajectories in turbulent flows. *J. Fluid Mech.* 180, 529–556.
 - Thomson, D. J., Physick, W. L., Maryon, R. H. (1997). Treatment of interfaces
-  in random walk dispersion models. *J. Appl. Meteor.* 36, 1284–1295. (Not
-  read for decision 0028; the scheme was taken from STILT's implementation of
-  it, which cites it.)
+  in random walk dispersion models. *J. Appl. Meteor.* 36, 1284–1295. (GLIDE
+  uses the §3 "alternative approach", with §4's treatment of jumps of $h$ in
+  time; checked against the paper, decision 0028.)
 - Wilson, J. D., Flesch, T. K. (1993). Flow boundaries in random-flight
   dispersion models: enforcing the well-mixed condition. *J. Appl. Meteor.* 32,
   1695–1707.

@@ -15,7 +15,7 @@
 - docs: docs/physics.md §3.3, §5, §6, §8, §9; docs/turbulence.md §2, §5, §6, §8, §9; docs/architecture.md §5, §8; docs/VALIDATION.md §2, §4; STATUS.md; dev/decisions/0027 (revised), 0028 (new).
 - handoff: Golden fixtures and the benchmark baseline are NOT regenerated (by instruction); they must be regenerated once after A2. Suggested PROGRESS.md "Current state" line: sub-stepping fixed (decision 0027, default 16 sub-steps at 60 s) and the boundary-layer top treated as a Thomson-Physick-Maryon interface (decision 0028); reference 0-40 m footprints +48% against the fixtures and converged in n. TPM 1997 itself still to be checked by a human.
 - proposed follow-ups:
-  - Check decision 0028's scheme against the TPM 1997 paper itself (not retrievable by the agent; taken from STILT's implementation).
+  - Check decision 0028's scheme against the TPM 1997 paper itself: DONE 25 Nov 2026 by the coordinating session (decision 0028, "What is implemented, against TPM 1997").
   - Optional surface-layer override: its 0.1h seam has the same straddled-jump defect; treat it as an interface or retire the option.
   - Stable boundary-layer top: first-order residual (−3% in the 50 m below h at n = 16) shrinks with n; consider it with the near-surface error if n is revisited.
   - Boundary-layer top: DONE in this PR (decision 0028).

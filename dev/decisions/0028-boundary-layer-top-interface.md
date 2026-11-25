@@ -67,24 +67,39 @@ In the closed-column harnesses (the near-surface CI gate, the study's
 `closed`) the lid at $h$ replaces the interface, so the crossing rule is off
 there (`_LidHanna` in `tests/test_near_surface_well_mixed.py`).
 
-**What is implemented, against TPM 1997.** The paper itself could not be
-retrieved (journal page refused automated access). The scheme as described
-here is from STILT's implementation, which labels it "Thomson [1997]
-reflection/transmission scheme" (`pardsp.f` of the STILT/HYSPLIT merged code,
-Lin et al. 2003; read for this decision): transmission probability
-$\rho_B\sigma_B/(\rho_A\sigma_A)$ (always transmitted if ≥ 1), $w'$ scaled by
-$\sigma_B/\sigma_A$ on transmission, $w' \to -w'$ on reflection, and $w'/\sigma_w$
-stored between outer steps "to have proper treatment of step changes in
-turbulence statistics from one timestep to the next (Thomson et al. [1997])".
-A human check against the paper is still owed. Departures, each deliberate:
+**What is implemented, against TPM 1997.** Checked against the paper
+(Thomson, Physick & Maryon 1997, *J. Appl. Meteor.* 36, 1284–1295; section
+numbers below are the paper's) by the coordinating session on 25 Nov 2026,
+after the scheme had been written from STILT's implementation of it
+(`pardsp.f`, Lin et al. 2003), because the paper was not available to the
+implementing agent. The paper does not prescribe a single scheme: it derives
+the condition any consistent scheme must meet (§2: if the particles
+reaching the interface are well mixed, those leaving it must have the
+well-mixed flux-weighted velocity distribution of the side they enter) and
+offers several schemes that meet it. GLIDE uses its §3 "alternative
+approach" for Gaussian turbulence. Point by point:
 
-| TPM / STILT | GLIDE | why |
-| --- | --- | --- |
-| piecewise-constant $\sigma$ in layers, no drift; every layer boundary an interface | smooth profiles with the Thomson drift on each side; only $h$ is an interface | the boundary-layer and free-troposphere profiles are smooth; only $h$ jumps |
-| particle moved to the interface, the internal step ends there, the rest of the time taken by later internal steps (variable number) | the sub-step is completed ballistically: transmitted overshoot scaled by $\sigma_B/\sigma_A$, reflected overshoot mirrored | keeps the fixed sub-step count (decision 0027, static shapes); exactly consistent, below |
-| factor $\rho_B/\rho_A$ | omitted | $\rho$ is continuous at $h$, so the factor is 1 |
-| $w'$ only | $u', v'$ also scaled on transmission | the horizontal $\sigma$ jump too; consistent for independent Gaussian components, below |
-| $w'/\sigma_w$ stored between calls | $u'/\sigma_u$, $v'/\sigma_v$, $w'/\sigma_w$ carried, $\sigma_{\mathrm{last}}$ at the end-of-step position | the same treatment for all three components |
+| Element | TPM 1997 | GLIDE | Relation and reason |
+| --- | --- | --- | --- |
+| Choice of scheme | §2–3 offer (i) a deterministic mapping of the incident velocity, Eq. (6), with reflection below a critical velocity, and (ii) the "alternative approach": transmission with probability $\sigma_w(z_{i+})/\sigma_w(z_{i-})$ (or 1), velocity scaled by that ratio, otherwise perfect reflection | (ii) | **Choice within the paper.** Simpler (no critical velocity, no logarithm), and more robust at long steps: in TPM's §7 tests method (i) over-fills the layer just above $h$ by about 4% and 8% at $\Delta t = 0.05\tau$ and $0.1\tau$, while (ii) shows "no significant problems" at either. It is a single uniform draw and two `where`s, so it is graph-safe. Like (i), it gives the maximum transmission the consistency condition allows. |
+| Physics assumed inside the interface | §2: no unique model; maximum transmission is appropriate when exchange is limited by diffusion on each side, and fails only "if the diffusivity within the interface is substantially smaller than the diffusivities occurring both above and below" | the same assumption, stated here | **Follows the paper; an assumption to cite.** A capping inversion whose own turbulence is much weaker than the free troposphere's would make GLIDE's exchange too fast. The Hanna/Richardson parameterisation has no separate inversion layer to represent this. |
+| Profiles on each side | §2 takes a continuous-statistics random walk model (Thomson 1987) as "truth" on each side; only the interface is discontinuous | smooth Hanna profile below $h$, Richardson closure above, each with Thomson's drift; the drift stencil kept on the particle's own side | **Follows the paper.** (STILT uses piecewise-constant layers without drift and treats every layer boundary as an interface; GLIDE departs from STILT, not from TPM.) |
+| Completing the step after a crossing | §2: ideally the velocity changes "at the instant the particle reaches the interface, with $z(t+\Delta t)$ calculated in a way that accounts for the change in velocity in the middle of the time step"; §6: "continuing at this new velocity until the end of the time step", also after reflection | the transmitted overshoot scaled by $\sigma_B/\sigma_A$, the reflected one mirrored | **Follows the paper.** (STILT moves the particle to the interface and spends the remaining time in further, variable-count internal steps; GLIDE departs from STILT, which the fixed-count graph-captured loop of decision 0027 could not do anyway.) |
+| Density | §2 is written for a general well-mixed density $p_a(z,w)$, which includes the air density; §3's Gaussian form assumes it uniform | no density factor | **Equivalent here.** The air density is continuous at $h$, so the general form's density ratio is 1. |
+| Horizontal velocities at $z = h$ | §5: assume $u_H$ and $w$ independent at a fixed point (adopted "in many practical dispersion models"); treat $u_H$ at the interface by conserving $\int p_a\,du_H$, i.e. by keeping $u'/\sigma_u$ | $u', v'$ scaled by their own $\sigma$ ratios on transmission, unchanged on reflection | **Follows the paper**, including its independence assumption, which holds in Hanna's scheme (no $u'w'$ covariance). Would need revisiting if a covariance is added (cf. Wilson & Flesch 1993, who also reverse $u'$ at a wall when $u'$ and $w'$ are correlated). (STILT scales $w'$ only.) |
+| $h$ moving | §2: a moving interface can be treated in a frame fixed in it; §4: where the model's $h$ moves in jumps, treat the jump as a discontinuity in time and keep $w/\sigma_w$ fixed (or redraw $w$ from the new distribution) | $h$ fixed during an outer step; between steps $u'/\sigma$, $v'/\sigma$, $w'/\sigma$ carried (`sigma_last`) | **Follows §4.** GLIDE's $h$ is constant within an outer step and changes between steps, which is the situation of TPM's Fig. 4. The carry is the "keep $w/\sigma_w$ fixed" option, applied to all three components (§5 extends it to $u_H$). |
+| $h$ varying horizontally | §5: for $w$, treat as a time discontinuity (as above); for $u_H$, in principle conserve the flux-weighted $\int \mathbf{u}\cdot\mathbf{n}\,p_a\,d\mathbf{u}$ across the sloping interface, but "the horizontal advection across the discontinuity will probably be dominated by the mean flow, and so details of the procedure adopted are probably of less importance" | the carry ($\int p_a\,du$ conserved) for all three components | **Departure, for $u_H$ only, justified by the paper's own remark.** A particle advected into a column with a different $h$ is mostly carried by the mean wind, not by $u'$. |
+| Mean vertical velocity | §2–3 assume none relative to the interface, or a split step: "the interface can be treated as if there is no mean flow in the turbulence step, and ignored in the mean flow step" | split: advection (mean $w$) and turbulence are separate steps; the crossing rule acts in the turbulence sub-steps only | **Follows the paper.** |
+| Order within a step | §7: $w$ incremented with $\sigma$ at the last $z$, then $z$ moved with the new $w$ | the same | **Follows the paper.** |
+| Time step on the two sides | §6: the scheme "will not work if $\Delta t$ changes discontinuously at the interface" (Fig. 8); §7 (closing warning): a time step that depends on the particle's random number "hopelessly biases the random numbers" | one sub-step length for every particle (decision 0027) | **Follows the paper**, and independently supports decision 0027's finding that a height-dependent sub-step biases the well-mixed state. |
+| Step length | §7 tests method (ii) at $\Delta t$ up to $0.1\tau$ | sub-steps of 3.75 s ($n = 16$, $\Delta t = 60$ s) | **At or slightly beyond TPM's tested range.** Below $h$, $T_{Lw} \ge 30$ s (the FLEXPART floor), so $\Delta t_{\mathrm{sub}} \le 0.125\,T_{Lw}$, against TPM's largest tested $0.1\tau$; near the top of a convective or neutral boundary layer $T_{Lw}$ is usually well above the floor (*argued*). Above $h$, $T_{Lw}$ can be shorter; the exceedance counter records $\Delta t_{\mathrm{sub}}/T_{Lw}$ there (decision 0027). The open-column tests (*Measured*, below) are the direct check at GLIDE's step. |
+| Velocity clip | not in TPM | GLIDE's $4\sigma$ rogue-trajectory clip, applied before the crossing | **GLIDE addition**, not part of the scheme. Transmission preserves $|w'|/\sigma$, so the clip binds no more after a crossing than elsewhere. |
+| Two boundaries in one sub-step | not discussed | not treated: the crossing rule is applied once, before the ground reflection | **Limitation.** A displacement crossing both $h$ and the ground needs $h$ below about $4\sigma_w\,\Delta t_{\mathrm{sub}} \approx 30$ m, under the 50 m minimum $h$ at the defaults (*derived*, review 2, `outputs/agents/WM/review69b/`). The long-sub-step warning covers non-default settings. |
+
+TPM also show (their Fig. 9) that a diffusion model with a smooth transition
+layer converges to the discontinuous treatment as the layer is made
+thinner, at about ten times the cost. That is the justification for modelling
+$h$ as a discontinuity at all (see *Rejected alternatives*).
 
 **Why it keeps a well-mixed state well mixed** (*derived*). GLIDE's backward
 model ($z_{n+1} = z_n - w'\Delta t$, drift negated, §4 of physics.md) is the
@@ -217,15 +232,22 @@ columns).
   rather than removing it (convective h … h + 50 m at 0.33 of uniform, above).
 - *A smooth transition layer* between the profiles. Adds a thickness parameter
   and a strong gradient that the sub-step must resolve; the jump is a property
-  of the parameterisation, and TPM handle it exactly.
-- *TPM with the sub-step truncated at $h$* (as STILT). Needs a variable number
-  of sub-steps, which the fixed-count, graph-captured loop does not allow; the
-  ballistic completion is exactly consistent instead.
+  of the parameterisation, and TPM handle it exactly. TPM's Fig. 9 shows the
+  smooth-layer results converging to the interface treatment as the layer
+  thins, at about ten times the computing cost.
+- *Truncating the sub-step at $h$* (as STILT does). Needs a variable number
+  of sub-steps, which the fixed-count, graph-captured loop does not allow; TPM
+  themselves complete the step at the new velocity (§2, §6), which is what
+  GLIDE does, and it is exactly consistent (above).
+- *TPM's deterministic scheme, Eq. (6)* (method (i) of §3). Consistent too, but
+  TPM found it over-fills the layer above the interface by 4–8% at
+  $\Delta t = 0.05$–$0.1	au$, where the scheme adopted showed no such error.
 - *Rescaling only when the side of $h$ changes between steps*, with $\sigma$ at
   $h$ (measured: fixes the neutral and convective moving-$h$ column but not the
   stable one, where $\sigma_w$ at $h$ is the 1 mm s⁻¹ floor). The carry, with
   $\sigma$ at the particle, fixes all three.
 
-**Status.** Accepted, 25 Nov 2026 (task WM, PR #69). Golden fixtures not
+**Status.** Accepted, 25 Nov 2026 (task WM, PR #69); checked against TPM 1997
+the same day (table above). Golden fixtures not
 regenerated. Docs: [physics.md](../../docs/physics.md) §3.3, §6, §8;
 [turbulence.md](../../docs/turbulence.md).
