@@ -619,6 +619,9 @@ python -m tracers.benchmark run --experiments OKC80 OKC80-PDCH \
   On a `none` store the "stp" basis divides by ρₖ read from the meteorology at
   the grid point nearest the source (surface pressure, and temperature and
   humidity on the lowest model level), interpolated to each bin's centre. The
+  whole source box must lie on the footprint grid: a box the grid only partly
+  covers is refused, since V would otherwise shrink to the covered part (the
+  runner's 3 × 3 grid of source-sized cells always covers it). The
   derivation is in the module's docstring.
 - **Scoring.** Predictions are written in DATEM format
   (`predictions/<experiment>.txt`, pg m⁻³, the measurement keys unchanged)
