@@ -26,8 +26,17 @@ bootstrapped over its own particles; the test passes if at least 90% of the
 tested cells agree within their 95% noise range and the sum over the tested
 cells does too. Counts are per case in ``CASES``.
 
-**Results** (outputs/agents/A6/; see the progress file dev/agent/progress/A6.md):
-filled in below at the tests.
+**Results at the defaults** (seed 0, ``scripts/validation/reciprocity/run_cases.py``;
+outputs/agents/A6/cases/; docs/VALIDATION.md §3): convective surface receptor
+0.876 of the tested cells agree, sum 1.016 (fails); convective, just above h,
+0.927 and 0.998 (passes); stable surface 0.776 and 0.978, just below h 0.861
+and 1.011, just above h 0.673 and 1.007 (all fail). Every difference shrinks
+from 16 to 64 sub-steps; near the ground it matches the forward model's own
+well-mixed error. The companions fail as they must: without the backward sign
+flip 0.077 agree, without the interface rule 0.175 (sum 0.24), with the drift
+stencil straddling h 0.148 (sum 1.13). The slow tests therefore fail at the
+defaults for four of the five cases; what to accept is an open question for
+the validation plan (dev/agent/progress/A6.md), not something this file tunes.
 """
 
 from __future__ import annotations
@@ -485,6 +494,16 @@ def reciprocity(case: Case, *, backward_variant: str = "production",
     forward_variant = forward_variant or (
         "production" if backward_variant == "no_backward_sign_flip" else backward_variant
     )
+    key = (case, backward_variant, forward_variant, n_boot)
+    if key not in _RESULT_CACHE:
+        _RESULT_CACHE[key] = _reciprocity(case, backward_variant, forward_variant, n_boot)
+    return _RESULT_CACHE[key]
+
+
+_RESULT_CACHE: dict[tuple, Result] = {}
+
+
+def _reciprocity(case: Case, backward_variant: str, forward_variant: str, n_boot: int) -> Result:
     grid = case.grid
     met = reciprocity_met(*REGIMES[case.regime])
     rr = case.receptor_row
@@ -635,6 +654,29 @@ TEETH_CASES = {
 
 def _passes(res: Result) -> bool:
     return res.frac_agree >= 0.90 and res.sum_ok
+
+
+QUICK_CASE = Case("convective", 0, n_back=10_000, n_fwd=2_500, n_steps=60)
+
+
+def test_removing_the_backward_sign_flip_breaks_reciprocity_quick() -> None:
+    """A quick companion for the default suite (about 40 s on 16 CPU threads):
+    a surface receptor in a convective boundary layer, 1 h, 10,000 backward and
+    2,500 forward particles per source row. With the backward drift's sign flip
+    removed, the per-cell agreement collapses; the production construction keeps
+    most cells. Measured at seeds 0, 1, 2: production 0.89, 0.93, 0.90 of the
+    tested cells agree, the mutant 0.09, 0.10, 0.10
+    (outputs/agents/A6/explore/quick_config.log). The bounds below (0.8 and 0.3)
+    are this smoke check's own, not the plan's acceptance criterion, which the
+    slow tests apply; the production sum is not asserted here because at the
+    default 16 sub-steps it carries the forward model's near-surface well-mixed
+    error (docs/VALIDATION.md §3)."""
+
+    prod = reciprocity(QUICK_CASE)
+    mutant = reciprocity(QUICK_CASE, backward_variant="no_backward_sign_flip")
+    assert prod.tested.sum() >= 50 and mutant.tested.sum() >= 50
+    assert prod.frac_agree >= 0.8, prod.summary()
+    assert mutant.frac_agree <= 0.3, mutant.summary()
 
 
 @slow

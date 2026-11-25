@@ -87,7 +87,13 @@ def test_save_writes_png_and_sidecar(tmp_path: Path) -> None:
     assert side["metrics"]["err"] == pytest.approx(0.0123457)
 
 
-def test_gallery_is_keyed_by_physics_tag_and_lists_pending(tmp_path: Path) -> None:
+def test_gallery_is_keyed_by_physics_tag_and_lists_pending(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Every Tier 0 figure is ready since task A6 drew reciprocity; register a
+    # pending one so the page's pending list is still exercised.
+    pending = tier0.FigureSpec("pending_probe", "Pending probe", "none", status="pending: a test")
+    monkeypatch.setattr(tier0, "FIGURES", [*tier0.FIGURES, pending])
     _fake_figure(tmp_path, "v0-physics", "taylor_dispersion", "2026-01-01T00:00:00Z")
     _fake_figure(tmp_path, "v1-physics", "taylor_dispersion", "2026-06-01T00:00:00Z")
     _fake_figure(tmp_path, "v1-physics", "terrain", "2026-06-01T00:00:00Z")
@@ -99,11 +105,13 @@ def test_gallery_is_keyed_by_physics_tag_and_lists_pending(tmp_path: Path) -> No
     for link in re.findall(r"!\[[^\]]*\]\(([^)]+)\)", page):
         assert (tmp_path / link).exists(), link
     # Planned but missing figures are visible.
-    assert "Forward–backward reciprocity" in page and "pending" in page
+    assert "Forward–backward reciprocity" in page
+    assert "- Tier 0, Pending probe: a test" in page
     planned = {s.figure_id for s in tier0.FIGURES}
     assert {"taylor_dispersion", "well_mixed", "analytic_plume", "diffusion_limit",
             "reciprocity", "convergence", "terrain"} <= planned  # fmt: skip
-    assert set(tier0.BUILDERS) == {s.figure_id for s in tier0.FIGURES if s.status == "ready"}
+    ready = {s.figure_id for s in tier0.FIGURES if s.status == "ready"}
+    assert set(tier0.BUILDERS) == ready and "reciprocity" in ready
 
 
 def _store(path: Path, field: np.ndarray, weighting: str | None) -> None:

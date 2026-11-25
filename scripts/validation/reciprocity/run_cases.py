@@ -50,6 +50,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--n-substeps", type=int, default=None)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--threads", type=int, default=16)
+    ap.add_argument("--figure", type=Path, default=None,
+                    help="also draw the Tier 0 reciprocity figure into this directory "
+                    "(reuses this process's runs; default counts and seed only)")  # fmt: skip
     a = ap.parse_args(argv)
     torch.set_num_threads(a.threads)
     a.out.mkdir(parents=True, exist_ok=True)
@@ -71,6 +74,11 @@ def main(argv: list[str] | None = None) -> int:
         res = tr.reciprocity(case(name), backward_variant=variant)
         _save(a.out, f"teeth_{variant}_{name}{suffix}", res,
               {"seconds": time.perf_counter() - t0, "variant": variant})  # fmt: skip
+    if a.figure is not None:
+        sys.path.insert(0, str(REPO / "scripts" / "validation"))
+        from figures import tier0
+
+        print("figure:", tier0.reciprocity(a.figure), flush=True)
     return 0
 
 
