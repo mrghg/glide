@@ -11,31 +11,43 @@ density varies by ~3% over [h, 2h], but its drift moves particles by less than
 near-surface gate (tests/test_near_surface_well_mixed.py): stable (h 400 m),
 neutral (h 1,500 m, u* 0.4 m s⁻¹), convective (h 1,500 m, H +200 W m⁻²).
 
-Two checks, both from a 6-h run (records every 15 min from 2 h): every one of
-the four 50 m bands from h - 100 to h + 100 m holds its uniform share to within
-TOLERANCE, and the occupancy is continuous across h (the 50 m above minus the
-50 m below, within JUMP_TOLERANCE). A well-mixed-consistent interface keeps the
-concentration continuous across h whatever the integration error elsewhere
-(decision 0028), so the second check isolates the interface from the
-first-order error of the stable boundary layer near its top, which the first
-check also sees.
+Two checks, both from a 6-h run of N_PARTICLES particles (records every 5 min
+from 1 h): every one of the four 50 m bands from h - 100 to h + 100 m holds its
+uniform share to within TOLERANCE, and the occupancy is continuous across h
+(the 50 m above minus the 50 m below, within JUMP_TOLERANCE). A
+well-mixed-consistent interface keeps the concentration continuous across h
+whatever the integration error elsewhere (decision 0028), so the second check
+isolates the interface from the first-order error of the stable boundary layer
+near its top, which the first check also sees.
+
+Particle count. The seed-to-seed spread is set by the bands just above h, where
+particles barely move (K_z 0.1 m² s⁻¹) and the counting noise stays frozen, so
+more records do not reduce it; only more particles per metre do. The deep
+neutral and convective columns (2h = 3 km) need the most: with 20,000 particles
+the jump's spread there was 0.03-0.04, and 1 of 12 fresh seeds failed the 0.08
+tolerance on correct code (jump -0.106, neutral). 100 m bands at h would halve
+the noise but dilute the pre-0028 stable failure to about the tolerance (+0.09),
+so the bands stay 50 m. Design study and per-seed values:
+outputs/agents/T2/calib/designs_summary.txt (main checkout).
 
 Before decision 0028 the drift's ±1 m finite difference straddled h, and a
-particle crossing h kept its w'. Calibration with this test's procedure
-(bl_top_gate_calibration.py; outputs/agents/WM/interface/gate/gate.jsonl):
+particle crossing h kept its w'. Calibration at this design with this test's own
+procedure (scripts/validation/wm_near_surface/bl_top_gate_calibration.py;
+outputs/agents/T2/gate/gate.jsonl and summary.txt), mean ± sd over seeds:
 
-- this branch, default 16 sub-steps, 6 seeds: worst band deviation 0.056
-  (stable; neutral 0.038, convective 0.044), worst jump 0.043; at 8 sub-steps
-  0.067 and 0.080;
-- PR #69 head 0de5f94, 16 sub-steps, 3 seeds: jump +0.11 to +0.17 (stable),
-  -0.76 to -0.85 (neutral), +5.1 (convective); worst band 0.07-0.09, 0.51-0.57
-  and 5.0;
-- main 20db902, 3 seeds: jump -0.14 to -0.19, +4.0, +9.7; worst band 0.48-0.50,
-  3.4-3.6, 9.0.
+- current code, default 16 sub-steps, 12 seeds (201-212), 0 failures: the
+  closest to a tolerance is the convective h..h+50 band, -0.005 ± 0.014, and
+  jump, -0.001 ± 0.014 (5.4 and 5.6 sd inside 0.08); neutral 6.3 and 6.5 sd;
+  stable worst band h..h+50, -0.032 ± 0.006 (8.0 sd), jump -0.010 ± 0.005;
+- PR #69 head 0de5f94, 16 sub-steps, 5 seeds, 5/5 failures in each regime, the
+  same failure modes as at 20,000 particles: stable only by the jump,
+  +0.121 ± 0.010 (+0.108 to +0.135; bands within 0.07); neutral jump
+  -0.80 ± 0.01 and every band; convective jump +4.86 ± 0.02 and three or four
+  bands.
 
-Both tolerances, 0.08, leave this branch's worst seed a margin of 0.024 and
-0.037 and fail PR #69's head and main in every regime (by the jump in the
-stable one).
+An earlier calibration at 20,000 particles and 15-min records from 2 h
+(outputs/agents/WM/interface/gate/gate.jsonl) also failed main 20db902 in every
+regime (jump -0.14 to -0.19, +4.0, +9.7).
 """
 
 from __future__ import annotations
@@ -60,6 +72,9 @@ FT_N = 0.015  # free-troposphere buoyancy frequency, s-1
 GRAVITY = 9.80665
 TOLERANCE = 0.08  # on each 50 m band's occupancy relative to uniform
 JUMP_TOLERANCE = 0.08  # on (h..h+50) - (h-50..h)
+N_PARTICLES = 150_000
+RECORD_FROM_STEP = 60  # first record at 1 h
+RECORD_EVERY = 5  # steps (5 min) between records
 
 
 def _met(blh_m: float, ustar: float, shf: float) -> HourlyMetTensors:
@@ -117,9 +132,11 @@ class _LidEngine(GPUEngine):
         return p, torch.where(over, -w, w)
 
 
-def run_column(regime: str, scheme: HannaScheme, seed: int = 20261125) -> dict[str, float]:
+def run_column(
+    regime: str, scheme: HannaScheme, seed: int = 20261125, n: int = N_PARTICLES
+) -> dict[str, float]:
     """Occupancy of the four 50 m bands around h, relative to uniform, averaged
-    over records every 15 min from 2 h to 6 h. The start is stratified (one
+    over records every 5 min from 1 h to 6 h. The start is stratified (one
     particle per equal slot of [0, 2h], jittered within it): above h particles
     move little in 6 h, so the binomial noise of an independent uniform start
     would stay frozen in the free-troposphere bands."""
@@ -128,7 +145,6 @@ def run_column(regime: str, scheme: HannaScheme, seed: int = 20261125) -> dict[s
     torch.manual_seed(seed)
     engine = _LidEngine(2.0 * blh, device="cpu")
     met = _met(blh, ustar, shf)
-    n = 20_000
     span = 2.0 * blh
     particles = torch.zeros(n, 4, dtype=torch.float32)
     particles[:, 1] = 45.0
@@ -138,11 +154,11 @@ def run_column(regime: str, scheme: HannaScheme, seed: int = 20261125) -> dict[s
     active = torch.ones(n, dtype=torch.bool)
 
     samples = []
-    for step in range(1, 361):  # 6 h at 60 s; record every 15 min from 2 h
+    for step in range(1, 361):  # 6 h at 60 s
         particles, state = scheme.step(
             particles, state, met, t_alpha=0.5, dt_seconds=60.0, active_mask=active, engine=engine
         )
-        if step >= 120 and step % 15 == 0:
+        if step >= RECORD_FROM_STEP and step % RECORD_EVERY == 0:
             samples.append(particles[:, 2].clone())
     z = torch.stack(samples)
     assert float(z.max()) <= span and float(z.min()) >= 0.0

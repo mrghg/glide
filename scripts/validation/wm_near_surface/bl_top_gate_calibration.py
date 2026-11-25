@@ -3,7 +3,10 @@ seeds with the HannaScheme on the PYTHONPATH (this branch, PR #69's head or main
 and append the four band occupancies per run to ``--out`` as JSON lines.
 
     PYTHONPATH=<src>:tests python scripts/validation/wm_near_surface/bl_top_gate_calibration.py \
-        --regime convective --seed 1 --label branch --out gate.jsonl [--n 8]
+        --regime convective --seed 1 --label branch --out gate.jsonl [--n 8] [--particles 20000]
+
+``--particles`` defaults to the test's ``N_PARTICLES``. Each line also records the
+jump across h, (h..h+50) - (h-50..h), and the record schedule.
 """
 
 from __future__ import annotations
@@ -25,6 +28,7 @@ def main() -> None:
     ap.add_argument("--regime", required=True)
     ap.add_argument("--seed", type=int, required=True)
     ap.add_argument("--n", type=int, default=None, help="n_substeps (default: the scheme's)")
+    ap.add_argument("--particles", type=int, default=gate.N_PARTICLES)
     ap.add_argument("--label", required=True)
     ap.add_argument("--threads", type=int, default=2)
     ap.add_argument("--out", required=True)
@@ -34,11 +38,13 @@ def main() -> None:
     if a.n is not None:
         kw["n_substeps"] = a.n
     t0 = time.time()
-    bands = gate.run_column(a.regime, HannaScheme(**kw), seed=a.seed)
+    bands = gate.run_column(a.regime, HannaScheme(**kw), seed=a.seed, n=a.particles)
+    jump = bands["h..h+50"] - bands["h-50..h"]
     rec = dict(
         label=a.label, regime=a.regime, seed=a.seed, n=a.n,
         src=os.path.dirname(hanna_mod.__file__), wall_s=round(time.time() - t0, 1),
-        bands=bands, start="stratified",
+        bands=bands, jump=jump, start="stratified", particles=a.particles,
+        records=dict(from_step=gate.RECORD_FROM_STEP, every=gate.RECORD_EVERY),
     )  # fmt: skip
     print(json.dumps(rec))
     with open(a.out, "a") as f:
