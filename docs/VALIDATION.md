@@ -309,6 +309,13 @@ with this repository — see [../data/README.md](../data/README.md).
 
 ## 8. Golden fixtures
 
+> **Stale since PR #69 (2026-11-25).** The sub-stepping fix and the
+> boundary-layer-top interface (decisions 0027, 0028) change the output by far
+> more than any tolerance (reference config, 0–40 m: +48%). The fixtures below
+> describe the physics before that change. They will be regenerated once, after
+> the residence-counting decision (A2); until then a comparison against them
+> reports the change, not a pass.
+
 A golden fixture freezes the output of a named configuration at one git rev, on
 one device, with the configuration's fixed seed. Any later change is compared
 with it: a change that should not alter the output must reproduce it, and a
