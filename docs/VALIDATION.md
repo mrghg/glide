@@ -474,7 +474,7 @@ rules of §6 once:
   their log ratio for each release. The exportable form of
   `notebooks/footprint_explorer.ipynb` for supplementary material.
 
-Regenerate every figure and the gallery (CPU, about five minutes, well under
+Regenerate every figure and the gallery (CPU, about eight minutes on 8 threads, well under
 2 GB):
 
 ```bash

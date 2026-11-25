@@ -6,7 +6,7 @@
     .venv/bin/python scripts/validation/figures/make_all.py --root DIR   # somewhere else
 
 Figures go to ``<root>/figures/<physics tag>/tier0/`` and the page to
-``<root>/gallery.md``; the default root is ``docs/validation``. CPU only, a few
+``<root>/gallery.md``; the default root is ``docs/validation``. CPU only, about eight
 minutes, under 2 GB of memory. Figures of earlier physics tags already under
 ``<root>/figures`` are kept, so the gallery compares versions.
 """

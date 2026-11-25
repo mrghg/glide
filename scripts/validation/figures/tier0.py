@@ -17,7 +17,7 @@ expose them, so a figure cannot silently drift from what CI checks.
 | ``reciprocity`` | pending: needs the forward-in-time mode (validation plan §2, Tier 0) |
 
 All cases run on CPU in float64 (float32 for the production Hanna path, as in
-its test); the whole set takes a few minutes and well under 2 GB.
+its test); the whole set takes about eight minutes on 8 threads and under 0.5 GB.
 """
 
 from __future__ import annotations
@@ -312,7 +312,7 @@ def well_mixed(out_dir: Path) -> Path:
             ax.step(prof, zc, where="mid", color=col, lw=1.8, label=f"{t_rec / 3600:g} h")
         ax.axvline(1.0, color=style.EXACT, ls="--", lw=1.3, label="well mixed")
         ax.set_title(f"{name}\nh = {blh:.0f} m, H = {shf:+.0f} W m⁻²", fontsize=9.5)
-        ax.set_xlim(0.5, 1.5)
+        ax.set_xlim(0.4, 1.6)
         ax.set_xlabel("density / uniform")
         core.recessive_grid(ax, "x")
     axes[0].set_ylabel("height / boundary-layer depth")
@@ -329,7 +329,7 @@ def well_mixed(out_dir: Path) -> Path:
         metrics[f"companion_bottom_third_{lab.replace(' ', '_')}"] = float((zn < 1 / 3).mean())
     ax.axvline(1.0, color=style.EXACT, ls="--", lw=1.3)
     ax.set_title("drift correction switched off\nσ_w² 0.5 → 2 m² s⁻², 4000 s", fontsize=9.5)
-    ax.set_xlim(0.5, 1.5)
+    ax.set_xlim(0.4, 1.6)
     ax.set_xlabel("density / uniform")
     ax.legend(loc="upper right", fontsize=7.5)
     core.recessive_grid(ax, "x")
@@ -337,10 +337,11 @@ def well_mixed(out_dir: Path) -> Path:
     caption = (
         "Particles released uniformly through the boundary layer, stepped by the production "
         "Hanna scheme (backward, dynamic sub-steps, meander off, uniform density, reflection "
-        "at the ground and the boundary-layer top), stay uniform at 0.5, 2 and 6 h in each "
-        "stability regime. Right: the engine-level companion test, where switching off the "
-        "well-mixed drift piles particles into the weakly turbulent lower layer. Bands: "
-        "particle noise (±2 s.e., 10 subsets) at the last time."
+        "at the ground and the boundary-layer top, outer step 15 s as in the test), against "
+        "the uniform well-mixed state at 0.5, 2 and 6 h in three stability regimes. The CI "
+        "test asserts only the neutral case's interior. Right: the engine-level companion "
+        "test, where switching off the well-mixed drift piles particles into the weakly "
+        "turbulent lower layer. Bands: particle noise (±2 s.e., 10 subsets) at the last time."
     )
     return _finish(fig, out_dir, spec, cfg, caption, metrics,
                    "tests/test_main_runtime.py::test_v1_well_mixed_hanna_backward_path; "
@@ -664,29 +665,34 @@ def _particle_count_errors(ns, *, pool=819_200, dt=0.5, seed=5):
     return np.array(rms), np.array(se)
 
 
-def _substep_errors(cs, *, dt, n=20_000, seed=11):
-    """Near-surface well-mixed error of the production Hanna scheme (neutral case)
-    for each sub-step accuracy target ``substep_c``, at outer step ``dt``.
+def _near_surface_error(regime: str, *, dt: float, substep_c=None, n=10_000, seed=11):
+    """Near-surface well-mixed error of the production Hanna scheme.
 
     Wilson & Flesch (1993) §7b: the well-mixed error in inhomogeneous turbulence
     is first order in the step over T_L, and largest near the ground, where T_L
     is shortest. Measured as the occupancy of the lowest 5% of the boundary
-    layer relative to uniform, averaged over 2–6 h, minus 1 (signed).
+    layer relative to uniform, averaged over 2–6 h, minus 1 (signed), with its
+    particle-noise standard error.
     """
-    blh, ustar, shf = WM_REGIMES["neutral"]
+    blh, ustar, shf = WM_REGIMES[regime]
     rec = list(np.arange(7200.0, 21600.0 + 1, 900.0))
-    errs, ses = [], []
-    for c in cs:
-        res = _hanna_well_mixed(blh, ustar, shf, n=n, dt=dt, record_s=rec, seed=seed,
-                                substep_c=c)  # fmt: skip
-        zs = np.stack(list(res.values()))  # [time, particle]
+    res = _hanna_well_mixed(blh, ustar, shf, n=n, dt=dt, record_s=rec, seed=seed,
+                            substep_c=substep_c)  # fmt: skip
+    zs = np.stack(list(res.values()))  # [time, particle]
 
-        def occ(idx, zs=zs):
-            return (zs[:, idx] < 0.05 * blh).mean() / 0.05
+    def occ(idx):
+        return (zs[:, idx] < 0.05 * blh).mean() / 0.05
 
-        errs.append(occ(slice(None)) - 1.0)
-        ses.append(core.subset_spread(occ, zs.shape[1]))
-    return np.array(errs), np.array(ses)
+    return occ(slice(None)) - 1.0, float(core.subset_spread(occ, zs.shape[1]))
+
+
+def _value_ticks(ax, values) -> None:
+    """Label a log x axis at the sampled values only."""
+    from matplotlib.ticker import FixedLocator, NullLocator
+
+    ax.xaxis.set_major_locator(FixedLocator(list(values)))
+    ax.xaxis.set_minor_locator(NullLocator())
+    ax.set_xticklabels([f"{v:g}" for v in values])
 
 
 def convergence(out_dir: Path) -> Path:
@@ -694,18 +700,26 @@ def convergence(out_dir: Path) -> Path:
         rotation_dts=[240.0, 120.0, 60.0, 30.0, 15.0],
         euler_dts=[160.0, 80.0, 40.0, 20.0, 10.0],
         euler_n=400_000,
-        particle_counts=[400, 1600, 6400, 25600, 102400],
+        outer_dts=[60.0, 30.0, 15.0, 7.5],
         substep_cs={"60": [2.0, 1.0, 0.5, 0.25, 0.125], "15": [2.0, 0.5, 0.125]},
-        substep_case=dict(regime="neutral", n=20_000, seed=11),
+        hanna_case=dict(n=10_000, seed=11, measure="lowest 5% of the BL, 2-6 h"),
+        particle_counts=[400, 1600, 6400, 25600, 102400],
     )
     rot = _rotation_errors(cfg["rotation_dts"])
     eb, eb_se = _euler_bias(cfg["euler_dts"], n=cfg["euler_n"])
+    outer = {
+        reg: np.array([_near_surface_error(reg, dt=dt) for dt in cfg["outer_dts"]])
+        for reg in WM_REGIMES
+    }
+    sub = {
+        dt: np.array([_near_surface_error("neutral", dt=float(dt), substep_c=c) for c in cs])
+        for dt, cs in cfg["substep_cs"].items()
+    }
     pc, pc_se = _particle_count_errors(cfg["particle_counts"])
-    sub = {dt: _substep_errors(cs, dt=float(dt)) for dt, cs in cfg["substep_cs"].items()}
 
     spec = _spec("convergence")
-    fig, axes = core.new_figure(3, width=4.2, height=3.7)
-    a1, a2, a3 = axes[0]
+    fig, axes = core.new_figure(4, width=3.7, height=3.7)
+    a1, a2, a3, a4 = axes[0]
 
     def slope_line(ax, x, y_anchor, slope, label):
         x = np.asarray(x, dtype=float)
@@ -714,74 +728,108 @@ def convergence(out_dir: Path) -> Path:
         ax.annotate(label, (x[-1], y[-1]), xytext=(4, -2), textcoords="offset points",
                     fontsize=8, color=style.INK2)  # fmt: skip
 
-    def noise_floor(ax, level, color, label="particle-noise floor (2 s.e.)"):
-        ax.axhspan(1e-9, level, color=color, alpha=0.12, lw=0, label=label)
+    def noise_floor(ax, level, label="particle-noise floor (2 s.e.)"):
+        ax.axhspan(1e-9, level, color=style.MUTED, alpha=0.15, lw=0, label=label)
 
+    def signed(ax, x, e, color, marker, label):
+        """|error| on log axes; open markers where the error is negative."""
+        ax.loglog(x, np.abs(e), "-", color=color, label=label)
+        neg = e < 0
+        ax.plot(x[~neg], np.abs(e[~neg]), marker, color=color, ls="none")
+        ax.plot(x[neg], np.abs(e[neg]), marker, mfc=style.SURFACE, mec=color, mew=1.6,
+                ls="none")  # fmt: skip
+
+    # (a) time step, engine primitives
     x1 = np.array(cfg["rotation_dts"])
-    a1.loglog(x1, rot, "o-", color=style.GLIDE, label="RK2 advection: rotation return error")
+    a1.loglog(x1, rot, "o-", color=style.GLIDE, label="RK2 advection: rotation return")
     slope_line(a1, x1, rot[0] * 2.5, 2, "slope 2")
     x2 = np.array(cfg["euler_dts"])
-    noise_floor(a1, 2 * float(eb_se.mean()), style.REFERENCE_MODEL)
-    a1.loglog(x2, np.abs(eb), "s-", color=style.REFERENCE_MODEL,
-              label="OU + displacement: |σ_z bias|")  # fmt: skip
+    noise_floor(a1, 2 * float(eb_se.mean()))
+    signed(a1, x2, eb, style.REFERENCE_MODEL, "s", "OU + displacement: σ_z bias")
     slope_line(a1, x2, abs(eb[0]) * 2.0, 1, "slope 1")
     a1.set_ylim(1e-4, 1.0)
     a1.set_xlabel("time step Δt (s)")
     a1.set_ylabel("relative error")
-    a1.set_title("Time step")
+    a1.set_title("Time step: engine")
     a1.legend(loc="lower right", fontsize=7)
     core.recessive_grid(a1, "both")
 
+    # (b) outer step, production Hanna, three regimes
+    x3 = np.array(cfg["outer_dts"])
     floor = 0.0
-    for (dt, (e, se)), col, mk in zip(sub.items(), [style.GLIDE, style.ALT], ["o", "s"]):
-        x3 = np.array(cfg["substep_cs"][dt])
-        a2.loglog(x3, np.abs(e), mk + "-", color=col, label=f"outer step Δt = {dt} s")
-        floor = max(floor, 2 * float(se.mean()))
-    noise_floor(a2, floor, style.MUTED)
-    x60 = np.array(cfg["substep_cs"]["60"])
-    slope_line(a2, x60, abs(sub["60"][0][0]) * 1.3, 1, "slope 1")
-    a2.axvline(0.5, color=style.MUTED, lw=1, ls=":")
-    a2.set_ylim(1e-3, 3.0)
-    a2.annotate("default", (0.5, 1.5e-3), xytext=(3, 0), textcoords="offset points",
-                fontsize=8, color=style.INK2)  # fmt: skip
-    a2.set_xlabel("sub-step target substep_c  (sub-step < c·T_L)")
-    a2.set_ylabel("|occupancy of lowest 5% / uniform − 1|")
-    a2.set_title("Sub-step accuracy target (Hanna, neutral)")
+    for (reg, arr), col, mk in zip(outer.items(), style.CATEGORICAL[:3], "os^"):
+        signed(a2, x3, arr[:, 0], col, mk, reg)
+        floor = max(floor, 2 * float(arr[:, 1].mean()))
+    noise_floor(a2, floor)
+    slope_line(a2, x3, abs(outer["neutral"][0, 0]) * 1.3, 1, "slope 1")
+    a2.axvline(60.0, color=style.MUTED, lw=1, ls=":")
+    a2.set_ylim(3e-3, 3.0)
+    _value_ticks(a2, x3)
+    a2.set_xlabel("outer step Δt (s); shipped 60 s")
+    a2.set_ylabel("near-surface occupancy / uniform − 1")
+    a2.set_title("Time step: Hanna scheme")
     a2.legend(loc="lower right", fontsize=7)
     core.recessive_grid(a2, "both")
 
-    x4 = np.array(cfg["particle_counts"])
-    core.log_band(a3, x4, pc, pc_se)
-    a3.loglog(x4, pc, "o-", color=style.GLIDE, label="RMS error of σ_z²")
-    slope_line(a3, x4, pc[0] * 1.6, -0.5, "slope −½")
-    a3.set_xlabel("particle count N")
-    a3.set_ylabel("relative error")
-    a3.set_title("Particle count")
-    a3.legend(loc="lower left", fontsize=7.5)
+    # (c) sub-step target, neutral
+    floor = 0.0
+    for (dt, arr), col, mk in zip(sub.items(), [style.GLIDE, style.ALT], "os"):
+        signed(a3, np.array(cfg["substep_cs"][dt]), arr[:, 0], col, mk, f"outer step {dt} s")
+        floor = max(floor, 2 * float(arr[:, 1].mean()))
+    noise_floor(a3, floor)
+    x60 = np.array(cfg["substep_cs"]["60"])
+    slope_line(a3, x60, abs(sub["60"][0, 0]) * 1.3, 1, "slope 1")
+    a3.axvline(0.5, color=style.MUTED, lw=1, ls=":")
+    a3.set_ylim(3e-3, 3.0)
+    _value_ticks(a3, x60)
+    a3.set_xlabel("sub-step target substep_c; default 0.5")
+    a3.set_ylabel("near-surface occupancy / uniform − 1")
+    a3.set_title("Sub-step target: Hanna, neutral")
+    a3.legend(loc="lower right", fontsize=7)
     core.recessive_grid(a3, "both")
-    fig.subplots_adjust(wspace=0.35, top=0.8)
+
+    # (d) particle count
+    x4 = np.array(cfg["particle_counts"])
+    core.log_band(a4, x4, pc, pc_se)
+    a4.loglog(x4, pc, "o-", color=style.GLIDE, label="RMS error of σ_z²")
+    slope_line(a4, x4, pc[0] * 1.6, -0.5, "slope −½")
+    a4.set_xlabel("particle count N")
+    a4.set_ylabel("relative error")
+    a4.set_title("Particle count")
+    a4.legend(loc="lower left", fontsize=7)
+    core.recessive_grid(a4, "both")
+    fig.subplots_adjust(wspace=0.42, top=0.8)
     caption = (
         "Error against each numerical setting, on log axes, with the slope theory predicts "
-        "(dashed). Left: RK2 return error after one solid-body rotation (second order) and "
-        "the forward-Euler position bias of σ_z at 5 T_L against Taylor (first order). "
-        "Middle: the production Hanna scheme's near-surface well-mixed error (neutral "
-        "boundary layer, occupancy of the lowest 5%, 2–6 h) against the sub-step target "
-        "substep_c, at outer steps of 60 s (the shipped value) and 15 s; theory (Wilson & "
-        "Flesch 1993) expects first order. Right: sampling error of σ_z² against particle "
-        "count. Shading: the particle-noise floor (2 s.e., 10 particle subsets); points "
-        "inside it carry no information. A preview of the Tier 0 convergence figure; the "
-        "full study is task A5."
+        "(dashed); open markers are negative errors. (a) RK2 return error after one "
+        "solid-body rotation (second order) and the bias of σ_z at 5 T_L against Taylor "
+        "(first order), through the engine primitives. (b) The production Hanna scheme's "
+        "near-surface well-mixed error (occupancy of the lowest 5% of the boundary layer "
+        "relative to uniform, 2–6 h, the setup of the well-mixed figure) against the outer "
+        "step, default sub-stepping. (c) The same, neutral, against the sub-step target "
+        "substep_c at outer steps of 60 s and 15 s. Wilson & Flesch (1993) expect first "
+        "order in the step. (d) Sampling error of σ_z² against particle count. Grey: the "
+        "particle-noise floor (2 s.e., 10 particle subsets). A preview of the Tier 0 "
+        "convergence figure; the full study is task A5."
     )
     metrics = {
         "rotation_order": float(np.polyfit(np.log(x1), np.log(rot), 1)[0]),
-        "euler_order": float(np.polyfit(np.log(x2[:3]), np.log(np.abs(eb[:3])), 1)[0]),
+        "euler_order_3_coarsest": float(
+            np.polyfit(np.log(x2[:3]), np.log(np.abs(eb[:3])), 1)[0]
+        ),
         "euler_rel_err": [float(v) for v in eb],
         "particle_order": float(np.polyfit(np.log(x4), np.log(pc), 1)[0]),
-        **{f"substep_err_dt{dt}": [float(v) for v in e] for dt, (e, _) in sub.items()},
-    }
+        **{f"near_surface_err_{reg}_by_outer_dt": [float(v) for v in arr[:, 0]]
+           for reg, arr in outer.items()},
+        **{f"near_surface_err_neutral_dt{dt}_by_substep_c": [float(v) for v in arr[:, 0]]
+           for dt, arr in sub.items()},
+        "near_surface_err_se_max": float(
+            max(arr[:, 1].max() for arr in [*outer.values(), *sub.values()])
+        ),
+    }  # fmt: skip
     return _finish(fig, out_dir, spec, cfg, caption, metrics,
-                   "tests/test_dispersion_analytic.py (rotation, Euler bias); new: particle "
-                   "count, Hanna substep_c")  # fmt: skip
+                   "tests/test_dispersion_analytic.py (rotation, Euler bias); new: Hanna "
+                   "outer step and substep_c, particle count")  # fmt: skip
 
 
 # --------------------------------------------------------------------------- terrain
