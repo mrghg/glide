@@ -193,6 +193,36 @@ def test_time_averaging(datem_files):
     assert (a_m[2:] == -1).all()
 
 
+def test_time_averaging_keeps_measured_and_calculated_apart(datem_files):
+    """Per-site means of the measured and calculated values, each from its own
+    column (2026-11-25 test review): predictions differ from the measurements, so
+    a routine that summed one column into both means would fail.
+
+    Records in file order: site 302 measures 0, 20, 5; site 306 measures 10, 40.
+    Predictions 3, 7, 6, 11, 9 in the same order. Sites appear in order of first
+    record (302, 306); the arrays are padded with -1 to the five records.
+    """
+
+    m = readers.read_datem_meas(datem_files / "meas-t1.txt")
+    assert list(m["site_num"]) == [302, 306, 302, 306, 302]
+    p = m.copy()
+    p["conc_raw"] = [3.0, 7.0, 6.0, 11.0, 9.0]
+    paired = datem_stats.pair_predictions(m, p)
+    a_m, a_c = datem_stats.average_pairs(paired, "time")
+    assert a_m.dtype == np.float32 and a_c.dtype == np.float32
+    assert len(a_m) == len(a_c) == 5
+    np.testing.assert_allclose(a_m, [25 / 3, 25.0, -1, -1, -1], rtol=1e-6)
+    np.testing.assert_allclose(a_c, [6.0, 9.0, -1, -1, -1], rtol=1e-6)
+
+    # A missing prediction drops the whole pair from both means: without the last
+    # record, site 302 averages measured (0 + 20)/2 and calculated (3 + 6)/2.
+    paired = datem_stats.pair_predictions(m, p.iloc[:4])
+    assert paired["calc"].iloc[4] == -1
+    a_m, a_c = datem_stats.average_pairs(paired, "time")
+    np.testing.assert_allclose(a_m, [10.0, 25.0, -1, -1, -1], rtol=1e-6)
+    np.testing.assert_allclose(a_c, [4.5, 9.0, -1, -1, -1], rtol=1e-6)
+
+
 def test_bootstrap_needs_seed_and_is_reproducible():
     with pytest.raises(ValueError):
         StatOptions(bootstrap=True)

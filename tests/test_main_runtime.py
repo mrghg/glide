@@ -1208,6 +1208,49 @@ def test_multi_site_run_emits_per_site_footprint_coords(tmp_path: Path) -> None:
     assert cube.sizes["release_time"] == 2
 
 
+def test_multi_site_footprint_rows_stay_with_their_named_receptor(tmp_path: Path) -> None:
+    """Each written footprint row belongs to its labelled site (2026-11-25 test review).
+
+    Still air and no turbulence: every particle stays at its release point, so all of
+    a release's residence lies in the output cell containing its site. The sites sit
+    at the centres of different 0.25° cells, so a permutation of footprint rows under
+    the original labels (e.g. a reversed batch-local release index in the gridder)
+    puts a site's residence in the other site's cell.
+    """
+
+    sites = {
+        "MHD": {"lon": -0.875, "lat": 0.125, "alt_agl_m": 100.0},
+        "RGL": {"lon": 1.125, "lat": -0.625, "alt_agl_m": 300.0},
+    }
+    raw = _make_multi_site_config(
+        output_uri=str(tmp_path / "out"), n_releases=2, n_particles_per_release=64
+    ).model_dump(mode="json")
+    raw["release"]["sites"] = [{"name": k, **v} for k, v in sites.items()]
+    cfg = RunConfig.model_validate(raw)
+    reader = _make_multi_release_reader(cfg, wind_fn=lambda _: (0.0, 0.0, 0.0))
+    scheme = PlaceholderConstantOU()
+    scheme.sigma_w2 = 0.0  # no vertical turbulence; the placeholder has no horizontal
+    _run(cfg, reader=reader, scheme=scheme)
+
+    fp = xr.open_zarr(tmp_path / "out" / "footprints.zarr").load()
+    assert list(fp["site"].values) == ["MHD", "RGL", "MHD", "RGL"]
+    lat_c, lon_c = fp["latitude"].values, fp["longitude"].values
+    per_cell = (
+        fp["footprint"].sum(["time_ago", "z_bin"]).transpose("release", "latitude", "longitude")
+    )
+    for r, name in enumerate(fp["site"].values):
+        iy = int(np.argmin(np.abs(lat_c - sites[name]["lat"])))
+        ix = int(np.argmin(np.abs(lon_c - sites[name]["lon"])))
+        assert abs(lat_c[iy] - sites[name]["lat"]) < 1e-9  # the site is a cell centre
+        assert abs(lon_c[ix] - sites[name]["lon"]) < 1e-9
+        cells = per_cell.isel(release=r).values
+        own = float(cells[iy, ix])
+        assert own > 0.0, f"release {r} ({name}): no residence in its own cell"
+        assert own == pytest.approx(float(cells.sum()), rel=1e-12), (
+            f"release {r} ({name}): residence outside its own cell"
+        )
+
+
 def test_periodic_release_run_completes_and_emits_5d_footprint(tmp_path: Path) -> None:
     """End-to-end periodic_point run: outputs land, shape is 5D with the right release_time coord."""
 
