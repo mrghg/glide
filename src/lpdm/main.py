@@ -29,7 +29,7 @@ import numpy as np
 import torch
 
 from lpdm.air_density import DENSITY_WEIGHTING_ATTRS, ParticleDryAirDensity
-from lpdm.config import ConcreteRelease, RunConfig
+from lpdm.config import N_SUBSTEPS_DEFAULT, ConcreteRelease, RunConfig
 from lpdm.convection import (
     ConvectionScheme,
 )
@@ -1210,6 +1210,45 @@ def _seed_global_generators(cfg: RunConfig) -> int | None:
     return int(seed)
 
 
+# The turbulence sub-step length at which the well-mixed tests are run: the default
+# count at the shipped 60 s outer step (decisions 0027 and 0028).
+VALIDATED_SUBSTEP_SECONDS = 60.0 / N_SUBSTEPS_DEFAULT
+
+
+def _log_substep_length(scheme: TurbulenceScheme, dt_seconds: float) -> float | None:
+    """Log the turbulence sub-step length, ``dt_seconds / n_substeps``.
+
+    ``turbulence.n_substeps`` is a count, so the sub-step length follows the
+    outer step: doubling ``dt_seconds`` doubles it. Warn when it is longer than
+    the sub-step the well-mixed tests are run at. Returns the length, or None for
+    a scheme without sub-steps.
+    """
+
+    n = getattr(scheme, "n_substeps", None)
+    if not n:
+        return None
+    sub = float(dt_seconds) / int(n)
+    LOGGER.info(
+        "turbulence: %d sub-steps of %.4g s per %.4g s step (turbulence.n_substeps is a "
+        "count; the sub-step length follows simulation.dt_seconds)",
+        int(n),
+        sub,
+        float(dt_seconds),
+    )
+    if sub > VALIDATED_SUBSTEP_SECONDS * (1.0 + 1e-9):
+        LOGGER.warning(
+            "turbulence: the %.4g s sub-step (dt_seconds %.4g / n_substeps %d) is longer than "
+            "the %.4g s at which the near-surface and boundary-layer-top well-mixed tests are "
+            "run (decisions 0027, 0028); raise turbulence.n_substeps to at least %d to keep it.",
+            sub,
+            float(dt_seconds),
+            int(n),
+            VALIDATED_SUBSTEP_SECONDS,
+            math.ceil(float(dt_seconds) / VALIDATED_SUBSTEP_SECONDS - 1e-9),
+        )
+    return sub
+
+
 class _ExceedanceTally:
     """Run totals of the turbulence sub-steps that are long compared with T_Lw.
 
@@ -1225,8 +1264,9 @@ class _ExceedanceTally:
     _LAYERS = (("boundary_layer", "bl"), ("free_troposphere", "ft"))
     _COUNTS = ("substeps", "exceeded", "over_T_L")
 
-    def __init__(self, scheme: TurbulenceScheme) -> None:
+    def __init__(self, scheme: TurbulenceScheme, dt_seconds: float | None = None) -> None:
         self.scheme = scheme
+        self.dt_seconds = dt_seconds
         self.supported = True
         self.window: datetime | None = None
         self.totals = {f"{c}_{s}": 0 for _, s in self._LAYERS for c in self._COUNTS}
@@ -1269,6 +1309,11 @@ class _ExceedanceTally:
 
         meta: dict[str, object] = {
             "n_substeps": getattr(self.scheme, "n_substeps", None),
+            "substep_seconds": (
+                self.dt_seconds / self.scheme.n_substeps
+                if self.dt_seconds and getattr(self.scheme, "n_substeps", None)
+                else None
+            ),
             "exceedance_c": getattr(self.scheme, "exceedance_c", None),
             "criterion": (
                 "exceeded: sub_dt > exceedance_c * T_Lw; over_T_L: sub_dt > T_Lw; "
@@ -1334,6 +1379,7 @@ def _run(
 
     if scheme is None:
         scheme = get_scheme(cfg.turbulence.scheme, **_scheme_kwargs(cfg))
+    _log_substep_length(scheme, sim.dt_seconds)
     if convection_scheme is None:
         convection_scheme = get_convection_scheme(
             cfg.convection.scheme,
@@ -1521,7 +1567,7 @@ def _run(
     wind_mean_cache: dict = {}
     # Sub-step exceedance counter (decision 0027): counted on the device inside the
     # step, read here once per met window, recorded in run_metadata.json.
-    exceedance = _ExceedanceTally(scheme)
+    exceedance = _ExceedanceTally(scheme, sim.dt_seconds)
 
     phase_timer.add("setup", time.perf_counter() - t_setup_start)
     for batch in batches:

@@ -1320,3 +1320,236 @@ def test_meander_alone_gives_the_exact_ou_displacement_variance(static: bool, mo
         exact = _ou_displacement_variance_exact(sigma, tau, t)
         assert abs(disc / exact - 1.0) < 2.0 * dt / t, (t, disc, exact)
         assert abs(var_model / disc - 1.0) < noise, (t, var_model, disc)
+
+
+# ---------------------------------------------------------------------------
+# Boundary-layer top as an interface (decision 0028).
+# ---------------------------------------------------------------------------
+
+
+def _interface_col(scheme: HannaScheme, met, n: int, h_over_L: float, *, blh: float = 800.0):
+    from lpdm.gpu_engine import GPUEngine
+
+    ft_fields, grid_bounds = scheme._free_trop_fields(met, torch.device("cpu"), torch.float32)
+
+    def full(v: float) -> torch.Tensor:
+        return torch.full((n,), float(v))
+
+    return dict(
+        blh=full(blh),
+        ustar=full(0.3),
+        w_star=full(1.8 if h_over_L < 0 else 0.0),
+        h_over_L=full(h_over_L),
+        L=full(blh / h_over_L if h_over_L else 1e10),
+        lat=full(0.0),
+        lon=full(0.0),
+        ft_fields=ft_fields,
+        grid_bounds=grid_bounds,
+        engine=GPUEngine(device="cpu"),
+    )
+
+
+@pytest.mark.parametrize("h_over_L", [5.0, 0.0, -50.0], ids=["stable", "neutral", "convective"])
+def test_drift_stencil_stays_on_the_particles_side_of_h(h_over_L: float) -> None:
+    """Decision 0028: ∂σ_w²/∂z is differenced on the particle's own side of h, each
+    side with its own profile (the boundary-layer profile at and below h, the
+    free-troposphere closure above), so the jump of σ_w at h never enters the
+    drift. More than δ = 1 m from h the stencil is the centred one, as before;
+    within δ of h a stencil straddling h would difference the jump instead."""
+
+    scheme = HannaScheme()
+    met = _uniform_met(blh=800.0)
+    z = torch.tensor([300.0, 798.0, 799.5, 800.0, 800.3, 801.0, 802.5, 1500.0])
+    col = _interface_col(scheme, met, z.numel(), h_over_L)
+    density = scheme._density_fields(met, torch.device("cpu"), torch.float32)
+    grad = -2.0 * scheme._vertical_coefficients(z, density, **col)[7]  # ∂σ_w²/∂z
+
+    side_ft = z > 800.0
+    z_hi = torch.where(side_ft, z + 1.0, torch.clamp(z + 1.0, max=800.0))
+    z_lo = torch.where(side_ft, torch.clamp(z - 1.0, min=800.0), z - 1.0)
+
+    def sw2(zz: torch.Tensor) -> torch.Tensor:
+        return scheme._column_sigma_w(zz, side_ft=side_ft, **col).pow(2)
+
+    one_sided = (sw2(z_hi) - sw2(z_lo)) / (z_hi - z_lo)
+    assert torch.equal(grad, one_sided)
+    straddling = (
+        scheme._column_sigma_w(z + 1.0, **col).pow(2)
+        - scheme._column_sigma_w(z - 1.0, **col).pow(2)
+    ) / 2.0
+    far = (z - 800.0).abs() > 1.0
+    assert torch.equal(grad[far], straddling[far])  # unchanged away from h
+    near = ~far
+    # Near h the straddling stencil is dominated by the jump; the one-sided one is not.
+    assert torch.all(straddling[near].abs() > 10.0 * grad[near].abs())
+
+
+def test_interface_sigmas_are_the_profile_limits_at_h() -> None:
+    """σ at h on the boundary-layer side is the profile's value at z = h; on the
+    free-troposphere side it is the closure's value at h, the limit from above."""
+
+    scheme = HannaScheme()
+    met = _uniform_met(blh=800.0)
+    n = 3
+    col = _interface_col(scheme, met, n, -50.0)
+    sig = scheme._interface_sigmas(**col)
+    h = col["blh"]
+    su, sv, sw, *_ = scheme._column_turbulence(h, **col)
+    assert torch.equal(sig[0], torch.stack([su, sv, sw]))
+    above = scheme._column_turbulence(h + 1e-2, **col)
+    assert torch.allclose(sig[1], torch.stack(above[:3]), rtol=1e-4)
+    assert torch.equal(
+        sig[1, 2], scheme._column_sigma_w(h, side_ft=torch.ones(n, dtype=torch.bool), **col)
+    )
+
+
+def test_interface_crossing_rule_backward() -> None:
+    """Thomson, Physick & Maryon (1997) at h, in GLIDE's backward convention
+    (displacement −w'·Δt): a particle crossing from side A to side B is
+    transmitted with probability min(1, σ_wB/σ_wA), its w' (and u', v') scaled by
+    σ_B/σ_A and the overshoot beyond h by σ_wB/σ_wA; otherwise it is reflected,
+    z → 2h − z and w' → −w', u' and v' unchanged. Non-crossing particles are
+    untouched."""
+
+    scheme = HannaScheme()
+    n = 200_000
+    blh = torch.full((n,), 800.0)
+    # [side (BL, FT), component (u, v, w)]
+    sig = torch.tensor([[1.0, 1.2, 0.8], [0.5, 0.3, 0.2]]).unsqueeze(-1).expand(2, 3, n)
+
+    def cross(z_from: float, w: float):
+        zf = torch.full((n,), z_from)
+        wp = torch.full((n,), w)
+        up, vp = torch.full((n,), 0.3), torch.full((n,), -0.4)
+        xyz = torch.zeros(n, 4)
+        xyz[:, 2] = zf - wp * 1.0  # backward displacement over 1 s
+        return xyz[:, 2].clone(), *scheme._cross_interface(zf, xyz, wp, up, vp, blh, sig)
+
+    # Upward, boundary layer to free troposphere (w' < 0 moves up in backward time):
+    # r = 0.2/0.8 = 0.25, transmitted with probability 0.25.
+    torch.manual_seed(0)
+    z_to, out, w2, u2, v2 = cross(799.0, -2.0)
+    assert torch.all(z_to == 801.0)
+    through = w2 == -0.5
+    refl = w2 == 2.0
+    assert torch.all(through | refl)
+    frac = float(through.float().mean())
+    assert abs(frac - 0.25) < 4.0 * math.sqrt(0.25 * 0.75 / n)
+    assert torch.allclose(out[through, 2], torch.tensor(800.25))
+    assert torch.allclose(u2[through], torch.tensor(0.15)) and torch.allclose(
+        v2[through], torch.tensor(-0.1)
+    )
+    assert torch.allclose(out[refl, 2], torch.tensor(799.0))
+    assert torch.all(u2[refl] == 0.3) and torch.all(v2[refl] == -0.4)
+
+    # Downward, free troposphere to boundary layer: r = 4 ≥ 1, always transmitted,
+    # the 0.5 m overshoot becomes 2 m.
+    z_to, out, w2, u2, v2 = cross(800.5, 1.0)
+    assert torch.all(w2 == 4.0) and torch.allclose(out[:, 2], torch.tensor(798.0))
+    assert torch.allclose(u2, torch.tensor(0.6)) and torch.allclose(v2, torch.tensor(-1.6))
+
+    # No crossing: untouched.
+    z_to, out, w2, u2, v2 = cross(700.0, -2.0)
+    assert torch.all(out[:, 2] == 702.0) and torch.all(w2 == -2.0) and torch.all(u2 == 0.3)
+
+
+def test_velocities_carried_as_w_over_sigma_across_steps() -> None:
+    """Decision 0028: at the start of a step each velocity is scaled by σ there now
+    over σ at the end of the particle's last step (``sigma_last``), so u'/σ_u,
+    v'/σ_v and w'/σ_w carry across the step; before a particle's first step
+    (``sigma_last`` = 0) nothing is scaled."""
+
+    u, v, w = torch.tensor([1.0, 1.0]), torch.tensor([2.0, 2.0]), torch.tensor([-3.0, -3.0])
+    last = torch.tensor([[0.5, 2.0, 0.25], [0.0, 0.0, 0.0]])
+    now = (torch.tensor([1.0, 1.0]), torch.tensor([1.0, 1.0]), torch.tensor([0.5, 0.5]))
+    u2, v2, w2 = HannaScheme._carry_velocities(u, v, w, last, *now)
+    assert u2.tolist() == [2.0, 1.0] and v2.tolist() == [1.0, 2.0] and w2.tolist() == [-6.0, -3.0]
+
+
+def _ramped_met(blh_start: float, blh_end: float, *, shf: float = 100.0):
+    """``_uniform_met`` with h ramping from ``blh_start`` to ``blh_end`` over the window."""
+
+    from lpdm.met_reader import HourlyMetTensors
+
+    a = _uniform_met(blh=blh_start, ustar=0.3, shf=shf)
+    b = _uniform_met(blh=blh_end, ustar=0.3, shf=shf)
+    return HourlyMetTensors(
+        hour_start=a.hour_start,
+        hour_end=b.hour_end,
+        metadata=a.metadata,
+        channel_names=a.channel_names,
+        height_agl_m=a.height_agl_m,
+    )
+
+
+@pytest.mark.parametrize("shf", [-20.0, 0.0, 100.0], ids=["stable", "neutral", "convective"])
+def test_carry_is_one_in_a_steady_column_and_tracks_a_moving_h(shf: float) -> None:
+    """In a steady, motionless column σ at the start of a step equals σ at the
+    end of the last one up to the particle's horizontal turbulent displacement
+    (rounding of the interpolated uniform fields, and the Coriolis parameter in
+    the neutral profile), so the carry ratio is 1 to within 1e-4. With h moving
+    through the window it scales w' by exactly σ_w now / ``sigma_last``."""
+
+    from lpdm.gpu_engine import GPUEngine
+
+    ratios: list[torch.Tensor] = []
+
+    def run(met, alphas) -> None:
+        torch.manual_seed(3)
+        scheme = HannaScheme(n_substeps=4)
+        carry = scheme._carry_velocities
+
+        def spy(u, v, w, last, su, sv, sw):
+            out = carry(u, v, w, last, su, sv, sw)
+            seen = last[:, 2] > 0
+            ratios.append((sw / last[:, 2])[seen])
+            assert torch.equal(out[2][seen], w[seen] * (sw / last[:, 2])[seen])
+            return out
+
+        scheme._carry_velocities = spy
+        n = 2000
+        p = torch.zeros(n, 4)
+        p[:, 2] = torch.rand(n) * 1600.0
+        state = scheme.initialize_state(n, device=torch.device("cpu"), dtype=torch.float32)
+        for a in alphas:
+            p, state = scheme.step(
+                p, state, met, t_alpha=a, dt_seconds=60.0,
+                active_mask=torch.ones(n, dtype=torch.bool), engine=GPUEngine(device="cpu"),
+            )  # fmt: skip
+
+    run(_ramped_met(800.0, 800.0, shf=shf), [0.5] * 4)
+    steady = torch.cat(ratios)
+    assert steady.numel() == 3 * 2000
+    assert float((steady - 1.0).abs().max()) < 1e-4
+    ratios.clear()
+    run(_ramped_met(600.0, 1000.0, shf=shf), [0.0, 0.5, 1.0])
+    moving = torch.cat(ratios)
+    assert float((moving - 1.0).abs().max()) > 1e-2  # h moved by 200 m between steps
+
+
+def test_static_and_dynamic_steps_bit_identical_with_moving_h() -> None:
+    """With h moving through the window (so the carry and the interface both act),
+    the static and dynamic paths stay bit-identical with every particle active."""
+
+    from lpdm.gpu_engine import GPUEngine
+
+    met = _ramped_met(700.0, 1000.0)
+    results = []
+    for static in (False, True):
+        torch.manual_seed(9)
+        scheme = HannaScheme(n_substeps=4, static_substeps=static)
+        n = 3000
+        p = torch.zeros(n, 4)
+        p[:, 2] = torch.rand(n) * 2000.0
+        state = scheme.initialize_state(n, device=torch.device("cpu"), dtype=torch.float32)
+        for k in range(6):
+            p, state = scheme.step(
+                p, state, met, t_alpha=0.1 + 0.15 * k, dt_seconds=60.0,
+                active_mask=torch.ones(n, dtype=torch.bool), engine=GPUEngine(device="cpu"),
+            )  # fmt: skip
+        results.append((p, state))
+    (p_d, s_d), (p_s, s_s) = results
+    assert torch.equal(p_d, p_s)
+    for key in ("u_prime", "v_prime", "w_prime", "sigma_last"):
+        assert torch.equal(s_d[key], s_s[key])
+    assert bool((s_d["sigma_last"] > 0).all())

@@ -1801,8 +1801,9 @@ class HannaScheme(TurbulenceScheme):
         Physick & Maryon (1997). It matters at h: when h moves past a particle,
         σ_w at it jumps between the boundary-layer and free-troposphere values.
         ``sigma_last`` is 0 before a particle's first step (no scaling). In a
-        steady column σ(now) and σ(end of last step) are the same computation, so
-        the ratio is exactly 1."""
+        steady, motionless column the ratio is 1 to within the change of σ over
+        the particle's horizontal turbulent displacement (< 1e-4,
+        ``test_carry_is_one_in_a_steady_column_and_tracks_a_moving_h``)."""
 
         now = torch.stack([sigma_u, sigma_v, sigma_w], dim=1)
         ratio = torch.where(

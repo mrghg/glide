@@ -360,10 +360,15 @@ class TurbulenceConfig(_Frozen):
     # of the run: never per particle, per step or per batch. A new field rather
     # than a reinterpreted `max_substeps`, so that no config silently changes
     # meaning (the removed keys are refused below). Ignored by non-Hanna schemes.
+    # It is a COUNT, not a length: the sub-step is dt_seconds / n_substeps, so a
+    # longer outer step gives longer sub-steps. The run logs the length, records it
+    # in run_metadata.json (runtime.substep_exceedance.substep_seconds) and warns
+    # when it is longer than the 60 s / default the well-mixed tests are run at
+    # (decision 0028 says why it stays a count).
     n_substeps: int = Field(
         N_SUBSTEPS_DEFAULT,
         ge=1,
-        description="Turbulence sub-steps per outer step, the same for every particle and step (sub-step = dt_seconds / n_substeps).",
+        description="Turbulence sub-steps per outer step, the same for every particle and step. A count: the sub-step is dt_seconds / n_substeps, so changing dt_seconds changes the sub-step length.",
     )
     # Near-surface mixing controls (2026-07-02 physics-review follow-up). Defaults
     # are the FLEXPART-v11-matching "improved" behaviour; the legacy combination

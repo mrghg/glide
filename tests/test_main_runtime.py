@@ -2423,6 +2423,15 @@ def test_substep_exceedance_counted_on_every_path(
     active_steps = int(traj["active_particles"].sum())
     assert active_steps > 0
     assert exc["n_substeps"] == 3 and exc["exceedance_c"] == 1e-6
+    # n_substeps is a count: the sub-step length follows dt_seconds, is recorded,
+    # and a sub-step longer than the validated 60 s / 16 is warned about.
+    assert exc["substep_seconds"] == pytest.approx(cfg.simulation.dt_seconds / 3)
+    assert cfg.simulation.dt_seconds / 3 > 3.75
+    assert [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "sub-step (dt_seconds" in r.getMessage()
+    ]
     bl, ft = exc["boundary_layer"], exc["free_troposphere"]
     assert bl["substeps"] + ft["substeps"] == 3 * active_steps
     assert bl["exceeded"] == bl["substeps"] and ft["exceeded"] == ft["substeps"]

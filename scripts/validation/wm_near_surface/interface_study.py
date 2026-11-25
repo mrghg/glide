@@ -208,6 +208,16 @@ def run(a) -> dict:
     p[:, 2] = torch.rand(n, dtype=torch.float32) * start_top
     p[:, 3] = 1.0 / n
     state = scheme.initialize_state(n, device=torch.device("cpu"), dtype=torch.float32)
+    if a.init_sigma:
+        # Probe: start u', v', w' from N(0, σ²) at each particle's height and side
+        # (the production start is 0).
+        init_met = static_met if not hvar else met_window(
+            h_of_t(0.0, h0), h_of_t(3600.0, h0), ustar, shf, ft_n=ft_n,
+            strat_from=0.75 * h0, t0=t0, top=top,
+        )  # fmt: skip
+        sig = sigmas_at(scheme, init_met, h_of_t(0.0, h0) if hvar else h0, ustar, shf, p[:, 2])
+        for k, key in enumerate(("u_prime", "v_prime", "w_prime")):
+            state[key] = sig[k] * torch.randn(n)
     active = torch.ones(n, dtype=torch.bool)
 
     rec_every = 900.0
@@ -267,6 +277,7 @@ def run(a) -> dict:
         regime=a.regime, harness=a.harness, dt=a.dt, n=None if a.variant == "old" else a.n,
         variant=a.variant, seed=a.seed, particles=n, steps=steps, ft_n=ft_n, tag=a.tag,
         fd_delta=a.fd_delta, src=os.path.dirname(hanna_mod.__file__), h0=h0,
+        init_sigma=a.init_sigma,
     )  # fmt: skip
     m = {}
     if a.harness == "closed":
@@ -330,6 +341,7 @@ def main() -> None:
     ap.add_argument("--particles", type=int, default=20_000)
     ap.add_argument("--threads", type=int, default=2)
     ap.add_argument("--tag", default="")
+    ap.add_argument("--init-sigma", action="store_true", help="probe: w' etc. start ~ N(0, σ²)")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
     rec = run(a)
