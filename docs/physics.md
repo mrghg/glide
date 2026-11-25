@@ -431,6 +431,46 @@ particle population lofted to ~2 km and stayed there.
 The random forcing is symmetric, so the noise term needs no sign treatment. The
 displacement of position simply runs the other way: $z_{n+1} = z_n - w'\Delta t$.
 
+**The reciprocity test** (`tests/test_reciprocity.py`, task A6) checks this
+construction directly. Flesch, Wilson & Yee's relation
+$\rho(\mathbf{x}_r)\,P_b(\mathbf{x}_s \mid \mathbf{x}_r) = \rho(\mathbf{x}_s)\,P_f(\mathbf{x}_r \mid \mathbf{x}_s)$
+(velocities started from the Eulerian distribution at both ends) makes the
+backward footprint of a receptor cell, counted as $\Delta t/\rho$, equal the
+forward model's time-integrated concentration at that cell from a unit source
+spread over each source cell. The test runs the forward model through the
+production scheme with a private flag (`HannaScheme._forward_in_time`, which
+no configuration can set): the same code with the drift unnegated and the
+displacement $+w'\Delta t$; ground reflection, the boundary-layer-top
+interface (§5) and the velocity carry are shared unchanged. On a steady,
+horizontally uniform column with the Hanna profile, a hydrostatic density, a
+sheared wind and a boundary-layer top, at the shipped 60 s step and
+16 sub-steps (validation plan §3 procedure; 40,000 backward particles,
+10,000 forward particles per source row; results in `outputs/agents/A6/` and
+[VALIDATION.md §3](VALIDATION.md#3-the-analytic-verification-tests)):
+
+- with the sign flip above removed, 8% of the tested cells agree for a surface
+  receptor in a convective boundary layer (88% with it); with the interface
+  rule of §5 disabled, 18% for a receptor just above $h$ and the sum over the
+  cells is 0.24 of the forward one; with the drift stencil straddling $h$
+  again (decision 0028), 15% and 1.13 (93% and 0.998 with neither change);
+- with the construction as written, every difference found shrinks as the
+  sub-steps go from 16 to 64, which points to the time discretisation rather
+  than the construction (argued from the trend, one seed at 64): at a surface
+  receptor the backward footprint exceeds the forward concentration by
+  1.6–1.8% (convective, three seeds; 0.8% at 64 sub-steps),
+  the forward model's own near-surface well-mixed deficit (0.981 of its share
+  in the lowest 150 m at 16 sub-steps); for a stable boundary layer the sum
+  is 2.1% low at 16 sub-steps and within noise at 64; for a receptor just
+  above a stable boundary layer the backward footprint in the boundary layer
+  is 1.5–3 times the forward concentration at 16 sub-steps and 1.2–1.4 times
+  at 64. Between the two counts the backward footprint summed over each of the
+  three rows below $h$ changes by at most 4%, the forward concentration by up
+  to 22% (one seed each), which suggests (argued, not shown) that most of the
+  difference at 16 sub-steps is the forward model's.
+
+At the defaults the test therefore does not yet pass the plan's criteria in
+every case; see VALIDATION.md §3.
+
 **Mass bookkeeping.** Each particle carries a weight $m_p = 1/N$, where $N$ is
 the number of particles in that release — so one particle represents $1/N$ of the
 released mass and the weights of a release sum to 1. It is set at release and

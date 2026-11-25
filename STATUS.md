@@ -200,8 +200,13 @@ relevant docs page with its consequence.
   now converged in the sub-step count (8 against 16 sub-steps: 0.4%); the
   Mace Head smoke run's 0–40 m footprint nearly doubles (+94%). The golden
   fixtures are not yet regenerated.
-- **Forward/backward reciprocity test.** It tests the backward formulation
-  directly, which nothing else does. Planned as task A6.
+- **Forward/backward reciprocity test** (task A6, `tests/test_reciprocity.py`).
+  The backward construction is confirmed (its sign, interface and stencil
+  companions fail; the remaining differences converge with the sub-step
+  count), but at the default 16 sub-steps the validation plan's criteria are
+  not met near the ground (the forward model's well-mixed error, ~2%) or just
+  above a stable boundary layer (1.5–3 times in the boundary-layer cells).
+  Open: what to accept ([docs/VALIDATION.md](docs/VALIDATION.md) §3).
 - **The source of u\*.** From the surface stresses for v1; ERA5's `zust` is
   the alternative, about half as large over land. To compare against the
   tracer experiments and radon after v1 (roadmap §5).
