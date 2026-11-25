@@ -22,6 +22,7 @@ comparison against another model yourself.
 7. [Comparing against FLEXPART, NAME and STILT](#7-comparing-against-flexpart-name-and-stilt)
 8. [Golden fixtures](#8-golden-fixtures)
 9. [Adding a physics test](#9-adding-a-physics-test)
+10. [Validation figures and the gallery](#10-validation-figures-and-the-gallery)
 
 ---
 
@@ -91,7 +92,7 @@ reflection, the gridder, and the unit conversion.
 
 | Test | Asserts | Tolerance (observed) |
 | --- | --- | --- |
-| `test_footprint_matches_analytic_gaussian_plume` | crosswind-integrated columns per travel-time band; 2-D correlation | 2–5 $T_L$: max < 5% (obs 0.4%); ≥ 5 $T_L$: max < 15% (obs ≤ 10%, statistical); corr > 0.995 (obs 0.9985) |
+| `test_footprint_matches_analytic_gaussian_plume` | crosswind-integrated columns per travel-time band; 2-D correlation | 2–5 $T_L$: max < 5% (obs 0.4%); ≥ 5 $T_L$: max < 15% (obs ≤ 10%: single columns that receive 9 or 11 time samples instead of 10, because along-wind motion is deterministic and particle positions fall on cell edges; not particle noise); corr > 0.995 (obs 0.9985) |
 | `test_footprint_absolute_magnitude_matches_plume` | total surface residence vs analytic | ratio within ±3% (obs 0.992) |
 | `test_footprint_crosswind_width_matches_taylor` | moment-based $\sigma_y$ (Sheppard-corrected) at ~6 distances | < 5% (obs ≤ 1.1%) |
 | `test_stilt_conversion_scales_raw_footprint_exactly` | STILT field = raw × $m_{\mathrm{air}}/(h\rho)$ | exact (rtol $10^{-12}$) |
@@ -439,3 +440,50 @@ accumulator:
 
 Tests must not depend on the restricted validation data; the synthetic fixtures
 have to be sufficient.
+
+---
+
+## 10. Validation figures and the gallery
+
+The figures of [validation-plan.md §5](validation-plan.md#5-the-figure-set) are
+made by scripts in `scripts/validation/figures/`, which implement the design
+rules of §6 once:
+
+- `style.py`: one palette and set of colour scales for every tier (the
+  project's validated reference palette). GLIDE is blue, a reference model
+  orange, an exact or numerical reference solution black and dashed.
+- `core.py`: the title stamp (physics tag and a 10-digit hash of the exact
+  configuration), log₁₀ ratios on one diverging scale, footprints on a
+  logarithmic scale in STILT units, and particle-noise bands. A band is the
+  statistic recomputed on 10 random disjoint particle subsets: the standard
+  error of the full-sample value is the subset spread over √10, drawn at ±2
+  standard errors. Each figure is saved with a JSON file holding the tag, the
+  hash, the configuration itself, the git revision and headline metrics.
+- `tier0.py`: the Tier 0 set, recomputed from the analytic tests of §3–4 with
+  their parameters, seeds and reference solutions (imported from the tests
+  where the tests expose them): Taylor dispersion, the well-mixed test in three
+  stability regimes with the drift switched off as a companion, the analytic
+  plume, the diffusion limit, a convergence preview (time step, sub-step
+  target, particle count; the full study is task A5) and terrain. The
+  reciprocity figure waits for the forward mode (task A6).
+- `gallery.py`: writes `docs/validation/gallery.md`, keyed by physics tag, with
+  an index that has one column per tag so a figure can be compared across
+  versions, and lists the figures still pending.
+- `explorer.py`: a static footprint explorer, one self-contained HTML page per
+  run (no server, network or libraries), with GLIDE beside a reference and
+  their log ratio for each release. The exportable form of
+  `notebooks/footprint_explorer.ipynb` for supplementary material.
+
+Regenerate every figure and the gallery (CPU, about five minutes, well under
+2 GB):
+
+```bash
+.venv/bin/python scripts/validation/figures/make_all.py [--root DIR] [--only ID ...]
+.venv/bin/python scripts/validation/figures/explorer.py RUN_DIR --reference REF_DIR --out page.html
+```
+
+Figures go to `<root>/figures/<physics tag>/tier<N>/`; the default root is
+`docs/validation`. Before the freeze tag exists the tag reads
+`pre-freeze-<revision>`. A validation task that adds figures adds a builder
+to its tier's module and an entry to its `FIGURES` list, so the gallery shows
+the gap until the figure exists.
