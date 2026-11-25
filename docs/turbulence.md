@@ -253,9 +253,12 @@ This was measured, not theorised. GLIDE's v2 validation over-estimated mean CH�
 enhancements, worst at polluted low-inlet sites, on stable nights: near-surface
 $K$ was running 3–8× below FLEXPART's. Turning the floors on was the fix.
 
-A convenient side effect: with $T_{Lw} \ge 30$ s, the boundary-layer sub-step count
-at $\Delta t = 60$ s is $\lceil 60/(0.5 \times 30) \rceil = 4$, so the
-`max_substeps` cap rarely binds.
+The floor also bounds the sub-step ratio in the boundary layer: with
+$T_{Lw} \ge 30$ s, a sub-step of $\Delta t/n$ is at most $\Delta t/(30n)$ of
+$T_{Lw}$ there, 0.25 at the default $n = 8$ and $\Delta t = 60$ s
+([physics.md](physics.md) §6). Above the boundary layer there is no such floor;
+the run's `substep_exceedance` metadata reports how often the sub-step is long
+compared with $T_{Lw}$ there.
 
 Set `flexpart_tl_floors: false` only to reproduce legacy A/B comparisons; it
 reverts to a 1 s floor.
@@ -484,8 +487,7 @@ nocturnal near-surface layer.
 ```yaml
 turbulence:
   scheme: hanna_1982          # required; or placeholder_constant_ou
-  substep_c: 0.5              # sub_dt target: sub_dt < substep_c · T_Lw
-  max_substeps: 6             # cap on the (shared) sub-step count per outer step
+  n_substeps: 8               # sub-steps per outer step, every particle (physics.md §6)
   flexpart_tl_floors: true    # §5 — leave on
   surface_layer_override: false   # §8 — leave off
   boundary_layer_depth_min_m: 50    # §2; validation runs: 100
@@ -497,11 +499,14 @@ turbulence:
     timescale_seconds: null   # null → half the store's met interval (1800 s hourly)
 ```
 
-`max_substeps` is a genuine performance/accuracy knob. On the GPU graph path it
-is a **fixed** per-step iteration count rather than a cap, so every particle pays
-it — the default of 50 in code is far more than the $T_L$ floors require, and the
-shipped configs set 6. Raise it only if you lower `simulation.dt_seconds` or
-`substep_c`, or turn the floors off.
+`n_substeps` is the number of equal sub-steps every particle takes in every
+outer step, with every coefficient re-evaluated at the particle's height at the
+start of each (decision 0027, [physics.md](physics.md) §6). It is a physics
+setting: the default keeps the near-surface well-mixed error within the tested
+tolerance at `dt_seconds: 60`. If you change `dt_seconds`, keep
+`dt_seconds / n_substeps` at or below 7.5 s. The step's GPU cost grows in
+proportion to it. The keys `substep_c` and `max_substeps` of the old per-particle
+adaptive schedule are refused.
 
 **Extra meteorology required by `hanna_1982`:**
 

@@ -273,7 +273,7 @@ GLIDE therefore carries two implementations, chosen automatically by device:
 | --- | --- | --- |
 | Which particles are processed | only the currently active ones, selected out of the array | all of them, every step |
 | Inactive particles | skipped | processed, but with their timestep set to zero, so nothing about them changes |
-| Sub-step loop | runs as many times as the busiest particle needs | always runs the maximum number of times |
+| Sub-step loop | `n_substeps` times, for the active particles | `n_substeps` times, for every particle |
 | Waiting on the GPU for a number | a few times per step; cheap on a CPU | never, inside the recorded region |
 | Role | **the reference behaviour** | the fast path |
 
@@ -282,13 +282,14 @@ which is what makes the uniform path give the same answer: the memory factor
 becomes $r = e^0 = 1$ so the velocity is unchanged, the noise amplitude
 $\sigma^2(1-r^2) = 0$ so no randomness is added, the displacement $w'\cdot 0 = 0$
 so the position is unchanged, and reflecting a particle already above ground does
-nothing. Every particle still takes exactly the $k$ real sub-steps it shares with the others; the
-extra iterations do nothing at all. Inactive particles are held still by
-*multiplying* by zero rather than by being excluded from the array — that is what
-keeps the array sizes fixed.
+nothing. Every active particle takes the same `n_substeps` sub-steps on both
+paths (decision 0027), so with every particle active the two paths do the same
+arithmetic and draw the same random numbers, and agree bit for bit. Inactive
+particles are held still by *multiplying* by zero rather than by being excluded
+from the array — that is what keeps the array sizes fixed.
 
-The trade-off is explicit: the uniform path performs *more* arithmetic (finished
-and departed particles are still processed) in exchange for far fewer
+The trade-off is explicit: the uniform path performs *more* arithmetic (departed
+and not-yet-released particles are still processed) in exchange for far fewer
 instructions. It wins because instruction overhead was the problem. On a CPU,
 where issuing work is free, the trade reverses — hence choosing by device.
 
@@ -443,8 +444,9 @@ All of these are environment variables, and all are optional.
 
 **Reading a GPU run.** The `*.gpu.log` sidecar reports GPU utilisation. Low and
 bursty means the run is limited by instruction overhead rather than computation.
-Confirm it the way §5 did: lower `max_substeps` and see whether the elapsed time
-falls while utilisation does not. In a `GLIDE_PROFILE` timeline, many tiny GPU
+Confirm it the way §5 did: lower `turbulence.n_substeps` (for the diagnosis only;
+it is a physics setting) and see whether the elapsed time falls while utilisation
+does not. In a `GLIDE_PROFILE` timeline, many tiny GPU
 operations point the same way; a lot of time in `cudaStreamSynchronize` means the
 CPU is still waiting on the GPU somewhere; long stretches of CPU-only activity
 mean the bottleneck is Python or meteorology reading. If the CPU time is

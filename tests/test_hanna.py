@@ -545,6 +545,41 @@ def test_static_and_dynamic_substeps_bit_identical_when_all_active(n_substeps: i
     assert int(dyn[4][0] + dyn[4][3]) == n * n_substeps  # substeps_bl + substeps_ft
 
 
+def test_static_and_dynamic_steps_bit_identical_when_all_active() -> None:
+    """Decision 0027 at the level of a whole ``step``: with every particle active
+    (and no mean wind, so the static path's folded advection is the identity) the
+    static path (full buffer, the CUDA-graph code) and the dynamic CPU path give
+    bit-identical particles, velocities and exceedance counts, over several steps
+    of a convective boundary layer with particles above and below its top."""
+
+    from lpdm.gpu_engine import GPUEngine
+
+    met = _uniform_met(blh=800.0, ustar=0.3, shf=100.0)
+    engine = GPUEngine(device="cpu")
+    results = []
+    for static in (False, True):
+        torch.manual_seed(5)
+        scheme = HannaScheme(n_substeps=4, static_substeps=static)
+        n = 3000
+        particles = torch.zeros(n, 4)
+        particles[:, 2] = torch.rand(n) * 2000.0
+        particles[:, 3] = 1.0
+        state = scheme.initialize_state(n, device=torch.device("cpu"), dtype=torch.float32)
+        active = torch.ones(n, dtype=torch.bool)
+        for _ in range(5):
+            particles, state = scheme.step(
+                particles, state, met, t_alpha=0.5, dt_seconds=60.0, active_mask=active,
+                engine=engine,
+            )  # fmt: skip
+        results.append((particles, state, scheme.take_substep_exceedance(None)))
+    (p_dyn, s_dyn, x_dyn), (p_stat, s_stat, x_stat) = results
+    assert torch.equal(p_dyn, p_stat)
+    for key in ("u_prime", "v_prime", "w_prime"):
+        assert torch.equal(s_dyn[key], s_stat[key])
+    assert x_dyn == x_stat
+    assert x_dyn["substeps_bl"] > 0 and x_dyn["substeps_ft"] > 0
+
+
 @pytest.mark.parametrize("static", [False, True])
 def test_substep_count_is_fixed_and_coefficients_re_evaluated_at_current_height(
     static: bool,
