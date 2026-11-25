@@ -346,25 +346,29 @@ class MeanderConfig(_Frozen):
     )
 
 
+# Hanna turbulence sub-steps per outer step (decision 0027); the same value as
+# `lpdm.turbulence.hanna.N_SUBSTEPS_DEFAULT` (tests/test_main_config.py checks).
+N_SUBSTEPS_DEFAULT = 16
+
+
 class TurbulenceConfig(_Frozen):
     scheme: str = Field(..., min_length=1)
     meander: MeanderConfig = MeanderConfig()
-    # Hanna F4 Tier 2 adaptive substepping (audit 2026-05-30). Each particle runs
-    # k_i = ceil(dt / (substep_c · T_Lw_i)) substeps, capped at max_substeps. These
-    # default to the historical hardcoded values, so existing configs are
-    # unchanged. They are also a performance knob: on GPU the substep loop is the
-    # dominant kernel-launch source, so lowering max_substeps (or raising
-    # substep_c) issues fewer kernels — at the cost of a larger near-surface Δt/τ
-    # bias. Ignored by non-Hanna schemes.
-    substep_c: float = Field(
-        0.5,
-        gt=0,
-        description="Target sub-dt / T_Lw ratio. Smaller → more substeps → smaller Δt/τ bias, more cost.",
-    )
-    max_substeps: int = Field(
-        50,
+    # Hanna sub-stepping (decision 0027, docs/physics.md §6). Every particle takes
+    # n_substeps equal sub-steps per outer step, with all coefficients
+    # re-evaluated at the current height each sub-step. The count is a constant
+    # of the run: never per particle, per step or per batch. A new field rather
+    # than a reinterpreted `max_substeps`, so that no config silently changes
+    # meaning (the removed keys are refused below). Ignored by non-Hanna schemes.
+    # It is a COUNT, not a length: the sub-step is dt_seconds / n_substeps, so a
+    # longer outer step gives longer sub-steps. The run logs the length, records it
+    # in run_metadata.json (runtime.substep_exceedance.substep_seconds) and warns
+    # when it is longer than the 60 s / default the well-mixed tests are run at
+    # (decision 0028 says why it stays a count).
+    n_substeps: int = Field(
+        N_SUBSTEPS_DEFAULT,
         ge=1,
-        description="Cap on per-particle substeps per step. Lower → fewer GPU kernels but coarser near-surface integration.",
+        description="Turbulence sub-steps per outer step, the same for every particle and step. A count: the sub-step is dt_seconds / n_substeps, so changing dt_seconds changes the sub-step length.",
     )
     # Near-surface mixing controls (2026-07-02 physics-review follow-up). Defaults
     # are the FLEXPART-v11-matching "improved" behaviour; the legacy combination
@@ -392,6 +396,26 @@ class TurbulenceConfig(_Frozen):
         gt=0,
         description="Upper limit on the boundary-layer depth (m); null for none.",
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_adaptive_substep_keys(cls, data: Any) -> Any:
+        # Removed with the adaptive schedule (decision 0027). Refused with a
+        # migration message rather than ignored: a config that sets them expects a
+        # behaviour GLIDE no longer has.
+        if isinstance(data, dict):
+            old = [k for k in ("substep_c", "max_substeps") if k in data]
+            if old:
+                raise ValueError(
+                    f"turbulence.{' and turbulence.'.join(old)} no longer "
+                    f"exist{'s' if len(old) == 1 else ''}: the per-particle adaptive "
+                    "sub-step schedule was replaced by one fixed count for every "
+                    "particle (decision 0027, docs/physics.md §6). Remove "
+                    f"{' and '.join(old)}; set turbulence.n_substeps to choose the "
+                    f"count (default {N_SUBSTEPS_DEFAULT}, a sub-step of "
+                    f"{60.0 / N_SUBSTEPS_DEFAULT:g} s at dt_seconds = 60)."
+                )
+        return data
 
     @model_validator(mode="after")
     def _check_boundary_layer_depth_limits(self) -> TurbulenceConfig:

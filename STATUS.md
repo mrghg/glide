@@ -5,7 +5,7 @@ what GLIDE is, see [README.md](README.md); for the physics and engineering, see
 [docs/](docs/); for why the major choices were made, see
 [dev/decisions/](dev/decisions/). Narrative history lives in git.
 
-_Last updated: 2026-11-20._
+_Last updated: 2026-11-25._
 
 > **Research code under active development. The physics has not been validated
 > against other models or observations. Not for production use.**
@@ -16,7 +16,7 @@ _Last updated: 2026-11-20._
 
 | Area | State |
 | --- | --- |
-| **Core backward LPDM** | RK2 advection, exact-OU Langevin turbulence with the full Thomson well-mixed drift and Stohl–Thomson density correction, ground reflection, per-particle adaptive sub-stepping. Mass-conserving. ([docs/physics.md](docs/physics.md)) |
+| **Core backward LPDM** | RK2 advection, exact-OU Langevin turbulence with the full Thomson well-mixed drift and Stohl–Thomson density correction, ground reflection, turbulence sub-stepping with one fixed count for every particle (16 at the 60 s step), every coefficient re-evaluated each sub-step (decision 0027); the boundary-layer top treated as a Thomson–Physick–Maryon interface (decision 0028). Mass-conserving. ([docs/physics.md](docs/physics.md)) |
 | **Turbulence** | Hanna (1982) in three regimes, aligned to FLEXPART v11; gradient-Richardson free-troposphere closure; Maryon meander. Behind a swappable `TurbulenceScheme` interface. ([docs/turbulence.md](docs/turbulence.md)) |
 | **Convection** | Reduced Emanuel mass-flux scheme, non-divergent matrix, in each meteorology column, once per meteorology interval. ([docs/convection.md](docs/convection.md)) |
 | **Terrain-following vertical coordinate** | Meteorology resampled onto a fixed AGL grid per window, with slope-corrected vertical velocity. Fixed the zero-surface-footprint problem over high terrain. |
@@ -174,9 +174,32 @@ relevant docs page with its consequence.
 
 - **Per-column vertical interpolation.** Uses the bounding-box mean. Convection
   now works column by column (task A02, decision 0023).
-- **Per-sub-step $\sigma$ re-evaluation.** FLEXPART re-evaluates $\sigma$ and
-  $T_L$ every sub-step; GLIDE holds them at the outer-step value (the
-  velocity-dependent part of the drift *is* re-evaluated).
+- **Near-surface well-mixed error at the 60 s step: fixed (decision 0027).**
+  Holding the turbulence coefficients over the sub-steps and choosing a
+  sub-step count per particle put 1.66–1.79 times the well-mixed share of
+  particles in the lowest 5% of neutral and stable boundary layers, in every
+  footprint made so far, the golden fixtures included. One fixed count for
+  every particle, 16 at the 60 s step, with every coefficient re-evaluated each
+  sub-step, brings all three regimes within 0.04 of 1 in the lowest 5% and in
+  0–40 m ([docs/physics.md](docs/physics.md) §6). The golden fixtures are not
+  yet regenerated (planned once, after the A2 residence-counting decision).
+- **The boundary-layer top: fixed (decision 0028).** $\sigma_w$ jumps at $h$
+  between the boundary-layer profile and the free-troposphere closure. The
+  drift's ±1 m finite difference straddled the jump and a crossing particle kept
+  its $w'$, so a column started uniform did not stay uniform at any sub-step
+  count: in a convective column the 50 m above $h$ held 0.4–11.5 times its
+  share depending on the count, and main was worse (found by an independent
+  review of PR #69). $h$ is now an interface (Thomson, Physick & Maryon 1997):
+  one-sided drift stencil, transmission or reflection with velocity rescaling
+  inside every sub-step, and velocities carried as $u'/\sigma$ across steps so
+  that a moving $h$ rescales them. The column stays uniform near $h$, and a
+  boundary layer loses particles to the free troposphere at the diffusion-limit
+  rate, at every count tested ([docs/physics.md](docs/physics.md) §5, §6). On
+  the reference multi-site run the 0–40 m footprint is +48% against the
+  fixtures (median over releases, 3 seeds, seed spread 0.2%; total −4.2%) and
+  now converged in the sub-step count (8 against 16 sub-steps: 0.4%); the
+  Mace Head smoke run's 0–40 m footprint nearly doubles (+94%). The golden
+  fixtures are not yet regenerated.
 - **Forward/backward reciprocity test.** It tests the backward formulation
   directly, which nothing else does. Planned as task A6.
 - **The source of u\*.** From the surface stresses for v1; ERA5's `zust` is

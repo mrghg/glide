@@ -12,7 +12,7 @@ expose them, so a figure cannot silently drift from what CI checks.
 | ``well_mixed`` | ``tests/test_main_runtime.py::test_v1_well_mixed_hanna_backward_path`` (extended to three stability regimes) and ``tests/test_physics.py::test_well_mixed_condition_drift_keeps_uniform_distribution`` |
 | ``analytic_plume`` | ``tests/test_plume_footprint.py`` |
 | ``diffusion_limit`` | ``tests/test_diffusion_pde.py`` |
-| ``convergence`` | ``tests/test_dispersion_analytic.py`` (rotation, Euler bias with dt), particle count, Hanna ``substep_c`` |
+| ``convergence`` | ``tests/test_dispersion_analytic.py`` (rotation, Euler bias with dt), particle count, Hanna ``n_substeps`` |
 | ``terrain`` | ``tests/test_terrain_transport.py`` |
 | ``reciprocity`` | pending: needs the forward-in-time mode (validation plan §2, Tier 0) |
 
@@ -223,13 +223,13 @@ WM_REGIMES = {
 }
 
 
-def _hanna_well_mixed(blh, ustar, shf, *, n, dt, record_s, seed, substep_c=None):
+def _hanna_well_mixed(blh, ustar, shf, *, n, dt, record_s, seed, n_substeps=None):
     from lpdm.gpu_engine import GPUEngine
     from lpdm.turbulence import HannaScheme
 
     torch.manual_seed(seed)
     engine = GPUEngine(device="cpu")
-    kw = {} if substep_c is None else {"substep_c": substep_c}
+    kw = {} if n_substeps is None else {"n_substeps": n_substeps}
     scheme = HannaScheme(meander_enabled=False, static_substeps=False, **kw)
     met = _hanna_met_window(blh_m=blh, ustar=ustar, shf=shf)
     p = torch.zeros(n, 4, dtype=torch.float32)
@@ -665,7 +665,7 @@ def _particle_count_errors(ns, *, pool=819_200, dt=0.5, seed=5):
     return np.array(rms), np.array(se)
 
 
-def _near_surface_error(regime: str, *, dt: float, substep_c=None, n=10_000, seed=11):
+def _near_surface_error(regime: str, *, dt: float, n_substeps=None, n=10_000, seed=11):
     """Near-surface well-mixed error of the production Hanna scheme.
 
     Wilson & Flesch (1993) §7b: the well-mixed error in inhomogeneous turbulence
@@ -677,7 +677,7 @@ def _near_surface_error(regime: str, *, dt: float, substep_c=None, n=10_000, see
     blh, ustar, shf = WM_REGIMES[regime]
     rec = list(np.arange(7200.0, 21600.0 + 1, 900.0))
     res = _hanna_well_mixed(blh, ustar, shf, n=n, dt=dt, record_s=rec, seed=seed,
-                            substep_c=substep_c)  # fmt: skip
+                            n_substeps=n_substeps)  # fmt: skip
     zs = np.stack(list(res.values()))  # [time, particle]
 
     def occ(idx):
@@ -696,12 +696,14 @@ def _value_ticks(ax, values) -> None:
 
 
 def convergence(out_dir: Path) -> Path:
+    from lpdm.turbulence import HannaScheme
+
     cfg = dict(
         rotation_dts=[240.0, 120.0, 60.0, 30.0, 15.0],
         euler_dts=[160.0, 80.0, 40.0, 20.0, 10.0],
         euler_n=400_000,
         outer_dts=[60.0, 30.0, 15.0, 7.5],
-        substep_cs={"60": [2.0, 1.0, 0.5, 0.25, 0.125], "15": [2.0, 0.5, 0.125]},
+        n_substeps={"60": [1, 2, 4, 8, 16], "15": [1, 2, 4]},
         hanna_case=dict(n=10_000, seed=11, measure="lowest 5% of the BL, 2-6 h"),
         particle_counts=[400, 1600, 6400, 25600, 102400],
     )
@@ -712,8 +714,8 @@ def convergence(out_dir: Path) -> Path:
         for reg in WM_REGIMES
     }
     sub = {
-        dt: np.array([_near_surface_error("neutral", dt=float(dt), substep_c=c) for c in cs])
-        for dt, cs in cfg["substep_cs"].items()
+        dt: np.array([_near_surface_error("neutral", dt=float(dt), n_substeps=k) for k in ks])
+        for dt, ks in cfg["n_substeps"].items()
     }
     pc, pc_se = _particle_count_errors(cfg["particle_counts"])
 
@@ -771,20 +773,20 @@ def convergence(out_dir: Path) -> Path:
     a2.legend(loc="lower right", fontsize=7)
     core.recessive_grid(a2, "both")
 
-    # (c) sub-step target, neutral
+    # (c) sub-step count, neutral
     floor = 0.0
     for (dt, arr), col, mk in zip(sub.items(), [style.GLIDE, style.ALT], "os"):
-        signed(a3, np.array(cfg["substep_cs"][dt]), arr[:, 0], col, mk, f"outer step {dt} s")
+        signed(a3, np.array(cfg["n_substeps"][dt]), arr[:, 0], col, mk, f"outer step {dt} s")
         floor = max(floor, 2 * float(arr[:, 1].mean()))
     noise_floor(a3, floor)
-    x60 = np.array(cfg["substep_cs"]["60"])
-    slope_line(a3, x60, abs(sub["60"][0, 0]) * 1.3, 1, "slope 1")
-    a3.axvline(0.5, color=style.MUTED, lw=1, ls=":")
+    x60 = np.array(cfg["n_substeps"]["60"], dtype=float)
+    slope_line(a3, x60, abs(sub["60"][0, 0]) * 1.3, -1, "slope −1")
+    a3.axvline(HannaScheme().n_substeps, color=style.MUTED, lw=1, ls=":")
     a3.set_ylim(3e-3, 3.0)
     _value_ticks(a3, x60)
-    a3.set_xlabel("sub-step target substep_c; default 0.5")
+    a3.set_xlabel(f"sub-steps per outer step n; default {HannaScheme().n_substeps}")
     a3.set_ylabel("near-surface occupancy / uniform − 1")
-    a3.set_title("Sub-step target: Hanna, neutral")
+    a3.set_title("Sub-step count: Hanna, neutral")
     a3.legend(loc="lower right", fontsize=7)
     core.recessive_grid(a3, "both")
 
@@ -806,8 +808,8 @@ def convergence(out_dir: Path) -> Path:
         "(first order), through the engine primitives. (b) The production Hanna scheme's "
         "near-surface well-mixed error (occupancy of the lowest 5% of the boundary layer "
         "relative to uniform, 2–6 h, the setup of the well-mixed figure) against the outer "
-        "step, default sub-stepping. (c) The same, neutral, against the sub-step target "
-        "substep_c at outer steps of 60 s and 15 s. Wilson & Flesch (1993) expect first "
+        "step, default sub-stepping. (c) The same, neutral, against the number of sub-steps "
+        "per outer step at outer steps of 60 s and 15 s. Wilson & Flesch (1993) expect first "
         "order in the step. (d) Sampling error of σ_z² against particle count. Grey: the "
         "particle-noise floor (2 s.e., 10 particle subsets). A preview of the Tier 0 "
         "convergence figure; the full study is task A5."
@@ -821,7 +823,7 @@ def convergence(out_dir: Path) -> Path:
         "particle_order": float(np.polyfit(np.log(x4), np.log(pc), 1)[0]),
         **{f"near_surface_err_{reg}_by_outer_dt": [float(v) for v in arr[:, 0]]
            for reg, arr in outer.items()},
-        **{f"near_surface_err_neutral_dt{dt}_by_substep_c": [float(v) for v in arr[:, 0]]
+        **{f"near_surface_err_neutral_dt{dt}_by_n_substeps": [float(v) for v in arr[:, 0]]
            for dt, arr in sub.items()},
         "near_surface_err_se_max": float(
             max(arr[:, 1].max() for arr in [*outer.values(), *sub.values()])
@@ -829,7 +831,7 @@ def convergence(out_dir: Path) -> Path:
     }  # fmt: skip
     return _finish(fig, out_dir, spec, cfg, caption, metrics,
                    "tests/test_dispersion_analytic.py (rotation, Euler bias); new: Hanna "
-                   "outer step and substep_c, particle count")  # fmt: skip
+                   "outer step and n_substeps, particle count")  # fmt: skip
 
 
 # --------------------------------------------------------------------------- terrain

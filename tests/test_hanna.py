@@ -20,6 +20,7 @@ from lpdm.turbulence.hanna import (
     ABOVE_BL_SIGMA_M_S,
     ABOVE_BL_T_L_S,
     EARTH_ROTATION_RATE_S,
+    EXCEEDANCE_COUNT_KEYS,
     FT_KZ_CEIL_M2_S,
     FT_KZ_FLOOR_M2_S,
     air_density,
@@ -377,32 +378,24 @@ def test_meander_constructor_validates_params() -> None:
         HannaScheme(meander_timescale_seconds=0.0)
 
 
-def test_substep_cap_warning_fires_once(caplog) -> None:
-    """F4 Tier 2 (audit 2026-05-30): when the per-particle substep count hits
-    ``max_substeps`` for any active particle, HannaScheme logs a single WARNING
-    (rate-limited to once per scheme instance) noting that the Δt/τ bias is only
-    partially controlled for those particles. Replaces the F4 Tier 1
-    ``dt > 5·T_L`` warning, which was made obsolete by adaptive substepping."""
+def _uniform_met(*, blh: float = 1500.0, ustar: float = 0.4, shf: float = 0.0):
+    """A tiny horizontally uniform met window (4 levels to 4 km)."""
 
-    import logging
     from datetime import datetime, timedelta
 
-    from lpdm.gpu_engine import GPUEngine
     from lpdm.met_reader import HourlyMetTensors, MetFieldMetadata
 
-    # Build a tiny met window with uniform fields. ustar=0.4, near-surface release
-    # → T_Lw drops to O(seconds), so dt=300 s comfortably trips the warning.
     n_lev, n_lat, n_lon = 4, 4, 4
     shape = (n_lev, n_lat, n_lon)
     chans = {
         "u": torch.zeros(shape),
         "v": torch.zeros(shape),
         "w": torch.zeros(shape),
-        "blh": torch.full(shape, 1500.0),
+        "blh": torch.full(shape, blh),
         "sp": torch.full(shape, 101325.0),
         "t": torch.full(shape, 280.0),
-        "ustar": torch.full(shape, 0.4),
-        "shf": torch.zeros(shape),
+        "ustar": torch.full(shape, ustar),
+        "shf": torch.full(shape, shf),
     }
     names = ("u", "v", "w", "blh", "sp", "t", "ustar", "shf")
     fields = torch.stack([chans[n] for n in names], dim=0)
@@ -420,7 +413,7 @@ def test_substep_cap_warning_fires_once(caplog) -> None:
     height = (
         torch.as_tensor(level, dtype=torch.float32).view(n_lev, 1, 1).expand(shape).contiguous()
     )
-    met = HourlyMetTensors(
+    return HourlyMetTensors(
         hour_start=fields,
         hour_end=fields,
         metadata=metadata,
@@ -428,153 +421,244 @@ def test_substep_cap_warning_fires_once(caplog) -> None:
         height_agl_m=height,
     )
 
+
+def _step_n(scheme: HannaScheme, met, z0: float, *, n: int = 8, steps: int = 3, dt: float = 300.0):
+    from lpdm.gpu_engine import GPUEngine
+
     engine = GPUEngine(device="cpu")
-    # Legacy near-surface configuration (1 s T_L floor + MO surface-layer
-    # override): that is the combination whose κz/σ_w timescale collapses to
-    # ~1 s at z=1 m and trips the substep cap. With the default FLEXPART floors
-    # (T_Lw ≥ 30 s) the cap never binds at dt=300 — covered by
-    # test_flexpart_tl_floors_prevent_substep_cap below.
-    scheme = HannaScheme(flexpart_tl_floors=False, surface_layer_override=True)
-    n = 8
     particles = torch.zeros(n, 4, dtype=torch.float32)
-    particles[:, 2] = 1.0  # release at z=1 m → T_Lw ~ κ·z/σ_w ~ 1 s, far below 5·dt
+    particles[:, 2] = z0
     particles[:, 3] = 1.0
     state = scheme.initialize_state(n, device=torch.device("cpu"), dtype=torch.float32)
     active = torch.ones(n, dtype=torch.bool)
-
-    with caplog.at_level(logging.WARNING, logger="lpdm.turbulence.hanna"):
-        for _ in range(3):
-            particles, state = scheme.step(
-                particles,
-                state,
-                met,
-                t_alpha=0.5,
-                dt_seconds=300.0,
-                active_mask=active,
-                engine=engine,
-            )
-
-    warnings = [r for r in caplog.records if "max_substeps" in r.getMessage()]
-    assert len(warnings) == 1, f"expected exactly one substep-cap warning, got {len(warnings)}"
-    assert "Hanna turbulence" in warnings[0].getMessage()
-    assert scheme._warned_substep_cap is True
+    for _ in range(steps):
+        particles, state = scheme.step(
+            particles, state, met, t_alpha=0.5, dt_seconds=dt, active_mask=active, engine=engine
+        )
+    return particles
 
 
-def test_flexpart_tl_floors_prevent_substep_cap(caplog) -> None:
+@pytest.mark.parametrize("static", [False, True], ids=["dynamic", "static"])
+def test_exceedance_counter_reports_short_T_L(static: bool) -> None:
+    """Decision 0027: the scheme counts the particle-sub-steps whose sub_dt exceeds
+    ``exceedance_c · T_Lw`` (and T_Lw), with the denominator, and reports them once
+    through ``take_substep_exceedance`` (which resets the counts). The legacy
+    near-surface treatment (1 s T_L floor + MO surface-layer override) gives
+    T_Lw ~ 1 s at z = 1 m, so the 300 s / 16 = 18.75 s sub-steps exceed it."""
+
+    scheme = HannaScheme(
+        flexpart_tl_floors=False, surface_layer_override=True, static_substeps=static
+    )
+    _step_n(scheme, _uniform_met(), z0=1.0, n=8, steps=3)
+    taken = scheme.take_substep_exceedance(None)
+    # Every active particle-sub-step is counted once, in the BL or the FT.
+    assert taken["substeps_bl"] + taken["substeps_ft"] == 8 * 3 * scheme.n_substeps
+    assert 0 < taken["over_T_L_bl"] <= taken["exceeded_bl"] <= taken["substeps_bl"]
+    assert taken["worst_bl"] > 1.0
+    # Read and reset.
+    again = scheme.take_substep_exceedance(None)
+    assert all(again[k] == 0 for k in EXCEEDANCE_COUNT_KEYS)
+
+
+def test_flexpart_tl_floors_bound_the_boundary_layer_exceedance() -> None:
     """With the DEFAULT near-surface treatment (FLEXPART T_L floors on, legacy
-    surface-layer override off), a z=1 m release at dt=300 s must NOT trip the
-    substep cap: T_Lw is floored at 30 s, so k = ceil(300/(0.5·30)) = 20 ≤ 50.
-    This pins the floors actually reaching the substep schedule — the same
-    scenario trips the cap under the legacy combination
-    (test_substep_cap_warning_fires_once)."""
+    surface-layer override off) T_Lw ≥ 30 s in the boundary layer, so the default
+    3.75 s sub-step at dt = 60 s (ratio ≤ 0.125) never exceeds the 0.5 target there,
+    even for a z = 1 m release. The same release exceeds it under the legacy
+    combination (test_exceedance_counter_reports_short_T_L)."""
 
-    import logging
-    from datetime import datetime, timedelta
-
-    from lpdm.gpu_engine import GPUEngine
-    from lpdm.met_reader import HourlyMetTensors, MetFieldMetadata
-
-    n_lev, n_lat, n_lon = 4, 4, 4
-    shape = (n_lev, n_lat, n_lon)
-    chans = {
-        "u": torch.zeros(shape),
-        "v": torch.zeros(shape),
-        "w": torch.zeros(shape),
-        "blh": torch.full(shape, 1500.0),
-        "sp": torch.full(shape, 101325.0),
-        "t": torch.full(shape, 280.0),
-        "ustar": torch.full(shape, 0.4),
-        "shf": torch.zeros(shape),
-    }
-    names = ("u", "v", "w", "blh", "sp", "t", "ustar", "shf")
-    fields = torch.stack([chans[n] for n in names], dim=0)
-    level = np.linspace(0.0, 4000.0, n_lev)
-    t0 = datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC)
-    metadata = MetFieldMetadata(
-        lon=np.linspace(-2.0, 2.0, n_lon),
-        lat=np.linspace(-2.0, 2.0, n_lat),
-        level=level,
-        pressure_level_hpa=np.linspace(1000.0, 600.0, n_lev),
-        time_start=t0,
-        time_end=t0 + timedelta(hours=1),
-        variable_units=dict.fromkeys(names, "m/s"),
-    )
-    height = (
-        torch.as_tensor(level, dtype=torch.float32).view(n_lev, 1, 1).expand(shape).contiguous()
-    )
-    met = HourlyMetTensors(
-        hour_start=fields,
-        hour_end=fields,
-        metadata=metadata,
-        channel_names=names,
-        height_agl_m=height,
-    )
-
-    engine = GPUEngine(device="cpu")
     scheme = HannaScheme()  # defaults: flexpart_tl_floors=True, surface_layer_override=False
     assert scheme.flexpart_tl_floors is True
     assert scheme.surface_layer_override is False
-    n = 8
-    particles = torch.zeros(n, 4, dtype=torch.float32)
-    particles[:, 2] = 1.0
-    particles[:, 3] = 1.0
-    state = scheme.initialize_state(n, device=torch.device("cpu"), dtype=torch.float32)
-    active = torch.ones(n, dtype=torch.bool)
-
-    with caplog.at_level(logging.WARNING, logger="lpdm.turbulence.hanna"):
-        for _ in range(3):
-            particles, state = scheme.step(
-                particles,
-                state,
-                met,
-                t_alpha=0.5,
-                dt_seconds=300.0,
-                active_mask=active,
-                engine=engine,
-            )
-
-    warnings = [r for r in caplog.records if "max_substeps" in r.getMessage()]
-    assert len(warnings) == 0, "FLEXPART T_L floors should keep the substep cap from binding"
+    _step_n(scheme, _uniform_met(), z0=1.0, n=8, steps=3, dt=60.0)
+    taken = scheme.take_substep_exceedance(None)
+    assert taken["substeps_bl"] == 8 * 3 * scheme.n_substeps
+    assert taken["exceeded_bl"] == taken["over_T_L_bl"] == 0
+    assert 0.0 < taken["worst_bl"] <= 60.0 / scheme.n_substeps / 30.0 + 1e-6
 
 
-def test_substep_cap_warning_silent_when_dt_is_small(caplog) -> None:
-    """No warning when dt is small enough that no particle's k_i hits the cap
-    (i.e. substepping comfortably keeps the Δt/τ bias small for everyone)."""
+@pytest.mark.parametrize("static", [False, True], ids=["dynamic", "static"])
+def test_exceedance_counter_hand_computed(static: bool) -> None:
+    """Hand-computed counts on synthetic inputs: dt = 60 s, n = 4 (15 s sub-steps),
+    T_Lw = 1000 / 10 / 2 / 20 s (ratios 0.015 / 1.5 / 7.5 / 0.75); the third
+    particle is above its boundary layer. The static path also carries an inactive
+    particle (the fifth), which must not be counted."""
 
-    import logging
-
-    scheme = HannaScheme()
-    # Manually call the substep integrator with T_L large vs dt — substep count
-    # k_i = ceil(dt/(c·T_L)) = ceil(1/(0.5·1000)) = 1, well below the cap.
-    engine_state = torch.zeros(3, 4, dtype=torch.float32)  # 3 particles
-    big_T_L = torch.tensor([1000.0, 500.0, 800.0])
-    sigma = torch.tensor([0.5, 0.5, 0.5])
-    sigma_sq = sigma.pow(2)
-    zeros = torch.zeros(3)
     from lpdm.gpu_engine import GPUEngine
 
-    with caplog.at_level(logging.WARNING, logger="lpdm.turbulence.hanna"):
-        scheme._integrate_vertical_substeps(
-            active_xyz=engine_state,
-            u_prime_in=torch.zeros(3),
-            v_prime_in=torch.zeros(3),
-            w_prime_in=torch.zeros(3),
-            sigma_u=sigma,
-            sigma_v=sigma,
-            sigma_w=sigma,
-            sigma_w_sq=sigma_sq,
-            T_Lu=big_T_L,
-            T_Lv=big_T_L,
-            T_Lw=big_T_L,
-            half_dsig2_dz_backward=zeros,
-            density_drift_backward=zeros,
-            dt_seconds=1.0,
-            engine=GPUEngine(device="cpu"),
+    scheme = HannaScheme(n_substeps=4)
+    tlw = torch.tensor([1000.0, 10.0, 2.0, 20.0, 5.0])
+    inp = _substep_inputs(5, T_Lw=tlw, seed=2)
+    inp["active_xyz"][:, 2] = torch.tensor([50.0, 50.0, 500.0, 50.0, 50.0])
+    inp["sigma_u"] = inp["sigma_v"] = inp["sigma_w"] = torch.full((5,), 0.01)
+    inp["sigma_w_sq"] = inp["sigma_w"].pow(2)
+    blh = torch.tensor([1000.0, 1000.0, 100.0, 1000.0, 1000.0])
+    if static:
+        active = torch.tensor([True, True, True, True, False])
+        out = scheme._integrate_vertical_substeps(
+            engine=GPUEngine(device="cpu"), blh=blh, active_mask=active, **inp
         )
+        assert torch.equal(out[0][4], inp["active_xyz"][4])  # inactive: frozen
+    else:
+        sub = {k: (v[:4] if isinstance(v, torch.Tensor) else v) for k, v in inp.items()}
+        out = scheme._integrate_vertical_substeps(
+            engine=GPUEngine(device="cpu"), blh=blh[:4], **sub
+        )
+    counts, worst = out[4], out[5]
+    # BL: 3 particles x 4 sub-steps, 2 above 0.5 T_Lw, 1 above T_Lw; FT: 1 x 4, above both.
+    assert dict(zip(EXCEEDANCE_COUNT_KEYS, counts.tolist(), strict=True)) == {
+        "substeps_bl": 12,
+        "exceeded_bl": 8,
+        "over_T_L_bl": 4,
+        "substeps_ft": 4,
+        "exceeded_ft": 4,
+        "over_T_L_ft": 4,
+    }
+    assert worst.tolist() == pytest.approx([1.5, 7.5])
 
-    warnings = [r for r in caplog.records if "max_substeps" in r.getMessage()]
-    assert warnings == []
-    assert scheme._warned_substep_cap is False
+
+@pytest.mark.parametrize("n_substeps", [1, 4, 8])
+def test_static_and_dynamic_substeps_bit_identical_when_all_active(n_substeps: int) -> None:
+    """Every particle takes the same ``n_substeps`` sub-steps whatever its T_Lw, so
+    with every particle active the static (full buffer + mask) and dynamic (active
+    subset) paths execute identical operations and draw the RNG identically: bit
+    for bit equal, even for a wide spread of T_Lw (which under the old adaptive
+    schedule gave per-particle counts from 1 to 8)."""
+
+    from lpdm.gpu_engine import GPUEngine
+
+    engine = GPUEngine(device="cpu")
+    scheme = HannaScheme(n_substeps=n_substeps)
+    n = 4096
+    tlw = torch.linspace(15.0, 1000.0, n)
+    inp = _substep_inputs(n, T_Lw=tlw, seed=11)
+    blh = torch.full((n,), 1000.0)
+    torch.manual_seed(100)
+    dyn = scheme._integrate_vertical_substeps(engine=engine, blh=blh, **inp)
+    torch.manual_seed(100)
+    stat = scheme._integrate_vertical_substeps(
+        engine=engine, blh=blh, active_mask=torch.ones(n, dtype=torch.bool), **inp
+    )
+    for a, b in zip(dyn, stat):
+        assert torch.equal(a, b)
+    assert torch.isfinite(dyn[0]).all()
+    assert int(dyn[4][0] + dyn[4][3]) == n * n_substeps  # substeps_bl + substeps_ft
+
+
+def test_static_and_dynamic_steps_bit_identical_when_all_active() -> None:
+    """Decision 0027 at the level of a whole ``step``: with every particle active
+    (and no mean wind, so the static path's folded advection is the identity) the
+    static path (full buffer, the CUDA-graph code) and the dynamic CPU path give
+    bit-identical particles, velocities and exceedance counts, over several steps
+    of a convective boundary layer with particles above and below its top."""
+
+    from lpdm.gpu_engine import GPUEngine
+
+    met = _uniform_met(blh=800.0, ustar=0.3, shf=100.0)
+    engine = GPUEngine(device="cpu")
+    results = []
+    for static in (False, True):
+        torch.manual_seed(5)
+        scheme = HannaScheme(n_substeps=4, static_substeps=static)
+        n = 3000
+        particles = torch.zeros(n, 4)
+        particles[:, 2] = torch.rand(n) * 2000.0
+        particles[:, 3] = 1.0
+        state = scheme.initialize_state(n, device=torch.device("cpu"), dtype=torch.float32)
+        active = torch.ones(n, dtype=torch.bool)
+        for _ in range(5):
+            particles, state = scheme.step(
+                particles, state, met, t_alpha=0.5, dt_seconds=60.0, active_mask=active,
+                engine=engine,
+            )  # fmt: skip
+        results.append((particles, state, scheme.take_substep_exceedance(None)))
+    (p_dyn, s_dyn, x_dyn), (p_stat, s_stat, x_stat) = results
+    assert torch.equal(p_dyn, p_stat)
+    for key in ("u_prime", "v_prime", "w_prime", "sigma_last"):
+        assert torch.equal(s_dyn[key], s_stat[key])
+    assert x_dyn == x_stat
+    assert x_dyn["substeps_bl"] > 0 and x_dyn["substeps_ft"] > 0
+
+
+@pytest.mark.parametrize("static", [False, True])
+def test_substep_count_is_fixed_and_coefficients_re_evaluated_at_current_height(
+    static: bool,
+) -> None:
+    """The loop runs exactly ``n_substeps`` sub-steps whatever T_Lw is, and
+    ``coeffs_at`` is called at the start of every sub-step after the first with
+    the particles' current heights (docs/physics.md §6)."""
+
+    from lpdm.gpu_engine import GPUEngine
+
+    engine = GPUEngine(device="cpu")
+    scheme = HannaScheme(n_substeps=5)
+    n = 64
+    for tlw in (1.0, 24.0, 1000.0):
+        inp = _substep_inputs(n, T_Lw=tlw, seed=3)
+        heights: list[torch.Tensor] = []
+
+        def coeffs_at(z: torch.Tensor, tlw=tlw, heights=heights):
+            heights.append(z.clone())
+            s = torch.full_like(z, 0.6)
+            tl = torch.full_like(z, tlw)
+            zero = torch.zeros_like(z)
+            return s, s, s, s.pow(2), tl, tl, tl, zero, zero
+
+        mask = torch.ones(n, dtype=torch.bool) if static else None
+        torch.manual_seed(0)
+        xyz, *_ = scheme._integrate_vertical_substeps(
+            engine=engine, coeffs_at=coeffs_at, active_mask=mask, **inp
+        )
+        assert len(heights) == 4
+        assert not torch.equal(heights[0], inp["active_xyz"][:, 2])  # moved since the start
+        assert torch.isfinite(xyz).all()
+
+
+def test_n_substeps_validated() -> None:
+    HannaScheme(n_substeps=1)
+    for bad in (0, -1, 2.5):
+        with pytest.raises(ValueError):
+            HannaScheme(n_substeps=bad)
+    with pytest.raises(ValueError):
+        HannaScheme(exceedance_c=0.0)
+
+
+@pytest.mark.parametrize("override", [False, True])
+@pytest.mark.parametrize("h_over_L", [-50.0, -0.5, 0.0, 0.5, 20.0])
+def test_sigma_w_probe_is_bit_identical_to_the_full_profile(
+    override: bool, h_over_L: float
+) -> None:
+    """The drift's finite-difference probes evaluate σ_w only
+    (``_column_sigma_w``). It must equal ``_column_turbulence(...)[2]`` bit for bit
+    in every regime (stable, neutral, convective), with and without the
+    surface-layer override, and in the boundary layer and the free troposphere."""
+
+    from lpdm.gpu_engine import GPUEngine
+
+    engine = GPUEngine(device="cpu")
+    scheme = HannaScheme(surface_layer_override=override)
+    met = _uniform_met(blh=800.0)
+    ft_fields, grid_bounds = scheme._free_trop_fields(met, torch.device("cpu"), torch.float32)
+    n = 2000
+    z = torch.cat([torch.linspace(0.0, 3500.0, n - 3), torch.tensor([2.0, 800.0, 801.0])])
+    blh = torch.full((n,), 800.0)
+    ustar = torch.full((n,), 0.35)
+    L = torch.full((n,), 800.0 / h_over_L if h_over_L else 1e10)
+    col = dict(
+        blh=blh,
+        ustar=ustar,
+        w_star=torch.full((n,), 1.8 if h_over_L < 0 else 0.0),
+        h_over_L=torch.full((n,), h_over_L),
+        L=L,
+        lat=torch.linspace(-60.0, 60.0, n),
+        lon=torch.linspace(-1.5, 1.5, n),
+        ft_fields=ft_fields,
+        grid_bounds=grid_bounds,
+        engine=engine,
+    )
+    full = scheme._column_turbulence(z, **col)[2]
+    probe = scheme._column_sigma_w(z, **col)
+    assert torch.equal(full, probe)
 
 
 def test_ubl_holds_sigma_constant_below_z_ubl() -> None:
@@ -607,6 +691,50 @@ def test_ubl_holds_sigma_constant_below_z_ubl() -> None:
     assert float(z_far_above.clamp(min=scheme.z_ubl_m)[0]) == 100.0
 
 
+@pytest.mark.parametrize("shf", [-20.0, 0.0, 200.0], ids=["stable", "neutral", "convective"])
+def test_basal_zero_gradient_only_below_the_clamp(shf: float) -> None:
+    """Below ``z_ubl`` every coefficient is sampled at ``z_ubl``, so the profile is
+    flat there, but the finite-difference stencil (clamped to [z_ubl, z_ubl + δ])
+    returns the one-sided gradient just above the clamp. With
+    ``basal_zero_gradient`` the σ_w² gradient drift is zero strictly below the
+    clamp and unchanged at and above it; σ, T_L and the density drift are the same
+    either way (decision 0027, physics.md §6)."""
+
+    from lpdm.gpu_engine import GPUEngine
+
+    engine = GPUEngine(device="cpu")
+    met = _uniform_met(blh=800.0, ustar=0.3, shf=shf)
+    z = torch.tensor([0.0, 0.5, 1.0, 1.999, 2.0, 2.5, 3.0, 50.0])
+    n = z.numel()
+    out = {}
+    for flag in (False, True):
+        scheme = HannaScheme(basal_zero_gradient=flag)
+        ft_fields, grid_bounds = scheme._free_trop_fields(met, torch.device("cpu"), torch.float32)
+        density = scheme._density_fields(met, torch.device("cpu"), torch.float32)
+        h_over_L = {-20.0: 5.0, 0.0: 0.0, 200.0: -50.0}[shf]
+        col = dict(
+            blh=torch.full((n,), 800.0),
+            ustar=torch.full((n,), 0.3),
+            w_star=torch.full((n,), 1.8 if shf > 0 else 0.0),
+            h_over_L=torch.full((n,), h_over_L),
+            L=torch.full((n,), 800.0 / h_over_L if h_over_L else 1e10),
+            lat=torch.full((n,), 0.0),
+            lon=torch.full((n,), 0.0),
+            ft_fields=ft_fields,
+            grid_bounds=grid_bounds,
+            engine=engine,
+        )
+        out[flag] = scheme._vertical_coefficients(z, density, **col)
+    below = z < 2.0
+    off, on = out[False], out[True]
+    # The stencil as it was: below the clamp, the one-sided gradient at the clamp.
+    assert torch.all(off[7][below] == off[7][4]) and float(off[7][4]) != 0.0
+    assert torch.all(on[7][below] == 0.0)  # −½∂σ_w²/∂z
+    assert torch.equal(on[7][~below], off[7][~below])
+    for k in (0, 1, 2, 3, 4, 5, 6, 8):  # σ, σ_w², T_L, density drift: unchanged
+        assert torch.equal(on[k], off[k])
+
+
 def test_z_ubl_constructor_validation() -> None:
     """`z_ubl_m` must be non-negative; the constructor rejects bad values."""
 
@@ -625,12 +753,12 @@ def test_meander_state_keys_only_when_enabled() -> None:
     off = HannaScheme(meander_enabled=False).initialize_state(
         4, device=torch.device("cpu"), dtype=torch.float32
     )
-    assert set(off) == {"u_prime", "v_prime", "w_prime"}
+    assert set(off) == {"u_prime", "v_prime", "w_prime", "sigma_last"}
 
     on = HannaScheme(meander_enabled=True).initialize_state(
         4, device=torch.device("cpu"), dtype=torch.float32
     )
-    assert set(on) == {"u_prime", "v_prime", "w_prime", "u_meander", "v_meander"}
+    assert set(on) == {"u_prime", "v_prime", "w_prime", "sigma_last", "u_meander", "v_meander"}
 
 
 def _make_meander_test_window(t0, u_start_val: float, u_end_val: float):
@@ -820,95 +948,9 @@ def test_ou_and_displacement_are_noops_at_zero_dt() -> None:
     assert torch.equal(p_r, particles) and torch.equal(w_r, w)
 
 
-def test_static_substeps_bit_identical_for_homogeneous_k() -> None:
-    """When every particle needs the same substep count, none finishes early, so
-    the static (full-set) and dynamic (masked) loops execute identical ops and
-    consume the RNG identically → bit-for-bit equal. Covers the base case (k=1)
-    and a multi-substep case (k=5)."""
-
-    from lpdm.gpu_engine import GPUEngine
-
-    engine = GPUEngine(device="cpu")
-    scheme = HannaScheme()
-    # dt=60, substep_c=0.5: T_Lw=1000 → k=1; T_Lw=24 → k=5.
-    for T_Lw, expected_k in ((1000.0, 1), (24.0, 5)):
-        inp = _substep_inputs(256, T_Lw=T_Lw)
-        k_req, _, max_k = scheme._substep_schedule(inp["T_Lw"], inp["dt_seconds"], torch.float32)
-        assert int(k_req.min()) == int(k_req.max()) == max_k == expected_k
-
-        torch.manual_seed(0)
-        dyn = scheme._integrate_vertical_substeps(engine=engine, **inp)
-        torch.manual_seed(0)
-        stat = scheme._integrate_vertical_substeps_static(engine=engine, **inp)
-        for a, b in zip(dyn, stat):
-            assert torch.equal(a, b)
-
-
-def test_static_substeps_matches_dynamic_distribution_for_heterogeneous_k() -> None:
-    """With a spread of substep counts the two paths draw RNG differently (full
-    set vs shrinking subset), so they are not bit-identical — but each particle
-    integrates the same OU over the same total dt, so the end-state distributions
-    match within Monte-Carlo tolerance, with no NaNs."""
-
-    from lpdm.gpu_engine import GPUEngine
-
-    engine = GPUEngine(device="cpu")
-    scheme = HannaScheme()
-    n = 8192
-    tlw = torch.linspace(15.0, 1000.0, n)  # k spans 1 .. ~8 at dt=60, c=0.5
-    k_req, _, _ = scheme._substep_schedule(tlw, 60.0, torch.float32)
-    assert int(k_req.min()) == 1 and int(k_req.max()) > 3  # genuinely heterogeneous
-
-    inp_d = _substep_inputs(n, T_Lw=tlw, seed=11, half_drift=0.0)  # driftless OU
-    inp_s = _substep_inputs(n, T_Lw=tlw, seed=11, half_drift=0.0)
-
-    torch.manual_seed(100)
-    d_xyz, _, _, d_w = scheme._integrate_vertical_substeps(engine=engine, **inp_d)
-    torch.manual_seed(200)
-    s_xyz, _, _, s_w = scheme._integrate_vertical_substeps_static(engine=engine, **inp_s)
-
-    assert torch.isfinite(s_xyz).all() and torch.isfinite(s_w).all()
-
-    dz_d = d_xyz[:, 2] - inp_d["active_xyz"][:, 2]
-    dz_s = s_xyz[:, 2] - inp_s["active_xyz"][:, 2]
-    # Std is the discriminating statistic (driftless → mean ≈ 0); n=8192 gives
-    # MC error ~1% on the std, so a 5% relative tolerance is safe.
-    assert abs(dz_s.std() / dz_d.std() - 1.0) < 0.05
-    assert abs(s_w.std() / d_w.std() - 1.0) < 0.05
-    assert abs(s_w.mean()) < 0.1 * s_w.std()  # near-zero mean velocity
-
-
 # ---------------------------------------------------------------------------
-# Phase 3 (CUDA-graph prep): fixed-count loop + graph-compile wiring.
+# CUDA-graph wiring.
 # ---------------------------------------------------------------------------
-
-
-def test_fixed_count_static_substeps_matches_variable_count() -> None:
-    """The fixed-count substep loop (`n_substeps=max_substeps` — the constant,
-    graph-capturable trip count) is **bit-identical** to the variable-count loop
-    (`n_substeps=None`). Iterations past `max_k` are pure no-ops (`sub_dt=0`): they
-    draw unused RNG but never change state, and both paths draw identically up to
-    `max_k`, so the end state matches exactly. This is what lets phase 3 drop the
-    `max_k` host sync for a constant loop bound."""
-
-    from lpdm.gpu_engine import GPUEngine
-
-    engine = GPUEngine(device="cpu")
-    scheme = HannaScheme()  # max_substeps = 50
-    n = 1024
-    tlw = torch.linspace(15.0, 1000.0, n)  # k spans 1..~8, well below 50
-    k_req, _ = scheme._substep_counts(tlw, 60.0, torch.float32)
-    assert int(k_req.max()) < scheme.max_substeps  # there really are no-op iterations
-
-    inp = _substep_inputs(n, T_Lw=tlw, seed=5)
-    torch.manual_seed(0)
-    var = scheme._integrate_vertical_substeps_static(engine=engine, **inp)
-    torch.manual_seed(0)
-    fix = scheme._integrate_vertical_substeps_static(
-        engine=engine, n_substeps=scheme.max_substeps, **inp
-    )
-    for a, b in zip(var, fix):
-        assert torch.equal(a, b)
 
 
 def test_graph_compile_gating(monkeypatch) -> None:
@@ -1118,7 +1160,7 @@ def test_boundary_layer_depth_limits_apply_on_both_paths(static: bool) -> None:
     t0 = datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC)
 
     def run(blh: float, shf: float, **limits) -> torch.Tensor:
-        scheme = HannaScheme(static_substeps=static, max_substeps=6, **limits)
+        scheme = HannaScheme(static_substeps=static, n_substeps=6, **limits)
         return _run_steps(scheme, _window_with(t0, blh=blh, shf=shf), n_steps=4)
 
     # Pairs of depths on the same side of a limit: both are replaced by the limit
@@ -1238,10 +1280,10 @@ def test_meander_alone_gives_the_exact_ou_displacement_variance(static: bool, mo
     )
 
     def _no_small_scale_turbulence(*, active_xyz, u_prime_in, v_prime_in, w_prime_in, **_):
-        return active_xyz, u_prime_in, v_prime_in, w_prime_in
+        counts = torch.zeros(len(EXCEEDANCE_COUNT_KEYS), dtype=torch.int64)
+        return active_xyz, u_prime_in, v_prime_in, w_prime_in, counts, torch.zeros(2)
 
     monkeypatch.setattr(scheme, "_integrate_vertical_substeps", _no_small_scale_turbulence)
-    monkeypatch.setattr(scheme, "_integrate_vertical_substeps_static", _no_small_scale_turbulence)
 
     engine = GPUEngine(device="cpu")
     torch.manual_seed(2024)
@@ -1278,3 +1320,236 @@ def test_meander_alone_gives_the_exact_ou_displacement_variance(static: bool, mo
         exact = _ou_displacement_variance_exact(sigma, tau, t)
         assert abs(disc / exact - 1.0) < 2.0 * dt / t, (t, disc, exact)
         assert abs(var_model / disc - 1.0) < noise, (t, var_model, disc)
+
+
+# ---------------------------------------------------------------------------
+# Boundary-layer top as an interface (decision 0028).
+# ---------------------------------------------------------------------------
+
+
+def _interface_col(scheme: HannaScheme, met, n: int, h_over_L: float, *, blh: float = 800.0):
+    from lpdm.gpu_engine import GPUEngine
+
+    ft_fields, grid_bounds = scheme._free_trop_fields(met, torch.device("cpu"), torch.float32)
+
+    def full(v: float) -> torch.Tensor:
+        return torch.full((n,), float(v))
+
+    return dict(
+        blh=full(blh),
+        ustar=full(0.3),
+        w_star=full(1.8 if h_over_L < 0 else 0.0),
+        h_over_L=full(h_over_L),
+        L=full(blh / h_over_L if h_over_L else 1e10),
+        lat=full(0.0),
+        lon=full(0.0),
+        ft_fields=ft_fields,
+        grid_bounds=grid_bounds,
+        engine=GPUEngine(device="cpu"),
+    )
+
+
+@pytest.mark.parametrize("h_over_L", [5.0, 0.0, -50.0], ids=["stable", "neutral", "convective"])
+def test_drift_stencil_stays_on_the_particles_side_of_h(h_over_L: float) -> None:
+    """Decision 0028: ∂σ_w²/∂z is differenced on the particle's own side of h, each
+    side with its own profile (the boundary-layer profile at and below h, the
+    free-troposphere closure above), so the jump of σ_w at h never enters the
+    drift. More than δ = 1 m from h the stencil is the centred one, as before;
+    within δ of h a stencil straddling h would difference the jump instead."""
+
+    scheme = HannaScheme()
+    met = _uniform_met(blh=800.0)
+    z = torch.tensor([300.0, 798.0, 799.5, 800.0, 800.3, 801.0, 802.5, 1500.0])
+    col = _interface_col(scheme, met, z.numel(), h_over_L)
+    density = scheme._density_fields(met, torch.device("cpu"), torch.float32)
+    grad = -2.0 * scheme._vertical_coefficients(z, density, **col)[7]  # ∂σ_w²/∂z
+
+    side_ft = z > 800.0
+    z_hi = torch.where(side_ft, z + 1.0, torch.clamp(z + 1.0, max=800.0))
+    z_lo = torch.where(side_ft, torch.clamp(z - 1.0, min=800.0), z - 1.0)
+
+    def sw2(zz: torch.Tensor) -> torch.Tensor:
+        return scheme._column_sigma_w(zz, side_ft=side_ft, **col).pow(2)
+
+    one_sided = (sw2(z_hi) - sw2(z_lo)) / (z_hi - z_lo)
+    assert torch.equal(grad, one_sided)
+    straddling = (
+        scheme._column_sigma_w(z + 1.0, **col).pow(2)
+        - scheme._column_sigma_w(z - 1.0, **col).pow(2)
+    ) / 2.0
+    far = (z - 800.0).abs() > 1.0
+    assert torch.equal(grad[far], straddling[far])  # unchanged away from h
+    near = ~far
+    # Near h the straddling stencil is dominated by the jump; the one-sided one is not.
+    assert torch.all(straddling[near].abs() > 10.0 * grad[near].abs())
+
+
+def test_interface_sigmas_are_the_profile_limits_at_h() -> None:
+    """σ at h on the boundary-layer side is the profile's value at z = h; on the
+    free-troposphere side it is the closure's value at h, the limit from above."""
+
+    scheme = HannaScheme()
+    met = _uniform_met(blh=800.0)
+    n = 3
+    col = _interface_col(scheme, met, n, -50.0)
+    sig = scheme._interface_sigmas(**col)
+    h = col["blh"]
+    su, sv, sw, *_ = scheme._column_turbulence(h, **col)
+    assert torch.equal(sig[0], torch.stack([su, sv, sw]))
+    above = scheme._column_turbulence(h + 1e-2, **col)
+    assert torch.allclose(sig[1], torch.stack(above[:3]), rtol=1e-4)
+    assert torch.equal(
+        sig[1, 2], scheme._column_sigma_w(h, side_ft=torch.ones(n, dtype=torch.bool), **col)
+    )
+
+
+def test_interface_crossing_rule_backward() -> None:
+    """Thomson, Physick & Maryon (1997) at h, in GLIDE's backward convention
+    (displacement −w'·Δt): a particle crossing from side A to side B is
+    transmitted with probability min(1, σ_wB/σ_wA), its w' (and u', v') scaled by
+    σ_B/σ_A and the overshoot beyond h by σ_wB/σ_wA; otherwise it is reflected,
+    z → 2h − z and w' → −w', u' and v' unchanged. Non-crossing particles are
+    untouched."""
+
+    scheme = HannaScheme()
+    n = 200_000
+    blh = torch.full((n,), 800.0)
+    # [side (BL, FT), component (u, v, w)]
+    sig = torch.tensor([[1.0, 1.2, 0.8], [0.5, 0.3, 0.2]]).unsqueeze(-1).expand(2, 3, n)
+
+    def cross(z_from: float, w: float):
+        zf = torch.full((n,), z_from)
+        wp = torch.full((n,), w)
+        up, vp = torch.full((n,), 0.3), torch.full((n,), -0.4)
+        xyz = torch.zeros(n, 4)
+        xyz[:, 2] = zf - wp * 1.0  # backward displacement over 1 s
+        return xyz[:, 2].clone(), *scheme._cross_interface(zf, xyz, wp, up, vp, blh, sig)
+
+    # Upward, boundary layer to free troposphere (w' < 0 moves up in backward time):
+    # r = 0.2/0.8 = 0.25, transmitted with probability 0.25.
+    torch.manual_seed(0)
+    z_to, out, w2, u2, v2 = cross(799.0, -2.0)
+    assert torch.all(z_to == 801.0)
+    through = w2 == -0.5
+    refl = w2 == 2.0
+    assert torch.all(through | refl)
+    frac = float(through.float().mean())
+    assert abs(frac - 0.25) < 4.0 * math.sqrt(0.25 * 0.75 / n)
+    assert torch.allclose(out[through, 2], torch.tensor(800.25))
+    assert torch.allclose(u2[through], torch.tensor(0.15)) and torch.allclose(
+        v2[through], torch.tensor(-0.1)
+    )
+    assert torch.allclose(out[refl, 2], torch.tensor(799.0))
+    assert torch.all(u2[refl] == 0.3) and torch.all(v2[refl] == -0.4)
+
+    # Downward, free troposphere to boundary layer: r = 4 ≥ 1, always transmitted,
+    # the 0.5 m overshoot becomes 2 m.
+    z_to, out, w2, u2, v2 = cross(800.5, 1.0)
+    assert torch.all(w2 == 4.0) and torch.allclose(out[:, 2], torch.tensor(798.0))
+    assert torch.allclose(u2, torch.tensor(0.6)) and torch.allclose(v2, torch.tensor(-1.6))
+
+    # No crossing: untouched.
+    z_to, out, w2, u2, v2 = cross(700.0, -2.0)
+    assert torch.all(out[:, 2] == 702.0) and torch.all(w2 == -2.0) and torch.all(u2 == 0.3)
+
+
+def test_velocities_carried_as_w_over_sigma_across_steps() -> None:
+    """Decision 0028: at the start of a step each velocity is scaled by σ there now
+    over σ at the end of the particle's last step (``sigma_last``), so u'/σ_u,
+    v'/σ_v and w'/σ_w carry across the step; before a particle's first step
+    (``sigma_last`` = 0) nothing is scaled."""
+
+    u, v, w = torch.tensor([1.0, 1.0]), torch.tensor([2.0, 2.0]), torch.tensor([-3.0, -3.0])
+    last = torch.tensor([[0.5, 2.0, 0.25], [0.0, 0.0, 0.0]])
+    now = (torch.tensor([1.0, 1.0]), torch.tensor([1.0, 1.0]), torch.tensor([0.5, 0.5]))
+    u2, v2, w2 = HannaScheme._carry_velocities(u, v, w, last, *now)
+    assert u2.tolist() == [2.0, 1.0] and v2.tolist() == [1.0, 2.0] and w2.tolist() == [-6.0, -3.0]
+
+
+def _ramped_met(blh_start: float, blh_end: float, *, shf: float = 100.0):
+    """``_uniform_met`` with h ramping from ``blh_start`` to ``blh_end`` over the window."""
+
+    from lpdm.met_reader import HourlyMetTensors
+
+    a = _uniform_met(blh=blh_start, ustar=0.3, shf=shf)
+    b = _uniform_met(blh=blh_end, ustar=0.3, shf=shf)
+    return HourlyMetTensors(
+        hour_start=a.hour_start,
+        hour_end=b.hour_end,
+        metadata=a.metadata,
+        channel_names=a.channel_names,
+        height_agl_m=a.height_agl_m,
+    )
+
+
+@pytest.mark.parametrize("shf", [-20.0, 0.0, 100.0], ids=["stable", "neutral", "convective"])
+def test_carry_is_one_in_a_steady_column_and_tracks_a_moving_h(shf: float) -> None:
+    """In a steady, motionless column σ at the start of a step equals σ at the
+    end of the last one up to the particle's horizontal turbulent displacement
+    (rounding of the interpolated uniform fields, and the Coriolis parameter in
+    the neutral profile), so the carry ratio is 1 to within 1e-4. With h moving
+    through the window it scales w' by exactly σ_w now / ``sigma_last``."""
+
+    from lpdm.gpu_engine import GPUEngine
+
+    ratios: list[torch.Tensor] = []
+
+    def run(met, alphas) -> None:
+        torch.manual_seed(3)
+        scheme = HannaScheme(n_substeps=4)
+        carry = scheme._carry_velocities
+
+        def spy(u, v, w, last, su, sv, sw):
+            out = carry(u, v, w, last, su, sv, sw)
+            seen = last[:, 2] > 0
+            ratios.append((sw / last[:, 2])[seen])
+            assert torch.equal(out[2][seen], w[seen] * (sw / last[:, 2])[seen])
+            return out
+
+        scheme._carry_velocities = spy
+        n = 2000
+        p = torch.zeros(n, 4)
+        p[:, 2] = torch.rand(n) * 1600.0
+        state = scheme.initialize_state(n, device=torch.device("cpu"), dtype=torch.float32)
+        for a in alphas:
+            p, state = scheme.step(
+                p, state, met, t_alpha=a, dt_seconds=60.0,
+                active_mask=torch.ones(n, dtype=torch.bool), engine=GPUEngine(device="cpu"),
+            )  # fmt: skip
+
+    run(_ramped_met(800.0, 800.0, shf=shf), [0.5] * 4)
+    steady = torch.cat(ratios)
+    assert steady.numel() == 3 * 2000
+    assert float((steady - 1.0).abs().max()) < 1e-4
+    ratios.clear()
+    run(_ramped_met(600.0, 1000.0, shf=shf), [0.0, 0.5, 1.0])
+    moving = torch.cat(ratios)
+    assert float((moving - 1.0).abs().max()) > 1e-2  # h moved by 200 m between steps
+
+
+def test_static_and_dynamic_steps_bit_identical_with_moving_h() -> None:
+    """With h moving through the window (so the carry and the interface both act),
+    the static and dynamic paths stay bit-identical with every particle active."""
+
+    from lpdm.gpu_engine import GPUEngine
+
+    met = _ramped_met(700.0, 1000.0)
+    results = []
+    for static in (False, True):
+        torch.manual_seed(9)
+        scheme = HannaScheme(n_substeps=4, static_substeps=static)
+        n = 3000
+        p = torch.zeros(n, 4)
+        p[:, 2] = torch.rand(n) * 2000.0
+        state = scheme.initialize_state(n, device=torch.device("cpu"), dtype=torch.float32)
+        for k in range(6):
+            p, state = scheme.step(
+                p, state, met, t_alpha=0.1 + 0.15 * k, dt_seconds=60.0,
+                active_mask=torch.ones(n, dtype=torch.bool), engine=GPUEngine(device="cpu"),
+            )  # fmt: skip
+        results.append((p, state))
+    (p_d, s_d), (p_s, s_s) = results
+    assert torch.equal(p_d, p_s)
+    for key in ("u_prime", "v_prime", "w_prime", "sigma_last"):
+        assert torch.equal(s_d[key], s_s[key])
+    assert bool((s_d["sigma_last"] > 0).all())

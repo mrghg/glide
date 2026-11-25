@@ -35,3 +35,5 @@ alternatives → Status**, with a pointer to the relevant `docs/` page.
 | [0023](0023-convection-per-column.md) | Deep convection in each meteorology column, batched over columns |
 | [0024](0024-boundary-layer-depth-limits-and-meander-timescale.md) | Boundary-layer depth limits as configuration (defaults 50 m, none); meander timescale half the store's met interval |
 | [0025](0025-hanna-column-pressure.md) | Hanna density and potential temperature from each column's own pressure, not the area mean per level |
+| [0027](0027-fixed-substep-count.md) | Hanna turbulence: one fixed sub-step count for every particle (default 16), coefficients re-evaluated every sub-step |
+| [0028](0028-boundary-layer-top-interface.md) | Hanna turbulence: the boundary-layer top as a Thomson, Physick & Maryon (1997) interface; one-sided drift stencil; velocities carried as u'/σ across steps |
