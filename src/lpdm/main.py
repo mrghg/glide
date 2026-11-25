@@ -326,10 +326,10 @@ DEPOSITION_POSITION_DOC = {
         "each step's residence is counted at the particle's position at the end of the "
         "step (after advection, turbulence and convection)"
     ),
-    "midpoint": (
-        "each step's residence is counted at the RK2 advection midpoint x - dt/2 u(x) "
-        "(the step's mid-time under the mean wind, reflected at the ground); the step's "
-        "turbulent and convective displacement is not included"
+    "step_mean": (
+        "each step's residence is counted at the mean of the particle's positions at the "
+        "start and at the end of the step (the end after advection, turbulence, "
+        "convection and surface reflection); longitude is averaged along the shorter arc"
     ),
 }
 
@@ -1116,16 +1116,23 @@ def _advection_alpha_wind_mean(
     return alpha, wind_mean
 
 
-def _midpoint_deposition_position(x_mid: torch.Tensor) -> torch.Tensor:
-    """The RK2 predictor midpoint ``x - dt/2 * u(x)`` as a deposition position (task A2).
+def _step_mean_position(start_xyz: torch.Tensor, end_xyz: torch.Tensor) -> torch.Tensor:
+    """Mean of a step's start and end positions, (N, 3) lon/lat/alt (task A2, decision 0026).
 
-    The predictor is not reflected at the ground, so a particle near the surface in a
-    sinking (backward: rising) flow can have a midpoint height below 0, which the
-    gridder would drop. Reflect it, as the step reflects the particle itself (z -> -z
-    for z < 0), so no residence is lost. Lon and lat are used as they are.
+    Both inputs are particle positions as the step leaves them (heights already
+    reflected at the ground), so their mean is too: the mean height is >= 0, and
+    below the met domain's top when both ends are. Longitude is averaged along the
+    shorter arc, start + wrap(end - start) / 2 with the difference taken into
+    [-180, 180), so a step that crosses the dateline (179.9 -> -179.9) is centred on
+    it, not on 0; the result keeps the start's longitude convention. The runtime does
+    not wrap particle longitudes today (a particle leaving the met domain's longitude
+    box is killed), so for current runs the difference is the plain one and the wrap
+    only guards periodic domains.
     """
 
-    return torch.cat((x_mid[:, :2], x_mid[:, 2:3].abs()), dim=1)
+    d = end_xyz - start_xyz
+    d_lon = torch.remainder(d[:, 0:1] + 180.0, 360.0) - 180.0
+    return start_xyz + 0.5 * torch.cat((d_lon, d[:, 1:]), dim=1)
 
 
 def _advect_active_particles(
@@ -1137,16 +1144,12 @@ def _advect_active_particles(
     delta_s: float,
     dtype: torch.dtype,
     wind_mean_cache: dict | None = None,
-    midpoint_out: list[torch.Tensor] | None = None,
 ) -> tuple[torch.Tensor, float, torch.Tensor]:
     """RK2 backward advection on the active particle subset (dynamic / CPU path).
 
     The third return is the grid-mean (u, v, w) wind as a device tensor — NOT
     materialised to floats here, so the trajectory diagnostics can be transferred
     to the host once per batch rather than syncing every step (matters on CUDA).
-
-    ``midpoint_out``, when given, receives the RK2 predictor midpoint (N, 3) of the
-    particles advected (midpoint deposition, task A2).
     """
 
     alpha, diag_wind_mean = _advection_alpha_wind_mean(
@@ -1190,15 +1193,9 @@ def _advect_active_particles(
         out[:, 2] = v_interp[:, 2]
         return out
 
-    if midpoint_out is None:
-        advected_active = engine.rk2_advect_backward(
-            active_particles, dt_seconds=delta_s, wind_fn=wind_fn
-        )
-    else:
-        advected_active, midpoint = engine.rk2_advect_backward(
-            active_particles, dt_seconds=delta_s, wind_fn=wind_fn, return_midpoint=True
-        )
-        midpoint_out.append(midpoint)
+    advected_active = engine.rk2_advect_backward(
+        active_particles, dt_seconds=delta_s, wind_fn=wind_fn
+    )
 
     del m_start
     del m_end
@@ -1464,10 +1461,11 @@ def _run(
             compile_core=use_static and bool(getattr(engine, "_compile_requested", False)),
         )
     LOGGER.info("footprint density weighting: %s", cfg.output_grid.density_weighting)
-    # Where each step's residence is counted (task A2): the endpoint (default), or the
-    # RK2 advection midpoint, which the scheme keeps when it advects (static path).
-    deposit_midpoint = cfg.output_grid.deposition.position == "midpoint"
-    scheme.record_advection_midpoint = deposit_midpoint
+    # Where each step's residence is counted (task A2, decision 0026): the endpoint
+    # (default), or the mean of each particle's start- and end-of-step positions. The
+    # runtime keeps the start, outside the captured step, so the step's graph and its
+    # outputs are the same for both.
+    deposit_step_mean = cfg.output_grid.deposition.position == "step_mean"
     LOGGER.info("footprint deposition position: %s", cfg.output_grid.deposition.position)
     if use_static:
         LOGGER.info("runtime: static-shape per-step path (full-set, mask-gated)")
@@ -1713,7 +1711,8 @@ def _run(
                 t_alpha, wind_mean = _advection_alpha_wind_mean(
                     met_window, t_cursor, delta_s, device, particles.dtype, wind_mean_cache
                 )
-                midpoint_out: list[torch.Tensor] | None = [] if deposit_midpoint else None
+                # Start-of-step positions (a copy, so nothing below can alias them).
+                start_xyz = particles[:, :3].clone() if deposit_step_mean else None
                 if not scheme.step_includes_advection(engine):
                     with phase_timer.phase("advect"):
                         advected_full = _advect_active_particles(
@@ -1725,7 +1724,6 @@ def _run(
                             delta_s,
                             particles.dtype,
                             wind_mean_cache=wind_mean_cache,
-                            midpoint_out=midpoint_out,
                         )[0]
                         particles = torch.where(active_mask.unsqueeze(1), advected_full, particles)
                 with phase_timer.phase("step"):
@@ -1760,12 +1758,11 @@ def _run(
                 if gridder.n_t == 1:
                     t_idx.clamp_(max=0)
                 with phase_timer.phase("gridder"):
-                    if deposit_midpoint:
-                        deposit_xyz = _midpoint_deposition_position(
-                            midpoint_out[0] if midpoint_out else scheme.advection_midpoint
-                        )
-                    else:
-                        deposit_xyz = particles[:, :3]
+                    deposit_xyz = (
+                        _step_mean_position(start_xyz, particles[:, :3])
+                        if deposit_step_mean
+                        else particles[:, :3]
+                    )
                     inv_density = (
                         None
                         if particle_density is None
@@ -1797,7 +1794,8 @@ def _run(
                     hour_windows += fetched_windows
                     if fetched_windows:
                         phase_timer.tick_fetch()
-                    midpoint_out = [] if deposit_midpoint else None
+                    # Start-of-step positions; `particles` is updated in place below.
+                    start_xyz = particles[:, :3].clone() if deposit_step_mean else None
                     advected_active, t_alpha, wind_mean = _advect_active_particles(
                         engine,
                         device,
@@ -1807,13 +1805,7 @@ def _run(
                         delta_s,
                         particles.dtype,
                         wind_mean_cache=wind_mean_cache,
-                        midpoint_out=midpoint_out,
                     )
-                    if deposit_midpoint:
-                        # Full-buffer deposition positions; inactive rows are never
-                        # counted (the gridder masks them), so their value is moot.
-                        deposit_xyz = particles[:, :3].clone()
-                        deposit_xyz[active_mask] = _midpoint_deposition_position(midpoint_out[0])
                     particles[active_mask] = advected_active
 
                     particles, turbulence_state = scheme.step(
@@ -1856,8 +1848,12 @@ def _run(
                     # (clamping them into the last bin would contradict time_ago_end_hours).
                     if gridder.n_t == 1:
                         t_idx.clamp_(max=0)
-                    if not deposit_midpoint:
-                        deposit_xyz = particles[:, :3]
+                    # Inactive rows are never counted (the gridder masks them).
+                    deposit_xyz = (
+                        _step_mean_position(start_xyz, particles[:, :3])
+                        if deposit_step_mean
+                        else particles[:, :3]
+                    )
                     inv_density = (
                         None
                         if particle_density is None

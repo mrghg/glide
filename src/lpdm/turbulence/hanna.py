@@ -653,7 +653,7 @@ class HannaScheme(TurbulenceScheme):
                 # the framework that a new invocation is beginning so it doesn't treat
                 # the previous run's output buffers as live inputs for the current step.
                 torch.compiler.cudagraph_mark_step_begin()
-            out = core_fn(
+            particles, u_p, v_p, w_p, u_m, v_m = core_fn(
                 particles=particles,
                 u_prime=state["u_prime"],
                 v_prime=state["v_prime"],
@@ -664,10 +664,8 @@ class HannaScheme(TurbulenceScheme):
                 dt_seconds=dt_seconds,
                 n_substeps=n_substeps,
                 engine=engine,
-                return_midpoint=self.record_advection_midpoint,
                 **inputs,
             )
-            particles, u_p, v_p, w_p, u_m, v_m = out[:6]
             # Clone graph output buffers before storing them back as state / returning
             # particles. Without this, the CUDAGraph output memory is aliased with the
             # inputs of the next invocation, triggering "overwritten by a subsequent
@@ -678,7 +676,6 @@ class HannaScheme(TurbulenceScheme):
             if self.meander_enabled:
                 state["u_meander"] = u_m.clone()
                 state["v_meander"] = v_m.clone()
-            self.advection_midpoint = out[6].clone() if self.record_advection_midpoint else None
             return particles.clone(), state
 
         # DYNAMIC / boolean-indexed path (CPU): touch only the active subset; the empty
@@ -918,8 +915,7 @@ class HannaScheme(TurbulenceScheme):
     ):
         """RK2 backward advection on the full particle buffer (folded into `_step_core`
         so the whole step captures as one graph). Bit-identical to the pre-fold
-        `main._advect_active_particles` wind_fn + `engine.rk2_advect_backward`.
-        Returns the advected particles and the predictor midpoint (N, 3)."""
+        `main._advect_active_particles` wind_fn + `engine.rk2_advect_backward`."""
         m_start = m_start_uvw.unsqueeze(0)
         m_end = m_end_uvw.unsqueeze(0)
 
@@ -943,11 +939,10 @@ class HannaScheme(TurbulenceScheme):
 
         xyz = particles[:, :3]
         v1 = wind(xyz)
-        x_mid = xyz - 0.5 * dt_seconds * v1
-        v2 = wind(x_mid)
+        v2 = wind(xyz - 0.5 * dt_seconds * v1)
         out = particles.clone()
         out[:, :3] = xyz - dt_seconds * v2
-        return out, x_mid
+        return out
 
     def _step_core(
         self,
@@ -976,7 +971,6 @@ class HannaScheme(TurbulenceScheme):
         dt_seconds,
         n_substeps,
         engine,
-        return_midpoint=False,
     ):
         """Pure-tensor WHOLE per-step pipeline for the static path -- the torch.compile /
         CUDA-graph target (docs/architecture.md S5): RK2 advection + interp + column turbulence +
@@ -985,13 +979,11 @@ class HannaScheme(TurbulenceScheme):
         window. Operates on the FULL particle buffer; inactive particles are gated back to
         their ORIGINAL (pre-advection) state at the end. Returns the full state (inactive
         unchanged). Eager when n_substeps is None (variable max_k); fixed-count (graph-
-        friendly) when n_substeps is given. With ``return_midpoint`` (a Python constant
-        for the run, so one graph) a seventh output is the RK2 predictor midpoint of
-        every particle (midpoint deposition, task A2); otherwise six outputs."""
+        friendly) when n_substeps is given."""
         # RK2 advection first (full set). Keep the pre-advection particles for the gate so
         # inactive particles are reverted to their original position, not the advected one.
         orig_particles = particles
-        particles, x_mid = self._advect_rk2(
+        particles = self._advect_rk2(
             particles,
             m_start_uvw,
             m_end_uvw,
@@ -1122,16 +1114,6 @@ class HannaScheme(TurbulenceScheme):
         if self.meander_enabled:
             u_meander_new = torch.where(active_mask, u_meander_new, u_meander)
             v_meander_new = torch.where(active_mask, v_meander_new, v_meander)
-        if return_midpoint:
-            return (
-                particles_new,
-                u_prime_new,
-                v_prime_new,
-                w_prime_new,
-                u_meander_new,
-                v_meander_new,
-                x_mid,
-            )
         return particles_new, u_prime_new, v_prime_new, w_prime_new, u_meander_new, v_meander_new
 
     @staticmethod

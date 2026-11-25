@@ -447,12 +447,12 @@ class DepositionConfig(_Frozen):
     """Where in a step each particle's residence is counted (task A2, [PR-F4])."""
 
     # `endpoint`: at the particle's position after the step's advection, turbulence
-    # and convection (endpoint quadrature; the long-standing behaviour). `midpoint`:
-    # at the RK2 advection's midpoint (predictor) position, x - dt/2 * u(x), the
-    # position at the step's mid-time under the mean wind; the step's turbulent and
-    # convective displacement is not included. Kernel deposition (decision 0012) is
-    # deferred to after v1.
-    position: Literal["endpoint", "midpoint"] = "endpoint"
+    # and convection (endpoint quadrature; the long-standing behaviour). `step_mean`:
+    # at the mean of the particle's positions at the start and at the end of the step
+    # (all of the step's motion included; decision 0026, which replaces the spec's
+    # RK2-predictor `midpoint`). Kernel deposition (decision 0012) is deferred to
+    # after v1.
+    position: Literal["endpoint", "step_mean"] = "endpoint"
 
 
 class OutputGridConfig(_Frozen):

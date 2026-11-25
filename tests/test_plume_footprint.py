@@ -214,7 +214,7 @@ def test_stilt_conversion_scales_raw_footprint_exactly(plume: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Deposition position (task A2, [PR-F4]): endpoint vs RK2 midpoint
+# Deposition position (task A2, [PR-F4], decision 0026): endpoint vs step mean
 # ---------------------------------------------------------------------------
 
 POS_N_PART = 50_000
@@ -229,7 +229,7 @@ def _surface_columns_by_position(dt: float, seed: int) -> dict[str, np.ndarray]:
     particles (paired, so the comparison is not swamped by particle noise). Returns
     the crosswind-integrated surface-layer residence per along-wind cell."""
 
-    from lpdm.main import _midpoint_deposition_position
+    from lpdm.main import _step_mean_position
 
     torch.manual_seed(seed)
     engine = GPUEngine(device="cpu", dtype=torch.float64)
@@ -244,7 +244,7 @@ def _surface_columns_by_position(dt: float, seed: int) -> dict[str, np.ndarray]:
             device="cpu",
             dtype=torch.float64,
         )
-        for position in ("endpoint", "midpoint")
+        for position in ("endpoint", "step_mean")
     }
     n = POS_N_PART
     particles = torch.zeros((n, 4), dtype=torch.float64)
@@ -263,9 +263,8 @@ def _surface_columns_by_position(dt: float, seed: int) -> dict[str, np.ndarray]:
         return out
 
     for _ in range(int(round(POS_T_END / dt))):
-        particles, x_mid = engine.rk2_advect_backward(
-            particles, dt_seconds=dt, wind_fn=wind_fn, return_midpoint=True
-        )
+        start_xyz = particles[:, :3].clone()
+        particles = engine.rk2_advect_backward(particles, dt_seconds=dt, wind_fn=wind_fn)
         v_prime = engine.update_langevin_velocity(
             v_prime, t_lagrangian=T_L, sigma_w2=SIGMA2, dt_seconds=dt
         )
@@ -281,7 +280,7 @@ def _surface_columns_by_position(dt: float, seed: int) -> dict[str, np.ndarray]:
         particles, w_prime = engine.reflect_surface(particles, w_prime, z_surface=0.0)
         positions = {
             "endpoint": particles[:, :3],
-            "midpoint": _midpoint_deposition_position(x_mid),
+            "step_mean": _step_mean_position(start_xyz, particles[:, :3]),
         }
         for position, gridder in gridders.items():
             gridder.accumulate(
@@ -324,17 +323,12 @@ def _position_test_columns(analytic: np.ndarray) -> np.ndarray:
     return np.where((analytic > 0) & (lower_edges >= -U_MS * POS_T_END))[0]
 
 
-def test_midpoint_deposition_no_worse_at_dt_and_better_at_4dt() -> None:
-    """A2 acceptance ([PR-F4]): the mean relative error of the crosswind-integrated
-    surface footprint, against the cell-integrated analytic plume, is no larger with
-    `midpoint` deposition than with `endpoint` at the reference step DT, and smaller at
-    4 DT. Observed (25 Nov 2026, 50,000 particles, seeds 9021 / 1234 / 7): at DT
-    endpoint 0.0099 / 0.0133 / 0.0117, midpoint 0.0070 / 0.0086 / 0.0086; at 4 DT
-    endpoint 0.0262 / 0.0271 / 0.0233, midpoint 0.0132 / 0.0121 / 0.0111. In the near
-    field alone (travel time < 2 T_L) midpoint is clearly better at 4 DT (0.067-0.075
-    against 0.082-0.091) but not at DT (0.018-0.026 against 0.015-0.021): the RK2
-    midpoint carries the step's along-wind motion but not its turbulent displacement,
-    so its height is the step's starting height."""
+def test_step_mean_deposition_no_worse_at_dt_and_better_at_4dt() -> None:
+    """A2 acceptance ([PR-F4], with `step_mean` in place of the spec's `midpoint`,
+    decision 0026): the mean relative error of the crosswind-integrated surface
+    footprint, against the cell-integrated analytic plume, is no larger with
+    `step_mean` deposition than with `endpoint` at the reference step DT, and smaller
+    at 4 DT. Observed values for three seeds are in docs/physics.md section 7."""
 
     analytic = _analytic_surface_columns()
     cols = _position_test_columns(analytic)
@@ -345,5 +339,5 @@ def test_midpoint_deposition_no_worse_at_dt_and_better_at_4dt() -> None:
             p: float(np.mean(np.abs(v[cols] - analytic[cols]) / analytic[cols]))
             for p, v in got.items()
         }
-    assert errors[1]["midpoint"] <= errors[1]["endpoint"], errors
-    assert errors[4]["midpoint"] < 0.75 * errors[4]["endpoint"], errors
+    assert errors[1]["step_mean"] <= errors[1]["endpoint"], errors
+    assert errors[4]["step_mean"] < 0.75 * errors[4]["endpoint"], errors
