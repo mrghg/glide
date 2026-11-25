@@ -106,16 +106,20 @@ MEANDER_COEFFICIENT_DEFAULT = 0.16  # FLEXPART `turbmesoscale`
 MEANDER_STENCIL_RADIUS_DEFAULT = 1  # 3x3 neighbourhood
 MEANDER_TIMESCALE_S_DEFAULT = 1800.0  # half of the hourly ERA5 field interval
 
-# F4 Tier 2 — per-particle substepping. When the outer dt is large vs T_Lw, the
-# discrete OU integration accumulates a Δt/τ bias (Wilson & Flesch 1993 App.,
-# Stohl & Thomson 1999). We substep so each particle's effective sub-dt satisfies
-# `sub_dt < SUBSTEP_C · T_Lw`. SUBSTEP_C defaults to 0.5 (≈25% bias bound per
-# W&F's linear bias formula) rather than S&T's c=0.05 because we cap the substep
-# count at MAX_SUBSTEPS_DEFAULT to keep the per-step cost bounded — the cap is
-# the binding constraint for the near-surface particles where T_Lw can drop to a
-# few seconds.
-SUBSTEP_C_DEFAULT = 0.5
-MAX_SUBSTEPS_DEFAULT = 50
+# Sub-stepping (decision 0026, docs/physics.md §6). Every particle takes the same
+# fixed number of equal sub-steps per outer step, and every coefficient (σ, T_L,
+# ∂σ_w²/∂z, density drift) is re-evaluated at the particle's current height at
+# the start of each sub-step. A sub-step length chosen per particle from its T_Lw
+# (the old adaptive schedule) is itself a spurious drift towards where steps are
+# short — the ground — so the count is a configured constant, never data-dependent.
+# The default makes the sub-step 7.5 s at the shipped 60 s outer step, a quarter
+# of the boundary-layer T_Lw floor (30 s).
+N_SUBSTEPS_DEFAULT = 8
+# Reporting threshold only: a particle-sub-step with sub_dt > EXCEEDANCE_C · T_Lw
+# (T_Lw at that sub-step's height) is counted in run_metadata.json
+# (`substep_exceedance`), split boundary layer / free troposphere. It does not
+# change the integration. 0.5 is the old adaptive scheme's target ratio.
+EXCEEDANCE_C_DEFAULT = 0.5
 
 # F5/F15 — "unresolved basal layer" (W&F 1993 §7b). Hold σ_w, T_L (and the
 # density-gradient piece) CONSTANT for any particle below this height by
@@ -199,6 +203,34 @@ def convective_velocity(
     return torch.where(cube > 0, cube.clamp(min=0.0).pow(1.0 / 3.0), torch.zeros_like(cube))
 
 
+# σ_w of each regime on its own. The full regime functions below use these same
+# expressions, so the σ_w-only evaluation (`in_bl_sigma_w`, used for the drift's
+# finite-difference probes) is bit-identical to σ_w from `in_bl_sigma_TL`.
+
+
+def _stable_sigma_w(z_over_h: torch.Tensor, ustar: torch.Tensor) -> torch.Tensor:
+    """Hanna (1982) Eq 7.19: σ_w = 1.3 u*(1−ζ)."""
+    one_minus = (1.0 - z_over_h).clamp(min=0.0)
+    return 1.3 * ustar * one_minus
+
+
+def _neutral_sigma_w(
+    z: torch.Tensor, ustar: torch.Tensor, f_abs: torch.Tensor, ustar_safe: torch.Tensor
+) -> torch.Tensor:
+    """Hanna (1982) Eq 7.26: σ_w = 1.3 u* exp(−2 f z/u*)."""
+    return 1.3 * ustar * torch.exp(-2.0 * f_abs * z / ustar_safe)
+
+
+def _unstable_sigma_w(
+    z_over_h: torch.Tensor, ustar: torch.Tensor, w_star: torch.Tensor
+) -> torch.Tensor:
+    """Ryall & Maryon (1998): σ_w = √(1.2 w*²(1−0.9ζ)ζ^(2/3) + (1.8−1.4ζ)u*²)."""
+    sigma_w_sq = 1.2 * w_star.pow(2) * (1.0 - 0.9 * z_over_h).clamp(min=0.0) * z_over_h.pow(
+        2.0 / 3.0
+    ) + (1.8 - 1.4 * z_over_h) * ustar.pow(2)
+    return sigma_w_sq.clamp(min=SIGMA_MIN_M_S**2).sqrt()
+
+
 def _in_bl_stable(
     z: torch.Tensor,
     blh: torch.Tensor,
@@ -217,7 +249,7 @@ def _in_bl_stable(
     # not the (1−ζ)^¾ of the previous secondary-reference form. σ_v tracks σ_w (1.3),
     # not σ_u (2.0).
     sigma_u = 2.0 * ustar * one_minus
-    sigma_w = 1.3 * ustar * one_minus
+    sigma_w = _stable_sigma_w(z_over_h, ustar)
     sigma_v = sigma_w
     # Small-z floor so ζ^0.8 / √ζ → 0 doesn't force T_L = 0 exactly at the surface.
     z_over_h_floor = z_over_h.clamp(min=1e-6)
@@ -252,7 +284,7 @@ def _in_bl_neutral(
     f_abs = f_cor.abs().clamp(min=1e-5)  # |f|, floored so the equator doesn't degenerate
     # Eq 7.25 σ_u = 2.0 u* exp(−3 f z/u*); Eq 7.26 σ_v = σ_w = 1.3 u* exp(−2 f z/u*).
     sigma_u = 2.0 * ustar * torch.exp(-3.0 * f_abs * z / ustar_safe)
-    sigma_w = 1.3 * ustar * torch.exp(-2.0 * f_abs * z / ustar_safe)
+    sigma_w = _neutral_sigma_w(z, ustar, f_abs, ustar_safe)
     sigma_v = sigma_w
     # Eq 7.27 T_L = 0.5 z/σ_w/(1 + 15 f z/u*), same for all three components.
     denom = 1.0 + 15.0 * f_abs * z / ustar_safe
@@ -285,10 +317,7 @@ def _in_bl_unstable(
     sigma_v = sigma_u
 
     # σ_w = √(1.2 w*²(1−0.9ζ)ζ^(2/3) + (1.8−1.4ζ)u*²)  [Ryall & Maryon 1998].
-    sigma_w_sq = 1.2 * w_star.pow(2) * (1.0 - 0.9 * z_over_h).clamp(min=0.0) * z_over_h.pow(
-        2.0 / 3.0
-    ) + (1.8 - 1.4 * z_over_h) * ustar.pow(2)
-    sigma_w = sigma_w_sq.clamp(min=SIGMA_MIN_M_S**2).sqrt()
+    sigma_w = _unstable_sigma_w(z_over_h, ustar, w_star)
 
     # T_Lu = T_Lv = 0.15 h/σ_u  [Eq 7.17].
     T_Lu = 0.15 * blh / sigma_u.clamp(min=SIGMA_MIN_M_S)
@@ -345,6 +374,29 @@ def in_bl_sigma_TL(
     T_Lv = _select(tv_st, tv_nu, tv_un)
     T_Lw = _select(tw_st, tw_nu, tw_un)
     return sigma_u, sigma_v, sigma_w, T_Lu, T_Lv, T_Lw
+
+
+def in_bl_sigma_w(
+    z: torch.Tensor,
+    blh: torch.Tensor,
+    ustar: torch.Tensor,
+    w_star: torch.Tensor,
+    h_over_L: torch.Tensor,
+    latitude_deg: torch.Tensor,
+) -> torch.Tensor:
+    """σ_w alone inside the BL: bit-identical to ``in_bl_sigma_TL(...)[2]`` (the
+    regime functions share the σ_w expressions) at a fraction of the cost. Used
+    for the well-mixed drift's finite-difference probes."""
+
+    f_abs = coriolis_parameter(latitude_deg).abs().clamp(min=1e-5)
+    ustar_safe = ustar.clamp(min=USTAR_MIN_M_S)
+    z_over_h = (z / blh).clamp(min=0.0, max=1.0)
+    w_st = _stable_sigma_w(z_over_h, ustar)
+    w_nu = _neutral_sigma_w(z, ustar, f_abs, ustar_safe)
+    w_un = _unstable_sigma_w(z_over_h, ustar, w_star)
+    in_stable = h_over_L > H_OVER_L_STABLE_THRESHOLD
+    in_unstable = h_over_L < H_OVER_L_UNSTABLE_THRESHOLD
+    return torch.where(in_stable, w_st, torch.where(in_unstable, w_un, w_nu))
 
 
 def potential_temperature(t_kelvin: torch.Tensor, pressure_pa: torch.Tensor) -> torch.Tensor:
@@ -456,8 +508,8 @@ class HannaScheme(TurbulenceScheme):
         meander_timescale_seconds: float | None = None,
         blh_min_m: float = BLH_MIN_M_DEFAULT,
         blh_max_m: float | None = BLH_MAX_M_DEFAULT,
-        substep_c: float = SUBSTEP_C_DEFAULT,
-        max_substeps: int = MAX_SUBSTEPS_DEFAULT,
+        n_substeps: int = N_SUBSTEPS_DEFAULT,
+        exceedance_c: float = EXCEEDANCE_C_DEFAULT,
         z_ubl_m: float = Z_UBL_DEFAULT_M,
         static_substeps: bool | None = None,
         flexpart_tl_floors: bool = True,
@@ -469,11 +521,15 @@ class HannaScheme(TurbulenceScheme):
         existing runs stay bit-identical; enable it via the YAML ``turbulence.meander``
         block. See ``docs/turbulence.md`` §7.
 
-        ``substep_c`` and ``max_substeps`` control the F4 Tier 2 adaptive substepping
-        (audit 2026-05-30). Each particle's OU + displacement + reflection is
-        substepped so its effective sub-dt satisfies ``sub_dt < substep_c · T_Lw``,
-        capped at ``max_substeps`` per outer step to bound the cost for very-near-
-        surface particles. Meander has τ ≈ 1800 s so always runs at the outer dt.
+        ``n_substeps`` is the number of equal sub-steps of the OU + displacement +
+        reflection that EVERY particle takes in each outer step (decision 0026,
+        docs/physics.md §6); all coefficients are re-evaluated at the particle's
+        current height at the start of each sub-step after the first. The count is a
+        constant of the run, never chosen per particle or per batch: a sub-step
+        length that depends on the particle's height biases the well-mixed state
+        towards the ground. ``exceedance_c`` is a reporting threshold only: sub-steps
+        with ``sub_dt > exceedance_c · T_Lw`` are counted (``take_substep_exceedance``).
+        Meander has τ ≈ 1800 s so always runs at the outer dt.
 
         ``flexpart_tl_floors`` (default True) applies FLEXPART v11's Lagrangian-
         timescale floors (T_Lu, T_Lv ≥ 10 s; T_Lw ≥ 30 s) after the profile
@@ -493,14 +549,14 @@ class HannaScheme(TurbulenceScheme):
 
         ``static_substeps`` selects the substep-loop implementation (docs/architecture.md
         §5). ``None`` (default) auto-selects by device: the **static-shape** variant
-        on CUDA (every substep processes the full active set with ``sub_dt=0`` no-ops
-        for finished particles — constant kernel shapes, the prerequisite for
+        on CUDA (every substep processes the full particle buffer with ``sub_dt=0``
+        for inactive particles — constant kernel shapes, the prerequisite for
         ``torch.compile`` fusion and CUDA-graph capture on a launch-bound GPU), and
-        the **dynamic masked** variant on CPU/MPS (touches only particles still owing
-        a substep — cheaper where launches are free). ``True``/``False`` force one
+        the **dynamic masked** variant on CPU/MPS (touches only the active
+        particles — cheaper where launches are free). ``True``/``False`` force one
         path (used by the equivalence tests). Env override: ``GLIDE_STATIC_SUBSTEPS``.
-        The two paths are physics-equivalent (statistically; bit-identical only when
-        every particle needs the same substep count).
+        The two paths run the same sub-step loop and are bit-identical when every
+        particle is active (with inactive particles present the random draws differ).
         """
 
         if meander_coefficient <= 0:
@@ -513,10 +569,10 @@ class HannaScheme(TurbulenceScheme):
             raise ValueError("blh_min_m must be > 0")
         if blh_max_m is not None and not blh_max_m > blh_min_m:
             raise ValueError("blh_max_m must be > blh_min_m")
-        if substep_c <= 0:
-            raise ValueError("substep_c must be > 0")
-        if max_substeps < 1:
-            raise ValueError("max_substeps must be >= 1")
+        if int(n_substeps) != n_substeps or n_substeps < 1:
+            raise ValueError("n_substeps must be an integer >= 1")
+        if not exceedance_c > 0:
+            raise ValueError("exceedance_c must be > 0")
         if z_ubl_m < 0:
             raise ValueError("z_ubl_m must be >= 0")
         self.z_ubl_m = float(z_ubl_m)
@@ -536,16 +592,22 @@ class HannaScheme(TurbulenceScheme):
         # compiled step specialises on them once (decision 0004), never per step.
         self.blh_min_m = float(blh_min_m)
         self.blh_max_m = None if blh_max_m is None else float(blh_max_m)
-        self.substep_c = float(substep_c)
-        self.max_substeps = int(max_substeps)
+        # A construction-time constant: the compiled step's loop trip count
+        # (decision 0004), and the same for every particle and step (decision 0026).
+        self.n_substeps = int(n_substeps)
+        self.exceedance_c = float(exceedance_c)
+        # Zero ∂σ_w²/∂z strictly below the basal clamp (`_vertical_coefficients`).
+        self.basal_zero_gradient = False
         self.flexpart_tl_floors = bool(flexpart_tl_floors)
         self.surface_layer_override = bool(surface_layer_override)
         self._static_substeps = static_substeps
-        # F4 Tier 1 (audit 2026-05-30): once-per-instance warning when dt is large
-        # vs the smallest active T_L. After F4 Tier 2 substepping, this warning
-        # now fires when the *effective* sub-dt is still large vs T_L — i.e. when
-        # `max_substeps` is the binding constraint (the substep cap saturates).
-        self._warned_substep_cap: bool = False
+        # Device-side running totals of the sub-step exceedance counter (decision
+        # 0026): `[exceeded BL, all BL, exceeded FT, all FT]` active particle-sub-steps
+        # (int64) and the worst sub_dt/T_Lw `[BL, FT]`. Accumulated inside the step
+        # with no host sync, on both paths; the runtime reads and resets them once
+        # per met window (`take_substep_exceedance`). Allocated on first use.
+        self._exceed_counts: torch.Tensor | None = None
+        self._exceed_worst: torch.Tensor | None = None
 
         # CUDA-graph capture (phase 4): lazily-built `torch.compile(mode="reduce-overhead")`
         # wrapper of the WHOLE per-step core (`_step_core`). Built on first use on the
@@ -647,13 +709,12 @@ class HannaScheme(TurbulenceScheme):
             inputs = self._gather_static_inputs(met_window, t_alpha, device, dtype)
             graph_core = self._maybe_graph_compile(engine)
             core_fn = graph_core if graph_core is not None else self._step_core
-            n_substeps = self.max_substeps if graph_core is not None else None
             if graph_core is not None:
                 # Required before each replay of a CUDAGraph-captured function: tells
                 # the framework that a new invocation is beginning so it doesn't treat
                 # the previous run's output buffers as live inputs for the current step.
                 torch.compiler.cudagraph_mark_step_begin()
-            particles, u_p, v_p, w_p, u_m, v_m = core_fn(
+            particles, u_p, v_p, w_p, u_m, v_m, exceed_counts, exceed_worst = core_fn(
                 particles=particles,
                 u_prime=state["u_prime"],
                 v_prime=state["v_prime"],
@@ -662,10 +723,12 @@ class HannaScheme(TurbulenceScheme):
                 v_meander=state.get("v_meander"),
                 active_mask=active_mask,
                 dt_seconds=dt_seconds,
-                n_substeps=n_substeps,
                 engine=engine,
                 **inputs,
             )
+            # Read into the scheme's own accumulators now, before the next replay
+            # reuses the graph's output buffers (a device-side add, no host sync).
+            self._accumulate_exceedance(exceed_counts, exceed_worst)
             # Clone graph output buffers before storing them back as state / returning
             # particles. Without this, the CUDAGraph output memory is aliased with the
             # inputs of the next invocation, triggering "overwritten by a subsequent
@@ -741,7 +804,14 @@ class HannaScheme(TurbulenceScheme):
             density_drift_backward,
         ) = coeffs_at(z_agl)
 
-        moved, u_prime_active, v_prime_active, w_prime_active = self._integrate_vertical_substeps(
+        (
+            moved,
+            u_prime_active,
+            v_prime_active,
+            w_prime_active,
+            exceed_counts,
+            exceed_worst,
+        ) = self._integrate_vertical_substeps(
             active_xyz=active_xyz,
             u_prime_in=u_prime_in,
             v_prime_in=v_prime_in,
@@ -756,9 +826,11 @@ class HannaScheme(TurbulenceScheme):
             half_dsig2_dz_backward=half_dsig2_dz_backward,
             density_drift_backward=density_drift_backward,
             coeffs_at=coeffs_at,
+            blh=blh,
             dt_seconds=dt_seconds,
             engine=engine,
         )
+        self._accumulate_exceedance(exceed_counts, exceed_worst)
 
         if self.meander_enabled:
             meander_fields, meander_bounds = self._meander_sigma_fields(met_window, device, dtype)
@@ -805,11 +877,17 @@ class HannaScheme(TurbulenceScheme):
         z_eval = z_agl.clamp(min=self.z_ubl_m)
         sigma_u, sigma_v, sigma_w, T_Lu, T_Lv, T_Lw = self._column_turbulence(z_eval, **col_kwargs)
 
+        # ∂σ_w²/∂z by finite difference; the probes need σ_w only.
         z_hi = z_eval + self.DRIFT_FD_DELTA_M
         z_lo = (z_eval - self.DRIFT_FD_DELTA_M).clamp(min=self.z_ubl_m)
-        sw_hi = self._column_turbulence(z_hi, **col_kwargs)[2]
-        sw_lo = self._column_turbulence(z_lo, **col_kwargs)[2]
+        sw_hi = self._column_sigma_w(z_hi, **col_kwargs)
+        sw_lo = self._column_sigma_w(z_lo, **col_kwargs)
         dsig2_dz = (sw_hi.pow(2) - sw_lo.pow(2)) / (z_hi - z_lo).clamp(min=self.DRIFT_FD_DELTA_M)
+        if self.basal_zero_gradient:
+            # Below the basal clamp σ_w is sampled at z_ubl, i.e. flat in z, so its
+            # gradient there is zero; the stencil would otherwise look one-sidedly
+            # upward from the clamp. The density drift is unchanged.
+            dsig2_dz = torch.where(z_agl < self.z_ubl_m, torch.zeros_like(dsig2_dz), dsig2_dz)
         sigma_w_sq = sigma_w.pow(2).clamp(min=SIGMA_MIN_M_S**2)
 
         density_at_p = self._interp_3d_field(
@@ -1016,7 +1094,6 @@ class HannaScheme(TurbulenceScheme):
         level_arr,
         ascending,
         dt_seconds,
-        n_substeps,
         engine,
     ):
         """Pure-tensor WHOLE per-step pipeline for the static path -- the torch.compile /
@@ -1025,8 +1102,9 @@ class HannaScheme(TurbulenceScheme):
         are passed in (gathered by `_gather_static_inputs`) so nothing here touches the met
         window. Operates on the FULL particle buffer; inactive particles are gated back to
         their ORIGINAL (pre-advection) state at the end. Returns the full state (inactive
-        unchanged). Eager when n_substeps is None (variable max_k); fixed-count (graph-
-        friendly) when n_substeps is given."""
+        unchanged), plus this step's sub-step exceedance counts (see
+        `_integrate_vertical_substeps`). The sub-step loop has the fixed trip count
+        `self.n_substeps`, so the same code runs eager and captured."""
         # RK2 advection first (full set). Keep the pre-advection particles for the gate so
         # inactive particles are reverted to their original position, not the advected one.
         orig_particles = particles
@@ -1093,7 +1171,14 @@ class HannaScheme(TurbulenceScheme):
             density_drift_backward,
         ) = coeffs_at(z_agl)
 
-        moved, u_prime_new, v_prime_new, w_prime_new = self._integrate_vertical_substeps_static(
+        (
+            moved,
+            u_prime_new,
+            v_prime_new,
+            w_prime_new,
+            exceed_counts,
+            exceed_worst,
+        ) = self._integrate_vertical_substeps(
             active_xyz=particles,
             u_prime_in=u_prime,
             v_prime_in=v_prime,
@@ -1108,10 +1193,10 @@ class HannaScheme(TurbulenceScheme):
             half_dsig2_dz_backward=half_dsig2_dz_backward,
             density_drift_backward=density_drift_backward,
             coeffs_at=coeffs_at,
+            blh=blh,
             dt_seconds=dt_seconds,
             engine=engine,
             active_mask=active_mask,
-            n_substeps=n_substeps,
         )
 
         u_meander_new, v_meander_new = u_meander, v_meander
@@ -1154,7 +1239,16 @@ class HannaScheme(TurbulenceScheme):
         if self.meander_enabled:
             u_meander_new = torch.where(active_mask, u_meander_new, u_meander)
             v_meander_new = torch.where(active_mask, v_meander_new, v_meander)
-        return particles_new, u_prime_new, v_prime_new, w_prime_new, u_meander_new, v_meander_new
+        return (
+            particles_new,
+            u_prime_new,
+            v_prime_new,
+            w_prime_new,
+            u_meander_new,
+            v_meander_new,
+            exceed_counts,
+            exceed_worst,
+        )
 
     @staticmethod
     def _bilinear_at(field_2d, lon0, lon1, lat0, lat1, particle_lon, particle_lat):
@@ -1172,19 +1266,6 @@ class HannaScheme(TurbulenceScheme):
         field = field_2d.unsqueeze(0).unsqueeze(0)
         sampled = torch.nn.functional.grid_sample(field, grid, align_corners=True, mode="bilinear")
         return sampled.view(-1)
-
-    def _warn_if_dt_too_large(
-        self,
-        T_Lu: torch.Tensor,
-        T_Lv: torch.Tensor,
-        T_Lw: torch.Tensor,
-        *,
-        dt_seconds: float,
-    ) -> None:
-        """Reserved for back-compat — no-op now that F4 Tier 2 substepping
-        (audit 2026-05-30) handles the Δt/τ bias automatically. The cap-saturation
-        warning has moved into ``_integrate_vertical_substeps``."""
-        del T_Lu, T_Lv, T_Lw, dt_seconds  # unused
 
     def _use_static_substeps(self, engine: GPUEngine) -> bool:
         """Choose the static-shape vs dynamic-masked per-step path (docs/architecture.md §5).
@@ -1248,237 +1329,6 @@ class HannaScheme(TurbulenceScheme):
             self._graph_compile_state = "failed"
             return None
 
-    def _substep_counts(
-        self,
-        T_Lw: torch.Tensor,
-        dt_seconds: float,
-        dtype: torch.dtype,
-        active_mask: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Substep count ``k`` and sub-dt — **no host sync**.
-
-        Each particle needs ``k_i = ceil(dt / (substep_c · T_Lw_i))``, clamped to
-        ``[1, max_substeps]``; **every** particle then takes the largest,
-        ``k = max_i k_i``, so the whole active set steps with one sub-step
-        ``dt / k``. A sub-step length that varies with the particle's height
-        breaks the well-mixed condition on its own: with per-particle ``k_i``
-        (or a FLEXPART-like count re-chosen every sub-step) the lowest 5% of a
-        neutral boundary layer stays over-occupied by ~30% at dt=60 s even with
-        the coefficients re-evaluated every sub-step (docs/physics.md §6).
-        ``active_mask`` (full-set static path) leaves inactive particles out of
-        the max (they're frozen via ``sub_dt=0`` in the loop). The max is a
-        tensor reduction, so this stays graph-safe; ``_substep_schedule`` adds the
-        ``max_k`` sync and the cap warning for the variable-count (non-graph) path.
-        """
-
-        c = self.substep_c
-        k_cap = self.max_substeps
-        k_each = torch.ceil(dt_seconds / (c * T_Lw.clamp(min=1e-3))).long().clamp(min=1, max=k_cap)
-        if active_mask is not None:
-            k_each = torch.where(active_mask, k_each, torch.ones_like(k_each))
-        k_required = k_each.max().expand_as(k_each) if k_each.numel() else k_each
-        sub_dt = float(dt_seconds) / k_required.to(dtype=dtype)
-        return k_required, sub_dt
-
-    def _substep_schedule(
-        self,
-        T_Lw: torch.Tensor,
-        dt_seconds: float,
-        dtype: torch.dtype,
-        active_mask: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, int]:
-        """``_substep_counts`` plus ``max_k`` (one host sync) and the cap warning.
-
-        Used by the variable-count loop (dynamic path, and the static path when graph
-        capture is off). The fixed-count graph path calls ``_substep_counts`` directly
-        and loops a constant ``max_substeps`` times, so it needs neither the ``max_k``
-        sync nor the per-step warning.
-        """
-
-        k_cap = self.max_substeps
-        k_required, sub_dt = self._substep_counts(T_Lw, dt_seconds, dtype, active_mask)
-        max_k = int(k_required.max().item())
-
-        if not self._warned_substep_cap and max_k >= k_cap:
-            at_cap = k_required >= k_cap
-            ratio_at_cap = (sub_dt[at_cap] / T_Lw[at_cap]).max().item()
-            LOGGER.warning(
-                "Hanna turbulence: %d active particles hit max_substeps=%d "
-                "(worst sub_dt/T_Lw=%.2f, target < %.2f). The Δt/τ bias is "
-                "only partially controlled for these particles. Reduce "
-                "simulation.dt_seconds or raise max_substeps.",
-                int(at_cap.sum().item()),
-                k_cap,
-                float(ratio_at_cap),
-                float(self.substep_c),
-            )
-            self._warned_substep_cap = True
-
-        return k_required, sub_dt, max_k
-
-    def _integrate_vertical_substeps_static(
-        self,
-        *,
-        active_xyz: torch.Tensor,
-        u_prime_in: torch.Tensor,
-        v_prime_in: torch.Tensor,
-        w_prime_in: torch.Tensor,
-        sigma_u: torch.Tensor,
-        sigma_v: torch.Tensor,
-        sigma_w: torch.Tensor,
-        sigma_w_sq: torch.Tensor,
-        T_Lu: torch.Tensor,
-        T_Lv: torch.Tensor,
-        T_Lw: torch.Tensor,
-        half_dsig2_dz_backward: torch.Tensor,
-        density_drift_backward: torch.Tensor,
-        dt_seconds: float,
-        engine: GPUEngine,
-        active_mask: torch.Tensor | None = None,
-        n_substeps: int | None = None,
-        coeffs_at: Callable[[torch.Tensor], tuple[torch.Tensor, ...]] | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Static-shape variant of the substep loop (docs/architecture.md §5; device-gated).
-
-        Identical physics to ``_integrate_vertical_substeps`` but every substep
-        processes the **full** particle buffer (constant tensor shapes across
-        iterations). Iterations past the shared count ``k`` (the fixed-count graph
-        loop) and inactive particles are advanced with ``sub_dt=0``, which is a
-        mathematical no-op: ``a = exp(0) = 1`` (velocity unchanged),
-        ``variance = σ²(1−a²) = 0`` (no noise term), ``displacement = w'·0 = 0``
-        (position unchanged), and reflection of an already-non-negative ``z`` is
-        the identity. ``coeffs_at`` re-evaluates the coefficients at the current
-        height at the start of every iteration after the first, as in the dynamic
-        variant (docs/physics.md §6); the re-evaluation also runs in the no-op
-        iterations, where it changes nothing.
-
-        This trades extra elementwise FLOPs (finished particles keep being touched)
-        for shape-consistency — one kernel shape per op across all iterations, which
-        ``torch.compile`` fuses cleanly and which CUDA graphs require. It is a win on
-        a launch-bound GPU and a loss on CPU, hence the device gate in
-        ``_use_static_substeps`` (the dynamic masked variant stays the CPU path).
-
-        ``active_mask`` (full-set ``step`` path): inactive particles (not yet
-        released / escaped) are frozen by forcing ``sub_dt=0`` for them every substep
-        — position and state unchanged — so the whole particle buffer can be passed
-        without boolean-indexing the active subset. When ``None`` all particles are
-        treated as active (the isolated equivalence tests).
-
-        With every particle active it is bit-identical to the dynamic variant (both
-        draw ``randn`` for the same set every iteration); with inactive particles
-        present the full-set draw differs from the dynamic path's active-subset
-        draw, so the two are then statistically equivalent only.
-
-        ``n_substeps`` (phase 3, graph path): when given, loop a **fixed** number of
-        iterations (``self.max_substeps``) instead of the data-dependent ``max_k`` —
-        removing the last per-step host sync and giving the loop a compile-time-constant
-        trip count so ``torch.compile(mode="reduce-overhead")`` can capture it as a CUDA
-        graph. Iterations beyond the shared ``k`` are ``sub_dt=0`` no-ops, so the
-        result matches the ``max_k`` loop; it just does more (no-op) iterations. The
-        per-step cap warning is skipped on this path (max_substeps is then a deliberate
-        fixed cost — tune it down for the graph runs).
-        """
-
-        if n_substeps is None:
-            k_required, sub_dt, n_iter = self._substep_schedule(
-                T_Lw,
-                dt_seconds,
-                sigma_w.dtype,
-                active_mask=active_mask,
-            )
-        else:
-            # Fixed-count, sync-free path (graph capture). No max_k, no warning.
-            k_required, sub_dt = self._substep_counts(
-                T_Lw,
-                dt_seconds,
-                sigma_w.dtype,
-                active_mask=active_mask,
-            )
-            n_iter = n_substeps
-
-        # Full-set working tensors (no per-iteration indexing). Clone so the input
-        # subsets aren't mutated.
-        xyz = active_xyz.clone()
-        u_p = u_prime_in.clone()
-        v_p = v_prime_in.clone()
-        w_p = w_prime_in.clone()
-
-        # `owing = k_required > i` per substep (the same for every particle); we AND
-        # in `active_mask` below so inactive particles get sub_dt=0 even at i=0 →
-        # fully frozen.
-        zero_dt = torch.zeros_like(sub_dt)
-        for i in range(n_iter):
-            if coeffs_at is not None and i > 0:
-                # Re-evaluate σ, T_L, ∂σ_w²/∂z and the density drift at the
-                # particle's CURRENT height (docs/physics.md §6).
-                (
-                    sigma_u,
-                    sigma_v,
-                    sigma_w,
-                    sigma_w_sq,
-                    T_Lu,
-                    T_Lv,
-                    T_Lw,
-                    half_dsig2_dz_backward,
-                    density_drift_backward,
-                ) = coeffs_at(xyz[:, 2])
-            sigma_u_var = sigma_u.pow(2)
-            sigma_v_var = sigma_v.pow(2)
-            sigma_w_var = sigma_w.pow(2)
-            # Rogue-trajectory clip bounds (|w'/σ| ≤ 4).
-            u_max = W_PRIME_SIGMA_RATIO_MAX * sigma_u
-            v_max = W_PRIME_SIGMA_RATIO_MAX * sigma_v
-            w_max = W_PRIME_SIGMA_RATIO_MAX * sigma_w
-
-            # Particles in a real substep get sub_dt; iterations past k and
-            # inactive particles get 0 (no-op). Multiply-mask, never index →
-            # constant shape every pass.
-            owing = k_required > i
-            if active_mask is not None:
-                owing = owing & active_mask
-            sub_dt_i = torch.where(owing, sub_dt, zero_dt)
-
-            # Backward drift with the CURRENT w' (the (1+w'²/σ²) factor must be
-            # recomputed per substep — see the dynamic variant's docstring). For a
-            # finished particle the factor is computed but multiplied by sub_dt=0.
-            factor = 1.0 + w_p.pow(2) / sigma_w_sq
-            drift_w = factor * half_dsig2_dz_backward + density_drift_backward
-
-            u_new = engine.update_langevin_velocity(
-                u_p,
-                t_lagrangian=T_Lu,
-                sigma_w2=sigma_u_var,
-                dt_seconds=sub_dt_i,
-            )
-            v_new = engine.update_langevin_velocity(
-                v_p,
-                t_lagrangian=T_Lv,
-                sigma_w2=sigma_v_var,
-                dt_seconds=sub_dt_i,
-            )
-            w_new = engine.update_langevin_velocity(
-                w_p,
-                t_lagrangian=T_Lw,
-                sigma_w2=sigma_w_var,
-                dt_seconds=sub_dt_i,
-                drift=drift_w,
-            )
-            w_new = torch.clamp(w_new, min=-w_max, max=w_max)
-            u_new = torch.clamp(u_new, min=-u_max, max=u_max)
-            v_new = torch.clamp(v_new, min=-v_max, max=v_max)
-
-            xyz = engine.apply_vertical_turbulence(xyz, w_new, dt_seconds=sub_dt_i, backward=True)
-            xyz = engine.apply_horizontal_turbulence(
-                xyz, u_new, v_new, dt_seconds=sub_dt_i, backward=True
-            )
-            # W&F §6 smooth-wall reflection (joint z, w' flip). A no-op for finished
-            # particles (z ≥ 0 from their own final substep's reflection).
-            xyz, w_new = engine.reflect_surface(xyz, w_new, z_surface=0.0)
-
-            u_p, v_p, w_p = u_new, v_new, w_new
-
-        return xyz, u_p, v_p, w_p
-
     def _integrate_vertical_substeps(
         self,
         *,
@@ -1498,46 +1348,77 @@ class HannaScheme(TurbulenceScheme):
         dt_seconds: float,
         engine: GPUEngine,
         coeffs_at: Callable[[torch.Tensor], tuple[torch.Tensor, ...]] | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Substepping of the OU + displacement + reflection.
+        blh: torch.Tensor | None = None,
+        active_mask: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, ...]:
+        """The sub-step loop: OU velocity update + displacement + ground reflection,
+        ``self.n_substeps`` equal sub-steps of ``dt / n_substeps`` for every particle
+        (decision 0026, docs/physics.md §6).
 
-        The active set takes ``k = max_i ceil(dt / (substep_c · T_Lw_i))`` equal
-        substeps (capped at ``self.max_substeps``; ``_substep_counts`` says why
-        the count is shared). When ``coeffs_at`` is given (as it is from
-        ``step``), σ, T_L, ``∂σ_w²/∂z`` and the density drift are re-evaluated at
-        each particle's current height at the start of every substep after the
-        first (docs/physics.md §6); holding them at the outer-step value acts like a
-        random walk with the diffusivity of the starting height and no
-        compensating drift, which piles particles up where T_L is short — at the
-        ground. Without ``coeffs_at`` they stay at the values passed in (the
-        synthetic-input unit tests).
+        **Coefficients.** The coefficients passed in are those at the start of the
+        outer step and drive the first sub-step. When ``coeffs_at`` is given (as it
+        is from ``step``), σ, T_L, ``∂σ_w²/∂z`` and the density drift are
+        re-evaluated at each particle's current height at the start of every later
+        sub-step. Holding them at the outer-step value acts like a random walk with
+        the diffusivity of the starting height and no compensating drift, which
+        piles particles up where T_L is short — at the ground. Without ``coeffs_at``
+        they stay at the values passed in (the synthetic-input unit tests).
 
-        The well-mixed drift's ``(1 + w'²/σ_w²)`` factor IS recomputed each
-        substep using the current ``w'`` — holding it fixed at the outer-step
-        ``w'`` (which is often ≈ 0 for newly-released particles) systematically
-        under-drifts particles, biasing them upward (this was caught by
-        ``test_hanna_well_mixed_no_runaway_lofting`` during F4 Tier 2 development).
+        **One count for everyone.** The count is the configured constant, never
+        chosen per particle: a sub-step length that depends on the particle's height
+        (the old ``k_i = ceil(dt / (c·T_Lw,i))``, or a count re-chosen every sub-step)
+        is a spurious drift towards where the steps are short, and leaves the lowest
+        5% of a neutral boundary layer ~30% over-occupied at dt = 60 s even with the
+        coefficients re-evaluated. The loop has a compile-time-constant trip count
+        and no host sync, so it captures in the CUDA graph (decision 0004).
 
-        Returns ``(xyz, u', v', w')`` after all substeps; reflection (with
-        w'-flip per W&F §6) is applied at the end of each substep so a particle
-        that crosses z=0 within a substep is reflected before the next substep.
+        **Both paths.** The dynamic (CPU) path passes the active subset with
+        ``active_mask=None``. The static path passes the full particle buffer and
+        ``active_mask``: inactive particles get ``sub_dt = 0``, a mathematical
+        no-op (``a = exp(0) = 1``, no noise, no displacement, and reflecting a
+        non-negative ``z`` is the identity), so shapes are constant across
+        iterations. With every particle active the two are bit-identical (same
+        operations, same random draws); with inactive particles present the
+        full-set draw differs from the subset draw, so they agree statistically.
+
+        The well-mixed drift's ``(1 + w'²/σ_w²)`` factor is recomputed every
+        substep from the current ``w'``.
+
+        **Exceedance counter.** Every sub-step is checked against
+        ``sub_dt > exceedance_c · T_Lw`` with T_Lw at the sub-step's own height,
+        split by whether that height is in the boundary layer (``z ≤ h``, needs
+        ``blh``) or the free troposphere. Returns, after the state,
+        ``counts = [exceeded BL, all BL, exceeded FT, all FT]`` (active
+        particle-sub-steps, int64) and ``worst = [max sub_dt/T_Lw in BL, in FT]``,
+        as device tensors (no host sync). Without ``blh`` everything counts as BL.
+
+        Ground reflection (W&F §6) is applied inside the loop, so a particle that
+        crosses z=0 within a substep is reflected before the next substep.
         """
 
-        # Shared substep count + sub-dt + loop bound (shared with the static
-        # variant; also fires the once-per-instance substep-cap warning). The single
-        # `max_k` host sync bounds the loop.
-        _, sub_dt, max_k = self._substep_schedule(T_Lw, dt_seconds, sigma_w.dtype)
-
-        # Working tensors. Clone so we don't mutate the input subsets.
+        n = self.n_substeps
         xyz = active_xyz.clone()
         u_p = u_prime_in.clone()
         v_p = v_prime_in.clone()
         w_p = w_prime_in.clone()
 
-        # Every particle owes every one of the `max_k` substeps (the count is
-        # shared), so the loop runs on the full active set without masking.
-        for i in range(max_k):
+        sub_dt = torch.full_like(T_Lw, float(dt_seconds) / n)
+        if active_mask is not None:
+            # Inactive particles: sub_dt = 0, a no-op every iteration.
+            sub_dt = torch.where(active_mask, sub_dt, torch.zeros_like(sub_dt))
+
+        # Exceedance counter, per particle across the sub-steps, reduced once at the end.
+        n_ft = torch.zeros(T_Lw.shape, dtype=torch.int32, device=T_Lw.device)
+        ex_bl = torch.zeros_like(n_ft)
+        ex_ft = torch.zeros_like(n_ft)
+        worst_bl = torch.zeros_like(sub_dt)
+        worst_ft = torch.zeros_like(sub_dt)
+        c_exceed = self.exceedance_c
+
+        for i in range(n):
             if coeffs_at is not None and i > 0:
+                # Re-evaluate σ, T_L, ∂σ_w²/∂z and the density drift at the
+                # particle's CURRENT height (docs/physics.md §6).
                 (
                     sigma_u,
                     sigma_v,
@@ -1550,23 +1431,29 @@ class HannaScheme(TurbulenceScheme):
                     density_drift_backward,
                 ) = coeffs_at(xyz[:, 2])
 
-            # Re-assemble backward drift each substep with the CURRENT w':
+            ratio = sub_dt / T_Lw
+            if blh is None:
+                in_ft = torch.zeros(T_Lw.shape, dtype=torch.bool, device=T_Lw.device)
+            else:
+                in_ft = xyz[:, 2] > blh
+            exceeded = ratio > c_exceed
+            n_ft += in_ft
+            ex_bl += exceeded & ~in_ft
+            ex_ft += exceeded & in_ft
+            worst_bl = torch.maximum(worst_bl, torch.where(in_ft, 0.0, ratio))
+            worst_ft = torch.maximum(worst_ft, torch.where(in_ft, ratio, 0.0))
+
+            # Backward drift with the CURRENT w':
             #   drift_b = -½(1 + w'²/σ_w²)·∂σ²/∂z  -  (σ_w²/ρ)·∂ρ/∂z
             # Pieces are pre-negated for the backward sign.
             factor = 1.0 + w_p.pow(2) / sigma_w_sq
             drift_w = factor * half_dsig2_dz_backward + density_drift_backward
 
             u_new = engine.update_langevin_velocity(
-                u_p,
-                t_lagrangian=T_Lu,
-                sigma_w2=sigma_u.pow(2),
-                dt_seconds=sub_dt,
+                u_p, t_lagrangian=T_Lu, sigma_w2=sigma_u.pow(2), dt_seconds=sub_dt
             )
             v_new = engine.update_langevin_velocity(
-                v_p,
-                t_lagrangian=T_Lv,
-                sigma_w2=sigma_v.pow(2),
-                dt_seconds=sub_dt,
+                v_p, t_lagrangian=T_Lv, sigma_w2=sigma_v.pow(2), dt_seconds=sub_dt
             )
             w_new = engine.update_langevin_velocity(
                 w_p,
@@ -1575,12 +1462,10 @@ class HannaScheme(TurbulenceScheme):
                 dt_seconds=sub_dt,
                 drift=drift_w,
             )
-            # Rogue-trajectory safeguard (spec §T): clip |w'/σ| at 4× to prevent
-            # the (1+w'²/σ²) factor from snowballing the drift when σ_w hits its
-            # numerical floor (e.g. at the BL top where stable σ_w → 0) and the
-            # substep cap is binding. Without this, particles can NaN out at the
-            # BL-top seam under the F4 Tier 2 substepping. FLEXPART has the
-            # equivalent clip in its OU implementation.
+            # Rogue-trajectory safeguard (spec §T): clip |w'/σ| at 4× to prevent the
+            # (1+w'²/σ²) factor from snowballing the drift when σ_w hits its floor
+            # (e.g. at the BL top). FLEXPART has the equivalent clip in its OU
+            # implementation.
             w_max = W_PRIME_SIGMA_RATIO_MAX * sigma_w
             u_max = W_PRIME_SIGMA_RATIO_MAX * sigma_u
             v_max = W_PRIME_SIGMA_RATIO_MAX * sigma_v
@@ -1595,12 +1480,70 @@ class HannaScheme(TurbulenceScheme):
             # W&F §6 smooth-wall reflection: joint (z, w') flip on those that
             # crossed the surface within this substep.
             xyz, w_new = engine.reflect_surface(xyz, w_new, z_surface=0.0)
-
             u_p, v_p, w_p = u_new, v_new, w_new
 
-        return xyz, u_p, v_p, w_p
+        if active_mask is not None:
+            n_ft = n_ft * active_mask
+            n_active = active_mask.sum()
+        else:
+            n_active = torch.tensor(T_Lw.numel(), device=T_Lw.device)
+        n_ft_total = n_ft.sum(dtype=torch.int64)
+        counts = torch.stack(
+            [
+                ex_bl.sum(dtype=torch.int64),
+                n_active.to(torch.int64) * n - n_ft_total,
+                ex_ft.sum(dtype=torch.int64),
+                n_ft_total,
+            ]
+        )
+        if worst_bl.numel():
+            worst = torch.stack([worst_bl.amax(), worst_ft.amax()])
+        else:
+            worst = torch.zeros(2, dtype=sub_dt.dtype, device=sub_dt.device)
+        return xyz, u_p, v_p, w_p, counts, worst
 
-    # ---- Turbulence profile assembly ----
+    def _accumulate_exceedance(self, counts: torch.Tensor, worst: torch.Tensor) -> None:
+        """Add one step's exceedance counts to the running device-side totals
+        (no host sync)."""
+
+        if self._exceed_counts is None or self._exceed_counts.device != counts.device:
+            self._exceed_counts = torch.zeros(4, dtype=torch.int64, device=counts.device)
+            self._exceed_worst = torch.zeros(2, dtype=worst.dtype, device=worst.device)
+        self._exceed_counts += counts
+        torch.maximum(self._exceed_worst, worst, out=self._exceed_worst)
+
+    def take_substep_exceedance(self, window_start: object) -> dict[str, float] | None:
+        """Read and reset the sub-step exceedance totals (one host sync).
+
+        Called by the runtime once per met window (and at the end of each batch).
+        Returns the active particle-sub-steps in the boundary layer and the free
+        troposphere, how many of each had ``sub_dt > exceedance_c · T_Lw``, and the
+        worst ratio in each, since the last call.
+        """
+
+        del window_start
+        if self._exceed_counts is None:
+            return {
+                "exceeded_bl": 0,
+                "substeps_bl": 0,
+                "exceeded_ft": 0,
+                "substeps_ft": 0,
+                "worst_bl": 0.0,
+                "worst_ft": 0.0,
+            }
+        ex_bl, n_bl, ex_ft, n_ft, worst_bl, worst_ft = torch.cat(
+            [self._exceed_counts.to(torch.float64), self._exceed_worst.to(torch.float64)]
+        ).tolist()
+        self._exceed_counts.zero_()
+        self._exceed_worst.zero_()
+        return {
+            "exceeded_bl": int(ex_bl),
+            "substeps_bl": int(n_bl),
+            "exceeded_ft": int(ex_ft),
+            "substeps_ft": int(n_ft),
+            "worst_bl": float(worst_bl),
+            "worst_ft": float(worst_ft),
+        }
 
     def _column_turbulence(
         self,
@@ -1699,6 +1642,47 @@ class HannaScheme(TurbulenceScheme):
         T_Lv = T_Lv.clamp(min=T_L_MIN_S)
         T_Lw = T_Lw.clamp(min=T_L_MIN_S)
         return sigma_u, sigma_v, sigma_w, T_Lu, T_Lv, T_Lw
+
+    def _column_sigma_w(
+        self,
+        z_query: torch.Tensor,
+        *,
+        blh: torch.Tensor,
+        ustar: torch.Tensor,
+        w_star: torch.Tensor,
+        h_over_L: torch.Tensor,
+        L: torch.Tensor,
+        lat: torch.Tensor,
+        lon: torch.Tensor,
+        ft_fields: torch.Tensor,
+        grid_bounds: GridInterpolationBounds,
+        engine: GPUEngine,
+        level_arr: torch.Tensor | None = None,
+        ascending: bool | None = None,
+    ) -> torch.Tensor:
+        """σ_w alone at ``z_query``: bit-identical to ``_column_turbulence(...)[2]``
+        (same regime selection, surface-layer override and free-troposphere
+        override; the T_L floors never touch σ), but it evaluates only the σ_w
+        expressions and samples only the σ_w channel of the free-troposphere stack.
+        Used for the two finite-difference probes of ∂σ_w²/∂z."""
+
+        sigma_w = in_bl_sigma_w(z_query, blh, ustar, w_star, h_over_L, lat)
+        if self.surface_layer_override:
+            in_sl = z_query < SURFACE_LAYER_FRACTION * blh
+            sigma_w = torch.where(in_sl, surface_layer_sigma_w(z_query, ustar, L), sigma_w)
+        above_bl = z_query > blh
+        ft_sw = self._interp_3d_field(
+            ft_fields[:1],
+            grid_bounds,
+            lon,
+            lat,
+            z_query,
+            engine,
+            level_arr=level_arr,
+            ascending=ascending,
+        )[0]
+        sigma_w = torch.where(above_bl, ft_sw, sigma_w)
+        return sigma_w.clamp(min=SIGMA_MIN_M_S)
 
     def _cached_window_field(
         self,

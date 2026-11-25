@@ -60,7 +60,7 @@ simulation:
   length_seconds: 864000
   start_time: '2019-01-07T02:00:00Z'
 turbulence:
-  max_substeps: 6
+  n_substeps: 8  # sub-steps per outer step, the same for every particle: 7.5 s at dt=60 (decision 0026)
   meander:
     coefficient: 0.16
     enabled: true

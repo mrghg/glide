@@ -377,32 +377,24 @@ def test_meander_constructor_validates_params() -> None:
         HannaScheme(meander_timescale_seconds=0.0)
 
 
-def test_substep_cap_warning_fires_once(caplog) -> None:
-    """F4 Tier 2 (audit 2026-05-30): when the per-particle substep count hits
-    ``max_substeps`` for any active particle, HannaScheme logs a single WARNING
-    (rate-limited to once per scheme instance) noting that the Δt/τ bias is only
-    partially controlled for those particles. Replaces the F4 Tier 1
-    ``dt > 5·T_L`` warning, which was made obsolete by adaptive substepping."""
+def _uniform_met(*, blh: float = 1500.0, ustar: float = 0.4, shf: float = 0.0):
+    """A tiny horizontally uniform met window (4 levels to 4 km)."""
 
-    import logging
     from datetime import datetime, timedelta
 
-    from lpdm.gpu_engine import GPUEngine
     from lpdm.met_reader import HourlyMetTensors, MetFieldMetadata
 
-    # Build a tiny met window with uniform fields. ustar=0.4, near-surface release
-    # → T_Lw drops to O(seconds), so dt=300 s comfortably trips the warning.
     n_lev, n_lat, n_lon = 4, 4, 4
     shape = (n_lev, n_lat, n_lon)
     chans = {
         "u": torch.zeros(shape),
         "v": torch.zeros(shape),
         "w": torch.zeros(shape),
-        "blh": torch.full(shape, 1500.0),
+        "blh": torch.full(shape, blh),
         "sp": torch.full(shape, 101325.0),
         "t": torch.full(shape, 280.0),
-        "ustar": torch.full(shape, 0.4),
-        "shf": torch.zeros(shape),
+        "ustar": torch.full(shape, ustar),
+        "shf": torch.full(shape, shf),
     }
     names = ("u", "v", "w", "blh", "sp", "t", "ustar", "shf")
     fields = torch.stack([chans[n] for n in names], dim=0)
@@ -420,7 +412,7 @@ def test_substep_cap_warning_fires_once(caplog) -> None:
     height = (
         torch.as_tensor(level, dtype=torch.float32).view(n_lev, 1, 1).expand(shape).contiguous()
     )
-    met = HourlyMetTensors(
+    return HourlyMetTensors(
         hour_start=fields,
         hour_end=fields,
         metadata=metadata,
@@ -428,154 +420,197 @@ def test_substep_cap_warning_fires_once(caplog) -> None:
         height_agl_m=height,
     )
 
+
+def _step_n(scheme: HannaScheme, met, z0: float, *, n: int = 8, steps: int = 3, dt: float = 300.0):
+    from lpdm.gpu_engine import GPUEngine
+
     engine = GPUEngine(device="cpu")
-    # Legacy near-surface configuration (1 s T_L floor + MO surface-layer
-    # override): that is the combination whose κz/σ_w timescale collapses to
-    # ~1 s at z=1 m and trips the substep cap. With the default FLEXPART floors
-    # (T_Lw ≥ 30 s) the cap never binds at dt=300 — covered by
-    # test_flexpart_tl_floors_prevent_substep_cap below.
-    scheme = HannaScheme(flexpart_tl_floors=False, surface_layer_override=True)
-    n = 8
     particles = torch.zeros(n, 4, dtype=torch.float32)
-    particles[:, 2] = 1.0  # release at z=1 m → T_Lw ~ κ·z/σ_w ~ 1 s, far below 5·dt
+    particles[:, 2] = z0
     particles[:, 3] = 1.0
     state = scheme.initialize_state(n, device=torch.device("cpu"), dtype=torch.float32)
     active = torch.ones(n, dtype=torch.bool)
-
-    with caplog.at_level(logging.WARNING, logger="lpdm.turbulence.hanna"):
-        for _ in range(3):
-            particles, state = scheme.step(
-                particles,
-                state,
-                met,
-                t_alpha=0.5,
-                dt_seconds=300.0,
-                active_mask=active,
-                engine=engine,
-            )
-
-    warnings = [r for r in caplog.records if "max_substeps" in r.getMessage()]
-    assert len(warnings) == 1, f"expected exactly one substep-cap warning, got {len(warnings)}"
-    assert "Hanna turbulence" in warnings[0].getMessage()
-    assert scheme._warned_substep_cap is True
+    for _ in range(steps):
+        particles, state = scheme.step(
+            particles, state, met, t_alpha=0.5, dt_seconds=dt, active_mask=active, engine=engine
+        )
+    return particles
 
 
-def test_flexpart_tl_floors_prevent_substep_cap(caplog) -> None:
+@pytest.mark.parametrize("static", [False, True], ids=["dynamic", "static"])
+def test_exceedance_counter_reports_short_T_L(static: bool) -> None:
+    """Decision 0026: the scheme counts the particle-sub-steps whose sub_dt exceeds
+    ``exceedance_c · T_Lw``, with the denominator, and reports them once through
+    ``take_substep_exceedance`` (which resets the counts). The legacy near-surface
+    treatment (1 s T_L floor + MO surface-layer override) gives T_Lw ~ 1 s at
+    z = 1 m, so 300 s / 8 = 37.5 s sub-steps exceed the 0.5 target."""
+
+    scheme = HannaScheme(
+        flexpart_tl_floors=False, surface_layer_override=True, static_substeps=static
+    )
+    _step_n(scheme, _uniform_met(), z0=1.0, n=8, steps=3)
+    taken = scheme.take_substep_exceedance(None)
+    # Every active particle-sub-step is counted once, in the BL or the FT.
+    assert taken["substeps_bl"] + taken["substeps_ft"] == 8 * 3 * scheme.n_substeps
+    assert taken["exceeded_bl"] > 0
+    assert taken["worst_bl"] > scheme.exceedance_c
+    # Read and reset.
+    again = scheme.take_substep_exceedance(None)
+    assert again["substeps_bl"] == again["substeps_ft"] == again["exceeded_bl"] == 0
+
+
+def test_flexpart_tl_floors_bound_the_boundary_layer_exceedance() -> None:
     """With the DEFAULT near-surface treatment (FLEXPART T_L floors on, legacy
-    surface-layer override off), a z=1 m release at dt=300 s must NOT trip the
-    substep cap: T_Lw is floored at 30 s, so k = ceil(300/(0.5·30)) = 20 ≤ 50.
-    This pins the floors actually reaching the substep schedule — the same
-    scenario trips the cap under the legacy combination
-    (test_substep_cap_warning_fires_once)."""
+    surface-layer override off) T_Lw ≥ 30 s in the boundary layer, so the default
+    7.5 s sub-step at dt = 60 s (ratio ≤ 0.25) never exceeds the 0.5 target there,
+    even for a z = 1 m release. The same release exceeds it under the legacy
+    combination (test_exceedance_counter_reports_short_T_L)."""
 
-    import logging
-    from datetime import datetime, timedelta
-
-    from lpdm.gpu_engine import GPUEngine
-    from lpdm.met_reader import HourlyMetTensors, MetFieldMetadata
-
-    n_lev, n_lat, n_lon = 4, 4, 4
-    shape = (n_lev, n_lat, n_lon)
-    chans = {
-        "u": torch.zeros(shape),
-        "v": torch.zeros(shape),
-        "w": torch.zeros(shape),
-        "blh": torch.full(shape, 1500.0),
-        "sp": torch.full(shape, 101325.0),
-        "t": torch.full(shape, 280.0),
-        "ustar": torch.full(shape, 0.4),
-        "shf": torch.zeros(shape),
-    }
-    names = ("u", "v", "w", "blh", "sp", "t", "ustar", "shf")
-    fields = torch.stack([chans[n] for n in names], dim=0)
-    level = np.linspace(0.0, 4000.0, n_lev)
-    t0 = datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC)
-    metadata = MetFieldMetadata(
-        lon=np.linspace(-2.0, 2.0, n_lon),
-        lat=np.linspace(-2.0, 2.0, n_lat),
-        level=level,
-        pressure_level_hpa=np.linspace(1000.0, 600.0, n_lev),
-        time_start=t0,
-        time_end=t0 + timedelta(hours=1),
-        variable_units=dict.fromkeys(names, "m/s"),
-    )
-    height = (
-        torch.as_tensor(level, dtype=torch.float32).view(n_lev, 1, 1).expand(shape).contiguous()
-    )
-    met = HourlyMetTensors(
-        hour_start=fields,
-        hour_end=fields,
-        metadata=metadata,
-        channel_names=names,
-        height_agl_m=height,
-    )
-
-    engine = GPUEngine(device="cpu")
     scheme = HannaScheme()  # defaults: flexpart_tl_floors=True, surface_layer_override=False
     assert scheme.flexpart_tl_floors is True
     assert scheme.surface_layer_override is False
-    n = 8
-    particles = torch.zeros(n, 4, dtype=torch.float32)
-    particles[:, 2] = 1.0
-    particles[:, 3] = 1.0
-    state = scheme.initialize_state(n, device=torch.device("cpu"), dtype=torch.float32)
-    active = torch.ones(n, dtype=torch.bool)
-
-    with caplog.at_level(logging.WARNING, logger="lpdm.turbulence.hanna"):
-        for _ in range(3):
-            particles, state = scheme.step(
-                particles,
-                state,
-                met,
-                t_alpha=0.5,
-                dt_seconds=300.0,
-                active_mask=active,
-                engine=engine,
-            )
-
-    warnings = [r for r in caplog.records if "max_substeps" in r.getMessage()]
-    assert len(warnings) == 0, "FLEXPART T_L floors should keep the substep cap from binding"
+    _step_n(scheme, _uniform_met(), z0=1.0, n=8, steps=3, dt=60.0)
+    taken = scheme.take_substep_exceedance(None)
+    assert taken["substeps_bl"] == 8 * 3 * scheme.n_substeps
+    assert taken["exceeded_bl"] == 0
+    assert 0.0 < taken["worst_bl"] <= 60.0 / scheme.n_substeps / 30.0 + 1e-6
 
 
-def test_substep_cap_warning_silent_when_dt_is_small(caplog) -> None:
-    """No warning when dt is small enough that no particle's k_i hits the cap
-    (i.e. substepping comfortably keeps the Δt/τ bias small for everyone)."""
+@pytest.mark.parametrize("static", [False, True], ids=["dynamic", "static"])
+def test_exceedance_counter_hand_computed(static: bool) -> None:
+    """Hand-computed counts on synthetic inputs: dt = 60 s, n = 4 (15 s sub-steps),
+    T_Lw = 1000 / 10 / 2 s (ratios 0.015 / 1.5 / 7.5); the third particle is above
+    its boundary layer. The static path also carries an inactive particle, which
+    must not be counted."""
 
-    import logging
-
-    scheme = HannaScheme()
-    # Manually call the substep integrator with T_L large vs dt — substep count
-    # k_i = ceil(dt/(c·T_L)) = ceil(1/(0.5·1000)) = 1, well below the cap.
-    engine_state = torch.zeros(3, 4, dtype=torch.float32)  # 3 particles
-    big_T_L = torch.tensor([1000.0, 500.0, 800.0])
-    sigma = torch.tensor([0.5, 0.5, 0.5])
-    sigma_sq = sigma.pow(2)
-    zeros = torch.zeros(3)
     from lpdm.gpu_engine import GPUEngine
 
-    with caplog.at_level(logging.WARNING, logger="lpdm.turbulence.hanna"):
-        scheme._integrate_vertical_substeps(
-            active_xyz=engine_state,
-            u_prime_in=torch.zeros(3),
-            v_prime_in=torch.zeros(3),
-            w_prime_in=torch.zeros(3),
-            sigma_u=sigma,
-            sigma_v=sigma,
-            sigma_w=sigma,
-            sigma_w_sq=sigma_sq,
-            T_Lu=big_T_L,
-            T_Lv=big_T_L,
-            T_Lw=big_T_L,
-            half_dsig2_dz_backward=zeros,
-            density_drift_backward=zeros,
-            dt_seconds=1.0,
-            engine=GPUEngine(device="cpu"),
+    scheme = HannaScheme(n_substeps=4)
+    tlw = torch.tensor([1000.0, 10.0, 2.0, 5.0])
+    inp = _substep_inputs(4, T_Lw=tlw, seed=2)
+    inp["active_xyz"][:, 2] = torch.tensor([50.0, 50.0, 500.0, 50.0])
+    inp["sigma_u"] = inp["sigma_v"] = inp["sigma_w"] = torch.full((4,), 0.01)
+    inp["sigma_w_sq"] = inp["sigma_w"].pow(2)
+    blh = torch.tensor([1000.0, 1000.0, 100.0, 1000.0])
+    if static:
+        active = torch.tensor([True, True, True, False])
+        out = scheme._integrate_vertical_substeps(
+            engine=GPUEngine(device="cpu"), blh=blh, active_mask=active, **inp
         )
+        assert torch.equal(out[0][3], inp["active_xyz"][3])  # inactive: frozen
+    else:
+        sub = {k: (v[:3] if isinstance(v, torch.Tensor) else v) for k, v in inp.items()}
+        out = scheme._integrate_vertical_substeps(engine=GPUEngine(device="cpu"), blh=blh[:3], **sub)
+    counts, worst = out[4], out[5]
+    assert counts.tolist() == [4, 8, 4, 4]  # [exceeded BL, all BL, exceeded FT, all FT]
+    assert worst.tolist() == pytest.approx([1.5, 7.5])
 
-    warnings = [r for r in caplog.records if "max_substeps" in r.getMessage()]
-    assert warnings == []
-    assert scheme._warned_substep_cap is False
 
+@pytest.mark.parametrize("n_substeps", [1, 4, 8])
+def test_static_and_dynamic_substeps_bit_identical_when_all_active(n_substeps: int) -> None:
+    """Every particle takes the same ``n_substeps`` sub-steps whatever its T_Lw, so
+    with every particle active the static (full buffer + mask) and dynamic (active
+    subset) paths execute identical operations and draw the RNG identically: bit
+    for bit equal, even for a wide spread of T_Lw (which under the old adaptive
+    schedule gave per-particle counts from 1 to 8)."""
+
+    from lpdm.gpu_engine import GPUEngine
+
+    engine = GPUEngine(device="cpu")
+    scheme = HannaScheme(n_substeps=n_substeps)
+    n = 4096
+    tlw = torch.linspace(15.0, 1000.0, n)
+    inp = _substep_inputs(n, T_Lw=tlw, seed=11)
+    blh = torch.full((n,), 1000.0)
+    torch.manual_seed(100)
+    dyn = scheme._integrate_vertical_substeps(engine=engine, blh=blh, **inp)
+    torch.manual_seed(100)
+    stat = scheme._integrate_vertical_substeps(
+        engine=engine, blh=blh, active_mask=torch.ones(n, dtype=torch.bool), **inp
+    )
+    for a, b in zip(dyn, stat):
+        assert torch.equal(a, b)
+    assert torch.isfinite(dyn[0]).all()
+    assert int(dyn[4][1] + dyn[4][3]) == n * n_substeps
+
+
+@pytest.mark.parametrize("static", [False, True])
+def test_substep_count_is_fixed_and_coefficients_re_evaluated_at_current_height(
+    static: bool,
+) -> None:
+    """The loop runs exactly ``n_substeps`` sub-steps whatever T_Lw is, and
+    ``coeffs_at`` is called at the start of every sub-step after the first with
+    the particles' current heights (docs/physics.md §6)."""
+
+    from lpdm.gpu_engine import GPUEngine
+
+    engine = GPUEngine(device="cpu")
+    scheme = HannaScheme(n_substeps=5)
+    n = 64
+    for tlw in (1.0, 24.0, 1000.0):
+        inp = _substep_inputs(n, T_Lw=tlw, seed=3)
+        heights: list[torch.Tensor] = []
+
+        def coeffs_at(z: torch.Tensor, tlw=tlw, heights=heights):
+            heights.append(z.clone())
+            s = torch.full_like(z, 0.6)
+            tl = torch.full_like(z, tlw)
+            zero = torch.zeros_like(z)
+            return s, s, s, s.pow(2), tl, tl, tl, zero, zero
+
+        mask = torch.ones(n, dtype=torch.bool) if static else None
+        torch.manual_seed(0)
+        xyz, *_ = scheme._integrate_vertical_substeps(
+            engine=engine, coeffs_at=coeffs_at, active_mask=mask, **inp
+        )
+        assert len(heights) == 4
+        assert not torch.equal(heights[0], inp["active_xyz"][:, 2])  # moved since the start
+        assert torch.isfinite(xyz).all()
+
+
+def test_n_substeps_validated() -> None:
+    HannaScheme(n_substeps=1)
+    for bad in (0, -1, 2.5):
+        with pytest.raises(ValueError):
+            HannaScheme(n_substeps=bad)
+    with pytest.raises(ValueError):
+        HannaScheme(exceedance_c=0.0)
+
+
+@pytest.mark.parametrize("override", [False, True])
+@pytest.mark.parametrize("h_over_L", [-50.0, -0.5, 0.0, 0.5, 20.0])
+def test_sigma_w_probe_is_bit_identical_to_the_full_profile(override: bool, h_over_L: float) -> None:
+    """The drift's finite-difference probes evaluate σ_w only
+    (``_column_sigma_w``). It must equal ``_column_turbulence(...)[2]`` bit for bit
+    in every regime (stable, neutral, convective), with and without the
+    surface-layer override, and in the boundary layer and the free troposphere."""
+
+    from lpdm.gpu_engine import GPUEngine
+
+    engine = GPUEngine(device="cpu")
+    scheme = HannaScheme(surface_layer_override=override)
+    met = _uniform_met(blh=800.0)
+    ft_fields, grid_bounds = scheme._free_trop_fields(met, torch.device("cpu"), torch.float32)
+    n = 2000
+    z = torch.cat([torch.linspace(0.0, 3500.0, n - 3), torch.tensor([2.0, 800.0, 801.0])])
+    blh = torch.full((n,), 800.0)
+    ustar = torch.full((n,), 0.35)
+    L = torch.full((n,), 800.0 / h_over_L if h_over_L else 1e10)
+    col = dict(
+        blh=blh,
+        ustar=ustar,
+        w_star=torch.full((n,), 1.8 if h_over_L < 0 else 0.0),
+        h_over_L=torch.full((n,), h_over_L),
+        L=L,
+        lat=torch.linspace(-60.0, 60.0, n),
+        lon=torch.linspace(-1.5, 1.5, n),
+        ft_fields=ft_fields,
+        grid_bounds=grid_bounds,
+        engine=engine,
+    )
+    full = scheme._column_turbulence(z, **col)[2]
+    probe = scheme._column_sigma_w(z, **col)
+    assert torch.equal(full, probe)
 
 def test_ubl_holds_sigma_constant_below_z_ubl() -> None:
     """F5/F15 (audit 2026-05-30): the "unresolved basal layer" (Wilson & Flesch
@@ -820,128 +855,9 @@ def test_ou_and_displacement_are_noops_at_zero_dt() -> None:
     assert torch.equal(p_r, particles) and torch.equal(w_r, w)
 
 
-def test_static_substeps_bit_identical_for_homogeneous_k() -> None:
-    """When every particle needs the same substep count, none finishes early, so
-    the static (full-set) and dynamic (masked) loops execute identical ops and
-    consume the RNG identically → bit-for-bit equal. Covers the base case (k=1)
-    and a multi-substep case (k=5)."""
-
-    from lpdm.gpu_engine import GPUEngine
-
-    engine = GPUEngine(device="cpu")
-    scheme = HannaScheme()
-    # dt=60, substep_c=0.5: T_Lw=1000 → k=1; T_Lw=24 → k=5.
-    for T_Lw, expected_k in ((1000.0, 1), (24.0, 5)):
-        inp = _substep_inputs(256, T_Lw=T_Lw)
-        k_req, _, max_k = scheme._substep_schedule(inp["T_Lw"], inp["dt_seconds"], torch.float32)
-        assert int(k_req.min()) == int(k_req.max()) == max_k == expected_k
-
-        torch.manual_seed(0)
-        dyn = scheme._integrate_vertical_substeps(engine=engine, **inp)
-        torch.manual_seed(0)
-        stat = scheme._integrate_vertical_substeps_static(engine=engine, **inp)
-        for a, b in zip(dyn, stat):
-            assert torch.equal(a, b)
-
-
-def test_substep_count_is_shared_by_all_particles() -> None:
-    """Every particle takes the largest required substep count, so the sub-step
-    length does not depend on the particle's height (a height-dependent sub-step
-    breaks the well-mixed condition near the ground; docs/physics.md §6). With
-    every particle active the static and dynamic loops then draw the RNG
-    identically and agree bit for bit, even for a wide spread of T_Lw."""
-
-    from lpdm.gpu_engine import GPUEngine
-
-    engine = GPUEngine(device="cpu")
-    scheme = HannaScheme()
-    n = 4096
-    tlw = torch.linspace(15.0, 1000.0, n)  # alone, k_i would span 1 .. 8 at dt=60, c=0.5
-    k_req, sub_dt, max_k = scheme._substep_schedule(tlw, 60.0, torch.float32)
-    assert max_k == 8
-    assert int(k_req.min()) == int(k_req.max()) == 8
-    assert torch.allclose(sub_dt, torch.full_like(sub_dt, 7.5))
-
-    # Inactive particles do not set the count.
-    active = tlw > 100.0
-    k_act, _ = scheme._substep_counts(tlw, 60.0, torch.float32, active_mask=active)
-    assert int(k_act.max()) == 2
-
-    inp_d = _substep_inputs(n, T_Lw=tlw, seed=11)
-    inp_s = _substep_inputs(n, T_Lw=tlw, seed=11)
-    torch.manual_seed(100)
-    dyn = scheme._integrate_vertical_substeps(engine=engine, **inp_d)
-    torch.manual_seed(100)
-    stat = scheme._integrate_vertical_substeps_static(engine=engine, **inp_s)
-    for a, b in zip(dyn, stat):
-        assert torch.isfinite(a).all()
-        assert torch.equal(a, b)
-
-
-@pytest.mark.parametrize("static", [False, True])
-def test_substeps_re_evaluate_coefficients_at_current_height(static: bool) -> None:
-    """``coeffs_at`` is called at the start of every substep after the first,
-    with the particles' current heights, and its values are the ones used."""
-
-    from lpdm.gpu_engine import GPUEngine
-
-    engine = GPUEngine(device="cpu")
-    scheme = HannaScheme()
-    n = 64
-    inp = _substep_inputs(n, T_Lw=24.0, seed=3)  # k = ceil(60/12) = 5
-    heights: list[torch.Tensor] = []
-
-    def coeffs_at(z: torch.Tensor):
-        heights.append(z.clone())
-        s = torch.full_like(z, 0.6)
-        tl = torch.full_like(z, 24.0)
-        zero = torch.zeros_like(z)
-        return s, s, s, s.pow(2), tl, tl, tl, zero, zero
-
-    fn = (
-        scheme._integrate_vertical_substeps_static
-        if static
-        else scheme._integrate_vertical_substeps
-    )
-    torch.manual_seed(0)
-    xyz, *_ = fn(engine=engine, coeffs_at=coeffs_at, **inp)
-    assert len(heights) == 4
-    assert not torch.equal(heights[0], inp["active_xyz"][:, 2])  # moved since the start
-    assert torch.isfinite(xyz).all()
-
-
 # ---------------------------------------------------------------------------
-# Phase 3 (CUDA-graph prep): fixed-count loop + graph-compile wiring.
+# CUDA-graph wiring.
 # ---------------------------------------------------------------------------
-
-
-def test_fixed_count_static_substeps_matches_variable_count() -> None:
-    """The fixed-count substep loop (`n_substeps=max_substeps` — the constant,
-    graph-capturable trip count) is **bit-identical** to the variable-count loop
-    (`n_substeps=None`). Iterations past `max_k` are pure no-ops (`sub_dt=0`): they
-    draw unused RNG but never change state, and both paths draw identically up to
-    `max_k`, so the end state matches exactly. This is what lets phase 3 drop the
-    `max_k` host sync for a constant loop bound."""
-
-    from lpdm.gpu_engine import GPUEngine
-
-    engine = GPUEngine(device="cpu")
-    scheme = HannaScheme()  # max_substeps = 50
-    n = 1024
-    tlw = torch.linspace(15.0, 1000.0, n)  # k spans 1..~8, well below 50
-    k_req, _ = scheme._substep_counts(tlw, 60.0, torch.float32)
-    assert int(k_req.max()) < scheme.max_substeps  # there really are no-op iterations
-
-    inp = _substep_inputs(n, T_Lw=tlw, seed=5)
-    torch.manual_seed(0)
-    var = scheme._integrate_vertical_substeps_static(engine=engine, **inp)
-    torch.manual_seed(0)
-    fix = scheme._integrate_vertical_substeps_static(
-        engine=engine, n_substeps=scheme.max_substeps, **inp
-    )
-    for a, b in zip(var, fix):
-        assert torch.equal(a, b)
-
 
 def test_graph_compile_gating(monkeypatch) -> None:
     """Phase 3 wiring: the substep-loop graph compile engages ONLY on the static
@@ -1150,7 +1066,7 @@ def test_boundary_layer_depth_limits_apply_on_both_paths(static: bool) -> None:
     t0 = datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC)
 
     def run(blh: float, shf: float, **limits) -> torch.Tensor:
-        scheme = HannaScheme(static_substeps=static, max_substeps=6, **limits)
+        scheme = HannaScheme(static_substeps=static, n_substeps=6, **limits)
         return _run_steps(scheme, _window_with(t0, blh=blh, shf=shf), n_steps=4)
 
     # Pairs of depths on the same side of a limit: both are replaced by the limit

@@ -349,22 +349,20 @@ class MeanderConfig(_Frozen):
 class TurbulenceConfig(_Frozen):
     scheme: str = Field(..., min_length=1)
     meander: MeanderConfig = MeanderConfig()
-    # Hanna F4 Tier 2 adaptive substepping (audit 2026-05-30). Each particle runs
-    # k = max_i ceil(dt / (substep_c · T_Lw_i)) substeps (shared), capped at max_substeps. These
-    # default to the historical hardcoded values, so existing configs are
-    # unchanged. They are also a performance knob: on GPU the substep loop is the
-    # dominant kernel-launch source, so lowering max_substeps (or raising
-    # substep_c) issues fewer kernels — at the cost of a larger near-surface Δt/τ
-    # bias. Ignored by non-Hanna schemes.
-    substep_c: float = Field(
+    # Hanna sub-stepping (decision 0026, docs/physics.md §6). Every particle takes
+    # n_substeps equal sub-steps per outer step, with all coefficients
+    # re-evaluated at the current height each sub-step. The count is a constant
+    # of the run: never per particle, per step or per batch. Ignored by non-Hanna
+    # schemes.
+    n_substeps: int = Field(
+        8,
+        ge=1,
+        description="Sub-steps per outer step, the same for every particle (sub-step = dt / n_substeps). 8 gives 7.5 s at dt = 60 s.",
+    )
+    exceedance_c: float = Field(
         0.5,
         gt=0,
-        description="Target sub-dt / T_Lw ratio. Smaller → more substeps → smaller Δt/τ bias, more cost.",
-    )
-    max_substeps: int = Field(
-        50,
-        ge=1,
-        description="Cap on per-particle substeps per step. Lower → fewer GPU kernels but coarser near-surface integration.",
+        description="Reporting threshold only: sub-steps with sub_dt > exceedance_c · T_Lw are counted in run_metadata.json (substep_exceedance), split boundary layer / free troposphere.",
     )
     # Near-surface mixing controls (2026-07-02 physics-review follow-up). Defaults
     # are the FLEXPART-v11-matching "improved" behaviour; the legacy combination
@@ -392,6 +390,23 @@ class TurbulenceConfig(_Frozen):
         gt=0,
         description="Upper limit on the boundary-layer depth (m); null for none.",
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_adaptive_substep_keys(cls, data: Any) -> Any:
+        # Removed with the adaptive schedule (decision 0026). Refuse rather than
+        # ignore them: a config that sets them expects a behaviour GLIDE no longer has.
+        if isinstance(data, dict):
+            old = sorted(k for k in ("substep_c", "max_substeps") if k in data)
+            if old:
+                raise ValueError(
+                    f"turbulence.{' and turbulence.'.join(old)} no longer exist: the "
+                    "adaptive per-particle sub-step schedule was replaced by a fixed "
+                    "count for every particle (decision 0026). Remove "
+                    f"{' and '.join(old)} and set turbulence.n_substeps instead "
+                    "(default 8, i.e. a 7.5 s sub-step at dt_seconds = 60)."
+                )
+        return data
 
     @model_validator(mode="after")
     def _check_boundary_layer_depth_limits(self) -> TurbulenceConfig:

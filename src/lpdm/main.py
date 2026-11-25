@@ -1171,8 +1171,8 @@ def _scheme_kwargs(cfg: RunConfig) -> dict[str, object]:
         "meander_enabled": m.enabled,
         "meander_coefficient": m.coefficient,
         "meander_stencil_radius": m.stencil_radius,
-        "substep_c": cfg.turbulence.substep_c,
-        "max_substeps": cfg.turbulence.max_substeps,
+        "n_substeps": cfg.turbulence.n_substeps,
+        "exceedance_c": cfg.turbulence.exceedance_c,
         "flexpart_tl_floors": cfg.turbulence.flexpart_tl_floors,
         "surface_layer_override": cfg.turbulence.surface_layer_override,
         "blh_min_m": cfg.turbulence.boundary_layer_depth_min_m,
@@ -1314,6 +1314,106 @@ def _seed_global_generators(cfg: RunConfig) -> int | None:
     torch.manual_seed(int(seed))  # seeds the CPU and all CUDA default generators
     LOGGER.info("rng: torch default generators seeded with %d", int(seed))
     return int(seed)
+
+
+class _ExceedanceTally:
+    """Run totals of the turbulence sub-steps longer than the reporting threshold.
+
+    The scheme counts, on the device and inside its step (on the graph path inside
+    the captured step, with no host sync), the active particle-sub-steps whose
+    ``sub_dt > exceedance_c · T_Lw``, with the denominators, split boundary layer /
+    free troposphere (decision 0026). ``poll`` reads them once per met window, when
+    the cursor enters a new window, and ``flush`` at the end of each batch, so the
+    run pays one host sync per window. A scheme without sub-steps returns None and
+    nothing is recorded.
+    """
+
+    _KEYS = ("exceeded_bl", "substeps_bl", "exceeded_ft", "substeps_ft")
+
+    def __init__(self, scheme: TurbulenceScheme) -> None:
+        self.scheme = scheme
+        self.supported = True
+        self.window: datetime | None = None
+        self.totals = dict.fromkeys(self._KEYS, 0)
+        self.worst_bl = 0.0
+        self.worst_ft = 0.0
+        self.windows_exceeded = 0
+
+    def poll(self, window_start: datetime) -> None:
+        """Read the counts of the window just left, if the cursor has left one."""
+        if not self.supported or window_start == self.window:
+            return
+        previous, self.window = self.window, window_start
+        if previous is not None:
+            self._take(previous)
+
+    def flush(self) -> None:
+        """Read the counts of the current window (end of a batch)."""
+        if self.supported and self.window is not None:
+            self._take(self.window)
+        self.window = None
+
+    def _take(self, window_start: datetime) -> None:
+        taken = self.scheme.take_substep_exceedance(window_start)
+        if taken is None:
+            self.supported = False
+            return
+        for k in self._KEYS:
+            self.totals[k] += int(taken[k])
+        self.worst_bl = max(self.worst_bl, float(taken["worst_bl"]))
+        self.worst_ft = max(self.worst_ft, float(taken["worst_ft"]))
+        if taken["exceeded_bl"] or taken["exceeded_ft"]:
+            self.windows_exceeded += 1
+
+    def metadata(self) -> dict[str, object] | None:
+        if not self.supported:
+            return None
+        t = self.totals
+
+        def frac(num: int, den: int) -> float:
+            return num / den if den else 0.0
+
+        return {
+            "n_substeps": getattr(self.scheme, "n_substeps", None),
+            "exceedance_c": getattr(self.scheme, "exceedance_c", None),
+            "criterion": "sub_dt > exceedance_c * T_Lw, T_Lw at the sub-step's height",
+            "unit": "active particle-sub-steps",
+            "boundary_layer": {
+                "exceeded": t["exceeded_bl"],
+                "substeps": t["substeps_bl"],
+                "fraction": frac(t["exceeded_bl"], t["substeps_bl"]),
+                "worst_sub_dt_over_T_Lw": self.worst_bl,
+            },
+            "free_troposphere": {
+                "exceeded": t["exceeded_ft"],
+                "substeps": t["substeps_ft"],
+                "fraction": frac(t["exceeded_ft"], t["substeps_ft"]),
+                "worst_sub_dt_over_T_Lw": self.worst_ft,
+            },
+            "met_windows_with_exceedance": self.windows_exceeded,
+        }
+
+    def log_run_total(self) -> None:
+        meta = self.metadata()
+        if meta is None:
+            return
+        bl, ft = meta["boundary_layer"], meta["free_troposphere"]
+        LOGGER.info(
+            "sub-step exceedance (sub_dt > %s T_Lw, n_substeps=%s): boundary layer %d of %d "
+            "(%.3g%%, worst %.2f); free troposphere %d of %d (%.3g%%, worst %.2f); "
+            "%d met window(s).",
+            meta["exceedance_c"],
+            meta["n_substeps"],
+            bl["exceeded"],
+            bl["substeps"],
+            100.0 * bl["fraction"],
+            bl["worst_sub_dt_over_T_Lw"],
+            ft["exceeded"],
+            ft["substeps"],
+            100.0 * ft["fraction"],
+            ft["worst_sub_dt_over_T_Lw"],
+            meta["met_windows_with_exceedance"],
+        )
 
 
 def _run(
@@ -1518,6 +1618,9 @@ def _run(
     # 2026-07-16 #2): without it every step paid a full [3, Z, Y, X] host->device
     # copy + reduction just to log a (3,) mean.
     wind_mean_cache: dict = {}
+    # Sub-step exceedance counter (decision 0026): counted on the device inside the
+    # step, read here once per met window, recorded in run_metadata.json.
+    exceedance = _ExceedanceTally(scheme)
 
     for batch in batches:
         if device.type == "cuda":
@@ -1649,6 +1752,7 @@ def _run(
                 hour_windows += fetched_windows
                 if fetched_windows:
                     phase_timer.tick_fetch()
+                exceedance.poll(met_window.metadata.time_start)
                 # On the static path HannaScheme folds RK2 advection into its captured
                 # graph (one graph for advect + turbulence), so the runtime must NOT
                 # advect separately. A scheme that does NOT fold advection (e.g. the
@@ -1735,6 +1839,7 @@ def _run(
                     hour_windows += fetched_windows
                     if fetched_windows:
                         phase_timer.tick_fetch()
+                    exceedance.poll(met_window.metadata.time_start)
                     advected_active, t_alpha, wind_mean = _advect_active_particles(
                         engine,
                         device,
@@ -1867,6 +1972,8 @@ def _run(
                 step_profiler.after_step()
 
             t_cursor = t_prev
+
+        exceedance.flush()
 
         # Materialise this batch's per-step diagnostics in ONE host transfer
         # (instead of a `.item()` sync every step). `alive_particles` is the
@@ -2001,6 +2108,10 @@ def _run(
         },
         "footprint_units": _footprint_units_doc(cfg),
     }
+    exceedance_meta = exceedance.metadata()
+    if exceedance_meta is not None:
+        metadata["substep_exceedance"] = exceedance_meta
+    exceedance.log_run_total()
     writer.write_metadata_json(outputs.metadata, metadata)
 
     phase_timer.summary(hour_windows=hour_windows)

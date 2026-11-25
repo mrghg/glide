@@ -86,6 +86,21 @@ class TurbulenceScheme(ABC):
 
         del met_interval_seconds
 
+    def take_substep_exceedance(self, window_start: object) -> dict[str, float] | None:
+        """Read and reset the sub-step exceedance counts accumulated since the last call.
+
+        The runtime calls this once per met window and at the end of each batch
+        (``window_start`` names the window just left). A scheme with sub-steps returns
+        ``exceeded_bl``, ``substeps_bl``, ``exceeded_ft``, ``substeps_ft`` (active
+        particle-sub-steps in the boundary layer / free troposphere, and how many had
+        a sub-step longer than the scheme's reporting threshold times T_Lw) and
+        ``worst_bl``, ``worst_ft`` (largest sub_dt / T_Lw). Default: ``None``, nothing
+        to report.
+        """
+
+        del window_start
+        return None
+
     def step_includes_advection(self, engine: GPUEngine) -> bool:
         """Whether ``step`` also performs the RK2 mean-wind advection (so the runtime
         must NOT advect separately).
