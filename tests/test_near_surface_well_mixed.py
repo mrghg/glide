@@ -10,10 +10,17 @@ must each hold their uniform share of the particles. Three regimes, as B7's
 
 Before decision 0027 the coefficients were held at their outer-step values over
 the sub-steps and each particle chose its own sub-step count from its T_Lw. On
-this harness that code gave the lowest 5% 1.6-1.8 times its share in the
-neutral and stable regimes (docs/physics.md §6). The tolerance covers the
-remaining sub-step error at the default count plus particle noise, measured
-with 5 seeds of 20,000 particles (outputs/agents/WM/fixcount/study/).
+this harness that code gives the lowest 5% 1.79 (stable) and 1.66 (neutral)
+times its share, and the convective 0-40 m 0.90 (5 seeds of 20,000 particles;
+this file fails on it in all three regimes). At the default 16 sub-steps the
+5-seed means are 1.035 / 1.035 (stable, lowest 5% / 0-40 m), 1.006 / 1.008
+(neutral) and 0.994 / 0.987 (convective), seed-to-seed standard deviation at
+most 0.016; 8 sub-steps give 1.074 / 1.064 and 0.970 / 0.940
+and 4 give 1.156 / 1.141 and 0.882 / 0.815
+(outputs/agents/WM/fixcount/study/tables.md, docs/physics.md §6). The
+tolerance, ±0.09, is the largest remaining error at the default (0.035) plus
+three seed standard deviations (0.048), rounded up; it fails the old code and
+4 sub-steps, not 8.
 """
 
 from __future__ import annotations
@@ -34,7 +41,7 @@ REGIMES = {
     "neutral": (1500.0, 0.4, 0.0),
     "convective": (1500.0, 0.3, 200.0),
 }
-TOLERANCE = 0.1
+TOLERANCE = 0.09
 
 
 def _met(blh_m: float, ustar: float, shf: float) -> HourlyMetTensors:

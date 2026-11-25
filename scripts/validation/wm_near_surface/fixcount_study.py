@@ -214,6 +214,9 @@ def run(args) -> dict:
     met = met_window(blh, ustar, shf, ft_n=args.ft_n if args.harness == "open" else None)
     engine = LidEngine(blh, device="cpu") if args.harness == "closed" else GPUEngine(device="cpu")
     scheme = build_scheme(args)
+    if args.fd_delta is not None:
+        # Mechanism probe only: the finite-difference step of ∂σ_w²/∂z (default 1 m).
+        scheme.DRIFT_FD_DELTA_M = float(args.fd_delta)
     n = args.particles
     p = torch.zeros(n, 4, dtype=torch.float32)
     p[:, 1] = 45.0
@@ -248,7 +251,7 @@ def run(args) -> dict:
         n=None if args.variant == "old" else args.n, variant=args.variant,
         adapt_c=args.adapt_c if args.variant == "adaptive" else None,
         ft_n=args.ft_n if args.harness == "open" else None,
-        seed=args.seed, particles=n, steps=steps, tag=args.tag,
+        seed=args.seed, particles=n, steps=steps, tag=args.tag, fd_delta=args.fd_delta,
         src=os.path.dirname(hanna_mod.__file__),
         metrics=m, se=se, profile30=[round(float(x), 4) for x in prof], profile_top_m=hi,
         exceedance=taken, wall_s=round(time.time() - t0, 1),
@@ -268,6 +271,7 @@ def main() -> None:
     ap.add_argument("--adapt-c", type=float, default=0.125)
     ap.add_argument("--max-substeps", type=int, default=None)
     ap.add_argument("--ft-n", type=float, default=0.015)
+    ap.add_argument("--fd-delta", type=float, default=None, help="probe: FD step of the drift (m)")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--particles", type=int, default=20_000)
     ap.add_argument("--threads", type=int, default=2)

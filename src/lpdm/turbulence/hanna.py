@@ -112,7 +112,7 @@ MEANDER_TIMESCALE_S_DEFAULT = 1800.0  # half of the hourly ERA5 field interval
 # the start of each sub-step. A sub-step length chosen per particle from its T_Lw
 # (the old adaptive schedule) is itself a spurious drift towards where steps are
 # short — the ground — so the count is a configured constant, never data-dependent.
-N_SUBSTEPS_DEFAULT = 8
+N_SUBSTEPS_DEFAULT = 16
 # Reporting threshold only: a particle-sub-step with sub_dt > EXCEEDANCE_C · T_Lw
 # (T_Lw at that sub-step's height) is counted in run_metadata.json
 # (`substep_exceedance`), split boundary layer / free troposphere, together with

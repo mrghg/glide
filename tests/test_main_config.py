@@ -429,7 +429,7 @@ def test_scheme_kwargs_forwards_meander_only_for_hanna() -> None:
         "meander_stencil_radius": 2,
         "meander_timescale_seconds": 900.0,
         # One fixed sub-step count for every particle (decision 0027).
-        "n_substeps": 8,
+        "n_substeps": 16,
         # Near-surface mixing knobs default to the FLEXPART-matching behaviour
         # (T_L floors on, legacy surface-layer override off).
         "flexpart_tl_floors": True,

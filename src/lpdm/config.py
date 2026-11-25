@@ -348,7 +348,7 @@ class MeanderConfig(_Frozen):
 
 # Hanna turbulence sub-steps per outer step (decision 0027); the same value as
 # `lpdm.turbulence.hanna.N_SUBSTEPS_DEFAULT` (tests/test_main_config.py checks).
-N_SUBSTEPS_DEFAULT = 8
+N_SUBSTEPS_DEFAULT = 16
 
 
 class TurbulenceConfig(_Frozen):

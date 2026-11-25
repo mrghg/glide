@@ -444,7 +444,7 @@ def test_exceedance_counter_reports_short_T_L(static: bool) -> None:
     ``exceedance_c · T_Lw`` (and T_Lw), with the denominator, and reports them once
     through ``take_substep_exceedance`` (which resets the counts). The legacy
     near-surface treatment (1 s T_L floor + MO surface-layer override) gives
-    T_Lw ~ 1 s at z = 1 m, so 300 s / 8 = 37.5 s sub-steps exceed the 0.5 target."""
+    T_Lw ~ 1 s at z = 1 m, so the 300 s / 16 = 18.75 s sub-steps exceed it."""
 
     scheme = HannaScheme(
         flexpart_tl_floors=False, surface_layer_override=True, static_substeps=static
@@ -463,7 +463,7 @@ def test_exceedance_counter_reports_short_T_L(static: bool) -> None:
 def test_flexpart_tl_floors_bound_the_boundary_layer_exceedance() -> None:
     """With the DEFAULT near-surface treatment (FLEXPART T_L floors on, legacy
     surface-layer override off) T_Lw ≥ 30 s in the boundary layer, so the default
-    7.5 s sub-step at dt = 60 s (ratio ≤ 0.25) never exceeds the 0.5 target there,
+    3.75 s sub-step at dt = 60 s (ratio ≤ 0.125) never exceeds the 0.5 target there,
     even for a z = 1 m release. The same release exceeds it under the legacy
     combination (test_exceedance_counter_reports_short_T_L)."""
 
@@ -689,6 +689,50 @@ def test_ubl_holds_sigma_constant_below_z_ubl() -> None:
     assert float(z_above_ubl.clamp(min=scheme.z_ubl_m)[0]) == 2.0
     z_far_above = torch.tensor([100.0])
     assert float(z_far_above.clamp(min=scheme.z_ubl_m)[0]) == 100.0
+
+
+@pytest.mark.parametrize("shf", [-20.0, 0.0, 200.0], ids=["stable", "neutral", "convective"])
+def test_basal_zero_gradient_only_below_the_clamp(shf: float) -> None:
+    """Below ``z_ubl`` every coefficient is sampled at ``z_ubl``, so the profile is
+    flat there, but the finite-difference stencil (clamped to [z_ubl, z_ubl + δ])
+    returns the one-sided gradient just above the clamp. With
+    ``basal_zero_gradient`` the σ_w² gradient drift is zero strictly below the
+    clamp and unchanged at and above it; σ, T_L and the density drift are the same
+    either way (decision 0027, physics.md §6)."""
+
+    from lpdm.gpu_engine import GPUEngine
+
+    engine = GPUEngine(device="cpu")
+    met = _uniform_met(blh=800.0, ustar=0.3, shf=shf)
+    z = torch.tensor([0.0, 0.5, 1.0, 1.999, 2.0, 2.5, 3.0, 50.0])
+    n = z.numel()
+    out = {}
+    for flag in (False, True):
+        scheme = HannaScheme(basal_zero_gradient=flag)
+        ft_fields, grid_bounds = scheme._free_trop_fields(met, torch.device("cpu"), torch.float32)
+        density = scheme._density_fields(met, torch.device("cpu"), torch.float32)
+        h_over_L = {-20.0: 5.0, 0.0: 0.0, 200.0: -50.0}[shf]
+        col = dict(
+            blh=torch.full((n,), 800.0),
+            ustar=torch.full((n,), 0.3),
+            w_star=torch.full((n,), 1.8 if shf > 0 else 0.0),
+            h_over_L=torch.full((n,), h_over_L),
+            L=torch.full((n,), 800.0 / h_over_L if h_over_L else 1e10),
+            lat=torch.full((n,), 0.0),
+            lon=torch.full((n,), 0.0),
+            ft_fields=ft_fields,
+            grid_bounds=grid_bounds,
+            engine=engine,
+        )
+        out[flag] = scheme._vertical_coefficients(z, density, **col)
+    below = z < 2.0
+    off, on = out[False], out[True]
+    # The stencil as it was: below the clamp, the one-sided gradient at the clamp.
+    assert torch.all(off[7][below] == off[7][4]) and float(off[7][4]) != 0.0
+    assert torch.all(on[7][below] == 0.0)  # −½∂σ_w²/∂z
+    assert torch.equal(on[7][~below], off[7][~below])
+    for k in (0, 1, 2, 3, 4, 5, 6, 8):  # σ, σ_w², T_L, density drift: unchanged
+        assert torch.equal(on[k], off[k])
 
 
 def test_z_ubl_constructor_validation() -> None:
