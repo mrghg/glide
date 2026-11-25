@@ -30,7 +30,7 @@ _HEADER = re.compile(
     r"GLIDE phase timers\s+\S\s+total wall\s+(?P<wall>[\d.]+)s\s+\(met fetches:\s*(?P<fetches>\d+)\)"
 )
 _ROW = re.compile(
-    r"^\s+(?P<name>\S+)\s+(?P<total>[\d.]+)\s+(?P<pct>[\d.]+)%"
+    r"^\s+(?P<name>\S+)\s+(?P<total>-?[\d.]+)\s+(?P<pct>-?[\d.]+)%"
     r"(?:\s+(?P<calls>\d+)\s+(?P<ms>[\d.]+))?\s*$"
 )
 

@@ -7,6 +7,7 @@ accumulation, output writing) without depending on remote ERA5 data.
 from __future__ import annotations
 
 import dataclasses
+import json
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -1928,7 +1929,7 @@ def test_step_core_traces_as_one_graph_no_breaks() -> None:
             engine=engine,
             **inputs,
         )
-        assert len(out) == 6 and all(torch.isfinite(o).all() for o in out)
+        assert len(out) == 8 and all(torch.isfinite(o).all() for o in out)
     finally:
         torch._dynamo.config.suppress_errors = prev
         torch._dynamo.reset()
@@ -2385,3 +2386,137 @@ def test_each_particle_stops_its_own_length_after_its_release(
     steps_per_hour = 3600 // cfg.simulation.dt_seconds
     expected = [n] * (2 * steps_per_hour) + [2 * n] * steps_per_hour + [n] * (2 * steps_per_hour)
     assert active[active > 0].tolist() == expected
+
+
+# --- Substep-cap saturation counter (task A1, PR-F2) ---------------------------------
+
+
+@pytest.mark.parametrize("path", ["dynamic", "static", "graph"])
+def test_substep_saturation_counted_on_every_path(
+    tmp_path: Path, monkeypatch, caplog, path: str
+) -> None:
+    """A config forced to saturate (max_substeps=1: every active particle needs at
+    least one substep, so every active particle-step is at the cap) reports every
+    active particle-step as saturated in run_metadata.json and logs the warning once,
+    on the dynamic path, the static eager path and the static graph-compiled path (on
+    CPU the compiled core is traced and run, without CUDA graphs)."""
+
+    import logging
+
+    from lpdm.turbulence import HannaScheme
+
+    monkeypatch.setenv("GLIDE_STATIC_SUBSTEPS", "0" if path == "dynamic" else "1")
+    monkeypatch.setenv("GLIDE_COMPILE", "1" if path == "graph" else "0")
+    cfg = _make_run_config(
+        output_uri=str(tmp_path / "out"),
+        turbulence_scheme="hanna_1982",
+        simulation_length_seconds=7200,
+        n_particles=64,
+    )
+    reader = _make_hanna_reader(cfg, wind_fn=lambda _: (5.0, 0.0, 0.0))
+    scheme = HannaScheme(max_substeps=1)
+    with caplog.at_level(logging.WARNING):
+        metadata = _run(cfg, reader=reader, scheme=scheme)
+    if path == "graph":
+        assert scheme._graph_compile_state == "ok"
+
+    sat = metadata["runtime"]["substep_saturation"]
+    traj = pd.read_parquet(tmp_path / "out" / "trajectory_diagnostics.parquet")
+    active_steps = int(traj["active_particles"].sum())
+    assert active_steps > 0
+    assert sat["max_substeps"] == 1
+    assert sat["active_particle_steps"] == active_steps
+    assert sat["saturated_particle_steps"] == active_steps
+    assert sat["saturated_fraction"] == 1.0
+    assert sat["met_windows_with_saturation"] >= 2  # 2 h back: at least two windows
+    assert sat["worst_sub_dt_over_T_Lw"] > 0.0
+    # The scheme's warning, once (from the step on the variable-count paths, from the
+    # once-per-window read on the graph path), then the run total.
+    messages = [r.getMessage() for r in caplog.records if "hit max_substeps" in r.getMessage()]
+    assert len(messages) == 2, messages
+    assert messages[0].startswith("Hanna turbulence: ")
+    assert messages[1].startswith(f"substep cap: {active_steps} of {active_steps} active")
+    on_disk = json.loads((tmp_path / "out" / "run_metadata.json").read_text())
+    assert on_disk["runtime"]["substep_saturation"] == sat
+
+
+@pytest.mark.parametrize("static", [False, True])
+def test_substep_saturation_zero_when_cap_never_binds(
+    tmp_path: Path, monkeypatch, caplog, static: bool
+) -> None:
+    """With the default cap (50) and the FLEXPART T_Lw floors, no particle reaches the
+    cap at dt=300 s: the count is zero, nothing is warned, and the run total is still
+    recorded (the smoke config's case on the GPU)."""
+
+    import logging
+
+    monkeypatch.setenv("GLIDE_STATIC_SUBSTEPS", "1" if static else "0")
+    cfg = _make_run_config(
+        output_uri=str(tmp_path / "out"),
+        turbulence_scheme="hanna_1982",
+        simulation_length_seconds=7200,
+        n_particles=64,
+    )
+    reader = _make_hanna_reader(cfg, wind_fn=lambda _: (5.0, 0.0, 0.0))
+    with caplog.at_level(logging.WARNING):
+        metadata = _run(cfg, reader=reader)
+    sat = metadata["runtime"]["substep_saturation"]
+    assert sat["saturated_particle_steps"] == 0
+    assert sat["met_windows_with_saturation"] == 0
+    assert sat["active_particle_steps"] > 0
+    assert not [r for r in caplog.records if "hit max_substeps" in r.getMessage()]
+
+
+def test_substep_saturation_absent_for_scheme_without_substeps(tmp_path: Path) -> None:
+    """A scheme with no adaptive substeps records None (the key is still present)."""
+
+    cfg = _make_run_config(output_uri=str(tmp_path / "out"))
+    metadata = _run(cfg, reader=_make_reader(cfg, wind_fn=lambda _: (5.0, 0.0, 0.0)))
+    assert metadata["runtime"]["substep_saturation"] is None
+
+
+def test_static_and_dynamic_saturation_counts_agree_on_first_step() -> None:
+    """Before any random draw the substep counts depend only on T_Lw, so one step from
+    the same state saturates the same particles on both paths: the static path's
+    in-step count (returned by the core) equals the dynamic path's."""
+
+    from lpdm.gpu_engine import GPUEngine
+    from lpdm.turbulence import HannaScheme
+
+    met = _wmc_met_window(blh_m=1500.0, ustar_m_s=0.4)
+    n = 64
+    torch.manual_seed(5)
+    z0 = torch.rand(n) * 1400.0 + 1.0
+    counts = {}
+    for static in (False, True):
+        engine = GPUEngine(device="cpu")
+        # Legacy near-surface treatment: T_Lw falls to ~1 s near the ground, so with
+        # dt=300 s and a cap of 8 some particles (the low ones) saturate and some do not.
+        scheme = HannaScheme(
+            max_substeps=8,
+            flexpart_tl_floors=False,
+            surface_layer_override=True,
+            static_substeps=static,
+        )
+        particles = torch.zeros(n, 4, dtype=torch.float32)
+        particles[:, 1] = 45.0
+        particles[:, 2] = z0
+        particles[:, 3] = 1.0
+        state = scheme.initialize_state(n, device=torch.device("cpu"), dtype=torch.float32)
+        active = torch.ones(n, dtype=torch.bool)
+        active[: n // 4] = False  # inactive particles are never counted
+        scheme.step(
+            particles,
+            state,
+            met,
+            t_alpha=0.5,
+            dt_seconds=300.0,
+            active_mask=active,
+            engine=engine,
+        )
+        counts[static] = scheme.take_substep_saturation("w")
+        # Read-and-reset: a second read is zero.
+        assert scheme.take_substep_saturation("w") == (0, 0.0)
+    assert 0 < counts[False][0] < 3 * n // 4
+    assert counts[False][0] == counts[True][0]
+    assert counts[False][1] == pytest.approx(counts[True][1])

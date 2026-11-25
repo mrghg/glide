@@ -546,6 +546,12 @@ class HannaScheme(TurbulenceScheme):
         # now fires when the *effective* sub-dt is still large vs T_L — i.e. when
         # `max_substeps` is the binding constraint (the substep cap saturates).
         self._warned_substep_cap: bool = False
+        # Device-side running count of particle-steps whose substep count hit the cap,
+        # and the worst sub_dt/T_Lw among them (task A1, PR-F2). Accumulated every step
+        # with no host sync, on both paths; the runtime reads and resets them once per
+        # met window (`take_substep_saturation`). Allocated on first use.
+        self._saturated_steps: torch.Tensor | None = None
+        self._saturated_worst: torch.Tensor | None = None
 
         # CUDA-graph capture (phase 4): lazily-built `torch.compile(mode="reduce-overhead")`
         # wrapper of the WHOLE per-step core (`_step_core`). Built on first use on the
@@ -653,7 +659,7 @@ class HannaScheme(TurbulenceScheme):
                 # the framework that a new invocation is beginning so it doesn't treat
                 # the previous run's output buffers as live inputs for the current step.
                 torch.compiler.cudagraph_mark_step_begin()
-            particles, u_p, v_p, w_p, u_m, v_m = core_fn(
+            particles, u_p, v_p, w_p, u_m, v_m, n_saturated, worst_saturated = core_fn(
                 particles=particles,
                 u_prime=state["u_prime"],
                 v_prime=state["v_prime"],
@@ -676,6 +682,9 @@ class HannaScheme(TurbulenceScheme):
             if self.meander_enabled:
                 state["u_meander"] = u_m.clone()
                 state["v_meander"] = v_m.clone()
+            # Read into the scheme's own accumulators now, before the next replay
+            # reuses the graph's output buffers (a device-side add, no host sync).
+            self._accumulate_saturation(n_saturated, worst_saturated)
             return particles.clone(), state
 
         # DYNAMIC / boolean-indexed path (CPU): touch only the active subset; the empty
@@ -1102,6 +1111,13 @@ class HannaScheme(TurbulenceScheme):
                 moved, u_meander_new, v_meander_new, dt_seconds=dt_seconds, backward=True
             )
 
+        # Substep-cap saturation of this step, counted inside the step (and so inside the
+        # captured graph) with no host sync; the counts are those the substep loop used.
+        k_required, sub_dt = self._substep_counts(
+            T_Lw, dt_seconds, sigma_w.dtype, active_mask=active_mask
+        )
+        n_saturated, worst_saturated = self._saturation_stats(k_required, sub_dt, T_Lw, active_mask)
+
         # Mask-gated write-back (authoritative gate: covers advection + substep + meander).
         # Inactive particles revert to `orig_particles` — their ORIGINAL pre-advection
         # state — so they are frozen exactly (advection ran on the full set but is undone
@@ -1114,7 +1130,16 @@ class HannaScheme(TurbulenceScheme):
         if self.meander_enabled:
             u_meander_new = torch.where(active_mask, u_meander_new, u_meander)
             v_meander_new = torch.where(active_mask, v_meander_new, v_meander)
-        return particles_new, u_prime_new, v_prime_new, w_prime_new, u_meander_new, v_meander_new
+        return (
+            particles_new,
+            u_prime_new,
+            v_prime_new,
+            w_prime_new,
+            u_meander_new,
+            v_meander_new,
+            n_saturated,
+            worst_saturated,
+        )
 
     @staticmethod
     def _bilinear_at(field_2d, lon0, lon1, lat0, lat1, particle_lon, particle_lat):
@@ -1233,6 +1258,69 @@ class HannaScheme(TurbulenceScheme):
             k_required = torch.where(active_mask, k_required, torch.ones_like(k_required))
         sub_dt = float(dt_seconds) / k_required.to(dtype=dtype)
         return k_required, sub_dt
+
+    def _saturation_stats(
+        self,
+        k_required: torch.Tensor,
+        sub_dt: torch.Tensor,
+        T_Lw: torch.Tensor,
+        active_mask: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Count of particles whose substep count hit ``max_substeps``, and the worst
+        ``sub_dt / T_Lw`` among them, as 0-d device tensors — **no host sync**.
+
+        The criterion is the one the once-per-run warning has always used
+        (``k_required >= max_substeps``); ``active_mask`` leaves out inactive particles.
+        """
+
+        at_cap = k_required >= self.max_substeps
+        if active_mask is not None:
+            at_cap = at_cap & active_mask
+        n_at_cap = at_cap.sum()
+        if at_cap.numel() == 0:
+            return n_at_cap, torch.zeros((), dtype=sub_dt.dtype, device=sub_dt.device)
+        ratio = torch.where(at_cap, sub_dt / T_Lw.clamp(min=1e-3), torch.zeros_like(sub_dt))
+        return n_at_cap, ratio.amax()
+
+    def _accumulate_saturation(self, n_at_cap: torch.Tensor, worst: torch.Tensor) -> None:
+        """Add one step's saturation count to the running device-side totals."""
+
+        if self._saturated_steps is None or self._saturated_steps.device != n_at_cap.device:
+            self._saturated_steps = torch.zeros((), dtype=torch.long, device=n_at_cap.device)
+            self._saturated_worst = torch.zeros((), dtype=worst.dtype, device=worst.device)
+        self._saturated_steps += n_at_cap
+        torch.maximum(self._saturated_worst, worst, out=self._saturated_worst)
+
+    def take_substep_saturation(self, window_start: object) -> tuple[int, float]:
+        """Read and reset the saturated particle-step count (one host sync).
+
+        Called by the runtime once per met window. On the first non-zero count it logs
+        the substep-cap warning, with the same wording on both paths, unless the
+        variable-count loop has already logged it for this scheme instance.
+        """
+
+        if self._saturated_steps is None:
+            return 0, 0.0
+        count, worst = torch.stack(
+            [self._saturated_steps.to(torch.float64), self._saturated_worst.to(torch.float64)]
+        ).tolist()
+        self._saturated_steps.zero_()
+        self._saturated_worst.zero_()
+        count = int(count)
+        if count > 0 and not self._warned_substep_cap:
+            LOGGER.warning(
+                "Hanna turbulence: %d active particle-steps hit max_substeps=%d "
+                "(worst sub_dt/T_Lw=%.2f, target < %.2f) in the met window starting %s. "
+                "The Δt/τ bias is only partially controlled for these particles. Reduce "
+                "simulation.dt_seconds or raise max_substeps.",
+                count,
+                self.max_substeps,
+                float(worst),
+                float(self.substep_c),
+                window_start,
+            )
+            self._warned_substep_cap = True
+        return count, float(worst)
 
     def _substep_schedule(
         self,
@@ -1462,6 +1550,7 @@ class HannaScheme(TurbulenceScheme):
         # `max_k` host sync bounds the loop — looping to the static `k_cap` instead
         # would run up to ~max_substeps empty-mask iterations every step.
         k_required, sub_dt, max_k = self._substep_schedule(T_Lw, dt_seconds, sigma_w.dtype)
+        self._accumulate_saturation(*self._saturation_stats(k_required, sub_dt, T_Lw))
 
         # Working tensors. Clone so we don't mutate the input subsets.
         xyz = active_xyz.clone()

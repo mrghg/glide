@@ -86,6 +86,18 @@ class TurbulenceScheme(ABC):
 
         del met_interval_seconds
 
+    def take_substep_saturation(self, window_start: object) -> tuple[int, float] | None:
+        """Read and reset the count of particle-steps whose substep count hit the cap.
+
+        The runtime calls this once per met window (``window_start`` names the window
+        the count belongs to, for the log). Returns ``(count, worst sub_dt / T_Lw)``
+        since the last call, or ``None`` for a scheme without adaptive substeps
+        (the default).
+        """
+
+        del window_start
+        return None
+
     def step_includes_advection(self, engine: GPUEngine) -> bool:
         """Whether ``step`` also performs the RK2 mean-wind advection (so the runtime
         must NOT advect separately).
