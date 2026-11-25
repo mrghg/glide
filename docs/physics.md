@@ -581,6 +581,11 @@ $T_{Lw} \le 20$ s, below the boundary-layer floor, so with the default settings
 every saturated particle is above the boundary layer. On the reference multi-site run
 (`configs/ab_multisite_perf.yaml`, January) 2.6% of active particle-steps
 reached it, the worst at $\Delta t_{\mathrm{sub}}/T_{Lw} = 1.58$ (task A1).
+The count measures **reaching the cap**, not exceeding the target: it cannot say
+what fraction of particle-steps had $\Delta t_{\mathrm{sub}} > c\,T_{Lw}$, only
+(through the worst ratio) that some did. A direct count of target exceedances,
+split between boundary layer and free troposphere, is part of the sub-stepping
+rework that follows this task.
 
 **Rogue-trajectory clip.** At the end of each sub-step's velocity update,
 
