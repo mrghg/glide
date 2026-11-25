@@ -20,14 +20,45 @@ from style import SEQ, SITE_COORDS, SITES, plt  # noqa: E402
 M_AIR, H = 0.02897, 40.0
 
 
+def load_fixture(fixture_dir: str, config: str) -> xr.DataArray:
+    """A golden fixture's footprint (``footprint.npz``, no coordinates) with the
+    coordinates and site labels rebuilt from its config: cell centres from the
+    output grid, the release order from the config's own schedule."""
+
+    from lpdm.config import RunConfig
+
+    cfg = RunConfig.from_yaml(config)
+    og = cfg.output_grid
+    arr = np.load(Path(fixture_dir) / "footprint.npz")["footprint"]
+    lon_e = np.linspace(og.lon_bounds[0], og.lon_bounds[1], og.n_x + 1)
+    lat_e = np.linspace(og.lat_bounds[0], og.lat_bounds[1], og.n_y + 1)
+    edges = np.asarray(og.z_edges_m, dtype=float)
+    releases = [r for b in cfg.expand_to_batches() for r in b.releases]
+    if len(releases) != arr.shape[0]:
+        raise ValueError(f"{len(releases)} releases in the config, {arr.shape[0]} in the fixture")
+    da = xr.DataArray(
+        arr,
+        dims=("release", "time_ago", "z_bin", "latitude", "longitude"),
+        coords={
+            "latitude": 0.5 * (lat_e[:-1] + lat_e[1:]),
+            "longitude": 0.5 * (lon_e[:-1] + lon_e[1:]),
+            "z_bottom_m": ("z_bin", edges[:-1]),
+            "z_top_m": ("z_bin", edges[1:]),
+            "site": ("release", np.array([r.label or "MHD" for r in releases])),
+        },
+        name="footprint",
+    )
+    return da.sum("time_ago")
+
+
 def load(run: str) -> xr.DataArray:
     fp = xr.open_zarr(Path(run) / "footprints.zarr")["footprint"].sum("time_ago").load()
     assert fp.attrs.get("density_weighting", "dry_air") == "dry_air" or True
     return fp
 
 
-def smoke(run: str, out: Path) -> dict:
-    fp = load(run).isel(release=0)
+def smoke(run, out: Path) -> dict:
+    fp = (run if isinstance(run, xr.DataArray) else load(run)).isel(release=0)
     surf = fp.isel(z_bin=0) * (M_AIR / H)
     box = dict(latitude=slice(40, 66), longitude=slice(-35, 15))
     s = surf.sel(**box)
@@ -67,8 +98,8 @@ def smoke(run: str, out: Path) -> dict:
     }
 
 
-def reference(run: str, out: Path) -> dict:
-    fp = load(run)
+def reference(run, out: Path) -> dict:
+    fp = run if isinstance(run, xr.DataArray) else load(run)
     surf = fp.isel(z_bin=0) * (M_AIR / H)
     sites = fp["site"].values
     box = dict(latitude=slice(40, 66), longitude=slice(-35, 15))
@@ -81,7 +112,8 @@ def reference(run: str, out: Path) -> dict:
         )
         lon, lat = SITE_COORDS[name]
         ax.plot(lon, lat, "o", ms=8, mfc=SITES[name], mec="white", mew=2)
-        ax.set_title(f"{name}: mean of 24 hourly releases, 1 Jan 2024")
+        n = int((sites == name).sum())
+        ax.set_title(f"{name}: mean of {n} hourly releases")
         ax.set_aspect(1.6)
     fig.colorbar(im, ax=axs, shrink=0.85, label="mean 0–40 m footprint (m² s mol⁻¹)")
     fig.savefig(out / "reference-maps.png", dpi=130)
@@ -89,19 +121,18 @@ def reference(run: str, out: Path) -> dict:
 
     totals = surf.sum(("latitude", "longitude"))
     fig, ax = plt.subplots(figsize=(10, 3.6), constrained_layout=True)
-    hours = np.arange(24)
     stats = {}
     for name in SITES:
         t = totals.isel(release=np.flatnonzero(sites == name)).values
-        ax.plot(hours, t, color=SITES[name], marker="o", ms=4, label=name)
+        ax.plot(np.arange(t.size), t, color=SITES[name], marker="o", ms=3, label=name)
         stats[name] = {
             "median": round(float(np.median(t)), 2),
             "min": round(float(t.min()), 2),
             "max": round(float(t.max()), 2),
         }
-    ax.set_xlabel("release start (hour of 1 Jan 2024, UTC)")
+    ax.set_xlabel("release start (hours from 1 Jan 2024 00:00 UTC)")
     ax.set_ylabel("total 0–40 m (m² s mol⁻¹)")
-    ax.set_xticks(range(0, 24, 3))
+    ax.set_xticks(range(0, 49, 6))
     ax.grid(axis="y")
     ax.legend(ncol=3, loc="upper left")
     ax.set_title("Total surface sensitivity of every release", loc="left")
@@ -111,10 +142,23 @@ def reference(run: str, out: Path) -> dict:
 
 
 if __name__ == "__main__":
-    out = Path(sys.argv[3])
-    out.mkdir(parents=True, exist_ok=True)
+    # Two run directories and an output directory, or "--fixtures OUTDIR" to
+    # draw the golden fixtures themselves (run from the repository root).
     import json
 
-    res = {"smoke": smoke(sys.argv[1], out), "reference": reference(sys.argv[2], out)}
+    if sys.argv[1] == "--fixtures":
+        out = Path(sys.argv[2])
+        out.mkdir(parents=True, exist_ok=True)
+        smoke_fp = load_fixture(
+            "tests/golden/smoke_mhd_single_release/cpu", "configs/smoke_mhd_single_release.yaml"
+        )
+        ref_fp = load_fixture(
+            "outputs/golden/ab_multisite_perf/cuda", "configs/ab_multisite_perf.yaml"
+        )
+        res = {"smoke": smoke(smoke_fp, out), "reference": reference(ref_fp, out)}
+    else:
+        out = Path(sys.argv[3])
+        out.mkdir(parents=True, exist_ok=True)
+        res = {"smoke": smoke(sys.argv[1], out), "reference": reference(sys.argv[2], out)}
     (out / "glide-summary.json").write_text(json.dumps(res, indent=1))
     print(json.dumps(res, indent=1))
