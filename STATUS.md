@@ -195,8 +195,11 @@ relevant docs page with its consequence.
   that a moving $h$ rescales them. The column stays uniform near $h$, and a
   boundary layer loses particles to the free troposphere at the diffusion-limit
   rate, at every count tested ([docs/physics.md](docs/physics.md) §5, §6). On
-  real meteorology the near-surface footprint roughly doubles against the
-  fixtures (FOOTPRINT_SUMMARY). The golden fixtures are not yet regenerated.
+  the reference multi-site run the 0–40 m footprint is +48% against the
+  fixtures (median over releases, 3 seeds, seed spread 0.2%; total −4.2%) and
+  now converged in the sub-step count (8 against 16 sub-steps: 0.4%); the
+  Mace Head smoke run's 0–40 m footprint nearly doubles (+94%). The golden
+  fixtures are not yet regenerated.
 - **Forward/backward reciprocity test.** It tests the backward formulation
   directly, which nothing else does. Planned as task A6.
 - **The source of u\*.** From the surface stresses for v1; ERA5's `zust` is

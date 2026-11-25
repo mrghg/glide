@@ -194,7 +194,17 @@ band below).
 On real meteorology (*measured*): CPU smoke (Mace Head, one release, 1 day,
 3 seeds): 0–40 m footprint +92.0% / +94.4% / +95.8% (seed sd 0.4–0.6) against
 the fixture at $n$ = 8, 16, 32, total −6.6%; $n = 8$ against 16, same seed,
-−1.2 ± 0.2% in 0–40 m. Reference config: REFCONFIG_SUMMARY.
+−1.2 ± 0.2% in 0–40 m. Reference config
+(`configs/ab_multisite_perf.yaml`, 144 releases, GPU; 3 seeds; median over
+releases against the CUDA fixture; `outputs/agents/WM/interface/bench/`):
+0–40 m +47.9% (seed sd 0.2%), 40–1,000 m +119%, 1–5 km −31.0%, total −4.2% at
+$n = 16$; $n = 8$ against 16, same seed, +0.4% in 0–40 m (at most 1.2% in any
+site's day or night releases), and the share of sub-steps above the boundary
+layer 52.6% against 52.7%. With decision 0027 alone the 0–40 m change was −16%
+and +15% at $n$ = 8 and 16 (one seed), with 72% and 61% of sub-steps above the
+boundary layer: the boundary-layer top was what kept footprints from
+converging in $n$ (*measured* change; the attribution is *argued* from the
+columns).
 
 **Rejected alternatives.**
 - *Reflection at $h$, no turbulent exchange* (as FLEXPART reflects inside its

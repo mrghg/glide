@@ -725,7 +725,14 @@ no boundary-layer sub-step exceeded $0.5\,T_{Lw}$ at $n$ = 4, 8 or 16 (worst
 ratio $60/(30n)$, as the floor implies), and in the free troposphere 11.6%,
 0.0039% and 0.00005% of sub-steps did at $n$ = 4, 8 and 16 (worst ratios 2.28,
 1.16 and 0.83; $\Delta t_{\mathrm{sub}} > T_{Lw}$ in 0.0027%, 0.000012% and
-none). This count replaced task A1's count of
+none; code of decision 0027 alone, one seed). With decision 0028 (3 seeds) the
+free troposphere holds 52.7% of the sub-steps, and 0.052% (n = 8) and
+0.00026% (n = 16) of them exceed $0.5\,T_{Lw}$ (worst ratios 1.65–1.68 and
+0.81–0.83; $\Delta t_{\mathrm{sub}} > T_{Lw}$ in 0.00026% and none); still no
+boundary-layer sub-step does. The boundary-layer half of the counter is
+structurally zero at the defaults: with $T_{Lw} \ge 30$ s it needs
+$\Delta t/n > 15$ s. It is kept for runs without the floors, with a longer
+step or fewer sub-steps. This count replaced task A1's count of
 particle-steps that reached the old cap of 6 (2.6% on the same run, worst ratio
 1.58), which could not say how many exceeded the target.
 
@@ -739,18 +746,22 @@ re-evaluation), 5.18, 9.66 and 11.72 ms at $n$ = 4, 8 and 16: at $n = 16$,
 125 s more over the run, about 11% of its 1,157 s wall time. Reading
 meteorology still dominates (57–71% of wall time).
 
-**Effect on footprints.** The same run against its golden fixture (made with
-the code before this decision; median over the 144 releases, single seed):
-the 0–40 m footprint changes by −28%, −16%, +15% and +81% at $n$ = 4, 8, 16
-and 32, the 40–1,000 m layer by +7%, +26%, +69% and +155%, the 1–5 km layer by
-−1%, −5%, −15% and −40%, the total by −0.1% to −6%. The share of sub-steps
-spent above the boundary layer falls from 76% to 72%, 61% and 43%. So on real
-meteorology the near-surface footprint is far from converged in $n$: as in the
-open-top column, how many particles stay in the boundary layer depends on the
-sub-step, through the boundary-layer top (§8). Until that is resolved the
-default count is the one that passes the closed-column test, not a converged
-choice for footprints. The smoke run (Mace Head, one
-release, one day) changes by +29% in 0–40 m and −3.7% in total at $n = 16$.
+**Effect on footprints.** The reference run (`configs/ab_multisite_perf.yaml`,
+144 releases at three sites, 5 days back) against its golden fixture, made with
+the code before decision 0027 (median over releases; 3 seeds, seed standard
+deviation in brackets; `outputs/agents/WM/interface/bench/`): with decisions
+0027 and 0028 at $n = 16$ the 0–40 m footprint is +47.9% (0.2%), the
+40–1,000 m layer +119% (0.9%), the 1–5 km layer −31.0% (0.05%) and the total
+−4.2% (0.02%); by site, 0–40 m +44.7% (Mace Head), +55.9% (Ridge Hill) and
++45.4% (Tacolneston), +34.6% to +77.2% across their day and night releases. At
+$n = 8$ the same seed gives a 0–40 m footprint within 0.4% (median; at most
+1.2% in any site's day or night releases), and the share of sub-steps spent
+above the boundary layer is 52.6% against 52.7%: real footprints are converged
+in $n$ between 8 and 16. With decision 0027 alone they were not (0–40 m −16%
+and +15% at $n$ = 8 and 16, 72% and 61% of sub-steps above the boundary layer),
+because the boundary-layer top was not well mixed. The smoke run (Mace Head,
+one release, one day, 3 seeds) changes by +92.0%, +94.4% and +95.8% in 0–40 m
+at $n$ = 8, 16 and 32 (seed standard deviation 0.4–0.6%) and −6.6% in total.
 
 **Rogue-trajectory clip.** At the end of each sub-step's velocity update,
 
