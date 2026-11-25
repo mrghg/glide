@@ -1041,8 +1041,8 @@ def _advect_active_particles(
 
     # The wind stacks in `simulation.wind_gather_dtype` (task A4): float32 is
     # sampled with grid_sample as always, a 16-bit type with `trilinear_sample`.
-    wind_dtype = engine.wind_gather_dtype
-    sample_16bit = wind_dtype != torch.float32
+    wind_dtype = engine.wind_dtype
+    sample_16bit = wind_dtype.itemsize == 2
     m_start_uvw, m_end_uvw = met_window.channels("u", "v", "w")
     m_start = m_start_uvw.unsqueeze(0).to(device=device, dtype=wind_dtype)
     m_end = m_end_uvw.unsqueeze(0).to(device=device, dtype=wind_dtype)

@@ -746,7 +746,7 @@ class HannaScheme(TurbulenceScheme):
                 device,
                 dtype,
                 frame=engine.frame,
-                wind_dtype=engine.wind_gather_dtype,
+                wind_dtype=engine.wind_dtype,
             )
             graph_core = self._maybe_graph_compile(engine)
             core_fn = graph_core if graph_core is not None else self._step_core
@@ -987,7 +987,7 @@ class HannaScheme(TurbulenceScheme):
         )
 
     def _cached_raw_device_met(
-        self, met_window, device, dtype, wind_dtype: torch.dtype = torch.float32
+        self, met_window, device, dtype, wind_dtype: torch.dtype | None = None
     ) -> dict:
         """Raw met moved to the device ONCE per window (keyed by window start time).
 
@@ -1002,6 +1002,7 @@ class HannaScheme(TurbulenceScheme):
         ``_advect_rk2``.
         """
 
+        wind_dtype = dtype if wind_dtype is None else wind_dtype
         ts = met_window.metadata.time_start
         key = (ts, wind_dtype)
         entry = self._raw_met_cache
@@ -1052,7 +1053,7 @@ class HannaScheme(TurbulenceScheme):
         dtype,
         *,
         frame: HorizontalFrame = DEGREES,
-        wind_dtype: torch.dtype = torch.float32,
+        wind_dtype: torch.dtype | None = None,
     ):
         """Assemble the per-step pure-tensor inputs for `_step_core` (the torch.compile
         target). The raw met + derived stacks are cached per window; only the cheap
@@ -1135,7 +1136,7 @@ class HannaScheme(TurbulenceScheme):
         frame = engine.frame
         m_start = m_start_uvw.unsqueeze(0)
         m_end = m_end_uvw.unsqueeze(0)
-        sample_16bit = m_start_uvw.dtype != torch.float32
+        sample_16bit = m_start_uvw.dtype.itemsize == 2
 
         def wind(xyz: torch.Tensor) -> torch.Tensor:
             xyz_norm = engine.normalize_particle_coordinates(

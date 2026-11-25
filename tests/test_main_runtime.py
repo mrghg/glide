@@ -1985,7 +1985,7 @@ def test_step_core_traces_as_one_graph_no_breaks(frame_kind: str, wind_dtype: to
             torch.device("cpu"),
             torch.float32,
             frame=engine.frame,
-            wind_dtype=engine.wind_gather_dtype,
+            wind_dtype=engine.wind_dtype,
         )
 
         compiled = torch.compile(scheme._step_core, fullgraph=True, backend="eager")
@@ -2048,7 +2048,7 @@ def test_step_core_does_not_recompile_per_step(frame_kind: str, wind_dtype: torc
                 torch.device("cpu"),
                 torch.float32,
                 frame=engine.frame,
-                wind_dtype=engine.wind_gather_dtype,
+                wind_dtype=engine.wind_dtype,
             )
             compiled(
                 particles=particles,

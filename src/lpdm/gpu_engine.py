@@ -248,6 +248,7 @@ class GPUEngine:
         if wind_gather_dtype not in (torch.float32, torch.bfloat16):
             raise ValueError(f"unsupported wind_gather_dtype {wind_gather_dtype}")
         self.wind_gather_dtype = wind_gather_dtype
+
         # `torch.compile` the elementwise hot-path methods (OU velocity update +
         # displacement + reflection). Each fuses its internal ops into far fewer
         # CUDA kernels, which helps when the run is launch-bound (the regime
@@ -275,6 +276,13 @@ class GPUEngine:
         self._ou_step_fn: Callable[..., torch.Tensor] = _ou_step_kernel
         if self._compile_hot_paths:
             self._enable_compiled_hot_paths()
+
+    @property
+    def wind_dtype(self) -> torch.dtype:
+        """dtype of the wind stacks on the device: the 16-bit gather dtype if one is
+        configured, else the engine's own dtype (float32, or float64 in some tests)."""
+
+        return self.dtype if self.wind_gather_dtype == torch.float32 else self.wind_gather_dtype
 
     def _enable_compiled_hot_paths(self) -> None:
         """Wrap the elementwise hot-path methods with ``torch.compile``.
