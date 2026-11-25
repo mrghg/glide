@@ -16,7 +16,7 @@ _Last updated: 2026-11-20._
 
 | Area | State |
 | --- | --- |
-| **Core backward LPDM** | RK2 advection, exact-OU Langevin turbulence with the full Thomson well-mixed drift and Stohl–Thomson density correction, ground reflection, per-particle adaptive sub-stepping. Mass-conserving. ([docs/physics.md](docs/physics.md)) |
+| **Core backward LPDM** | RK2 advection, exact-OU Langevin turbulence with the full Thomson well-mixed drift and Stohl–Thomson density correction, ground reflection, adaptive sub-stepping (one shared sub-step, coefficients re-evaluated every sub-step). Mass-conserving. ([docs/physics.md](docs/physics.md)) |
 | **Turbulence** | Hanna (1982) in three regimes, aligned to FLEXPART v11; gradient-Richardson free-troposphere closure; Maryon meander. Behind a swappable `TurbulenceScheme` interface. ([docs/turbulence.md](docs/turbulence.md)) |
 | **Convection** | Reduced Emanuel mass-flux scheme, non-divergent matrix, in each meteorology column, once per meteorology interval. ([docs/convection.md](docs/convection.md)) |
 | **Terrain-following vertical coordinate** | Meteorology resampled onto a fixed AGL grid per window, with slope-corrected vertical velocity. Fixed the zero-surface-footprint problem over high terrain. |
@@ -169,9 +169,11 @@ relevant docs page with its consequence.
 
 - **Per-column vertical interpolation.** Uses the bounding-box mean. Convection
   now works column by column (task A02, decision 0023).
-- **Per-sub-step $\sigma$ re-evaluation.** FLEXPART re-evaluates $\sigma$ and
-  $T_L$ every sub-step; GLIDE holds them at the outer-step value (the
-  velocity-dependent part of the drift *is* re-evaluated).
+- **Sub-step fraction $c$.** With per-sub-step re-evaluation and a shared
+  sub-step (branch `agent/WM-near-surface`), the default $c = 0.5$ leaves the
+  lowest 5% of the boundary layer +15% over-occupied (stable) and −11% under
+  (convective); $c = 0.125$ brings both within 3%, for four times the
+  turbulence work ([docs/physics.md](docs/physics.md) §6). Not yet decided.
 - **Forward/backward reciprocity test.** It tests the backward formulation
   directly, which nothing else does. Planned as task A6.
 - **The source of u\*.** From the surface stresses for v1; ERA5's `zust` is

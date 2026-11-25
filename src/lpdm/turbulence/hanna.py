@@ -725,22 +725,21 @@ class HannaScheme(TurbulenceScheme):
             engine=engine,
         )
         z_eval = z_agl.clamp(min=self.z_ubl_m)
-        sigma_u, sigma_v, sigma_w, T_Lu, T_Lv, T_Lw = self._column_turbulence(z_eval, **col_kwargs)
 
-        z_hi = z_eval + self.DRIFT_FD_DELTA_M
-        z_lo = (z_eval - self.DRIFT_FD_DELTA_M).clamp(min=self.z_ubl_m)
-        sw_hi = self._column_turbulence(z_hi, **col_kwargs)[2]
-        sw_lo = self._column_turbulence(z_lo, **col_kwargs)[2]
-        dsig2_dz = (sw_hi.pow(2) - sw_lo.pow(2)) / (z_hi - z_lo).clamp(min=self.DRIFT_FD_DELTA_M)
-        sigma_w_sq = sigma_w.pow(2).clamp(min=SIGMA_MIN_M_S**2)
+        def coeffs_at(z: torch.Tensor) -> tuple[torch.Tensor, ...]:
+            return self._vertical_coefficients(z, density_fields, **col_kwargs)
 
-        density_at_p = self._interp_3d_field(
-            density_fields, grid_bounds, lon_deg, lat_deg, z_eval, engine
-        )
-        rho_at_p = density_at_p[0].clamp(min=1e-3)
-        density_drift_forward = sigma_w_sq * density_at_p[1] / rho_at_p
-        half_dsig2_dz_backward = -0.5 * dsig2_dz
-        density_drift_backward = -density_drift_forward
+        (
+            sigma_u,
+            sigma_v,
+            sigma_w,
+            sigma_w_sq,
+            T_Lu,
+            T_Lv,
+            T_Lw,
+            half_dsig2_dz_backward,
+            density_drift_backward,
+        ) = coeffs_at(z_agl)
 
         moved, u_prime_active, v_prime_active, w_prime_active = self._integrate_vertical_substeps(
             active_xyz=active_xyz,
@@ -756,6 +755,7 @@ class HannaScheme(TurbulenceScheme):
             T_Lw=T_Lw,
             half_dsig2_dz_backward=half_dsig2_dz_backward,
             density_drift_backward=density_drift_backward,
+            coeffs_at=coeffs_at,
             dt_seconds=dt_seconds,
             engine=engine,
         )
@@ -789,6 +789,53 @@ class HannaScheme(TurbulenceScheme):
             state["u_meander"][active_mask] = u_meander_active
             state["v_meander"][active_mask] = v_meander_active
         return particles, state
+
+    def _vertical_coefficients(
+        self,
+        z_agl: torch.Tensor,
+        density_fields: torch.Tensor,
+        **col_kwargs,
+    ) -> tuple[torch.Tensor, ...]:
+        """All turbulence coefficients at height ``z_agl`` (sampled at the basal-layer
+        clamp ``max(z, z_ubl)``): ``(σ_u, σ_v, σ_w, σ_w², T_Lu, T_Lv, T_Lw,
+        −½∂σ_w²/∂z, −(σ_w²/ρ)∂ρ/∂z)``, the last two pre-negated for the backward
+        drift. Called once at the start of the outer step and again at the start of
+        every later sub-step at the particle's current height (docs/physics.md §6)."""
+
+        z_eval = z_agl.clamp(min=self.z_ubl_m)
+        sigma_u, sigma_v, sigma_w, T_Lu, T_Lv, T_Lw = self._column_turbulence(z_eval, **col_kwargs)
+
+        z_hi = z_eval + self.DRIFT_FD_DELTA_M
+        z_lo = (z_eval - self.DRIFT_FD_DELTA_M).clamp(min=self.z_ubl_m)
+        sw_hi = self._column_turbulence(z_hi, **col_kwargs)[2]
+        sw_lo = self._column_turbulence(z_lo, **col_kwargs)[2]
+        dsig2_dz = (sw_hi.pow(2) - sw_lo.pow(2)) / (z_hi - z_lo).clamp(min=self.DRIFT_FD_DELTA_M)
+        sigma_w_sq = sigma_w.pow(2).clamp(min=SIGMA_MIN_M_S**2)
+
+        density_at_p = self._interp_3d_field(
+            density_fields,
+            col_kwargs["grid_bounds"],
+            col_kwargs["lon"],
+            col_kwargs["lat"],
+            z_eval,
+            col_kwargs["engine"],
+            level_arr=col_kwargs.get("level_arr"),
+            ascending=col_kwargs.get("ascending"),
+        )
+        rho_at_p = density_at_p[0].clamp(min=1e-3)
+        density_drift_backward = -(sigma_w_sq * density_at_p[1] / rho_at_p)
+        half_dsig2_dz_backward = -0.5 * dsig2_dz
+        return (
+            sigma_u,
+            sigma_v,
+            sigma_w,
+            sigma_w_sq,
+            T_Lu,
+            T_Lv,
+            T_Lw,
+            half_dsig2_dz_backward,
+            density_drift_backward,
+        )
 
     def _cached_raw_device_met(self, met_window, device, dtype) -> dict:
         """Raw met moved to the device ONCE per window (keyed by window start time).
@@ -1030,29 +1077,21 @@ class HannaScheme(TurbulenceScheme):
             ascending=ascending,
         )
         z_eval = z_agl.clamp(min=self.z_ubl_m)
-        sigma_u, sigma_v, sigma_w, T_Lu, T_Lv, T_Lw = self._column_turbulence(z_eval, **col_kwargs)
 
-        z_hi = z_eval + self.DRIFT_FD_DELTA_M
-        z_lo = (z_eval - self.DRIFT_FD_DELTA_M).clamp(min=self.z_ubl_m)
-        sw_hi = self._column_turbulence(z_hi, **col_kwargs)[2]
-        sw_lo = self._column_turbulence(z_lo, **col_kwargs)[2]
-        dsig2_dz = (sw_hi.pow(2) - sw_lo.pow(2)) / (z_hi - z_lo).clamp(min=self.DRIFT_FD_DELTA_M)
-        sigma_w_sq = sigma_w.pow(2).clamp(min=SIGMA_MIN_M_S**2)
+        def coeffs_at(z: torch.Tensor) -> tuple[torch.Tensor, ...]:
+            return self._vertical_coefficients(z, density_fields, **col_kwargs)
 
-        density_at_p = self._interp_3d_field(
-            density_fields,
-            grid_bounds,
-            lon_deg,
-            lat_deg,
-            z_eval,
-            engine,
-            level_arr=level_arr,
-            ascending=ascending,
-        )
-        rho_at_p = density_at_p[0].clamp(min=1e-3)
-        density_drift_forward = sigma_w_sq * density_at_p[1] / rho_at_p
-        half_dsig2_dz_backward = -0.5 * dsig2_dz
-        density_drift_backward = -density_drift_forward
+        (
+            sigma_u,
+            sigma_v,
+            sigma_w,
+            sigma_w_sq,
+            T_Lu,
+            T_Lv,
+            T_Lw,
+            half_dsig2_dz_backward,
+            density_drift_backward,
+        ) = coeffs_at(z_agl)
 
         moved, u_prime_new, v_prime_new, w_prime_new = self._integrate_vertical_substeps_static(
             active_xyz=particles,
@@ -1068,6 +1107,7 @@ class HannaScheme(TurbulenceScheme):
             T_Lw=T_Lw,
             half_dsig2_dz_backward=half_dsig2_dz_backward,
             density_drift_backward=density_drift_backward,
+            coeffs_at=coeffs_at,
             dt_seconds=dt_seconds,
             engine=engine,
             active_mask=active_mask,
@@ -1215,22 +1255,28 @@ class HannaScheme(TurbulenceScheme):
         dtype: torch.dtype,
         active_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Per-particle substep count ``k_i`` and sub-dt — **no host sync**.
+        """Substep count ``k`` and sub-dt — **no host sync**.
 
-        ``k_i = ceil(dt / (substep_c · T_Lw_i))`` clamped to ``[1, max_substeps]``;
-        ``sub_dt_i = dt / k_i``. ``active_mask`` (full-set static path) forces inactive
-        particles to ``k=1`` (they're frozen via ``sub_dt=0`` in the loop). This is the
-        graph-safe part of the schedule; ``_substep_schedule`` adds the ``max_k`` sync
-        and the cap warning for the variable-count (non-graph) path.
+        Each particle needs ``k_i = ceil(dt / (substep_c · T_Lw_i))``, clamped to
+        ``[1, max_substeps]``; **every** particle then takes the largest,
+        ``k = max_i k_i``, so the whole active set steps with one sub-step
+        ``dt / k``. A sub-step length that varies with the particle's height
+        breaks the well-mixed condition on its own: with per-particle ``k_i``
+        (or a FLEXPART-like count re-chosen every sub-step) the lowest 5% of a
+        neutral boundary layer stays over-occupied by ~30% at dt=60 s even with
+        the coefficients re-evaluated every sub-step (docs/physics.md §6).
+        ``active_mask`` (full-set static path) leaves inactive particles out of
+        the max (they're frozen via ``sub_dt=0`` in the loop). The max is a
+        tensor reduction, so this stays graph-safe; ``_substep_schedule`` adds the
+        ``max_k`` sync and the cap warning for the variable-count (non-graph) path.
         """
 
         c = self.substep_c
         k_cap = self.max_substeps
-        k_required = (
-            torch.ceil(dt_seconds / (c * T_Lw.clamp(min=1e-3))).long().clamp(min=1, max=k_cap)
-        )
+        k_each = torch.ceil(dt_seconds / (c * T_Lw.clamp(min=1e-3))).long().clamp(min=1, max=k_cap)
         if active_mask is not None:
-            k_required = torch.where(active_mask, k_required, torch.ones_like(k_required))
+            k_each = torch.where(active_mask, k_each, torch.ones_like(k_each))
+        k_required = k_each.max().expand_as(k_each) if k_each.numel() else k_each
         sub_dt = float(dt_seconds) / k_required.to(dtype=dtype)
         return k_required, sub_dt
 
@@ -1290,17 +1336,21 @@ class HannaScheme(TurbulenceScheme):
         engine: GPUEngine,
         active_mask: torch.Tensor | None = None,
         n_substeps: int | None = None,
+        coeffs_at: Callable[[torch.Tensor], tuple[torch.Tensor, ...]] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Static-shape variant of the substep loop (docs/architecture.md §5; device-gated).
 
         Identical physics to ``_integrate_vertical_substeps`` but every substep
-        processes the **full** active set (constant tensor shapes across iterations)
-        rather than a shrinking masked subset. A particle that has completed its
-        ``k_i`` substeps is advanced with ``sub_dt=0``, which is a mathematical no-op:
-        ``a = exp(0) = 1`` (velocity unchanged), ``variance = σ²(1−a²) = 0`` (no
-        noise term), ``displacement = w'·0 = 0`` (position unchanged), and reflection
-        of an already-non-negative ``z`` is the identity. So each particle still
-        integrates exactly ``k_i`` real substeps; the rest are no-ops.
+        processes the **full** particle buffer (constant tensor shapes across
+        iterations). Iterations past the shared count ``k`` (the fixed-count graph
+        loop) and inactive particles are advanced with ``sub_dt=0``, which is a
+        mathematical no-op: ``a = exp(0) = 1`` (velocity unchanged),
+        ``variance = σ²(1−a²) = 0`` (no noise term), ``displacement = w'·0 = 0``
+        (position unchanged), and reflection of an already-non-negative ``z`` is
+        the identity. ``coeffs_at`` re-evaluates the coefficients at the current
+        height at the start of every iteration after the first, as in the dynamic
+        variant (docs/physics.md §6); the re-evaluation also runs in the no-op
+        iterations, where it changes nothing.
 
         This trades extra elementwise FLOPs (finished particles keep being touched)
         for shape-consistency — one kernel shape per op across all iterations, which
@@ -1314,16 +1364,16 @@ class HannaScheme(TurbulenceScheme):
         without boolean-indexing the active subset. When ``None`` all particles are
         treated as active (the isolated equivalence tests).
 
-        **Not bit-identical** to the dynamic variant when ``k_i`` varies across
-        particles: ``randn`` is drawn for the full set every iteration (vs only the
-        owing subset), so the random realisation differs. The two are statistically
-        equivalent (and bit-identical when every particle needs the same ``k``).
+        With every particle active it is bit-identical to the dynamic variant (both
+        draw ``randn`` for the same set every iteration); with inactive particles
+        present the full-set draw differs from the dynamic path's active-subset
+        draw, so the two are then statistically equivalent only.
 
         ``n_substeps`` (phase 3, graph path): when given, loop a **fixed** number of
         iterations (``self.max_substeps``) instead of the data-dependent ``max_k`` —
         removing the last per-step host sync and giving the loop a compile-time-constant
         trip count so ``torch.compile(mode="reduce-overhead")`` can capture it as a CUDA
-        graph. Iterations beyond a particle's ``k_i`` are ``sub_dt=0`` no-ops, so the
+        graph. Iterations beyond the shared ``k`` are ``sub_dt=0`` no-ops, so the
         result matches the ``max_k`` loop; it just does more (no-op) iterations. The
         per-step cap warning is skipped on this path (max_substeps is then a deliberate
         fixed cost — tune it down for the graph runs).
@@ -1353,23 +1403,36 @@ class HannaScheme(TurbulenceScheme):
         v_p = v_prime_in.clone()
         w_p = w_prime_in.clone()
 
-        sigma_u_var = sigma_u.pow(2)
-        sigma_v_var = sigma_v.pow(2)
-        sigma_w_var = sigma_w.pow(2)
-        # Rogue-trajectory clip bounds (|w'/σ| ≤ 4), precomputed once — constant
-        # across substeps because σ is held fixed at the outer-step value.
-        u_max = W_PRIME_SIGMA_RATIO_MAX * sigma_u
-        v_max = W_PRIME_SIGMA_RATIO_MAX * sigma_v
-        w_max = W_PRIME_SIGMA_RATIO_MAX * sigma_w
-
-        # `owing_base = k_required > i` per substep; inactive particles already have
-        # k_required forced to 1 (so they never owe a substep past i=0) AND we AND in
-        # `active_mask` below so they get sub_dt=0 even at i=0 → fully frozen.
+        # `owing = k_required > i` per substep (the same for every particle); we AND
+        # in `active_mask` below so inactive particles get sub_dt=0 even at i=0 →
+        # fully frozen.
         zero_dt = torch.zeros_like(sub_dt)
         for i in range(n_iter):
-            # Particles still owing a substep get their real sub_dt; finished /
-            # inactive ones get 0 (no-op). Multiply-mask, never index → constant
-            # shape every pass.
+            if coeffs_at is not None and i > 0:
+                # Re-evaluate σ, T_L, ∂σ_w²/∂z and the density drift at the
+                # particle's CURRENT height (docs/physics.md §6).
+                (
+                    sigma_u,
+                    sigma_v,
+                    sigma_w,
+                    sigma_w_sq,
+                    T_Lu,
+                    T_Lv,
+                    T_Lw,
+                    half_dsig2_dz_backward,
+                    density_drift_backward,
+                ) = coeffs_at(xyz[:, 2])
+            sigma_u_var = sigma_u.pow(2)
+            sigma_v_var = sigma_v.pow(2)
+            sigma_w_var = sigma_w.pow(2)
+            # Rogue-trajectory clip bounds (|w'/σ| ≤ 4).
+            u_max = W_PRIME_SIGMA_RATIO_MAX * sigma_u
+            v_max = W_PRIME_SIGMA_RATIO_MAX * sigma_v
+            w_max = W_PRIME_SIGMA_RATIO_MAX * sigma_w
+
+            # Particles in a real substep get sub_dt; iterations past k and
+            # inactive particles get 0 (no-op). Multiply-mask, never index →
+            # constant shape every pass.
             owing = k_required > i
             if active_mask is not None:
                 owing = owing & active_mask
@@ -1434,19 +1497,22 @@ class HannaScheme(TurbulenceScheme):
         density_drift_backward: torch.Tensor,
         dt_seconds: float,
         engine: GPUEngine,
+        coeffs_at: Callable[[torch.Tensor], tuple[torch.Tensor, ...]] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Per-particle adaptive substepping of the OU + displacement + reflection.
+        """Substepping of the OU + displacement + reflection.
 
-        Each particle gets ``k_i = ceil(dt / (substep_c · T_Lw_i))`` substeps
-        (capped at ``self.max_substeps``); inside the loop only particles still
-        owing substeps are touched (vectorised via boolean masking). σ², T_L,
-        ``∂σ²/∂z`` and the density-gradient piece remain fixed at their
-        outer-step values — a deliberate simplification (FLEXPART re-evaluates
-        per substep, but the cost of per-substep ``_column_turbulence`` calls is
-        significant and the σ change across one outer dt is moderate). Documented
-        as a known approximation.
+        The active set takes ``k = max_i ceil(dt / (substep_c · T_Lw_i))`` equal
+        substeps (capped at ``self.max_substeps``; ``_substep_counts`` says why
+        the count is shared). When ``coeffs_at`` is given (as it is from
+        ``step``), σ, T_L, ``∂σ_w²/∂z`` and the density drift are re-evaluated at
+        each particle's current height at the start of every substep after the
+        first (docs/physics.md §6); holding them at the outer-step value acts like a
+        random walk with the diffusivity of the starting height and no
+        compensating drift, which piles particles up where T_L is short — at the
+        ground. Without ``coeffs_at`` they stay at the values passed in (the
+        synthetic-input unit tests).
 
-        BUT the well-mixed drift's ``(1 + w'²/σ_w²)`` factor IS recomputed each
+        The well-mixed drift's ``(1 + w'²/σ_w²)`` factor IS recomputed each
         substep using the current ``w'`` — holding it fixed at the outer-step
         ``w'`` (which is often ≈ 0 for newly-released particles) systematically
         under-drifts particles, biasing them upward (this was caught by
@@ -1457,11 +1523,10 @@ class HannaScheme(TurbulenceScheme):
         that crosses z=0 within a substep is reflected before the next substep.
         """
 
-        # Per-particle substep count + sub-dt + loop bound (shared with the static
+        # Shared substep count + sub-dt + loop bound (shared with the static
         # variant; also fires the once-per-instance substep-cap warning). The single
-        # `max_k` host sync bounds the loop — looping to the static `k_cap` instead
-        # would run up to ~max_substeps empty-mask iterations every step.
-        k_required, sub_dt, max_k = self._substep_schedule(T_Lw, dt_seconds, sigma_w.dtype)
+        # `max_k` host sync bounds the loop.
+        _, sub_dt, max_k = self._substep_schedule(T_Lw, dt_seconds, sigma_w.dtype)
 
         # Working tensors. Clone so we don't mutate the input subsets.
         xyz = active_xyz.clone()
@@ -1469,42 +1534,46 @@ class HannaScheme(TurbulenceScheme):
         v_p = v_prime_in.clone()
         w_p = w_prime_in.clone()
 
-        # `mask` is non-empty for every i < max_k by construction (max_k is the
-        # max of k_required), so no per-iteration emptiness check / break is
-        # needed — and skipping it removes up to ~max_k host syncs per step,
-        # which on CUDA were serialising the substep loop.
+        # Every particle owes every one of the `max_k` substeps (the count is
+        # shared), so the loop runs on the full active set without masking.
         for i in range(max_k):
-            mask = k_required > i
-            sub_dt_m = sub_dt[mask]
-            T_Lu_m, T_Lv_m, T_Lw_m = T_Lu[mask], T_Lv[mask], T_Lw[mask]
-            sigma_u_m, sigma_v_m, sigma_w_m = sigma_u[mask], sigma_v[mask], sigma_w[mask]
-            sigma_w_sq_m = sigma_w_sq[mask]
+            if coeffs_at is not None and i > 0:
+                (
+                    sigma_u,
+                    sigma_v,
+                    sigma_w,
+                    sigma_w_sq,
+                    T_Lu,
+                    T_Lv,
+                    T_Lw,
+                    half_dsig2_dz_backward,
+                    density_drift_backward,
+                ) = coeffs_at(xyz[:, 2])
 
             # Re-assemble backward drift each substep with the CURRENT w':
             #   drift_b = -½(1 + w'²/σ_w²)·∂σ²/∂z  -  (σ_w²/ρ)·∂ρ/∂z
-            # Pieces are pre-negated for the backward sign; the only thing that
-            # updates per substep is the (1 + w'²/σ_w²) velocity factor.
-            factor = 1.0 + w_p[mask].pow(2) / sigma_w_sq_m
-            drift_w_m = factor * half_dsig2_dz_backward[mask] + density_drift_backward[mask]
+            # Pieces are pre-negated for the backward sign.
+            factor = 1.0 + w_p.pow(2) / sigma_w_sq
+            drift_w = factor * half_dsig2_dz_backward + density_drift_backward
 
             u_new = engine.update_langevin_velocity(
-                u_p[mask],
-                t_lagrangian=T_Lu_m,
-                sigma_w2=sigma_u_m.pow(2),
-                dt_seconds=sub_dt_m,
+                u_p,
+                t_lagrangian=T_Lu,
+                sigma_w2=sigma_u.pow(2),
+                dt_seconds=sub_dt,
             )
             v_new = engine.update_langevin_velocity(
-                v_p[mask],
-                t_lagrangian=T_Lv_m,
-                sigma_w2=sigma_v_m.pow(2),
-                dt_seconds=sub_dt_m,
+                v_p,
+                t_lagrangian=T_Lv,
+                sigma_w2=sigma_v.pow(2),
+                dt_seconds=sub_dt,
             )
             w_new = engine.update_langevin_velocity(
-                w_p[mask],
-                t_lagrangian=T_Lw_m,
-                sigma_w2=sigma_w_m.pow(2),
-                dt_seconds=sub_dt_m,
-                drift=drift_w_m,
+                w_p,
+                t_lagrangian=T_Lw,
+                sigma_w2=sigma_w.pow(2),
+                dt_seconds=sub_dt,
+                drift=drift_w,
             )
             # Rogue-trajectory safeguard (spec §T): clip |w'/σ| at 4× to prevent
             # the (1+w'²/σ²) factor from snowballing the drift when σ_w hits its
@@ -1512,35 +1581,22 @@ class HannaScheme(TurbulenceScheme):
             # substep cap is binding. Without this, particles can NaN out at the
             # BL-top seam under the F4 Tier 2 substepping. FLEXPART has the
             # equivalent clip in its OU implementation.
-            w_max = W_PRIME_SIGMA_RATIO_MAX * sigma_w_m
-            u_max = W_PRIME_SIGMA_RATIO_MAX * sigma_u_m
-            v_max = W_PRIME_SIGMA_RATIO_MAX * sigma_v_m
+            w_max = W_PRIME_SIGMA_RATIO_MAX * sigma_w
+            u_max = W_PRIME_SIGMA_RATIO_MAX * sigma_u
+            v_max = W_PRIME_SIGMA_RATIO_MAX * sigma_v
             w_new = torch.clamp(w_new, min=-w_max, max=w_max)
             u_new = torch.clamp(u_new, min=-u_max, max=u_max)
             v_new = torch.clamp(v_new, min=-v_max, max=v_max)
 
-            xyz_m = xyz[mask]
-            xyz_m = engine.apply_vertical_turbulence(
-                xyz_m,
-                w_new,
-                dt_seconds=sub_dt_m,
-                backward=True,
-            )
-            xyz_m = engine.apply_horizontal_turbulence(
-                xyz_m,
-                u_new,
-                v_new,
-                dt_seconds=sub_dt_m,
-                backward=True,
+            xyz = engine.apply_vertical_turbulence(xyz, w_new, dt_seconds=sub_dt, backward=True)
+            xyz = engine.apply_horizontal_turbulence(
+                xyz, u_new, v_new, dt_seconds=sub_dt, backward=True
             )
             # W&F §6 smooth-wall reflection: joint (z, w') flip on those that
             # crossed the surface within this substep.
-            xyz_m, w_new = engine.reflect_surface(xyz_m, w_new, z_surface=0.0)
+            xyz, w_new = engine.reflect_surface(xyz, w_new, z_surface=0.0)
 
-            xyz[mask] = xyz_m
-            u_p[mask] = u_new
-            v_p[mask] = v_new
-            w_p[mask] = w_new
+            u_p, v_p, w_p = u_new, v_new, w_new
 
         return xyz, u_p, v_p, w_p
 

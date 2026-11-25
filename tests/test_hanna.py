@@ -844,38 +844,70 @@ def test_static_substeps_bit_identical_for_homogeneous_k() -> None:
             assert torch.equal(a, b)
 
 
-def test_static_substeps_matches_dynamic_distribution_for_heterogeneous_k() -> None:
-    """With a spread of substep counts the two paths draw RNG differently (full
-    set vs shrinking subset), so they are not bit-identical — but each particle
-    integrates the same OU over the same total dt, so the end-state distributions
-    match within Monte-Carlo tolerance, with no NaNs."""
+def test_substep_count_is_shared_by_all_particles() -> None:
+    """Every particle takes the largest required substep count, so the sub-step
+    length does not depend on the particle's height (a height-dependent sub-step
+    breaks the well-mixed condition near the ground; docs/physics.md §6). With
+    every particle active the static and dynamic loops then draw the RNG
+    identically and agree bit for bit, even for a wide spread of T_Lw."""
 
     from lpdm.gpu_engine import GPUEngine
 
     engine = GPUEngine(device="cpu")
     scheme = HannaScheme()
-    n = 8192
-    tlw = torch.linspace(15.0, 1000.0, n)  # k spans 1 .. ~8 at dt=60, c=0.5
-    k_req, _, _ = scheme._substep_schedule(tlw, 60.0, torch.float32)
-    assert int(k_req.min()) == 1 and int(k_req.max()) > 3  # genuinely heterogeneous
+    n = 4096
+    tlw = torch.linspace(15.0, 1000.0, n)  # alone, k_i would span 1 .. 8 at dt=60, c=0.5
+    k_req, sub_dt, max_k = scheme._substep_schedule(tlw, 60.0, torch.float32)
+    assert max_k == 8
+    assert int(k_req.min()) == int(k_req.max()) == 8
+    assert torch.allclose(sub_dt, torch.full_like(sub_dt, 7.5))
 
-    inp_d = _substep_inputs(n, T_Lw=tlw, seed=11, half_drift=0.0)  # driftless OU
-    inp_s = _substep_inputs(n, T_Lw=tlw, seed=11, half_drift=0.0)
+    # Inactive particles do not set the count.
+    active = tlw > 100.0
+    k_act, _ = scheme._substep_counts(tlw, 60.0, torch.float32, active_mask=active)
+    assert int(k_act.max()) == 2
 
+    inp_d = _substep_inputs(n, T_Lw=tlw, seed=11)
+    inp_s = _substep_inputs(n, T_Lw=tlw, seed=11)
     torch.manual_seed(100)
-    d_xyz, _, _, d_w = scheme._integrate_vertical_substeps(engine=engine, **inp_d)
-    torch.manual_seed(200)
-    s_xyz, _, _, s_w = scheme._integrate_vertical_substeps_static(engine=engine, **inp_s)
+    dyn = scheme._integrate_vertical_substeps(engine=engine, **inp_d)
+    torch.manual_seed(100)
+    stat = scheme._integrate_vertical_substeps_static(engine=engine, **inp_s)
+    for a, b in zip(dyn, stat):
+        assert torch.isfinite(a).all()
+        assert torch.equal(a, b)
 
-    assert torch.isfinite(s_xyz).all() and torch.isfinite(s_w).all()
 
-    dz_d = d_xyz[:, 2] - inp_d["active_xyz"][:, 2]
-    dz_s = s_xyz[:, 2] - inp_s["active_xyz"][:, 2]
-    # Std is the discriminating statistic (driftless → mean ≈ 0); n=8192 gives
-    # MC error ~1% on the std, so a 5% relative tolerance is safe.
-    assert abs(dz_s.std() / dz_d.std() - 1.0) < 0.05
-    assert abs(s_w.std() / d_w.std() - 1.0) < 0.05
-    assert abs(s_w.mean()) < 0.1 * s_w.std()  # near-zero mean velocity
+@pytest.mark.parametrize("static", [False, True])
+def test_substeps_re_evaluate_coefficients_at_current_height(static: bool) -> None:
+    """``coeffs_at`` is called at the start of every substep after the first,
+    with the particles' current heights, and its values are the ones used."""
+
+    from lpdm.gpu_engine import GPUEngine
+
+    engine = GPUEngine(device="cpu")
+    scheme = HannaScheme()
+    n = 64
+    inp = _substep_inputs(n, T_Lw=24.0, seed=3)  # k = ceil(60/12) = 5
+    heights: list[torch.Tensor] = []
+
+    def coeffs_at(z: torch.Tensor):
+        heights.append(z.clone())
+        s = torch.full_like(z, 0.6)
+        tl = torch.full_like(z, 24.0)
+        zero = torch.zeros_like(z)
+        return s, s, s, s.pow(2), tl, tl, tl, zero, zero
+
+    fn = (
+        scheme._integrate_vertical_substeps_static
+        if static
+        else scheme._integrate_vertical_substeps
+    )
+    torch.manual_seed(0)
+    xyz, *_ = fn(engine=engine, coeffs_at=coeffs_at, **inp)
+    assert len(heights) == 4
+    assert not torch.equal(heights[0], inp["active_xyz"][:, 2])  # moved since the start
+    assert torch.isfinite(xyz).all()
 
 
 # ---------------------------------------------------------------------------

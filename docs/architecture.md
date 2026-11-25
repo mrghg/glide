@@ -282,7 +282,7 @@ which is what makes the uniform path give the same answer: the memory factor
 becomes $r = e^0 = 1$ so the velocity is unchanged, the noise amplitude
 $\sigma^2(1-r^2) = 0$ so no randomness is added, the displacement $w'\cdot 0 = 0$
 so the position is unchanged, and reflecting a particle already above ground does
-nothing. Every particle still takes exactly its own $k_p$ real sub-steps; the
+nothing. Every particle still takes exactly the $k$ real sub-steps it shares with the others; the
 extra iterations do nothing at all. Inactive particles are held still by
 *multiplying* by zero rather than by being excluded from the array — that is what
 keeps the array sizes fixed.
