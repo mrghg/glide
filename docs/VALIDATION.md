@@ -417,6 +417,74 @@ This run is also the run the reference fixture was made from (the phase timers d
 and gridder times are under-counted and the residual holds the rest. Compare
 like with like: same node type, same cache settings, nothing else on the GPU.
 
+### Phase breakdown with sub-phases (task A1)
+
+Since task A1 the phases nest and each row is the phase's own time
+(`lpdm/phase_timers.py`; [architecture.md §8](architecture.md#8-diagnostics-and-knobs)),
+so the former 8.7% residual is now named. The same config and settings as the
+baseline, 25 Nov 2026, at `src/` of 4388a6e, with `GLIDE_PHASE_TIMERS_SYNC=1`
+(the GPU synchronised at every phase boundary, so each phase carries its own
+GPU work; another agent's small job shared the GPU):
+
+| quantity | value |
+| --- | --- |
+| process wall time | 1154.1 s |
+| **footprints per second** | **0.1248** (baseline 0.1252) |
+| peak host RSS | 53.0 GB |
+
+| phase | total (s) | % wall | calls | ms/call |
+| --- | ---: | ---: | ---: | ---: |
+| met_fetch | 832.76 | 72.7 | 17280 | 48.192 |
+| gridder | 90.57 | 7.9 | 17280 | 5.242 |
+| step | 73.93 | 6.5 | 17280 | 4.278 |
+| gc | 47.67 | 4.2 | 345 | 138.188 |
+| mask_liveness | 44.06 | 3.8 | 51840 | 0.850 |
+| convection.lift | 11.08 | 1.0 | 286 | 38.727 |
+| loop_overhead | 10.44 | 0.9 | 17280 | 0.604 |
+| setup | 7.59 | 0.7 | 1 | 7589.972 |
+| wind_mean | 7.49 | 0.7 | 17280 | 0.433 |
+| diagnostics | 5.01 | 0.4 | 17280 | 0.290 |
+| output_write | 2.79 | 0.2 | 4 | 696.400 |
+| saturation_poll | 2.26 | 0.2 | 17282 | 0.131 |
+| convection.matrices | 2.11 | 0.2 | 286 | 7.362 |
+| convection.columns | 1.82 | 0.2 | 286 | 6.372 |
+| batch_setup | 1.15 | 0.1 | 2 | 572.830 |
+| convection.redistribute | 1.03 | 0.1 | 286 | 3.616 |
+| log_guard | 0.99 | 0.1 | 17280 | 0.058 |
+| convection.log | 0.54 | 0.0 | 286 | 1.877 |
+| batch_end, convection (own), particle_generation, batch_diagnostics | 0.89 | 0.1 | | |
+| (residual/untimed) | 0.56 | 0.0 |  |  |
+
+Convection with its parts is 16.9 s (1.5% of wall, 58.6 ms per met window);
+the parcel lift is two thirds of it (38.7 ms per window). The same run without
+GPU synchronisation (1371.0 s, 0.1050 footprints/s, slower met fetch at 59.3
+ms/call on a cold file cache) charged 93.4 s to `gc` (271 ms per
+`gc.collect`) and 37.4 s to `mask_liveness`; with or without
+synchronisation the untimed residual is below 0.1% of wall. The per-call cost
+of `gc` is Python's full collection over the run's object graph, every 50 steps
+(`memory.gc_every_steps`); `mask_liveness` is the active mask, the time-ago
+bins and the met-domain escape check, three small elementwise passes over the
+1.44 million-particle buffer every step.
+
+**Changing the compiled step changes the CUDA random realisation.** Task A1
+added two scalar outputs to the captured step (the substep-saturation count).
+On the smoke config the footprint still met the CUDA tolerance and the endpoint
+particles were identical, but on `ab_multisite_perf` every particle's
+trajectory changed, so the comparison with the reference fixture fails (largest
+cell |a−b|/bound 9.0e4). The eager static path is unchanged bit for bit (a
+12-hour, 12-release cut of the config, main against the branch, on CUDA with
+`GLIDE_COMPILE=0`), and even returning `active_mask.sum()` from the core alters
+the compiled result: Inductor generates the step's random numbers per kernel,
+so a different kernel layout (here, a reduction over 1.44 million particles
+that splits differently from one over 20,000) gives a different, equally valid
+stream. Two runs of the new code were identical. Against the fixture the
+change is the size of a different random seed: release totals differ by a
+median 2.9e-5 (largest 4.5e-4) relative, the 0–40 m layer by a median 0.04%
+(largest 0.45%) per release, and summed over each site's 48 releases by
+−0.005%, +0.023% and +0.006% (MHD, RGL, TAC). Any later edit to the captured
+step will do the same; the reference CUDA fixture then has to be regenerated,
+and the CUDA tolerance only covers unchanged compiled code.
+
 ---
 
 ## 9. Adding a physics test
