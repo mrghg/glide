@@ -226,6 +226,13 @@ DEPOSITION_POSITION_DOC = {
         "start and at the end of the step (the end after advection, turbulence, "
         "convection and surface reflection); longitude is averaged along the shorter arc"
     ),
+    "trapezoid": (
+        "each step's residence is split in two halves: dt/2 counted at the particle's "
+        "position at the start of the step and dt/2 at its position at the end (after "
+        "advection, turbulence and convection), each half with its own time-ago bin (the "
+        "start half by the age at the start of the step, the end half by the age half a "
+        "step later) and, with dry-air weighting, the density at its own position and time"
+    ),
 }
 
 
@@ -1044,6 +1051,18 @@ def _time_ago_index(elapsed_s: torch.Tensor, time_bin_s: float, n_time_bins: int
     return t_idx
 
 
+def _time_weight(met_window: HourlyMetTensors, t_eval_s: float) -> float:
+    """Time-interpolation weight of the window end at ``t_eval_s`` (Unix seconds).
+
+    The same formula as ``_advection_alpha_wind_mean``, which evaluates it at the
+    step's midpoint; the trapezoid deposit evaluates it at each end of the step.
+    """
+
+    t_start_s = met_window.metadata.time_start.timestamp()
+    t_end_s = met_window.metadata.time_end.timestamp()
+    return max(0.0, min(1.0, (t_eval_s - t_start_s) / max(1.0, float(t_end_s - t_start_s))))
+
+
 def _deposit_step(
     gridder: FootprintGridder,
     *,
@@ -1074,7 +1093,48 @@ def _deposit_step(
       density at ``end_xyz`` and the step's time weight ``t_alpha``.
     * ``step_mean``: as endpoint, at the mean of ``start_xyz`` and ``end_xyz``
       (decision 0026).
+    * ``trapezoid``: ``delta_s / 2`` at ``start_xyz`` and ``delta_s / 2`` at
+      ``end_xyz``, two literal deposits. Each half stands for half the step's
+      interval of ages: the start half for [e, e + delta_s/2), binned by e (=
+      ``t_idx``), the end half for [e + delta_s/2, e + delta_s), binned by
+      e + delta_s/2, in the same way that endpoint bins the whole step by e. With
+      steps aligned to the bins both halves fall in the step's bin. With dry-air
+      weighting each half divides by the density at its own position and time (the
+      start at ``t_cursor``, the end at ``t_cursor - delta_s``), in the step's met
+      window. A particle's first step is counted half at its release position; a
+      particle that leaves the met domain in a step keeps the start half (the end
+      half is dropped by the gridder if outside the output grid, as endpoint's is).
     """
+
+    if position == "trapezoid":
+        half_s = 0.5 * delta_s
+        t_start_s = t_cursor.timestamp()
+        halves = (
+            (start_xyz, t_idx, t_start_s),
+            (
+                end_xyz,
+                _time_ago_index(elapsed_s + half_s, time_bin_s, gridder.n_t),
+                t_start_s - delta_s,
+            ),
+        )
+        for xyz, idx, t_eval_s in halves:
+            inv_density = (
+                None
+                if particle_density is None
+                else particle_density.inverse_density(
+                    xyz, met_window, _time_weight(met_window, t_eval_s), engine
+                )
+            )
+            gridder.accumulate(
+                particles=xyz,
+                active_mask=active_mask,
+                weights=weights,
+                t_idx=idx,
+                release_idx=release_idx,
+                dt_seconds=half_s,
+                inv_density=inv_density,
+            )
+        return
 
     deposit_xyz = end_xyz if position == "endpoint" else _step_mean_position(start_xyz, end_xyz)
     inv_density = (
@@ -1574,10 +1634,11 @@ def _run(
             compile_core=use_static and bool(getattr(engine, "_compile_requested", False)),
         )
     LOGGER.info("footprint density weighting: %s", cfg.output_grid.density_weighting)
-    # Where each step's residence is counted (task A2, decision 0026): the endpoint
-    # (default) or the mean of each particle's start- and end-of-step positions
-    # (`_deposit_step`). The runtime keeps the start, outside the captured step, so
-    # the step's graph and its outputs are the same for both.
+    # Where each step's residence is counted (task A2, decisions 0026 and 0029): the
+    # endpoint (default), the mean of each particle's start- and end-of-step
+    # positions, or half at each (`_deposit_step`). The runtime keeps the start,
+    # outside the captured step, so the step's graph and its outputs are the same for
+    # all three.
     deposition_position = cfg.output_grid.deposition.position
     keep_step_start = deposition_position != "endpoint"
     LOGGER.info("footprint deposition position: %s", cfg.output_grid.deposition.position)

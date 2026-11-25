@@ -474,9 +474,10 @@ class DepositionConfig(_Frozen):
     # and convection (endpoint quadrature; the long-standing behaviour). `step_mean`:
     # at the mean of the particle's positions at the start and at the end of the step
     # (all of the step's motion included; decision 0026, which replaces the spec's
-    # RK2-predictor `midpoint`). Kernel deposition (decision 0012) is deferred to
-    # after v1.
-    position: Literal["endpoint", "step_mean"] = "endpoint"
+    # RK2-predictor `midpoint`). `trapezoid`: half the step at the start position and
+    # half at the end, each with its own time-ago bin and density (decision 0029).
+    # Kernel deposition (decision 0012) is deferred to after v1.
+    position: Literal["endpoint", "step_mean", "trapezoid"] = "endpoint"
 
 
 class OutputGridConfig(_Frozen):
