@@ -45,7 +45,9 @@ def main() -> None:
         def shifted(cfg):
             md = cfg.met_domain
             base = HorizontalFrame.local_metric(md.lon_bounds, md.lat_bounds)
-            return HorizontalFrame("local_metric", base.lon0 + 7.31, base.lat0 - 3.17, base.kx, base.ky)
+            return HorizontalFrame(
+                "local_metric", base.lon0 + 7.31, base.lat0 - 3.17, base.kx, base.ky
+            )
 
         lm._position_frame = shifted
     elif args.variant == "ulp":

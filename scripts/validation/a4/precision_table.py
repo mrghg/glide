@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Task A4: float32 resolution of a particle position, degrees vs the local metric frame.
 
-    python scripts/validation/a4/precision_table.py [--markdown]
+    python scripts/validation/a4/precision_table.py   # prints a Markdown table
 
 For each met domain in ``configs/*.yaml`` and a few larger illustrative domains
 (global; the Arctic; a polar cap reaching the model's cos(lat) clamp), samples a
@@ -79,9 +79,7 @@ def domain_row(name: str, lon_b, lat_b) -> dict:
 
 
 def main() -> None:
-    p = argparse.ArgumentParser()
-    p.add_argument("--markdown", action="store_true")
-    args = p.parse_args()
+    argparse.ArgumentParser(description=__doc__).parse_args()
     domains: dict[str, tuple] = {}
     for cfg in sorted((REPO / "configs").glob("*.yaml")):
         md = (yaml.safe_load(cfg.read_text()) or {}).get("met_domain")

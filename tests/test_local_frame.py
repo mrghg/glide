@@ -152,7 +152,9 @@ def _met(
         level=level,
         pressure_level_hpa=np.linspace(1000.0, 600.0, n_lev),
         time_start=t0,
-        time_end=t0 + timedelta(hours=1),
+        # 4096 s: every RK2 time weight is a float32 number (see
+        # test_static_and_dynamic_agree_bit_for_bit).
+        time_end=t0 + timedelta(seconds=4096),
         variable_units={},
     )
     height = torch.as_tensor(level, dtype=torch.float32).view(-1, 1, 1).expand(shape).contiguous()
@@ -239,18 +241,18 @@ def test_metric_frame_agrees_with_degrees_to_rounding(static: bool) -> None:
     [(DEGREES, torch.float32), (METRIC, torch.float32), (METRIC, torch.bfloat16)],
     ids=["degrees", "metric", "metric-bf16"],
 )
-def test_static_and_dynamic_agree_to_rounding(frame, wind_dtype) -> None:
-    """The two step paths agree to float32 rounding in either frame, and with
-    the 16-bit wind gather, which both share. Not bit for bit: here, as on main
-    (checked on main's code with this setup: 69% of particles bit-identical,
-    the rest within one ulp of latitude), the dynamic path's RK2 time weight is a
-    Python float and the static path's a float32 tensor."""
+def test_static_and_dynamic_agree_bit_for_bit(frame, wind_dtype) -> None:
+    """With every particle active the two step paths do the same arithmetic
+    (docs/architecture.md §5) in either frame, and with the 16-bit wind gather,
+    which both share. The window is 4096 s long so that every RK2 time weight is
+    a float32 number: the dynamic path uses it as a Python float and the static
+    path as a float32 tensor, and with a weight float32 cannot hold (an hourly
+    window) the two agree only to rounding, on main as here (69% of particles
+    bit-identical in this setup, the rest within one ulp)."""
 
     dyn = _steps(frame, static=False, wind_dtype=wind_dtype)
     sta = _steps(frame, static=True, wind_dtype=wind_dtype)
-    assert float(_horizontal_m(dyn, sta).max()) < 1.0
-    assert float((dyn[:, 2] - sta[:, 2]).abs().max()) < 1e-2
-    assert float((dyn == sta).all(1).float().mean()) > 0.5
+    assert torch.equal(dyn, sta)
 
 
 def test_bf16_winds_move_particles_by_their_rounding() -> None:

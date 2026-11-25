@@ -285,7 +285,11 @@ so the position is unchanged, reflecting a particle already above ground does
 nothing, and a particle that did not move cannot cross the boundary-layer top,
 so the interface rule (decision 0028) leaves it alone too. Every active particle takes the same `n_substeps` sub-steps on both
 paths (decision 0027), so with every particle active the two paths do the same
-arithmetic and draw the same random numbers, and agree bit for bit. Inactive
+arithmetic and draw the same random numbers, and agree bit for bit, provided
+the step's time-interpolation weight is a float32 number (the selective path
+uses it as a Python float, the uniform path as a float32 tensor, so a weight
+such as 3570/3600 is rounded differently and the paths then agree to one ulp;
+the parity tests use weights that are exact, task A4). Inactive
 particles are held still by *multiplying* by zero rather than by being excluded
 from the array — that is what keeps the array sizes fixed.
 
