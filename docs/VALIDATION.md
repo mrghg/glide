@@ -33,7 +33,7 @@ comparison against another model yourself.
 .venv/bin/python -m pytest -q tests/test_physics.py # engine primitives only
 ```
 
-**319 tests across 16 files, about 2.5 minutes, 90% statement coverage, no network access.**
+**597 tests on `main` at d19755d (26 Nov 2026): 583 passed and 14 skipped (local meteorology, DATEM and ETEX data absent), 14 minutes on 8 CPU threads, no network access.** The statement-coverage figure (90%) dates from an earlier, smaller suite and has not been remeasured.
 End-to-end tests use synthetic meteorology through `AnalyticMetReader`, so
 nothing depends on remote ERA5 or on the restricted validation datasets. Tests
 share no state and run order is irrelevant. Stochastic tests are seeded.
