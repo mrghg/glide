@@ -379,7 +379,7 @@ class TurbulenceConfig(_Frozen):
     )
     surface_layer_override: bool = Field(
         False,
-        description="Enable the legacy GLIDE-only Monin-Obukhov surface-layer override below 0.1·BLH (FLEXPART has no such override).",
+        description="Enable the legacy GLIDE-only Monin-Obukhov surface-layer override below 0.1·BLH (FLEXPART has no such override). For A/B comparisons only: sigma_w jumps at 0.1·BLH, so the model is not well-mixed consistent there; a run with it on logs a warning and records it in run_metadata.json (runtime.physics_warnings).",
     )
     # Limits on the boundary-layer depth h from the meteorology (decision 0024).
     # Applied wherever the turbulence scheme uses h. The defaults keep GLIDE's

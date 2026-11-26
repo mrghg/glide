@@ -55,6 +55,7 @@ from lpdm.phase_timers import make_phase_timer
 from lpdm.release_generator import generate_batch_particles
 from lpdm.runtime import DEVICE
 from lpdm.turbulence import TurbulenceScheme, get_scheme, list_schemes
+from lpdm.turbulence.hanna import SURFACE_LAYER_OVERRIDE_WARNING
 from lpdm.vertical_grid import default_agl_levels
 
 LOGGER = logging.getLogger(__name__)
@@ -1249,6 +1250,23 @@ def _log_substep_length(scheme: TurbulenceScheme, dt_seconds: float) -> float | 
     return sub
 
 
+def _physics_warnings(scheme: TurbulenceScheme) -> list[str]:
+    """Log, once per run, the configured physics options that are not well-mixed
+    consistent, and return their messages for ``runtime.physics_warnings`` in
+    run_metadata.json (empty when there are none).
+
+    The opt-in surface-layer override leaves a sigma_w jump at 0.1 h that the drift
+    straddles (decision 0028, "Other boundaries"; docs/turbulence.md §8).
+    """
+
+    warnings: list[str] = []
+    if getattr(scheme, "surface_layer_override", False):
+        warnings.append(SURFACE_LAYER_OVERRIDE_WARNING)
+    for message in warnings:
+        LOGGER.warning(message)
+    return warnings
+
+
 class _ExceedanceTally:
     """Run totals of the turbulence sub-steps that are long compared with T_Lw.
 
@@ -1380,6 +1398,7 @@ def _run(
     if scheme is None:
         scheme = get_scheme(cfg.turbulence.scheme, **_scheme_kwargs(cfg))
     _log_substep_length(scheme, sim.dt_seconds)
+    physics_warnings = _physics_warnings(scheme)
     if convection_scheme is None:
         convection_scheme = get_convection_scheme(
             cfg.convection.scheme,
@@ -2079,6 +2098,9 @@ def _run(
             # troposphere (decision 0027; replaced A1's substep_saturation), or None
             # for a scheme without sub-steps.
             substep_exceedance=exceedance.metadata(),
+            # Configured physics options that are not well-mixed consistent, as
+            # logged at the start of the run; empty for the defaults.
+            physics_warnings=physics_warnings,
         ),
         "schedule": {
             "n_batches": len(batches),

@@ -489,6 +489,9 @@ $z \to 0$, undercutting the floors that §5 exists to impose. Second, it puts a
 discontinuity in $\sigma_w$ and $K$ at the $0.1h$ seam, which the drift's finite
 difference straddles. That is the same defect decision 0028 removed at $h$, and
 the seam is not treated as an interface: enabling the override reintroduces it.
+A run with the override on logs a warning saying so once, at the start, and records
+the same message in `run_metadata.json` under `runtime.physics_warnings` (an empty
+list for the defaults).
 
 The stable branch being **constant in height** is itself a correction. An earlier
 form, $1.3u_\ast(1 + 5z/L)$, *grew* with stability — that expression is the $\phi_m$
