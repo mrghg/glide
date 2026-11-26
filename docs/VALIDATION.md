@@ -31,7 +31,11 @@ comparison against another model yourself.
 ```bash
 .venv/bin/python -m pytest -q                      # everything
 .venv/bin/python -m pytest -q tests/test_physics.py # engine primitives only
+GLIDE_SLOW_TESTS=1 .venv/bin/python -m pytest -q   # also the slow full-strength tests
 ```
+
+Tests marked slow (minutes each on CPU) are skipped unless `GLIDE_SLOW_TESTS=1`
+is set; they are full-strength versions of default-suite gates (§4).
 
 **319 tests across 16 files, about 2.5 minutes, 90% statement coverage, no network access.**
 End-to-end tests use synthetic meteorology through `AnalyticMetReader`, so
@@ -61,7 +65,7 @@ share no state and run order is irrelevant. Stochastic tests are seeded.
 | `test_terrain_transport.py` | Terrain-following transport end-to-end | 2 |
 | `test_diffusion_pde.py` | Langevin diffusion limit vs a PDE reference | 2 |
 | `test_near_surface_well_mixed.py` | Near-surface well-mixed gate through the production Hanna scheme at $\Delta t = 60$ s, three regimes | 3 |
-| `test_bl_top_well_mixed.py` | Boundary-layer-top well-mixed gate: open column uniform in $[0, 2h]$ through the production Hanna scheme at $\Delta t = 60$ s, three regimes | 3 |
+| `test_bl_top_well_mixed.py` | Boundary-layer-top well-mixed gate: open column uniform in $[0, 2h]$ through the production Hanna scheme at $\Delta t = 60$ s, three regimes; a full-strength copy is slow (`GLIDE_SLOW_TESTS=1`) | 3 + 3 slow |
 
 ---
 
@@ -156,7 +160,8 @@ CI:
 | `test_well_mixed_uniformity_in_periodic_turbulence` | uniformity in a periodic domain (rel-RMS < 0.12) |
 | `test_v1_well_mixed_hanna_backward_path` | a flat distribution stays flat through the **production backward scheme** at constant $\rho$ — parametrised over both the static and dynamic paths |
 | `test_near_surface_well_mixed_at_60_s` (`test_near_surface_well_mixed.py`) | at the shipped $\Delta t = 60$ s and the default sub-step count, a closed boundary layer (lid inside every sub-step) keeps its lowest 5% and its 0–40 m layer within ±0.09 of their well-mixed share, stable, neutral and convective (decision 0027; the code before it gave 1.66–1.79 in the lowest 5% and fails it in all three regimes) |
-| `test_uniform_column_stays_uniform_across_the_boundary_layer_top` (`test_bl_top_well_mixed.py`) | at the shipped $\Delta t = 60$ s and the default sub-step count, a column started uniform in $[0, 2h]$, open at $h$ to the free-troposphere closure and closed by a lid at $2h$, keeps each 50 m band from $h - 100$ to $h + 100$ m within ±0.08 of uniform and the occupancy continuous across $h$ (jump within ±0.08), stable, neutral and convective (decision 0028; PR #69's head and main fail it in all three regimes) |
+| `test_uniform_column_stays_uniform_across_the_boundary_layer_top` (`test_bl_top_well_mixed.py`) | at the shipped $\Delta t = 60$ s and the default sub-step count, a column started uniform in $[0, 2h]$, open at $h$ to the free-troposphere closure and closed by a lid at $2h$, keeps each 50 m band from $h - 100$ to $h + 100$ m near uniform and the occupancy continuous across $h$, stable, neutral and convective. Default suite (~2.7 min at 8 threads): stable 60,000 particles, 6 h, records every 5 min from 1 h, band and jump tolerance ±0.08; neutral and convective 40,000 particles, 2 h, records from 15 min, ±0.20. Every tolerance is at least 5.2 seed-to-seed standard deviations from the mean (12 seeds stable, 24 neutral and convective), and PR #69's head fails it in all three regimes (stable by the jump, +0.12; neutral −0.59; convective +3.2) (decision 0028) |
+| `test_uniform_column_stays_uniform_across_the_boundary_layer_top_full` (`test_bl_top_well_mixed.py`, slow: `GLIDE_SLOW_TESTS=1`) | the same column at full strength (~8.5 min at 8 threads): 150,000 particles, 6 h, records from 1 h, ±0.08 on every band and the jump in all three regimes; each tolerance at least 5.4 standard deviations from the mean over 12 seeds; PR #69's head and main fail it in all three regimes |
 | `test_drift_stencil_stays_on_the_particles_side_of_h`, `test_interface_crossing_rule_backward`, `test_carry_is_one_in_a_steady_column_and_tracks_a_moving_h` (`test_hanna.py`) | the drift never differences the jump at $h$; the transmission probability, velocity and overshoot scaling and reflection at $h$ in backward time; $u'/\sigma$ carried across steps (decision 0028) |
 | `test_v1_density_weighted_well_mixed_with_F2` | a $\rho$-weighted distribution stays $\rho$-weighted under varying $\rho$ |
 | `test_hanna_well_mixed_no_runaway_lofting` | no systematic upward drift (this caught the frozen $(1+w'^2/\sigma_w^2)$ factor) |
