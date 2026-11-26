@@ -308,3 +308,26 @@ def test_trapezoid_time_ago_bins_match_endpoint_totals(
     release_col = 200
     assert by_lon["endpoint"][release_col] == 0.0
     assert by_lon["trapezoid"][release_col] > 0.0
+
+
+def test_float64_accumulation_matches_float32_and_writes_float32(tmp_path: Path) -> None:
+    """`output_grid.accumulation_dtype: float64` (prototype, off by default) sums in
+    double precision and rounds once at write: the store stays float32, the default
+    is float32, and on a short run the two agree to float32 rounding."""
+
+    assert _make_run_config().output_grid.accumulation_dtype == "float32"
+    fps = {}
+    for dtype in ("float32", "float64"):
+        cfg = _make_run_config(output_uri=str(tmp_path / dtype), simulation_length_seconds=3600)
+        og = cfg.output_grid.model_copy(update={"accumulation_dtype": dtype})
+        cfg = _with_position(cfg.model_copy(update={"output_grid": og}), "trapezoid")
+        _run(cfg, reader=_make_reader(cfg, wind_fn=lambda _: (5.0, 0.0, 0.0)))
+        fp = xr.open_zarr(tmp_path / dtype / "footprints.zarr")["footprint"]
+        assert fp.dtype == np.float32
+        fps[dtype] = fp.values.astype(np.float64)
+        meta = json.loads((tmp_path / dtype / "run_metadata.json").read_text())
+        assert meta["footprint_units"]["accumulation_dtype"] == dtype
+    assert fps["float32"].sum() > 0
+    np.testing.assert_allclose(
+        fps["float64"], fps["float32"], rtol=1e-5, atol=1e-6 * fps["float32"].max()
+    )
