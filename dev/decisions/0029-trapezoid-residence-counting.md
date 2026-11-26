@@ -4,6 +4,9 @@
 `endpoint` until Matt decides. This record proposes making `trapezoid` the
 default, with the evidence below.
 
+**Plain-language explainer** (what the rules are, what each gets wrong, and the
+age-bin split, with a figure): [docs/physics.md §7.1](../../docs/physics.md#71-explainer-counting-a-particles-residence-within-a-step).
+
 **Context.** The footprint approximates, for each particle and step, the time
 integral $\int 1[\mathbf{x}(t)\in\text{cell}]\,w/\rho_d\,dt$ from one or two
 positions. Decision 0026 added `step_mean` (the mean of the step's start and end
@@ -20,10 +23,11 @@ indicator: score the rules against fine-time residence on the same trajectories.
 - Add `output_grid.deposition.position: trapezoid`: each step deposits
   $\Delta t/2$ at the particle's start position and $\Delta t/2$ at its end
   position, as two literal deposits (no "endpoint plus corrections" shortcut).
-  Each half has its own time-ago bin (the start half the age at the step's
-  start, the end half the age half a step later, as `endpoint` bins the whole
-  step by its starting age; with steps aligned to the bins both fall in the
-  step's bin) and, with dry-air weighting, its own density, at its own position
+  The start half stands for the ages $[e, e + \Delta t/2)$ and the end half for
+  $[e + \Delta t/2, e + \Delta t)$, and each is split by its overlap with the
+  time-ago bins (see "Residence counting fixes" below; the first version binned
+  each half by a single age). With
+  dry-air weighting each half has its own density, at its own position
   and time (the start at $t$, the end at $t - \Delta t$, in the step's met
   window). The first step of a particle is counted half at its release position;
   a particle that leaves the met domain in a step keeps its start half; a
@@ -107,8 +111,7 @@ indicator: score the rules against fine-time residence on the same trajectories.
 **Rationale.**
 - *Derived.* Summed over consecutive steps, `trapezoid` equals `endpoint` plus
   $\Delta t/2$ at each particle's first position, minus $\Delta t/2$ at its last,
-  with half-step shifts only where a step straddles a time-ago bin edge (none when
-  steps align with bins) and density evaluated at the node's own time. So away
+  with density evaluated at the node's own time. So away
   from the release it inherits `endpoint`'s interior sampling, which the scorer
   shows to be unbiased at 60 s (rings within ±0.2% on the smoke run), and near
   the release it supplies the half step `endpoint` never counts.
@@ -159,6 +162,84 @@ particle over its lifetime, and `trapezoid` ≡ `endpoint` there. Real
 configurations always have the receptor inside the grid, so this is a property
 of that harness, not of the rule; it is one more reason the plume cannot rank
 the rules.
+
+**Residence counting fixes** (external review of PR #66, 26 Nov 2026; asked for
+by Matt the same day). Both concern where deposits land, not the rule itself.
+
+1. *The ground was outside the grid.* The gridder binned heights with
+   `torch.bucketize(z, edges, right=False) - 1`, i.e. layers $(\text{lo},
+   \text{hi}]$, so a deposit at exactly $z = 0$ got index −1 and was dropped
+   (its own comment described half-open layers). A unit-weight particle moving
+   from 0 to 1 m in 60 s was counted 30 s by `trapezoid` and, ending on the
+   ground, 0 s by `endpoint`, instead of 60 s (*measured*, the review's example,
+   now `tests/test_deposition_position.py::test_a_deposit_on_the_ground_is_counted`;
+   it fails on the old binning). The bug is on `main` too. **Decision:** layers
+   are $[\text{lo}, \text{hi})$ (`right=True`), the convention of the horizontal
+   cells (`floor`) and the time-ago bins, so one rule covers all axes and needs no
+   special case. Consequences: the ground is in the first layer; a height exactly
+   on an interior edge moves to the layer above; a height exactly at the top edge
+   is now outside the grid, as a longitude exactly at `lon_max` already was.
+   *Rejected:* keeping $(\text{lo}, \text{hi}]$ and including $z = 0$
+   explicitly. It changes nothing for $z > 0$, but leaves the vertical axis with
+   a different convention from the other four and a special case at the ground,
+   for no physical gain: an output edge other than the ground has no physical
+   meaning, and which side a height exactly on it falls is a convention either
+   way. *What moves* (*measured* on the CPU smoke run, `endpoint` and
+   `trapezoid`, by a read-only hook on every deposit,
+   `$GLIDE_AGENT_OUTPUTS/agents/A2/fixes/edge_counts_*.json`): see the PR; in
+   transported particles a height exactly on an edge needs exact float
+   cancellation (*argued*). The one deterministic case is `trapezoid`'s first
+   start half at the release height: a release at 0 m is now counted in the
+   first layer, and a release exactly on an interior edge (the JFJ case,
+   `scripts/validation/zs-repair/case2-jfj.yaml`, 1,000 m with an edge at
+   1,000 m) puts that half step in the layer above instead of below (*derived*;
+   neither is the 0–40 m layer).
+2. *Half steps were binned by one age.* Each half stands for an interval of
+   ages but was counted in the bin of one age, so a half that straddled a
+   time-ago edge put residence in the wrong bin. The first review gave ages
+   80–140 s against an edge at 100 s: 30/30 instead of 20/40, and bins narrower
+   than a step were worse. The reviewer then refined it: the particles of a
+   batch share one step clock, but each counts its age from its own release
+   window's end, so a window ending off the step grid makes steps straddle bin
+   edges even when the bin width is a multiple of $\Delta t$ (ages 80–140 s
+   against 120 s bins: 60/0 instead of 40/20). Planned column and satellite
+   releases have observation times not aligned to $\Delta t$, so arbitrary
+   windows must work. **Decision:** split each half step by its actual overlap
+   with the age bins, each piece keeping its half's position and density
+   (`lpdm.main._age_bin_pieces`). A half spans at most
+   ⌈(Δt/2) / width⌉ + 1 bins (two for any bin at least half a step wide); the
+   count depends only on the step length and the configured width, so shapes are
+   static, there is no host sync, and the captured step is untouched (the
+   deposit is outside it). Pieces that do not overlap add an exact 0, so a run
+   whose steps never straddle an edge is unchanged (*derived*). One
+   time-integrated bin is one piece, unrestricted. No configuration check is
+   needed. *Measured* (`tests/test_deposition_position.py`,
+   `tests/test_tracer_benchmark.py::test_misaligned_release_residence_and_one_bin_emission_are_exact`):
+   the reviewer's three cases split exactly; a stationary particle at age
+   offsets 0, 20 and 45 s from the step grid fills every bin with its exact
+   seconds (widths 25, 60, 180 s, 60 s steps); end to end on both step paths,
+   two releases in one batch, one ending 20 s off the step grid (so the runtime
+   takes a 20 s first step), give the exact seconds per bin, including the partly
+   covered bins at each end of the lifetime, and the exact predicted enhancement
+   of an emission active in one partly covered bin. Every one of these fails on
+   the code before this fix except the aligned cases. *Rejected:* validating that
+   bin widths, run lengths and release windows are multiples of $\Delta t$ (it
+   was implemented first, then dropped at the coordinator's request): it would
+   refuse the misaligned windows that column and satellite releases need, and
+   the split costs only one more scatter per half.
+   **`endpoint` has the same issue and is not changed** (Matt's instruction): it
+   counts a whole step in the bin of its starting age. Where windows end on the
+   step grid and the width is a multiple of $\Delta t$ (every shipped
+   configuration, *measured*: `$GLIDE_AGENT_OUTPUTS/agents/A2/fixes/shipped_configs.txt`)
+   it is exact per bin; otherwise it moves up to a step of residence into the
+   neighbouring bin, which cancels in fully covered bins but not at the ends of
+   a release's lifetime (up to 4.4 s of a 120 s bin in the test above,
+   *measured*), and mistimes an emission active in only some bins by up to a
+   step. A related, separate property (*derived*, not changed): a particle is
+   counted from the step boundary at or below its release time, so its counted
+   ages are shifted older by up to one step; with a window ending off the grid,
+   up to that much of its oldest residence can fall past the end of the age axis
+   (20 s of 3,600 s for the test's second release).
 
 **Consequences.** Changing the default changes every surface-inlet footprint
 near the receptor (smoke: +11.6% in the receptor's cell, +1.25% on the 0–40 m

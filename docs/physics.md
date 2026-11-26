@@ -814,7 +814,17 @@ the attributes `density_weighting` and `units` of the dataset and of its
 `footprint_units`. The vertical bins are set
 by `output_grid.z_edges_m`, an arbitrary strictly-ascending edge list — e.g.
 `[0, 40, 1000, 5000]` gives a 0–40 m surface bin matching the FLEXPART/NAME
-convention, a mixed-layer bin, and a free-troposphere bin. Accumulating *directly*
+convention, a mixed-layer bin, and a free-troposphere bin. Every axis of the grid
+is binned half-open, $[\text{lo}, \text{hi})$: layer $k$ holds
+$z_k \le z < z_{k+1}$, as the horizontal cells hold $[\text{lo}, \text{hi})$ of
+longitude and latitude and time-ago bin $k$ the ages $[k, k+1)$ × the bin width.
+So a particle on the ground ($z = 0$, for example a release at 0 m, counted by
+`trapezoid` at its release point) is in the first layer, a particle exactly on an
+interior edge is in the layer above it, and one exactly at the top edge is
+outside the grid, as one at exactly the east or north edge is. (Until the review
+of PR #66 the layers were $(\text{lo}, \text{hi}]$, which dropped every deposit
+at exactly $z = 0$; nothing else lands exactly on an edge in practice.)
+Accumulating *directly*
 into a bin that matches the reference's surface layer makes the downstream unit
 conversion exact rather than a depth-weighted approximation.
 
@@ -838,46 +848,115 @@ dropped rather than clamped, so the axis labels stay honest.
 Particles outside the grid horizontally, vertically, in time-ago, or in release
 index contribute nothing.
 
-**Where in the step a particle is counted.** Each step's $\Delta f$ stands for
-the time integral of the cell indicator over the step,
-$\int 1[\mathbf{x}(t)\in\text{cell}]\,m_p/\rho_d\,dt$, which the gridder
-approximates from the positions it has. `output_grid.deposition.position`
-(task A2; decisions 0026 and 0029) chooses how:
+### 7.1 Explainer: counting a particle's residence within a step
 
-- `endpoint` (the default): all of $\Delta t$ at the particle's position at the
-  end of the step, after advection, turbulence, reflection and convection, with
-  $\rho_d$ there at the step's mid-time: a right-rectangle rule in time. A
-  particle's first step is counted where it ends, never at its release point.
-- `trapezoid`: $\Delta t/2$ at the start position and $\Delta t/2$ at the end
-  position, as two deposits (decision 0029). Each half has its own time-ago bin
-  (the start half the age at the start of the step, the end half the age half a
-  step later, just as `endpoint` bins the whole step by its starting age; with
-  steps aligned to the bins both halves fall in the step's bin) and its own
-  $\rho_d$, at its own position and time (the start at $t$, the end at
-  $t-\Delta t$, in the step's met window). A particle's first step is counted
-  half at its release point; a particle that leaves the met domain keeps the
-  start half of its last step, and the end half is dropped, like `endpoint`'s,
-  if it lies outside the output grid.
+**The problem.** A footprint cell's value is the time the released particles
+spend in that cell (per unit released mass, divided by the air density), summed
+over the particles. For one particle it is the time integral
 
-A third option, `step_mean` (all of $\Delta t$ at the mean of the step's start and
-end positions; decision 0026), was **removed** by decision 0029: scored below, it
-undercounts the 0–40 m layer wherever a step's vertical displacement is
-comparable to the layer, and it was the only rule that averaged positions (and so
-depended on the horizontal coordinate frame). Its measurements are kept below as
-the reason; configuration validation rejects it with that explanation.
+$$
+\int 1[\mathbf{x}(t)\in\text{cell}]\ \frac{m_p}{\rho_d}\ dt ,
+$$
+
+where $1[\cdot]$ is 1 while the particle is in the cell and 0 otherwise. The model
+does not know the path between steps: it knows each particle's position at the
+step times $t_0 = $ release, $t_1 = t_0 - \Delta t$, $t_2$, … (backward in time,
+$\Delta t = 60$ s by default). So the integral over each step has to be estimated
+from the step's two end positions, and the **counting rule**
+(`output_grid.deposition.position`, task A2) says how.
+
+**The rules** (figure, panel a: one particle's height over its first five steps
+from a 10 m release, with the 0–40 m layer shaded):
+
+![Where endpoint and trapezoid count a particle's residence, and how trapezoid splits a half step between age bins](img/residence-counting.png)
+
+*Panel (a): an illustrative height path (not a GLIDE trajectory); the deposits
+and totals are counted by GLIDE's own `_deposit_step`. Panel (b): the age-bin
+split, by GLIDE's `_age_bin_pieces`. Script:
+`scripts/validation/figures/residence_counting.py`.*
+
+- `endpoint` (the default): all of $\Delta t$ at the step's **end** position, a
+  right-rectangle rule in time. Its blind spot is the first step: the particle's
+  release position is never counted, and a step's residence is credited to
+  wherever the particle has got to after 60 s. For a surface inlet this removes
+  about half a step of residence from the receptor's own cell, where the footprint
+  is largest (−10.8% in the receptor's 0–40 m cell of the smoke run; decision
+  0029). Away from the release it is unbiased at 60 s.
+- `trapezoid`: $\Delta t/2$ at the step's **start** position and $\Delta t/2$ at
+  its **end** position, i.e. the trapezoidal rule for the time integral. Summed
+  over a trajectory it counts the same interior positions as `endpoint` with the
+  same weights, plus half a step at the release and minus half a step at the
+  particle's last position (*derived*), so it supplies exactly what `endpoint`
+  misses. Scored against fine-time residence it is within 0.5% everywhere on the
+  smoke run (decision 0029). What it still gets wrong is what any two-point rule
+  gets wrong: a crossing between two step times is credited by where the step's
+  end points fall, so single cells only a few steps wide carry errors of a few
+  per cent (±2% with 1 km cells at 3 m s⁻¹).
+- Two rules were tried and **removed**. The RK2 `midpoint` (decision 0026)
+  counted at the advection predictor, which leaves out the step's turbulent and
+  convective motion, so in the vertical it counted the first step at the
+  release height (+5% on the smoke run's 0–40 m total relative to `endpoint`). `step_mean` counted all
+  of $\Delta t$ at the mean of the start and end positions; averaging two heights
+  moves residence away from the ground when a step's vertical displacement is
+  comparable to the 40 m layer (−3 to −5% of the 0–40 m layer outside the
+  receptor's cell on the smoke run, up to −15% in strong turbulence; decision
+  0029). Configuration validation rejects both, with the reason.
+
+In panel (a) the particle truly spends 158 s in the layer over the five steps;
+`trapezoid` counts 150 s and `endpoint` 120 s, the difference being the half step
+at the release (*measured*, the figure script). Over a whole trajectory only the
+release end matters, because the trajectory's other end is days back and far
+away.
+
+**Age bins, and how trapezoid splits a half step between them.** With
+`n_time_bins > 1` the footprint also resolves *when*: bin $k$ holds residence at
+ages $[k, k+1)$ × `time_bin_seconds`, the age being the time before the particle's
+own release window's end. A backward step covers each particle's ages
+$[e, e + \Delta t)$, $e$ its age at the step's start. The particles of a batch
+share one step clock, but each counts its age from its own release window's
+end, so whenever a window ends between steps (a column or satellite sounding at
+an arbitrary time, say) the step's age interval straddles bin edges, even when the
+bin width is a multiple of $\Delta t$. `trapezoid` therefore treats its start half
+as standing for the ages $[e, e + \Delta t/2)$ and its end half for
+$[e + \Delta t/2, e + \Delta t)$, and splits each half by its overlap with the
+bins; each piece keeps its half's position and density (panel b: a step of ages
+80–140 s against 120 s bins gives 30 + 10 = 40 s to the first bin and 20 s to the
+second, the exact split; binning each half by one age gave 60 / 0). A half spans
+at most ⌈(Δt/2) / width⌉ + 1 bins, which is two for any bin at least half a step
+wide; the number of pieces depends only on the configuration, so the shapes are
+static and there is no host sync. For a stationary particle the seconds per bin
+are then exact for any alignment of release windows, steps and bins, including
+the runtime's short first step (*measured*: `tests/test_deposition_position.py`,
+`tests/test_tracer_benchmark.py::test_misaligned_release_residence_and_one_bin_emission_are_exact`,
+which also checks the predicted enhancement of an emission active in a single
+bin). With one bin (time-integrated, the default for FLEXPART comparisons) there
+is nothing to split and nothing is restricted.
+
+`endpoint` is **unchanged** and still counts a whole step in the bin of its
+starting age. Where a release window ends off the step grid, it therefore moves
+up to $\Delta t$ of each straddling step into the neighbouring bin: in fully
+covered bins the shifts in and out cancel, but at the ends of a release's
+lifetime they do not (up to 4.4 s of 120 s per bin in the test above,
+*measured*), and an emission active in only some bins is mistimed by up to one
+step. When windows end on the step grid and the bin width is a multiple of
+$\Delta t$ (every shipped configuration), both rules put every step in one bin.
+
+### 7.2 Implementation details
+
+`endpoint` deposits with $\rho_d$ at the end position and the step's mid-time.
+`trapezoid` deposits each half with its own $\rho_d$, at its own position and time
+(the start at $t$, the end at $t-\Delta t$, in the step's met window). A
+particle's first step is counted half at its release point; a particle that
+leaves the met domain keeps the start half of its last step, and the end half is
+dropped, like `endpoint`'s, if it lies outside the output grid. Vertical layers
+are half-open, as above, so a release at 0 m is counted in the first layer.
 
 For `trapezoid` the runtime copies the start positions before the step, outside
 the captured graph, so the static (CUDA) step's graph, shapes and outputs are the
-same as for `endpoint` (decision 0004). Summed over consecutive
-steps, `trapezoid` is `endpoint` plus $\Delta t/2$ at each particle's first
-position minus $\Delta t/2$ at its last, because each interior position is the
-end of one step and the start of the next (*derived*); the only other
-differences are that each half carries the density at its own time and, where a
-step straddles a time-ago edge, its own bin. In space, then, `endpoint` and
-`trapezoid` sample the same interior positions with the same weights; what
-`endpoint` lacks is the first half step at the release point. Kernel deposition
-(decision 0012) is deferred to after v1; deposition is a delta at the chosen
-position(s).
+same as for `endpoint` (decision 0004). Each half is one scatter per age-bin
+piece (two pieces per half with several bins, one with a single bin). Kernel
+deposition (decision 0012) is deferred to after v1; deposition is a delta at the
+chosen position(s).
 
 **Scored against fine-time residence** (decision 0029;
 `scripts/validation/score_residence_counting.py`, outputs in
