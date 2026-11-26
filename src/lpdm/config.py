@@ -504,6 +504,12 @@ class OutputGridConfig(_Frozen):
     density_weighting: Literal["dry_air", "none"] = "dry_air"
     # Where in each step residence is counted (task A2); default endpoint.
     deposition: DepositionConfig = DepositionConfig()
+    # Precision of the in-memory footprint accumulator (A2 follow-up, prototype).
+    # `float32` (default) is the long-standing behaviour. `float64` sums each cell's
+    # contributions in double precision and rounds to float32 once, when the batch
+    # is written; the store stays float32. It doubles the accumulator's memory (one
+    # batch's grid).
+    accumulation_dtype: Literal["float32", "float64"] = "float32"
     # Footprint storage (task B2). Both None (default) keep the store's default
     # encoding, so existing output is unchanged. `footprint_keep_mantissa_bits`
     # rounds each value to that many float32 mantissa bits before compression

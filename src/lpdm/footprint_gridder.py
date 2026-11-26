@@ -202,6 +202,12 @@ class FootprintGridder:
         stride_z = self.n_y * self.n_x
         flat_idx = r_c * stride_r + t_c * stride_t + z_c * stride_z + y_c * self.n_x + x_c
 
+        # A float64 grid (output_grid.accumulation_dtype) takes float32 inputs;
+        # `.to` is a no-op when the dtypes already match, so a float32 grid is
+        # unchanged.
+        weights = weights.to(self.dtype)
+        if inv_density is not None:
+            inv_density = inv_density.to(self.dtype)
         if inv_density is None:
             w_eff = weights * valid.to(weights.dtype) * dt_seconds
         else:

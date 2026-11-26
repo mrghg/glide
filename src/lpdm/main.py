@@ -253,6 +253,7 @@ def _footprint_units_doc(cfg: RunConfig) -> dict[str, object]:
     doc: dict[str, object] = dict(FOOTPRINT_UNITS_DOC)
     doc.update(DENSITY_WEIGHTING_ATTRS[weighting])
     doc.update(_deposition_attrs(cfg))
+    doc["accumulation_dtype"] = cfg.output_grid.accumulation_dtype
     if weighting == "dry_air":
         doc["value"] = (
             "Σ over active particles in cell of (weight_i × dt_step_seconds / rho_d,i), "
@@ -1658,6 +1659,10 @@ def _run(
     # outside the captured step, so the step's graph and its outputs are the same for
     # all three.
     deposition_position = cfg.output_grid.deposition.position
+    accumulation_dtype = (
+        torch.float64 if cfg.output_grid.accumulation_dtype == "float64" else torch.float32
+    )
+    LOGGER.info("footprint accumulation dtype: %s", cfg.output_grid.accumulation_dtype)
     keep_step_start = deposition_position != "endpoint"
     LOGGER.info("footprint deposition position: %s", cfg.output_grid.deposition.position)
     if use_static:
@@ -1790,7 +1795,7 @@ def _run(
             n_x=out_grid.n_x,
             n_releases=len(batch.releases),
             device=device,
-            dtype=torch.float32,
+            dtype=accumulation_dtype,
         )
 
         if not footprint_store_created:
@@ -2186,7 +2191,8 @@ def _run(
         with phase_timer.phase("output_write"):
             writer.write_footprint_region(
                 outputs.footprints,
-                gridder.tensor,
+                # The store is float32; a float64 accumulator is rounded once here.
+                gridder.tensor.to(torch.float32),
                 release_start=batch_release_offset,
                 release_stop=batch_release_offset + len(batch.releases),
             )
