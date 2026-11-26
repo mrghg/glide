@@ -237,13 +237,14 @@ def _neutral_sigma_w(
 
 
 def _unstable_sigma_w(
-    z_over_h: torch.Tensor, ustar: torch.Tensor, w_star: torch.Tensor
+    z_over_h: torch.Tensor, ustar: torch.Tensor, w_star: torch.Tensor, *, floored: bool = True
 ) -> torch.Tensor:
-    """Ryall & Maryon (1998): σ_w = √(1.2 w*²(1−0.9ζ)ζ^(2/3) + (1.8−1.4ζ)u*²)."""
+    """Ryall & Maryon (1998): σ_w = √(1.2 w*²(1−0.9ζ)ζ^(2/3) + (1.8−1.4ζ)u*²).
+    ``floored=False`` returns the unfloored branch (clamped at 0 only)."""
     sigma_w_sq = 1.2 * w_star.pow(2) * (1.0 - 0.9 * z_over_h).clamp(min=0.0) * z_over_h.pow(
         2.0 / 3.0
     ) + (1.8 - 1.4 * z_over_h) * ustar.pow(2)
-    return sigma_w_sq.clamp(min=SIGMA_MIN_M_S**2).sqrt()
+    return sigma_w_sq.clamp(min=SIGMA_MIN_M_S**2 if floored else 0.0).sqrt()
 
 
 def _in_bl_stable(
@@ -398,6 +399,8 @@ def in_bl_sigma_w(
     w_star: torch.Tensor,
     h_over_L: torch.Tensor,
     latitude_deg: torch.Tensor,
+    *,
+    floored: bool = True,
 ) -> torch.Tensor:
     """σ_w alone inside the BL: bit-identical to ``in_bl_sigma_TL(...)[2]`` (the
     regime functions share the σ_w expressions) at a fraction of the cost. Used
@@ -408,10 +411,64 @@ def in_bl_sigma_w(
     z_over_h = (z / blh).clamp(min=0.0, max=1.0)
     w_st = _stable_sigma_w(z_over_h, ustar)
     w_nu = _neutral_sigma_w(z, ustar, f_abs, ustar_safe)
-    w_un = _unstable_sigma_w(z_over_h, ustar, w_star)
+    w_un = _unstable_sigma_w(z_over_h, ustar, w_star, floored=floored)
     in_stable = h_over_L > H_OVER_L_STABLE_THRESHOLD
     in_unstable = h_over_L < H_OVER_L_UNSTABLE_THRESHOLD
     return torch.where(in_stable, w_st, torch.where(in_unstable, w_un, w_nu))
+
+
+def in_bl_dsigw2_dz(
+    z: torch.Tensor,
+    blh: torch.Tensor,
+    ustar: torch.Tensor,
+    w_star: torch.Tensor,
+    h_over_L: torch.Tensor,
+    latitude_deg: torch.Tensor,
+) -> torch.Tensor:
+    """Analytic ∂σ_H²/∂z of the UNFLOORED boundary-layer σ_w profile of each regime
+    (the expressions of ``in_bl_sigma_w``), for 0 < z ≤ h. The caller zeroes it
+    where the floor binds.
+
+    stable  σ = 1.3u*(1−ζ):           ∂σ²/∂z = −2·1.3u*·σ/h
+    neutral σ = 1.3u*exp(−2|f|z/u*):  ∂σ²/∂z = −4|f|σ²/u*
+    unstable σ² = 1.2w*²(1−0.9ζ)ζ^⅔ + (1.8−1.4ζ)u*²:
+        ∂σ²/∂z = [1.2w*²(−0.9ζ^⅔ + ⅔(1−0.9ζ)ζ^−⅓) − 1.4u*²]/h
+    """
+
+    f_abs = coriolis_parameter(latitude_deg).abs().clamp(min=1e-5)
+    ustar_safe = ustar.clamp(min=USTAR_MIN_M_S)
+    z_over_h = (z / blh).clamp(min=1e-6, max=1.0)
+    w_st = _stable_sigma_w(z_over_h, ustar)
+    g_st = -2.0 * 1.3 * ustar * w_st / blh
+    w_nu = _neutral_sigma_w(z, ustar, f_abs, ustar_safe)
+    g_nu = -4.0 * f_abs * w_nu.pow(2) / ustar_safe
+    g_un = (
+        1.2
+        * w_star.pow(2)
+        * (
+            -0.9 * z_over_h.pow(2.0 / 3.0)
+            + (2.0 / 3.0) * (1.0 - 0.9 * z_over_h) * z_over_h.pow(-1.0 / 3.0)
+        )
+        - 1.4 * ustar.pow(2)
+    ) / blh
+    in_stable = h_over_L > H_OVER_L_STABLE_THRESHOLD
+    in_unstable = h_over_L < H_OVER_L_UNSTABLE_THRESHOLD
+    return torch.where(in_stable, g_st, torch.where(in_unstable, g_un, g_nu))
+
+
+def apply_sigma_w_floor(sigma_h: torch.Tensor, form: str) -> torch.Tensor:
+    """The boundary-layer σ_w from the unfloored profile value ``sigma_h`` and the
+    floor ``SIGMA_MIN_M_S`` (read at call time): ``clamp`` max(σ_H, σ_min) (the
+    production form, a kink where it binds), ``quadrature`` √(σ_H² + σ_min²)
+    (smooth), ``offset`` σ_H + σ_min (smooth; FLEXPART's additive form)."""
+
+    if form == "clamp":
+        return sigma_h.clamp(min=SIGMA_MIN_M_S)
+    if form == "quadrature":
+        return (sigma_h.pow(2) + SIGMA_MIN_M_S**2).sqrt()
+    if form == "offset":
+        return sigma_h + SIGMA_MIN_M_S
+    raise ValueError(f"unknown sigma_w floor form {form!r}")
 
 
 def potential_temperature(t_kelvin: torch.Tensor, pressure_pa: torch.Tensor) -> torch.Tensor:
@@ -711,6 +768,26 @@ class HannaScheme(TurbulenceScheme):
 
     # Finite-difference step (m) for the well-mixed drift's ∂σ_w²/∂z.
     DRIFT_FD_DELTA_M: ClassVar[float] = 1.0
+    # PROTOTYPE (task WM-sigma-floor): the boundary-layer drift gradient where σ_w
+    # meets its floor SIGMA_MIN_M_S. "fd": the ±δ difference of the floored
+    # profile (the code before this prototype; straddles the kink where the floor
+    # starts to bind).
+    # "kink": the ±δ difference of the UNFLOORED branch σ_H, zero where the floor
+    # binds at the particle (the derivative of max(σ_H, σ_min)² on the particle's
+    # side of the kink; bit-identical to "fd" wherever neither the particle nor a
+    # probe is in the floor). "analytic": ∂σ_H²/∂z from the regime formulas, zero
+    # where the floor binds. The free-troposphere side is the "fd" stencil in
+    # every mode. "hybrid": "analytic" only for boundary-layer particles whose
+    # stencil is cut at h or touches the floor, else "fd" bit for bit. "kink" and
+    # "hybrid" need SIGMA_W_FLOOR_FORM == "clamp"; "analytic" with a smooth form
+    # differentiates that form. Default "hybrid" (the recommendation of
+    # outputs/agents/WM/sigma_floor/SUMMARY.md); the others are kept for A/B.
+    DRIFT_GRADIENT_MODE: ClassVar[str] = "hybrid"
+    # PROTOTYPE: how the boundary-layer σ_w meets the floor (``apply_sigma_w_floor``):
+    # "clamp" (production), "quadrature" √(σ_H² + σ_min²), "offset" σ_H + σ_min.
+    # With a smooth form T_Lw is rescaled by clamp(σ_H)/form(σ_H) so that the
+    # regime's K = σ_w²·T_Lw ∝ σ_w keeps its form (every regime's T_Lw ∝ 1/σ_w).
+    SIGMA_W_FLOOR_FORM: ClassVar[str] = "clamp"
 
     def step(
         self,
@@ -933,9 +1010,51 @@ class HannaScheme(TurbulenceScheme):
         z_lo = (z_eval - self.DRIFT_FD_DELTA_M).clamp(min=self.z_ubl_m)
         z_hi = torch.where(side_ft, z_hi, torch.minimum(z_hi, blh))
         z_lo = torch.where(side_ft, torch.maximum(z_lo, blh), z_lo)
-        sw_hi = self._column_sigma_w(z_hi, side_ft=side_ft, **col_kwargs)
-        sw_lo = self._column_sigma_w(z_lo, side_ft=side_ft, **col_kwargs)
+        mode = self.DRIFT_GRADIENT_MODE
+        form = self.SIGMA_W_FLOOR_FORM
+        if mode not in ("fd", "kink", "analytic", "hybrid") or (
+            mode in ("kink", "hybrid") and form != "clamp"
+        ):
+            raise ValueError(f"unsupported DRIFT_GRADIENT_MODE {mode!r} with form {form!r}")
+        unfloored = mode == "kink"
+        sw_hi = self._column_sigma_w(z_hi, side_ft=side_ft, floored=not unfloored, **col_kwargs)
+        sw_lo = self._column_sigma_w(z_lo, side_ft=side_ft, floored=not unfloored, **col_kwargs)
         dsig2_dz = (sw_hi.pow(2) - sw_lo.pow(2)) / (z_hi - z_lo).clamp(min=self.DRIFT_FD_DELTA_M)
+        if mode in ("analytic", "hybrid") and not self.surface_layer_override:
+            bl_args = (
+                blh,
+                col_kwargs["ustar"],
+                col_kwargs["w_star"],
+                col_kwargs["h_over_L"],
+                col_kwargs["lat"],
+            )
+            g_h = in_bl_dsigw2_dz(z_eval, *bl_args)
+            sigma_h = in_bl_sigma_w(z_eval, *bl_args, floored=False)
+            if form == "clamp":
+                g_bl = torch.where(sigma_h > SIGMA_MIN_M_S, g_h, torch.zeros_like(g_h))
+            elif form == "quadrature":
+                g_bl = g_h
+            else:  # offset: ∂(σ_H + m)²/∂z = (1 + m/σ_H)·∂σ_H²/∂z
+                g_bl = (1.0 + SIGMA_MIN_M_S / sigma_h.clamp(min=1e-9)) * g_h
+            if mode == "hybrid":
+                # Analytic only where the boundary-layer stencil is not a plain
+                # centred difference of the smooth profile: cut at h (one-sided,
+                # so it evaluates the gradient up to δ/2 below the particle, where
+                # a stable σ_H → 0 makes that a large error) or touching the floor.
+                # Elsewhere the production stencil, bit for bit.
+                near = (
+                    (z_eval + self.DRIFT_FD_DELTA_M > blh)
+                    | (sw_hi <= SIGMA_MIN_M_S)
+                    | (sw_lo <= SIGMA_MIN_M_S)
+                    | (sigma_w <= SIGMA_MIN_M_S)
+                )
+                g_bl = torch.where(near, g_bl, dsig2_dz)
+            dsig2_dz = torch.where(side_ft, dsig2_dz, g_bl)
+        if unfloored:
+            # The floor binds at the particle (σ_w is exactly the floor there):
+            # σ_w is flat, so its gradient is zero.
+            in_floor = (~side_ft) & (sigma_w <= SIGMA_MIN_M_S)
+            dsig2_dz = torch.where(in_floor, torch.zeros_like(dsig2_dz), dsig2_dz)
         if self.basal_zero_gradient:
             # Below the basal clamp σ_w is sampled at z_ubl, i.e. flat in z, so its
             # gradient there is zero; the stencil would otherwise look one-sidedly
@@ -1662,6 +1781,10 @@ class HannaScheme(TurbulenceScheme):
             h_over_L,
             lat,
         )
+        if self.SIGMA_W_FLOOR_FORM != "clamp":
+            sigma_h = in_bl_sigma_w(z_query, blh, ustar, w_star, h_over_L, lat, floored=False)
+            sigma_w = apply_sigma_w_floor(sigma_h, self.SIGMA_W_FLOOR_FORM)
+            T_Lw = T_Lw * sigma_h.clamp(min=SIGMA_MIN_M_S) / sigma_w
 
         # OPTIONAL Monin-Obukhov surface-layer override for z < 0.1 h (GLIDE
         # addition; off by default — FLEXPART v11 runs the regime formulas to the
@@ -1740,6 +1863,7 @@ class HannaScheme(TurbulenceScheme):
         level_arr: torch.Tensor | None = None,
         ascending: bool | None = None,
         side_ft: torch.Tensor | None = None,
+        floored: bool = True,
     ) -> torch.Tensor:
         """σ_w alone at ``z_query``: bit-identical to ``_column_turbulence(...)[2]``
         (same regime selection, surface-layer override and free-troposphere
@@ -1753,7 +1877,13 @@ class HannaScheme(TurbulenceScheme):
         ``z_query`` is (so a probe at exactly ``z = h`` can be evaluated on
         either side). ``None`` selects by ``z_query > h``, as the profile does."""
 
-        sigma_w = in_bl_sigma_w(z_query, blh, ustar, w_star, h_over_L, lat)
+        if self.SIGMA_W_FLOOR_FORM != "clamp":
+            sigma_w = apply_sigma_w_floor(
+                in_bl_sigma_w(z_query, blh, ustar, w_star, h_over_L, lat, floored=False),
+                self.SIGMA_W_FLOOR_FORM,
+            )
+        else:
+            sigma_w = in_bl_sigma_w(z_query, blh, ustar, w_star, h_over_L, lat, floored=floored)
         if self.surface_layer_override:
             in_sl = z_query < SURFACE_LAYER_FRACTION * blh
             sigma_w = torch.where(in_sl, surface_layer_sigma_w(z_query, ustar, L), sigma_w)
@@ -1769,7 +1899,7 @@ class HannaScheme(TurbulenceScheme):
             ascending=ascending,
         )[0]
         sigma_w = torch.where(above_bl, ft_sw, sigma_w)
-        return sigma_w.clamp(min=SIGMA_MIN_M_S)
+        return sigma_w.clamp(min=SIGMA_MIN_M_S) if floored else sigma_w
 
     def _sigmas_at(self, z_agl: torch.Tensor, **col_kwargs) -> torch.Tensor:
         """(σ_u, σ_v, σ_w) at height ``z_agl`` (basal clamp applied), ``[N, 3]``:
@@ -1835,6 +1965,11 @@ class HannaScheme(TurbulenceScheme):
         time), so they are evaluated once per outer step (decision 0028)."""
 
         su, sv, sw, *_ = in_bl_sigma_TL(blh, blh, ustar, w_star, h_over_L, lat)
+        if self.SIGMA_W_FLOOR_FORM != "clamp":
+            sw = apply_sigma_w_floor(
+                in_bl_sigma_w(blh, blh, ustar, w_star, h_over_L, lat, floored=False),
+                self.SIGMA_W_FLOOR_FORM,
+            )
         ft = self._interp_3d_field(
             ft_fields[:2],
             grid_bounds,

@@ -23,6 +23,7 @@ from lpdm.turbulence.hanna import (
     EXCEEDANCE_COUNT_KEYS,
     FT_KZ_CEIL_M2_S,
     FT_KZ_FLOOR_M2_S,
+    SIGMA_MIN_M_S,
     air_density,
     brunt_vaisala_squared,
     convective_velocity,
@@ -1355,9 +1356,15 @@ def test_drift_stencil_stays_on_the_particles_side_of_h(h_over_L: float) -> None
     side with its own profile (the boundary-layer profile at and below h, the
     free-troposphere closure above), so the jump of σ_w at h never enters the
     drift. More than δ = 1 m from h the stencil is the centred one, as before;
-    within δ of h a stencil straddling h would difference the jump instead."""
+    within δ of h a stencil straddling h would difference the jump instead.
+
+    Checked with the ``fd`` drift-gradient mode (the stencil itself). The default
+    ``hybrid`` mode replaces the cut stencil of a boundary-layer particle within δ
+    of h by the analytic gradient (tests/test_sigma_floor_gradient.py); the last
+    lines check that it agrees with ``fd`` everywhere else here."""
 
     scheme = HannaScheme()
+    scheme.DRIFT_GRADIENT_MODE = "fd"
     met = _uniform_met(blh=800.0)
     z = torch.tensor([300.0, 798.0, 799.5, 800.0, 800.3, 801.0, 802.5, 1500.0])
     col = _interface_col(scheme, met, z.numel(), h_over_L)
@@ -1382,6 +1389,17 @@ def test_drift_stencil_stays_on_the_particles_side_of_h(h_over_L: float) -> None
     near = ~far
     # Near h the straddling stencil is dominated by the jump; the one-sided one is not.
     assert torch.all(straddling[near].abs() > 10.0 * grad[near].abs())
+
+    hybrid = HannaScheme()
+    assert hybrid.DRIFT_GRADIENT_MODE == "hybrid"
+    grad_h = -2.0 * hybrid._vertical_coefficients(z, density, **col)[7]
+    floor = SIGMA_MIN_M_S
+    at_floor = torch.zeros_like(side_ft)
+    for zz in (z, z_hi, z_lo):
+        at_floor |= scheme._column_sigma_w(zz, side_ft=side_ft, **col) <= floor
+    cut = (~side_ft) & ((z + 1.0 > 800.0) | at_floor)  # stable: 798 m is in the floor layer
+    assert torch.equal(grad_h[~cut], grad[~cut])
+    assert torch.all(straddling[near].abs() > 10.0 * grad_h[near].abs())
 
 
 def test_interface_sigmas_are_the_profile_limits_at_h() -> None:
