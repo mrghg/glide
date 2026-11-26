@@ -179,11 +179,13 @@ class _RecordingDensity:
 
 def test_trapezoid_deposits_each_half_with_its_own_bin_and_density() -> None:
     """The literal rule on a multi-bin, multi-release, density-weighted grid: dt/2 at
-    the start (bin of the age at the step's start, density at the start's position
-    and time) and dt/2 at the end (bin of the age half a step later, density at the
-    end's position and time). Covers a step that straddles a bin edge, a particle
-    whose end leaves the grid (it keeps its start half), an inactive particle and a
-    second release."""
+    the start (density at the start's position and time) standing for the ages
+    [e, e + dt/2), and dt/2 at the end (density at the end's position and time) for
+    [e + dt/2, e + dt), each half split between age bins by its overlap with them.
+    Covers a half that straddles a bin edge (particle 1, ages 80-140 s against an
+    edge at 100 s: 20 + 40 s, not the 30 + 30 s of binning each half by one age),
+    a particle whose end leaves the grid (it keeps its start half), an inactive
+    particle, and a second release whose end half straddles an edge."""
 
     gridder = FootprintGridder(
         lon_bounds=(0.0, 4.0),
@@ -247,15 +249,19 @@ def test_trapezoid_deposits_each_half_with_its_own_bin_and_density() -> None:
     # particle 0: age 0, both halves in bin 0; start in x cell 0, end in x cell 1
     expected[0, 0, 0, 0, 0] += 1.0 * h * inv(10.0, a_start)
     expected[0, 0, 0, 0, 1] += 1.0 * h * inv(30.0, a_end)
-    # particle 1: age 80, start half in bin 0 (80 s), end half in bin 1 (110 s)
-    expected[0, 0, 1, 0, 1] += 2.0 * h * inv(50.0, a_start)
+    # particle 1: start half ages 80-110 s, 20 s in bin 0 and 10 s in bin 1; end half
+    # ages 110-140 s, all in bin 1
+    expected[0, 0, 1, 0, 1] += 2.0 * 20.0 * inv(50.0, a_start)
+    expected[0, 1, 1, 0, 1] += 2.0 * 10.0 * inv(50.0, a_start)
     expected[0, 1, 0, 0, 2] += 2.0 * h * inv(20.0, a_end)
     # particle 2: its end leaves the grid, so only the start half is counted
     expected[0, 0, 0, 0, 3] += 3.0 * h * inv(20.0, a_start)
     # particle 3: inactive, nothing
-    # particle 4: release 1, age 150, both halves in bin 1 (150 s, 180 s)
+    # particle 4: release 1, start half ages 150-180 s in bin 1; end half 180-210 s,
+    # 20 s in bin 1 and 10 s in bin 2
     expected[1, 1, 0, 0, 2] += 5.0 * h * inv(5.0, a_start)
-    expected[1, 1, 1, 0, 2] += 5.0 * h * inv(60.0, a_end)
+    expected[1, 1, 1, 0, 2] += 5.0 * 20.0 * inv(60.0, a_end)
+    expected[1, 2, 1, 0, 2] += 5.0 * 10.0 * inv(60.0, a_end)
     torch.testing.assert_close(gridder.tensor, expected, rtol=1e-12, atol=0.0)
 
 
@@ -267,15 +273,133 @@ def test_time_ago_index_single_bin_lumps_every_age() -> None:
     assert _time_ago_index(torch.tensor([3599.0, 3600.0]), 3600.0, 3).tolist() == [0, 1]
 
 
+def _deposit_one_step(gridder, position, start, end, age_s=0.0, dt=60.0, bin_s=3600.0) -> None:
+    """`_deposit_step` for unit-weight particles of age ``age_s`` (at the step's
+    start) in release 0, without density."""
+
+    t0 = datetime(2024, 1, 1, 12, 0, tzinfo=UTC)
+    met_window = SimpleNamespace(
+        metadata=SimpleNamespace(time_start=t0, time_end=t0 + timedelta(hours=1))
+    )
+    n = end.shape[0]
+    elapsed = torch.full((n,), float(age_s), dtype=torch.float32)
+    _deposit_step(
+        gridder,
+        position=position,
+        start_xyz=start,
+        end_xyz=end,
+        active_mask=torch.ones(n, dtype=torch.bool),
+        weights=torch.ones(n, dtype=end.dtype),
+        elapsed_s=elapsed,
+        t_idx=_time_ago_index(elapsed, bin_s, gridder.n_t),
+        time_bin_s=bin_s,
+        release_idx=torch.zeros(n, dtype=torch.int64),
+        delta_s=dt,
+        t_cursor=t0 + timedelta(seconds=1800),
+        particle_density=None,
+        met_window=met_window,
+        t_alpha=0.5,
+        engine=None,
+    )
+
+
+def _single_cell_gridder(n_time_bins: int = 1) -> FootprintGridder:
+    return FootprintGridder(
+        lon_bounds=(0.0, 1.0),
+        lat_bounds=(0.0, 1.0),
+        z_edges_m=(0.0, 40.0, 1000.0),
+        n_time_bins=n_time_bins,
+        n_y=1,
+        n_x=1,
+        device="cpu",
+        dtype=torch.float64,
+    )
+
+
+@pytest.mark.parametrize("position", ["endpoint", "trapezoid"])
+def test_a_deposit_on_the_ground_is_counted(position: str) -> None:
+    """The review of PR #66: a unit-weight particle moving from 0 to 1 m in 60 s is in
+    the 0-40 m layer for the whole step, so the layer records 60 s. The gridder's
+    layers were (lo, hi], which dropped the deposit at z = 0 (trapezoid recorded
+    30 s). For endpoint the particle moves from 1 m to the ground."""
+
+    gridder = _single_cell_gridder()
+    ground = torch.tensor([[0.5, 0.5, 0.0]], dtype=torch.float64)
+    above = torch.tensor([[0.5, 0.5, 1.0]], dtype=torch.float64)
+    start, end = (ground, above) if position == "trapezoid" else (above, ground)
+    _deposit_one_step(gridder, position, start, end)
+    assert gridder.tensor[0, 0, 0, 0, 0].item() == 60.0
+    assert gridder.tensor.sum().item() == 60.0
+
+
+_XYZ = torch.tensor([[0.5, 0.5, 10.0]], dtype=torch.float64)
+
+
+@pytest.mark.parametrize(
+    ("age_s", "bin_s", "n_bins", "trapezoid", "endpoint"),
+    [
+        # The reviewer's refined case: ages 80-140 s against 120 s bins (40 + 20).
+        (80.0, 120.0, 2, [40.0, 20.0], [60.0, 0.0]),
+        # The first review: an edge at 100 s inside the step (20 + 40).
+        (80.0, 100.0, 2, [20.0, 40.0], [60.0, 0.0]),
+        # Bins narrower than a half step: six 10 s bins over ages 0-60 s.
+        (0.0, 10.0, 6, [10.0] * 6, [60.0] + [0.0] * 5),
+        # A step on the grid of the bins: all in one bin, either way.
+        (60.0, 120.0, 2, [60.0, 0.0], [60.0, 0.0]),
+    ],
+)
+def test_one_step_is_split_by_age_bin(age_s, bin_s, n_bins, trapezoid, endpoint) -> None:
+    """A stationary unit-weight particle, one 60 s step: `trapezoid` splits each half
+    step by its overlap with the age bins, so the seconds per bin are exact;
+    `endpoint` keeps counting the whole step in the bin of its starting age."""
+
+    for position, expected in (("trapezoid", trapezoid), ("endpoint", endpoint)):
+        gridder = _single_cell_gridder(n_time_bins=n_bins)
+        _deposit_one_step(gridder, position, _XYZ, _XYZ, age_s=age_s, bin_s=bin_s)
+        assert gridder.tensor[0, :, 0, 0, 0].tolist() == expected, position
+
+
+@pytest.mark.parametrize("offset_s", [0.0, 20.0, 45.0])
+@pytest.mark.parametrize(("dt", "bin_s"), [(60.0, 60.0), (60.0, 180.0), (60.0, 25.0)])
+def test_stationary_particle_fills_each_age_bin_with_its_width(
+    offset_s: float, dt: float, bin_s: float
+) -> None:
+    """A stationary unit-weight particle followed for many steps, its ages offset
+    from the step grid by ``offset_s`` (a release window ending between steps):
+    with `trapezoid` every bin the particle spans completely holds exactly its
+    width, whatever the alignment, and the first and last bins hold the rest."""
+
+    n_bins = 8
+    n_steps = 20
+    gridder = _single_cell_gridder(n_time_bins=n_bins)
+    for k in range(n_steps):
+        _deposit_one_step(
+            gridder, "trapezoid", _XYZ, _XYZ, age_s=offset_s + k * dt, dt=dt, bin_s=bin_s
+        )
+    lo, hi = offset_s, offset_s + n_steps * dt
+    edges = np.arange(n_bins + 1) * bin_s
+    exact = np.clip(np.minimum(hi, edges[1:]) - np.maximum(lo, edges[:-1]), 0.0, None)
+    np.testing.assert_allclose(gridder.tensor[0, :, 0, 0, 0].numpy(), exact, rtol=0, atol=1e-9)
+
+
+def test_time_integrated_footprint_takes_any_age() -> None:
+    """One bin (time-integrated): no splitting, every age counts in full."""
+
+    gridder = _single_cell_gridder(n_time_bins=1)
+    _deposit_one_step(gridder, "trapezoid", _XYZ, _XYZ, age_s=1e6 + 17.0, bin_s=7.0)
+    assert gridder.tensor.sum().item() == 60.0
+
+
 @pytest.mark.parametrize("static", [False, True], ids=["dynamic", "static"])
 def test_trapezoid_time_ago_bins_match_endpoint_totals(
     tmp_path: Path, monkeypatch, static: bool
 ) -> None:
     """End to end with time-ago bins and dry-air weighting: with steps aligned to the
-    bins, each step's two halves fall in its own bin, so the per-bin totals (summed
-    over space) match the endpoint's up to the density's change along a step; and the
-    first steps' start halves are counted in the release column, which endpoint never
-    counts."""
+    bins (a 300 s release window and 300 s steps), each step lies in one bin, so the
+    per-bin totals (summed over space) match the endpoint's up to the density's change
+    along a step; and the first steps' start halves are counted in the release column,
+    which endpoint never counts. (The helper's default 60 s window is not aligned with
+    300 s steps; misaligned windows are tested in `test_tracer_benchmark.py`.)"""
 
     monkeypatch.setattr(PlaceholderConstantOU, "sigma_w2", 0.0)
     monkeypatch.setenv("GLIDE_STATIC_SUBSTEPS", "1" if static else "0")
@@ -284,6 +408,7 @@ def test_trapezoid_time_ago_bins_match_endpoint_totals(
         cfg = _make_run_config(
             output_uri=str(tmp_path / position),
             dt_seconds=300,
+            release_duration_seconds=300,
             simulation_length_seconds=3 * 3600,
             n_time_bins=3,
             density_weighting="dry_air",

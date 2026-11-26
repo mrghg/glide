@@ -472,10 +472,11 @@ class DepositionConfig(_Frozen):
 
     # `endpoint`: all of the step at the particle's position after the step's
     # advection, turbulence and convection (the long-standing behaviour).
-    # `trapezoid`: half the step at the start position and half at the end, each with
-    # its own time-ago bin and density (decision 0029). `step_mean` (decision 0026)
-    # was removed: scored against fine-time residence it undercounts the 0-40 m
-    # layer by 3-5% (up to 15% in strong turbulence). The RK2 `midpoint` was removed
+    # `trapezoid`: half the step at the start position and half at the end, each
+    # split between time-ago bins by its overlap with them and with its own density
+    # (decision 0029).
+    # `step_mean` (decision 0026) was removed: scored against fine-time residence it
+    # undercounts the 0-40 m layer by 3-5% (up to 15% in strong turbulence). The RK2 `midpoint` was removed
     # before it. Kernel deposition (decision 0012) is deferred to after v1.
     position: Literal["endpoint", "trapezoid"] = "endpoint"
 

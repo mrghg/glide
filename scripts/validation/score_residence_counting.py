@@ -34,8 +34,9 @@ and endpoint rules themselves).
 **Rules**, exactly as `main._deposit_step` counts them: endpoint (Δ at x1, density
 at x1 and the step's mid-time, age bin of the step's start), step_mean (Δ at the
 mean of x0 and x1, density there at mid-time), trapezoid (Δ/2 at x0, density at the
-step's start time, age bin of the start; Δ/2 at x1, density at the step's end time,
-age bin of the age half a step later).
+step's start time, age of the step's start; Δ/2 at x1, density at the step's end
+time, age half a step later; production splits each half by its overlap with the
+age bins, which with hourly bins and 60 s steps aligned to them changes nothing).
 
 **Tallies.** Each estimator accumulates, density-weighted and not, (a) the
 time-integrated (z, y, x) grid and (b) per hourly time-ago bin, the totals by
@@ -154,7 +155,8 @@ class Tallies:
         iy = torch.floor(
             (xyz[:, 1] - g.lat_bounds[0]) / (g.lat_bounds[1] - g.lat_bounds[0]) * g.n_y
         ).long()
-        iz = torch.bucketize(xyz[:, 2].contiguous(), self.z_edges_t, right=False) - 1
+        # [lo, hi) layers, as FootprintGridder.accumulate (z = 0 is in layer 0).
+        iz = torch.bucketize(xyz[:, 2].contiguous(), self.z_edges_t, right=True) - 1
         it = torch.floor(age_s.to(torch.float64) / g.bin_s).long()
         ok = (
             (ix >= 0)

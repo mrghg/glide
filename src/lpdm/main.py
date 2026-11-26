@@ -224,9 +224,9 @@ DEPOSITION_POSITION_DOC = {
     "trapezoid": (
         "each step's residence is split in two halves: dt/2 counted at the particle's "
         "position at the start of the step and dt/2 at its position at the end (after "
-        "advection, turbulence and convection), each half with its own time-ago bin (the "
-        "start half by the age at the start of the step, the end half by the age half a "
-        "step later) and, with dry-air weighting, the density at its own position and time"
+        "advection, turbulence and convection); each half is split between time-ago bins "
+        "by its overlap with them and, with dry-air weighting, uses the density at its own "
+        "position and time"
     ),
 }
 
@@ -1040,6 +1040,37 @@ def _time_weight(met_window: HourlyMetTensors, t_eval_s: float) -> float:
     return max(0.0, min(1.0, (t_eval_s - t_start_s) / max(1.0, float(t_end_s - t_start_s))))
 
 
+def _age_bin_pieces(
+    age_s: torch.Tensor, length_s: float, time_bin_s: float, n_time_bins: int
+) -> list[tuple[torch.Tensor, torch.Tensor | float]]:
+    """Split each particle's age interval [age, age + length) by the time-ago bins.
+
+    Returns ``(t_idx, seconds)`` pieces whose seconds sum to ``length_s`` for every
+    particle: piece j is bin floor(age / width) + j, with the overlap of the
+    interval with that bin. The number of pieces, ceil(length / width) + 1 (two
+    whenever a bin is at least as wide as the interval), depends only on the step
+    length and the configured width, never on the data, so the shapes are static
+    and there is no host sync. Pieces that do not overlap carry 0 s (an exact
+    no-op in the scatter). With one bin (time-integrated) every age is bin 0 and
+    the interval is one piece.
+    """
+
+    if n_time_bins == 1:
+        return [(_time_ago_index(age_s, time_bin_s, 1), length_s)]
+    # float64 so that interval ends that fall on bin edges stay exact.
+    lo = age_s.to(torch.float64)
+    hi = lo + length_s
+    first = torch.floor(lo / time_bin_s)
+    pieces: list[tuple[torch.Tensor, torch.Tensor | float]] = []
+    for j in range(math.ceil(length_s / time_bin_s) + 1):
+        bin_lo = (first + j) * time_bin_s
+        overlap = (torch.minimum(hi, bin_lo + time_bin_s) - torch.maximum(lo, bin_lo)).clamp_(
+            min=0.0
+        )
+        pieces.append(((first + j).to(torch.int64), overlap.to(age_s.dtype)))
+    return pieces
+
+
 def _deposit_step(
     gridder: FootprintGridder,
     *,
@@ -1060,39 +1091,38 @@ def _deposit_step(
     engine: GPUEngine,
 ) -> None:
     """Count one backward step's residence, (t_cursor - delta_s, t_cursor], in the grid
-    (task A2, `output_grid.deposition.position`).
+    (task A2, `output_grid.deposition.position`; docs/physics.md §7).
 
-    ``elapsed_s`` is each particle's age at the step's start (``t_cursor``) and
-    ``t_idx`` its time-ago bin. Inactive rows are never counted (the gridder masks
-    them, and escaped particles are no longer active).
+    ``elapsed_s`` is each particle's age e at the step's start (``t_cursor``), counted
+    from its own release window's end, and ``t_idx`` its time-ago bin. The step
+    covers the ages [e, e + delta_s). Inactive rows are never counted (the gridder
+    masks them, and escaped particles are no longer active).
 
     * ``endpoint``: all of ``delta_s`` at ``end_xyz``, in bin ``t_idx``, with the
-      density at ``end_xyz`` and the step's time weight ``t_alpha``.
-    * ``trapezoid``: ``delta_s / 2`` at ``start_xyz`` and ``delta_s / 2`` at
-      ``end_xyz``, two literal deposits. Each half stands for half the step's
-      interval of ages: the start half for [e, e + delta_s/2), binned by e (=
-      ``t_idx``), the end half for [e + delta_s/2, e + delta_s), binned by
-      e + delta_s/2, in the same way that endpoint bins the whole step by e. With
-      steps aligned to the bins both halves fall in the step's bin. With dry-air
-      weighting each half divides by the density at its own position and time (the
-      start at ``t_cursor``, the end at ``t_cursor - delta_s``), in the step's met
-      window. A particle's first step is counted half at its release position; a
-      particle that leaves the met domain in a step keeps the start half (the end
-      half is dropped by the gridder if outside the output grid, as endpoint's is).
+      density at ``end_xyz`` and the step's time weight ``t_alpha``. A step that
+      straddles a bin edge is counted wholly in the bin of its starting age (the
+      long-standing behaviour, kept).
+    * ``trapezoid``: ``delta_s / 2`` at ``start_xyz``, standing for the ages
+      [e, e + delta_s/2), and ``delta_s / 2`` at ``end_xyz``, for
+      [e + delta_s/2, e + delta_s). Each half is split by its overlap with the
+      time-ago bins (`_age_bin_pieces`), each piece keeping that half's position and
+      density, so a stationary particle's residence per bin is exact whatever the
+      alignment of release windows, steps and bins. With dry-air weighting each
+      half divides by the density at its own position and time (the start at
+      ``t_cursor``, the end at ``t_cursor - delta_s``), in the step's met window. A
+      particle's first step is counted half at its release position; a particle
+      that leaves the met domain in a step keeps the start half (the end half is
+      dropped by the gridder if outside the output grid, as endpoint's is).
     """
 
     if position == "trapezoid":
         half_s = 0.5 * delta_s
         t_start_s = t_cursor.timestamp()
         halves = (
-            (start_xyz, t_idx, t_start_s),
-            (
-                end_xyz,
-                _time_ago_index(elapsed_s + half_s, time_bin_s, gridder.n_t),
-                t_start_s - delta_s,
-            ),
+            (start_xyz, elapsed_s, t_start_s),
+            (end_xyz, elapsed_s + half_s, t_start_s - delta_s),
         )
-        for xyz, idx, t_eval_s in halves:
+        for xyz, age_s, t_eval_s in halves:
             inv_density = (
                 None
                 if particle_density is None
@@ -1100,15 +1130,16 @@ def _deposit_step(
                     xyz, met_window, _time_weight(met_window, t_eval_s), engine
                 )
             )
-            gridder.accumulate(
-                particles=xyz,
-                active_mask=active_mask,
-                weights=weights,
-                t_idx=idx,
-                release_idx=release_idx,
-                dt_seconds=half_s,
-                inv_density=inv_density,
-            )
+            for piece_idx, piece_s in _age_bin_pieces(age_s, half_s, time_bin_s, gridder.n_t):
+                gridder.accumulate(
+                    particles=xyz,
+                    active_mask=active_mask,
+                    weights=weights,
+                    t_idx=piece_idx,
+                    release_idx=release_idx,
+                    dt_seconds=piece_s,
+                    inv_density=inv_density,
+                )
         return
 
     deposit_xyz = end_xyz
