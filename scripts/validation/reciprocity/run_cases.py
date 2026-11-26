@@ -8,7 +8,7 @@ procedure (``reciprocity``); each companion (``TEETH_CASES``) with its mutation.
 For every run the script writes ``<name>.json`` (the summary the test asserts on,
 the case, the timings) and ``<name>.npz`` (both maps, the tested cells and the
 95% noise ranges) to OUT_DIR, and prints one line per run. CPU only; about
-4 minutes per case at the test's counts on 16 threads (more on a loaded node).
+5 minutes per case at the test's counts on 8 threads (more on a loaded node).
 """
 
 from __future__ import annotations
@@ -35,11 +35,13 @@ def _save(out: Path, name: str, res: tr.Result, extra: dict) -> None:
     (out / f"{name}.json").write_text(json.dumps(summary, indent=2, default=float) + "\n")
     np.savez_compressed(
         out / f"{name}.npz", backward=res.backward, forward=res.forward, tested=res.tested,
-        lo=res.lo, hi=res.hi, sum_lo=res.sum_lo, sum_hi=res.sum_hi,
+        tested_backward=res.tested_backward, tested_forward=res.tested_forward, lo=res.lo, hi=res.hi, sum_lo=res.sum_lo, sum_hi=res.sum_hi,
         z_edges=np.asarray(res.case.grid.z_edges),
     )  # fmt: skip
     print(name, json.dumps({k: summary[k] for k in ("frac_agree", "sum_ratio", "sum_range_rel",
-                                                    "n_tested", "passes")}), flush=True)  # fmt: skip
+                                                    "n_tested", "n_selected_backward",
+                                                    "n_selected_forward", "passes")}),
+          flush=True)  # fmt: skip
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -49,7 +51,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--teeth", nargs="*", default=list(tr.TEETH_CASES))
     ap.add_argument("--n-substeps", type=int, default=None)
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--threads", type=int, default=16)
+    ap.add_argument("--threads", type=int, default=8)
     ap.add_argument("--figure", type=Path, default=None,
                     help="also draw the Tier 0 reciprocity figure into this directory "
                     "(reuses this process's runs; default counts and seed only)")  # fmt: skip

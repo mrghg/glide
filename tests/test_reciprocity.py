@@ -378,12 +378,14 @@ class Result:
     case: Case
     backward: np.ndarray  # [rows, k]: footprint of source cell (row, k) at the receptor
     forward: np.ndarray  # [rows, k]: forward concentration, scaled by dz_S / dz_R
-    tested: np.ndarray  # [rows, k] bool, from the selection run
+    tested: np.ndarray  # [rows, k] bool: both selection runs pass the cell
     lo: np.ndarray  # 95% range of the difference under particle noise alone
     hi: np.ndarray
     sum_lo: float
     sum_hi: float
     n_boot: int
+    tested_backward: np.ndarray  # [rows, k] bool: >= 50 particles of the backward selection run
+    tested_forward: np.ndarray  # [rows, k] bool: >= 50 particles of the forward selection run
 
     @property
     def diff(self) -> np.ndarray:
@@ -419,6 +421,8 @@ class Result:
                 self.case.receptor_row : self.case.receptor_row + 2
             ],
             n_tested=int(t.sum()),
+            n_selected_backward=int(self.tested_backward.sum()),
+            n_selected_forward=int(self.tested_forward.sum()),
             frac_agree=round(self.frac_agree, 4),
             sum_ratio=round(self.sum_ratio, 5),
             sum_range_rel=(round(self.sum_lo / f, 5), round(self.sum_hi / f, 5)),
@@ -464,6 +468,37 @@ def forward_contributions(case: Case, variant: str) -> torch.Tensor:
     return _FORWARD_CACHE[key]
 
 
+_FORWARD_SELECTION_CACHE: dict[tuple, np.ndarray] = {}
+
+
+def forward_selection(case: Case, variant: str) -> np.ndarray:
+    """The forward selection run: a second set of forward runs, with their own
+    seeds, used only to choose cells. Returns ``[source row, receptor row, k]``,
+    the number of different particles from a unit source in the source row
+    (``n_fwd`` of them) that pass through each receptor cell. Cached as
+    ``forward_contributions``."""
+
+    grid = case.grid
+    key = (case.regime, grid, case.n_fwd, case.n_steps, case.dt, case.n_substeps, case.seed,
+           variant)  # fmt: skip
+    if key not in _FORWARD_SELECTION_CACHE:
+        gen = torch.Generator().manual_seed(3000 + case.seed)
+        z0 = _release_heights(grid.z_edges, range(grid.n_rows), case.n_fwd, gen)
+        _, visited = run_particles(
+            VARIANTS[variant](n_substeps=case.n_substeps, static_substeps=False),
+            reciprocity_met(*REGIMES[case.regime]),
+            z0,
+            forward=True,
+            grid=grid,
+            n_steps=case.n_steps,
+            dt=case.dt,
+            seed=41 + case.seed,
+        )
+        counts = visited.view(grid.n_rows, case.n_fwd, grid.n_rows, grid.n_k).sum(1)
+        _FORWARD_SELECTION_CACHE[key] = counts.numpy()
+    return _FORWARD_SELECTION_CACHE[key]
+
+
 def _bootstrap_deviation(contrib: torch.Tensor, n_boot: int, rng: np.random.Generator):
     """Bootstrap resamples of a particle mean minus the mean itself, ``[B, ...]``:
     ``contrib`` is ``[N, ...]``, one row per particle."""
@@ -478,8 +513,11 @@ def _bootstrap_deviation(contrib: torch.Tensor, n_boot: int, rng: np.random.Gene
 def reciprocity(case: Case, *, backward_variant: str = "production",
                 forward_variant: str | None = None, n_boot: int = 400) -> Result:  # fmt: skip
     """The four steps of docs/validation-plan.md §3 (Tier 0, reciprocity) for one
-    receptor: (1) a selection run, backward with its own seed, picks the cells at
-    least 50 different particles pass through; (2) each map is bootstrapped over
+    receptor: (1) two selection runs, one backward and one forward, each with its
+    own seeds, pick the cells at least 50 different particles pass through in
+    both (the plan states the rule for a backward selection run; it is applied
+    to the forward map too, whose noise is as hard to estimate from a handful of
+    particles); (2) each map is bootstrapped over
     its own particles, giving each tested cell's 95% range of the difference
     under particle noise alone; (3) and (4) are read off the returned ``Result``
     (``frac_agree``, ``sum_ok``).
@@ -518,9 +556,11 @@ def _reciprocity(case: Case, backward_variant: str, forward_variant: str, n_boot
         )  # fmt: skip
 
     cb, _ = backward_run(21 + case.seed)
-    _, visited = backward_run(31 + case.seed)  # the selection run
-    tested = (visited.sum(0) >= 50).numpy()
+    _, visited = backward_run(31 + case.seed)  # the backward selection run
+    tested_backward = (visited.sum(0) >= 50).numpy()
     del visited
+    tested_forward = forward_selection(case, forward_variant)[:, rr, :] >= 50
+    tested = tested_backward & tested_forward
 
     scale = (grid.dz / grid.dz[rr])[:, None]  # dz_S / dz_R
     backward = cb.mean(0).numpy()
@@ -532,7 +572,8 @@ def _reciprocity(case: Case, backward_variant: str, forward_variant: str, n_boot
         dev[:, r] -= _bootstrap_deviation(cf[r], n_boot, rng) * scale[r]
     lo, hi = np.percentile(dev, [2.5, 97.5], axis=0)
     sum_lo, sum_hi = np.percentile(dev[:, tested].sum(axis=1), [2.5, 97.5])
-    return Result(case, backward, forward, tested, lo, hi, float(sum_lo), float(sum_hi), n_boot)
+    return Result(case, backward, forward, tested, lo, hi, float(sum_lo), float(sum_hi), n_boot,
+                  tested_backward, tested_forward)  # fmt: skip
 
 
 # ---------------------------------------------------------------------------
@@ -624,6 +665,99 @@ def test_forward_mode_flips_the_drift_and_the_displacement_only() -> None:
         assert torch.equal(back[i], fwd[i])
     assert torch.equal(back[7], -fwd[7]) and torch.equal(back[8], -fwd[8])
     assert float(back[7].abs().max()) > 0 and float(back[8].abs().max()) > 0
+
+
+# ---------------------------------------------------------------------------
+# the backward sign construction, pathwise (exact, default suite)
+# ---------------------------------------------------------------------------
+
+
+class _NegatedNoiseEngine(GPUEngine):
+    """Every Gaussian draw of the Langevin update negated. The draws consume the
+    global generator exactly as the plain engine's do, so the interface rule's
+    uniform draws stay the same."""
+
+    def update_langevin_velocity(self, w_prime, t_lagrangian, sigma_w2, dt_seconds,
+                                 noise=None, drift=0.0):  # fmt: skip
+        if noise is None:
+            noise = -torch.randn_like(w_prime)
+        return super().update_langevin_velocity(
+            w_prime, t_lagrangian, sigma_w2, dt_seconds, noise=noise, drift=drift
+        )
+
+
+def _pathwise_run(
+    regime: str, scheme_cls: type[HannaScheme], *, forward: bool, static: bool,
+    n: int = 4000, n_steps: int = 30,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:  # fmt: skip
+    """Particles through ``n_steps`` production steps in a still, steady,
+    horizontally uniform column, backward with the noise η and the Eulerian
+    start velocities, or forward with −η and the start velocities negated.
+    Returns the heights after every step ``[n_steps, n]`` and the final state
+    (with the final particles under ``"particles"``)."""
+
+    met = reciprocity_met(*REGIMES[regime], u_surface=0.0, u_top=0.0)
+    h = REGIMES[regime][0]
+    engine = (_NegatedNoiseEngine if forward else GPUEngine)(device="cpu", dtype=torch.float32)
+    scheme = scheme_cls(n_substeps=N_SUBSTEPS_DEFAULT, static_substeps=static)
+    scheme._forward_in_time = forward
+    gen = torch.Generator().manual_seed(5)
+    particles = torch.zeros(n, 4)
+    particles[:, 0] = LON0 + 0.1 * torch.rand(n, generator=gen)
+    particles[:, 1] = LAT0 + 0.1 * torch.rand(n, generator=gen)
+    particles[:, 2] = 1.3 * h * torch.rand(n, generator=gen)
+    particles[:, 3] = 1.0 / n
+    state = scheme.initialize_state(n, device=torch.device("cpu"), dtype=torch.float32)
+    sig = eulerian_sigmas(scheme, met, particles[:, :3], engine)
+    eta0 = torch.randn(n, 3, generator=gen)
+    sign = -1.0 if forward else 1.0
+    for i, key in enumerate(("u_prime", "v_prime", "w_prime")):
+        state[key] = sign * sig[:, i] * eta0[:, i]
+    state["sigma_last"] = sig.clone()
+    active = torch.ones(n, dtype=torch.bool)
+    torch.manual_seed(11)
+    heights = []
+    for _ in range(n_steps):
+        particles, state = scheme.step(particles, state, met, 0.5, 60.0, active, engine)
+        heights.append(particles[:, 2].clone())
+    state = dict(state, particles=particles)
+    return torch.stack(heights), state
+
+
+@pytest.mark.parametrize("static", [False, True], ids=["dynamic", "static"])
+@pytest.mark.parametrize("regime", list(REGIMES))
+def test_backward_step_is_the_forward_step_with_the_velocity_negated(
+    regime: str, static: bool
+) -> None:
+    """The backward sign construction (docs/physics.md §4), exactly. In a steady,
+    horizontally uniform column, a backward run with the noise η is, bit for bit,
+    the forward run with −η and the start velocities negated: the same
+    positions after every step and w′ of opposite sign. Over 30 steps at 16
+    sub-steps particles reflect at the ground and cross h (the interface rule's
+    uniform draws are shared), on both step paths. With the backward sign flip
+    removed the identity breaks.
+
+    So in such a column the backward run is the forward process with w′ → −w′,
+    and the slow reciprocity cases below test the shared scheme's transfer
+    symmetry (ρ-weighted detailed balance between cells), not a separate
+    backward error. The review measured the same identity at 20,000 particles
+    and 120 steps (outputs/agents/A6/review/pathwise.log)."""
+
+    h = REGIMES[regime][0]
+    zb, sb = _pathwise_run(regime, HannaScheme, forward=False, static=static)
+    zf, sf = _pathwise_run(regime, HannaScheme, forward=True, static=static)
+    assert torch.equal(sb["particles"], sf["particles"])
+    assert torch.equal(zb, zf)
+    for key in ("u_prime", "v_prime", "w_prime"):
+        assert torch.equal(sb[key], -sf[key]), key
+    # Both boundaries were exercised: h is crossed between steps (9 times in the stable
+    # column, 108 in the convective one) and particles come within 5% of h of the ground.
+    side = zb > h
+    assert int((side[1:] != side[:-1]).sum()) > 0
+    assert float(zb.min()) < 0.05 * h
+    # Teeth: the backward drift with the forward sign is a different process.
+    zm, _ = _pathwise_run(regime, NoBackwardSignFlip, forward=False, static=static)
+    assert float((zm - zf).abs().max()) > 0.05 * h
 
 
 # ---------------------------------------------------------------------------
