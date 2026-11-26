@@ -186,9 +186,13 @@ by Matt the same day). Both concern where deposits land, not the rule itself.
    meaning, and which side a height exactly on it falls is a convention either
    way. *What moves* (*measured* on the CPU smoke run, `endpoint` and
    `trapezoid`, by a read-only hook on every deposit,
-   `$GLIDE_AGENT_OUTPUTS/agents/A2/fixes/edge_counts_*.json`): see the PR; in
-   transported particles a height exactly on an edge needs exact float
-   cancellation (*argued*). The one deterministic case is `trapezoid`'s first
+   `$GLIDE_AGENT_OUTPUTS/agents/A2/fixes/edge_counts_*.json`): no deposit at
+   exactly 0, 40, 1,000 or 5,000 m among 28.8 million (`endpoint`) and 57.6
+   million (`trapezoid`) particle deposits, and the `endpoint` smoke run is
+   bit-identical to `main` (footprint, endpoint particles, trajectory
+   diagnostics; `bitcmp_smoke_main_vs_endpoint_a630b27.txt`). In transported
+   particles a height exactly on an edge needs exact float cancellation
+   (*argued*). The one deterministic case is `trapezoid`'s first
    start half at the release height: a release at 0 m is now counted in the
    first layer, and a release exactly on an interior edge (the JFJ case,
    `scripts/validation/zs-repair/case2-jfj.yaml`, 1,000 m with an edge at
