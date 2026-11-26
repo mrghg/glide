@@ -90,7 +90,14 @@ indicator: score the rules against fine-time residence on the same trajectories.
   receptor's 0–40 m cell, +1.25% on the 0–40 m total, ≤ 0.05% in every ring;
   `step_mean` +12.9% in the cell, −3.0 to −4.9% in the rings, −2.24% in total.
   CUDA smoke (static path, graph capture) agrees: `trapezoid` +11.68% / +1.24%.
-  Reference config (GPU): see the PR and the progress file (runs in progress at the time of writing).
+  Reference config (GPU, 144 releases, 5 days back, seeds 42/43/44,
+  `tables/production_ref.md`): `trapezoid` changes only the 10 m inlet — Mace
+  Head receptor cell +7.49 ± 0.01%, 0–40 m total +0.37% (day +0.26%, night
+  +0.45%), rings ≤ 0.05%; Ridge Hill (90 m) and Tacolneston (185 m) ≤ 0.04%
+  everywhere, since their release half is above the layer. `step_mean`: 0–40 m
+  total −2.0 / −3.2 / −3.5% (MHD / RGL / TAC), down to −16% in Ridge Hill's
+  rings 2–3 at night and −13% in Tacolneston's receptor cell at night. Endpoint's
+  own per-release seed spread of the 0–40 m total: 0.26–0.44% (median).
 
 **Rationale.**
 - *Derived.* Summed over consecutive steps, `trapezoid` equals `endpoint` plus
@@ -134,7 +141,9 @@ indicator: score the rules against fine-time residence on the same trajectories.
 near the receptor (smoke: +11.6% in the receptor's cell, +1.25% on the 0–40 m
 total) and so needs the golden fixtures regenerated, which is planned once the
 defaults settle. Two scatters and two density evaluations per step instead of
-one (cost: see the PR). The float32 footprint grid accumulates twice as many,
+one. Cost on the reference config (GPU, shared node, *measured*, single runs per
+seed): wall time 20:51 / 21:47 / 22:18 for `trapezoid` against 21:54 / 25:31 /
+20:36 for `endpoint`, so no cost is resolved at this noise (±2–5 min). The float32 footprint grid accumulates twice as many,
 half-sized contributions; the largest smoke cells (40–1000 m) then differ from a
 float64 tally by up to 0.2% (0.02% with `endpoint`; 0–40 m total 7e-5). *Measured,
 isolated:* the same run with a float64 grid matches the scorer to 2e-9 on the

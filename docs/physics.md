@@ -949,7 +949,18 @@ Against `endpoint` on production runs (same seeds, so the changes are paired;
 `tables/production_*.md`): on the smoke run `trapezoid` adds +11.66% (s.d. over
 seeds 0.03) to the receptor's 0–40 m cell and +1.25% to the 0–40 m total, and
 changes every ring by ≤ 0.05%; `step_mean` gives +12.9% in the cell, −3.0 to
-−4.9% in the rings and −2.24% in total. Reference-config (GPU) results: in progress at the time of writing.
+−4.9% in the rings and −2.24% in total. On the reference configuration (`configs/ab_multisite_perf.yaml`, GPU, 144
+releases from Mace Head 10 m, Ridge Hill 90 m and Tacolneston 185 m, 5 days back,
+seeds 42/43/44; `tables/production_ref.md`), `trapezoid` changes only the 10 m
+inlet: Mace Head +7.49% in the receptor's cell and +0.37% on the 0–40 m total
+(day +0.26%, night +0.45%), every ring ≤ 0.05%; at the two elevated inlets the
+release half lies above the 0–40 m layer and the change is ≤ 0.04% everywhere.
+`step_mean` lowers the 0–40 m total at every site (−2.0% Mace Head, −3.2% Ridge
+Hill, −3.5% Tacolneston), most near elevated inlets at night (Ridge Hill rings
+2–3 −16%, Tacolneston receptor cell −13%). The s.d. over seeds of these paired
+changes is ≤ 0.01 points for `trapezoid` and ≤ 0.08 for `step_mean` except its receptor cells (≤ 2.1);
+for scale, endpoint's own 0–40 m total varies between seeds by 0.26–0.44% per
+release (median).
 
 **The dry-air density at the particle.** $\rho_d = (p - e)/(R_d T)$ with
 $R_d = 287.05$ J kg⁻¹ K⁻¹ and the vapour pressure $e = q p / (0.622 + 0.378 q)$
