@@ -115,7 +115,7 @@ def test_deposit_moves_half_a_step_downwind(
             dt_seconds=dt,
             simulation_length_seconds=3600,
             n_time_bins=1,
-            output_n_x=400,  # 0.01 deg ~ 1.1 km cells, finer than U dt / 2 = 750 m
+            output_n_x=4000,  # 0.001 deg ~ 110 m cells, a tenth of U dt / 2 = 750 m
         )
         cfg = _with_position(cfg, position)
         _run(cfg, reader=_make_reader(cfg, wind_fn=lambda _: (u, 0.0, 0.0)))
@@ -123,9 +123,12 @@ def test_deposit_moves_half_a_step_downwind(
 
     assert totals[other] == pytest.approx(totals["endpoint"], rel=1e-6)
     shift_deg = 0.5 * u * dt / M_PER_DEG_LON
-    # Cell centres quantise each deposit by up to half a cell; the shift is the same
-    # for every particle-step, so the centroid difference is within one cell of it.
-    assert centroids[other] - centroids["endpoint"] == pytest.approx(shift_deg, abs=0.01)
+    # Cell centres quantise each deposit by up to half a cell, so the centroid
+    # difference is within one cell (0.001 deg) of the half step (0.0067 deg). The
+    # tolerance, 0.3 of the shift, fails a zero shift and a whole-step (double) one.
+    shift = centroids[other] - centroids["endpoint"]
+    assert shift == pytest.approx(shift_deg, abs=0.3 * shift_deg)
+    assert abs(shift) > 0.5 * shift_deg and abs(shift) < 1.5 * shift_deg
 
 
 @pytest.mark.parametrize("position", ["step_mean", "trapezoid"])
