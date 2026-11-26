@@ -142,6 +142,24 @@ indicator: score the rules against fine-time residence on the same trajectories.
 - *Finer outer steps:* `endpoint`'s receptor error falls with Δt, but the cost is
   the whole step, for an error that one extra deposit removes.
 
+**Amends decision 0022.** 0022 evaluates the dry-air density "at the
+particle's position and the step's time, using the same met window and time
+weight as the step" (the step's mid-time). With `trapezoid` each half uses the
+density at its own time instead: the start half at the step's start ($t$), the end
+half at its end ($t - \Delta t$), still in the step's met window. `endpoint` keeps
+0022's mid-time weight.
+
+**The analytic-plume harness drops `trapezoid`'s release half** (*derived*,
+consistent with the independent review's measurement). In
+`tests/test_plume_footprint.py`'s geometry, and in the scorer's `plume` mode with
+`--receptor-frac 1`, the release point sits on the grid's east edge, where the
+gridder's floor puts it outside the grid. Every particle's first start half is
+therefore dropped, so the plume's all-layer total is low by exactly Δt/2 per
+particle over its lifetime, and `trapezoid` ≡ `endpoint` there. Real
+configurations always have the receptor inside the grid, so this is a property
+of that harness, not of the rule; it is one more reason the plume cannot rank
+the rules.
+
 **Consequences.** Changing the default changes every surface-inlet footprint
 near the receptor (smoke: +11.6% in the receptor's cell, +1.25% on the 0–40 m
 total) and so needs the golden fixtures regenerated, which is planned once the
