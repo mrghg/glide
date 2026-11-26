@@ -236,14 +236,20 @@ def _neutral_sigma_w(
     return 1.3 * ustar * torch.exp(-2.0 * f_abs * z / ustar_safe)
 
 
+def _unstable_sigma_w_sq(
+    z_over_h: torch.Tensor, ustar: torch.Tensor, w_star: torch.Tensor
+) -> torch.Tensor:
+    """Ryall & Maryon (1998) σ_w² before the floor: 1.2 w*²(1−0.9ζ)ζ^(2/3) + (1.8−1.4ζ)u*²."""
+    return 1.2 * w_star.pow(2) * (1.0 - 0.9 * z_over_h).clamp(min=0.0) * z_over_h.pow(2.0 / 3.0) + (
+        1.8 - 1.4 * z_over_h
+    ) * ustar.pow(2)
+
+
 def _unstable_sigma_w(
     z_over_h: torch.Tensor, ustar: torch.Tensor, w_star: torch.Tensor
 ) -> torch.Tensor:
     """Ryall & Maryon (1998): σ_w = √(1.2 w*²(1−0.9ζ)ζ^(2/3) + (1.8−1.4ζ)u*²)."""
-    sigma_w_sq = 1.2 * w_star.pow(2) * (1.0 - 0.9 * z_over_h).clamp(min=0.0) * z_over_h.pow(
-        2.0 / 3.0
-    ) + (1.8 - 1.4 * z_over_h) * ustar.pow(2)
-    return sigma_w_sq.clamp(min=SIGMA_MIN_M_S**2).sqrt()
+    return _unstable_sigma_w_sq(z_over_h, ustar, w_star).clamp(min=SIGMA_MIN_M_S**2).sqrt()
 
 
 def _in_bl_stable(
@@ -412,6 +418,50 @@ def in_bl_sigma_w(
     in_stable = h_over_L > H_OVER_L_STABLE_THRESHOLD
     in_unstable = h_over_L < H_OVER_L_UNSTABLE_THRESHOLD
     return torch.where(in_stable, w_st, torch.where(in_unstable, w_un, w_nu))
+
+
+def in_bl_dsigw2_dz(
+    z: torch.Tensor,
+    blh: torch.Tensor,
+    ustar: torch.Tensor,
+    w_star: torch.Tensor,
+    h_over_L: torch.Tensor,
+    latitude_deg: torch.Tensor,
+) -> torch.Tensor:
+    """Analytic ∂σ_w²/∂z of the floored boundary-layer profile
+    σ_w = max(σ_H, SIGMA_MIN_M_S) of ``in_bl_sigma_w``, for 0 < z ≤ h: the
+    derivative of the regime's σ_H² where σ_H is above the floor, and zero where the
+    floor binds (σ_w is flat there). Decision 0030.
+
+    stable  σ_H = 1.3u*(1−ζ):          ∂σ²/∂z = −2·1.3u*·σ_H/h
+    neutral σ_H = 1.3u*exp(−2|f|z/u*): ∂σ²/∂z = −4|f|σ_H²/u*
+    unstable σ_H² = 1.2w*²(1−0.9ζ)ζ^⅔ + (1.8−1.4ζ)u*²:
+        ∂σ²/∂z = [1.2w*²(−0.9ζ^⅔ + ⅔(1−0.9ζ)ζ^−⅓) − 1.4u*²]/h
+    (the unstable form holds for ζ ≤ 1/0.9, i.e. everywhere in the boundary layer).
+    SIGMA_MIN_M_S is read at call time."""
+
+    f_abs = coriolis_parameter(latitude_deg).abs().clamp(min=1e-5)
+    ustar_safe = ustar.clamp(min=USTAR_MIN_M_S)
+    z_over_h = (z / blh).clamp(min=1e-6, max=1.0)
+    w_st = _stable_sigma_w(z_over_h, ustar)
+    g_st = -2.0 * 1.3 * ustar * w_st / blh
+    w_nu = _neutral_sigma_w(z, ustar, f_abs, ustar_safe)
+    g_nu = -4.0 * f_abs * w_nu.pow(2) / ustar_safe
+    w2_un = _unstable_sigma_w_sq(z_over_h, ustar, w_star)
+    g_un = (
+        1.2
+        * w_star.pow(2)
+        * (
+            -0.9 * z_over_h.pow(2.0 / 3.0)
+            + (2.0 / 3.0) * (1.0 - 0.9 * z_over_h) * z_over_h.pow(-1.0 / 3.0)
+        )
+        - 1.4 * ustar.pow(2)
+    ) / blh
+    in_stable = h_over_L > H_OVER_L_STABLE_THRESHOLD
+    in_unstable = h_over_L < H_OVER_L_UNSTABLE_THRESHOLD
+    grad = torch.where(in_stable, g_st, torch.where(in_unstable, g_un, g_nu))
+    sigma_sq = torch.where(in_stable, w_st.pow(2), torch.where(in_unstable, w2_un, w_nu.pow(2)))
+    return torch.where(sigma_sq > SIGMA_MIN_M_S**2, grad, torch.zeros_like(grad))
 
 
 def potential_temperature(t_kelvin: torch.Tensor, pressure_pa: torch.Tensor) -> torch.Tensor:
@@ -711,6 +761,9 @@ class HannaScheme(TurbulenceScheme):
 
     # Finite-difference step (m) for the well-mixed drift's ∂σ_w²/∂z.
     DRIFT_FD_DELTA_M: ClassVar[float] = 1.0
+    # PRIVATE, for A/B tests only (no configuration sets it): True restores the
+    # ±δ stencil for every particle, i.e. the drift gradient before decision 0030.
+    _fd_drift_gradient_only: bool = False
 
     def step(
         self,
@@ -936,6 +989,33 @@ class HannaScheme(TurbulenceScheme):
         sw_hi = self._column_sigma_w(z_hi, side_ft=side_ft, **col_kwargs)
         sw_lo = self._column_sigma_w(z_lo, side_ft=side_ft, **col_kwargs)
         dsig2_dz = (sw_hi.pow(2) - sw_lo.pow(2)) / (z_hi - z_lo).clamp(min=self.DRIFT_FD_DELTA_M)
+        if not (self.surface_layer_override or self._fd_drift_gradient_only):
+            # Decision 0030: the stencil is wrong for a boundary-layer particle
+            # whose stencil (i) is cut at h, where it is one-sided and returns the
+            # gradient up to δ/2 below the particle (an O(1) error where a stable
+            # σ_w → 0 linearly at h), or (ii) touches the floor SIGMA_MIN_M_S,
+            # where it differences across the kink of max(σ_H, σ_min) and puts a
+            # drift inside the floor layer, where σ_w is flat. Those particles take
+            # the analytic gradient of the floored profile (zero where the floor
+            # binds); every other particle keeps the stencil, bit for bit. A
+            # data-dependent select, no host sync, the same on both step paths.
+            # With the surface-layer override the stencil is used everywhere (the
+            # analytic form does not include the override's profile).
+            g_bl = in_bl_dsigw2_dz(
+                z_eval,
+                blh,
+                col_kwargs["ustar"],
+                col_kwargs["w_star"],
+                col_kwargs["h_over_L"],
+                col_kwargs["lat"],
+            )
+            use_analytic = (~side_ft) & (
+                (z_eval + self.DRIFT_FD_DELTA_M > blh)
+                | (sw_hi <= SIGMA_MIN_M_S)
+                | (sw_lo <= SIGMA_MIN_M_S)
+                | (sigma_w <= SIGMA_MIN_M_S)
+            )
+            dsig2_dz = torch.where(use_analytic, g_bl, dsig2_dz)
         if self.basal_zero_gradient:
             # Below the basal clamp σ_w is sampled at z_ubl, i.e. flat in z, so its
             # gradient there is zero; the stencil would otherwise look one-sidedly
