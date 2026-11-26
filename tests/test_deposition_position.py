@@ -1,9 +1,8 @@
 """Deposition position, `output_grid.deposition.position` (task A2, part 1; [PR-F4]).
 
 `endpoint` (the default) counts each step's residence at the particle's position after
-the step; `step_mean` counts it at the mean of the particle's positions at the start
-and at the end of the step (decision 0026); `trapezoid` counts half the step at each
-end (decision 0029). The analytic-plume comparison is in `test_plume_footprint.py`;
+the step; `trapezoid` counts half the step at each end (decision 0029). `step_mean`
+(decision 0026) was removed by decision 0029. The analytic-plume comparison is in `test_plume_footprint.py`;
 the fine-time residence scoring of all three is
 `scripts/validation/score_residence_counting.py`.
 """
@@ -23,7 +22,7 @@ import xarray as xr
 from test_main_runtime import _make_hanna_reader, _make_reader, _make_run_config
 
 from lpdm.footprint_gridder import FootprintGridder
-from lpdm.main import _deposit_step, _run, _step_mean_position, _time_ago_index, _time_weight
+from lpdm.main import _deposit_step, _run, _time_ago_index, _time_weight
 from lpdm.turbulence.placeholder import PlaceholderConstantOU
 
 M_PER_DEG_LON = 111320.0
@@ -40,51 +39,17 @@ def test_default_position_is_endpoint() -> None:
     assert cfg.output_grid.deposition.position == "endpoint"
 
 
-@pytest.mark.parametrize("position", ["start", "midpoint"])
-def test_unknown_position_is_rejected(position: str) -> None:
-    # `midpoint` (the RK2 predictor) was replaced by `step_mean` (decision 0026).
+@pytest.mark.parametrize("position", ["start", "midpoint", "step_mean"])
+def test_unknown_or_removed_position_is_rejected(position: str) -> None:
+    # `midpoint` (the RK2 predictor, decision 0026) and `step_mean` (decision 0029)
+    # were removed; the message says why.
     cfg = _make_run_config()
     data = cfg.model_dump(mode="json")
     data["output_grid"]["deposition"] = {"position": position}
-    with pytest.raises(pydantic.ValidationError):
+    with pytest.raises(pydantic.ValidationError) as err:
         type(cfg).model_validate(data)
-
-
-def test_step_mean_is_the_mean_of_start_and_end() -> None:
-    start = torch.tensor([[1.0, 50.0, 10.0], [-3.0, 40.0, 0.0]], dtype=torch.float64)
-    end = torch.tensor([[2.0, 52.0, 30.0], [-4.0, 39.0, 5.0]], dtype=torch.float64)
-    out = _step_mean_position(start, end)
-    torch.testing.assert_close(out, 0.5 * (start + end), rtol=0, atol=1e-12)
-
-
-def test_step_mean_height_stays_above_ground() -> None:
-    # Both ends reflected (z >= 0), so the mean is too, including a step that ends
-    # on the ground.
-    start = torch.tensor([[0.0, 0.0, 3.0], [0.0, 0.0, 0.0]])
-    end = torch.tensor([[0.0, 0.0, 0.0], [0.0, 0.0, 7.0]])
-    z = _step_mean_position(start, end)[:, 2]
-    assert torch.equal(z, torch.tensor([1.5, 3.5]))
-
-
-@pytest.mark.parametrize(
-    ("lon_start", "lon_end", "expected"),
-    [
-        (179.9, -179.9, 180.0),  # across the dateline, eastward
-        (-179.9, 179.9, -180.0),  # across the dateline, westward
-        (359.9, 0.1, 360.0),  # across the prime meridian in 0..360
-        (0.1, 359.9, 0.0),
-        (-10.0, -12.0, -11.0),  # no crossing: the plain mean
-    ],
-)
-def test_step_mean_longitude_takes_the_shorter_arc(
-    lon_start: float, lon_end: float, expected: float
-) -> None:
-    start = torch.tensor([[lon_start, 10.0, 100.0]], dtype=torch.float64)
-    end = torch.tensor([[lon_end, 12.0, 300.0]], dtype=torch.float64)
-    out = _step_mean_position(start, end)
-    assert out[0, 0].item() == pytest.approx(expected, abs=1e-9)
-    assert out[0, 1].item() == pytest.approx(11.0)
-    assert out[0, 2].item() == pytest.approx(200.0)
+    if position != "start":
+        assert "was removed" in str(err.value)
 
 
 def _lon_centroid_and_total(path: Path) -> tuple[float, float, np.ndarray]:
@@ -94,14 +59,13 @@ def _lon_centroid_and_total(path: Path) -> tuple[float, float, np.ndarray]:
     return float((by_lon * lon).sum() / by_lon.sum()), float(by_lon.sum()), fp.values
 
 
-@pytest.mark.parametrize("other", ["step_mean", "trapezoid"])
+@pytest.mark.parametrize("other", ["trapezoid"])
 @pytest.mark.parametrize("static", [False, True], ids=["dynamic", "static"])
 def test_deposit_moves_half_a_step_downwind(
     tmp_path: Path, monkeypatch, static: bool, other: str
 ) -> None:
     """With uniform wind and no turbulence, every particle-step is counted half a step
-    (U dt / 2) less far upwind on average with `step_mean` or `trapezoid` than with
-    `endpoint`, and the totals are the same. The placeholder scheme does not fold
+    (U dt / 2) less far upwind on average with `trapezoid` than with `endpoint`, and the totals are the same. The placeholder scheme does not fold
     advection, so on the static path this exercises the runtime's own full-set
     advection."""
 
@@ -131,7 +95,7 @@ def test_deposit_moves_half_a_step_downwind(
     assert abs(shift) > 0.5 * shift_deg and abs(shift) < 1.5 * shift_deg
 
 
-@pytest.mark.parametrize("position", ["step_mean", "trapezoid"])
+@pytest.mark.parametrize("position", ["trapezoid"])
 def test_static_and_dynamic_paths_agree(tmp_path: Path, monkeypatch, position: str) -> None:
     """With a deterministic step (no turbulence), the static (full-buffer) and dynamic
     (active-subset) paths deposit at the same positions."""
@@ -151,7 +115,7 @@ def test_static_and_dynamic_paths_agree(tmp_path: Path, monkeypatch, position: s
     np.testing.assert_allclose(fps[True], fps[False], rtol=1e-6, atol=1e-6 * fps[False].max())
 
 
-@pytest.mark.parametrize("other", ["step_mean", "trapezoid"])
+@pytest.mark.parametrize("other", ["trapezoid"])
 @pytest.mark.parametrize("static", [False, True], ids=["dynamic", "static"])
 def test_hanna_run_conserves_residence(tmp_path: Path, monkeypatch, static, other) -> None:
     """End to end with Hanna (on the static path, advection folded into the scheme's
@@ -180,7 +144,7 @@ def test_hanna_run_conserves_residence(tmp_path: Path, monkeypatch, static, othe
     assert totals[other] == pytest.approx(totals["endpoint"], rel=1e-5)
 
 
-@pytest.mark.parametrize("position", ["endpoint", "step_mean", "trapezoid"])
+@pytest.mark.parametrize("position", ["endpoint", "trapezoid"])
 def test_store_and_metadata_record_the_position(tmp_path: Path, position: str) -> None:
     out = tmp_path / position
     cfg = _with_position(

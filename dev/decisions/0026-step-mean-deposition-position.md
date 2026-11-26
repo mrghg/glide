@@ -101,4 +101,5 @@ trajectories, after decisions 0027 and 0028, `step_mean` undercounts the 0–40 
 layer outside the receptor's cell by 3–5% on the smoke run and by up to 15% in
 an equilibrated column with $u_*$ = 1 m s⁻¹; the surface-layer bias above is
 real, not an artefact of comparing with a biased `endpoint`. Decision 0029 adds
-`trapezoid` and proposes it as the default.
+`trapezoid`, proposes it as the default, and **removes `step_mean`**: this
+decision is superseded.

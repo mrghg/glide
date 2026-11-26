@@ -30,8 +30,13 @@ indicator: score the rules against fine-time residence on the same trajectories.
   multi-release batch needs nothing special (each particle carries its own age
   and release index). The start positions are copied outside the captured step,
   as for `step_mean` (decision 0004).
-- **Propose `trapezoid` as the default.** Keep `step_mean` only as a documented,
-  measured-biased option, or remove it (Matt's call; it is not used by any run).
+- **Propose `trapezoid` as the default.**
+- **Remove `step_mean`** (in its own commit, so it can be dropped if Matt
+  disagrees). Reasons: it is measured biased low in the 0–40 m layer (below);
+  no run uses it; and it is the only rule that averages positions, so the only
+  one that depends on the horizontal frame (its longitude wrap would corrupt
+  steps in the metric frame proposed in PR #74). Configuration validation
+  rejects it, and `midpoint`, with a message giving the reason.
 - `endpoint` stays available and bit-identical.
 
 **Evidence** (outputs in `$GLIDE_AGENT_OUTPUTS/agents/A2/counting/`; scorer

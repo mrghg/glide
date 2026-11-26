@@ -374,14 +374,13 @@ Model: Opus 5.5, high effort. Run strictly in order unless a task is BLOCKED.
   the particle's position after advection, turbulence and convection, i.e.
   endpoint quadrature: a particle crossing cell or vertical-bin boundaries
   during a step contributes nothing to the cells it traversed. Add
-  `output_grid.deposition.position: endpoint | step_mean` (default `endpoint`,
-  bit-identical). `step_mean` deposits at the mean of each particle's positions
-  at the start and end of the step, advection, turbulence and convection
-  included ([decision 0026](../decisions/0026-step-mean-deposition-position.md);
-  this replaced the RK2-predictor `midpoint` first specified here, which leaves
-  out the step's turbulent displacement). `trapezoid` (half of each step at each
-  end) was added after scoring all three against fine-time residence, and is
-  proposed as the default ([decision 0029](../decisions/0029-trapezoid-residence-counting.md)).
+  `output_grid.deposition.position: endpoint | trapezoid` (default `endpoint`,
+  bit-identical). `trapezoid` counts half of each step at each end; it was added
+  after scoring the rules against fine-time residence, and is proposed as the
+  default ([decision 0029](../decisions/0029-trapezoid-residence-counting.md)).
+  The RK2-predictor `midpoint` first specified here, and the `step_mean` that
+  replaced it ([decision 0026](../decisions/0026-step-mean-deposition-position.md)),
+  were both removed as measured-biased.
   List endpoint quadrature under known approximations in `docs/physics.md`
   regardless of the default.
 - **Acceptance.** New tests:
@@ -395,8 +394,8 @@ Model: Opus 5.5, high effort. Run strictly in order unless a task is BLOCKED.
     one release into two branches, the kernel footprint stays within particle
     noise of the delta footprint at the initial fraction. A bimodal cloud
     overstates local spread, so this is the case most likely to over-smooth;
-  - the analytic plume error with `step_mean` no worse than `endpoint` at the
-    reference Δt and better at 4Δt.
+  - (dropped with `step_mean`, decision 0029: the analytic plume with u′ = 0
+    cannot rank the rules, and its release is above the counted layer.)
   Figure: plume footprint delta vs kernel vs analytic (Tier 0 set). `docs/physics.md` footprint section updated.
 - **Verification.** With `kind: delta` golden bit-identical on CPU. Graph
   capture intact with `kind: gaussian` on CUDA.
@@ -410,8 +409,8 @@ Model: Opus 5.5, high effort. Run strictly in order unless a task is BLOCKED.
   and a CFL-type bound on the met grid), re-evaluated once per met window. The
   loop keeps a fixed trip count: a particle advances only on the iterations
   that are multiples of its rate, gated by multiply, never by index. Residence
-  accumulation uses the particle's own Δt_i and the `step_mean` deposition
-  position from A2 [PR-F4], because a long far-field step makes endpoint
+  accumulation uses the particle's own Δt_i and the `trapezoid` deposition
+  from A2 [PR-F4], because a long far-field step makes endpoint
   quadrature coarser in proportion to the step. Reflection, the OU sub-stepping and
   the drift are integrated over Δt_i. Time interpolation of the met remains
   correct across the window.
@@ -473,7 +472,7 @@ Model: Opus 5.5, high effort. Run strictly in order unless a task is BLOCKED.
 - **Scope.** Sweeps on the analytic plume and on one real-met case from the
   case library: Δt and Δt_max (multi-rate), sub-step accuracy target, particle
   count, vertical ladder, kernel bandwidth, and deposition position (endpoint,
-  step_mean, trapezoid) [PR-F4]. Report sub-step saturation counts from A1 [PR-F2] for
+  trapezoid) [PR-F4]. Report sub-step saturation counts from A1 [PR-F2] for
   every sweep point. Produce error-against-parameter
   figures with expected slopes (Tier 0 figure set) and a table. Propose the v1
   defaults with the converged values. Grade as `docs/validation-plan.md` §3

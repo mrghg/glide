@@ -848,11 +848,6 @@ approximates from the positions it has. `output_grid.deposition.position`
   end of the step, after advection, turbulence, reflection and convection, with
   $\rho_d$ there at the step's mid-time: a right-rectangle rule in time. A
   particle's first step is counted where it ends, never at its release point.
-- `step_mean`: all of $\Delta t$ at the mean of the particle's start and end
-  positions, $\tfrac12(\mathbf{x}_n + \mathbf{x}_{n-1})$, with $\rho_d$ there at
-  the step's mid-time (decision 0026). Longitude is averaged along the shorter
-  arc (the difference taken into [−180°, 180°)); the runtime does not wrap
-  particle longitudes today, so this only guards future periodic domains.
 - `trapezoid`: $\Delta t/2$ at the start position and $\Delta t/2$ at the end
   position, as two deposits (decision 0029). Each half has its own time-ago bin
   (the start half the age at the start of the step, the end half the age half a
@@ -864,9 +859,16 @@ approximates from the positions it has. `output_grid.deposition.position`
   start half of its last step, and the end half is dropped, like `endpoint`'s,
   if it lies outside the output grid.
 
-For `step_mean` and `trapezoid` the runtime copies the start positions before the
-step, outside the captured graph, so the static (CUDA) step's graph, shapes and
-outputs are the same for all three (decision 0004). Summed over consecutive
+A third option, `step_mean` (all of $\Delta t$ at the mean of the step's start and
+end positions; decision 0026), was **removed** by decision 0029: scored below, it
+undercounts the 0–40 m layer wherever a step's vertical displacement is
+comparable to the layer, and it was the only rule that averaged positions (and so
+depended on the horizontal coordinate frame). Its measurements are kept below as
+the reason; configuration validation rejects it with that explanation.
+
+For `trapezoid` the runtime copies the start positions before the step, outside
+the captured graph, so the static (CUDA) step's graph, shapes and outputs are the
+same as for `endpoint` (decision 0004). Summed over consecutive
 steps, `trapezoid` is `endpoint` plus $\Delta t/2$ at each particle's first
 position minus $\Delta t/2$ at its last, because each interior position is the
 end of one step and the start of the next (*derived*); the only other
@@ -1022,7 +1024,7 @@ Stated plainly, because they bound what the model can be trusted for.
 | The boundary-layer top is a jump of $\sigma_w$ and $T_{Lw}$ to the free-troposphere closure, treated as a Thomson–Physick–Maryon interface (§5, decision 0028) | Well-mixed-consistent for any sub-step if $\sigma$ were constant on each side; the interface does not smooth the jump, which is a property of the two parameterisations, not of the atmosphere. $h$ is fixed per particle within an outer step. Horizontal velocities are scaled on transmission like $w'$. The optional surface layer's seam at $0.1h$ is not treated as an interface. |
 | Turbulence support fields ($\rho$, free-troposphere $\sigma/T_L$, meander $\sigma$) built once per meteorology hour at the window midpoint | A met-cadence approximation (<1%/hr drift), matching how FLEXPART-class models refresh turbulence fields. Per-particle interpolation through those fields is unchanged. |
 | Deep convection assigns each particle to the nearest meteorology column | Each (lon, lat) column has its own parcel lift, trigger and matrix (task A02), fired once per meteorology interval read from the store. A particle near a column boundary takes the nearest column's matrix rather than a blend. See [convection.md](convection.md) §1 and §7. |
-| Each step's residence is counted from at most two positions: the step's end (`output_grid.deposition.position: endpoint`, the default), the mean of its start and end (`step_mean`), or half at each end (`trapezoid`; decision 0029) | The cell indicator is sampled at 60 s, so a particle crossing a cell or bin edge during a step is credited by where its sample points fall, not by when it crossed. Scored against fine-time residence on the same trajectories (§7): `endpoint` misses the first half step at the release point (−10.8% in the receptor's 0–40 m cell and −1.25% on the 0–40 m total of the smoke run) and is otherwise within ±0.2%; `step_mean` undercounts the 0–40 m layer wherever a step's vertical displacement is comparable to it (−3 to −5% outside the receptor's cell on the smoke run, up to −15% in strong turbulence); `trapezoid` is within 0.5% in every region scored. Where cells are only a few steps wide, single crossings leave errors of a few per cent per cell for every rule (±2% with 1 km cells at 3 m s⁻¹), and with deterministic along-wind motion (the analytic plume) they alias. |
+| Each step's residence is counted from at most two positions: the step's end (`output_grid.deposition.position: endpoint`, the default) or half at each end (`trapezoid`; decision 0029) | The cell indicator is sampled at 60 s, so a particle crossing a cell or bin edge during a step is credited by where its sample points fall, not by when it crossed. Scored against fine-time residence on the same trajectories (§7): `endpoint` misses the first half step at the release point (−10.8% in the receptor's 0–40 m cell and −1.25% on the 0–40 m total of the smoke run) and is otherwise within ±0.2%; the removed `step_mean` undercounted the 0–40 m layer wherever a step's vertical displacement is comparable to it (−3 to −5% outside the receptor's cell on the smoke run, up to −15% in strong turbulence); `trapezoid` is within 0.5% in every region scored. Where cells are only a few steps wide, single crossings leave errors of a few per cent per cell for every rule (±2% with 1 km cells at 3 m s⁻¹), and with deterministic along-wind motion (the analytic plume) they alias. |
 | Initial $u', v', w' = 0$ rather than sampled from the local $\sigma$ | Particles equilibrate within one $T_L$ (typically ~100 s), which is shorter than the release window. |
 | Virtual temperature approximated as $T$ in the Obukhov length | Humidity correction is small; deferred. |
 | Free-troposphere horizontal turbulence treated as isotropic with the vertical | The unresolved-mesoscale horizontal spread is carried separately by the meander process. |

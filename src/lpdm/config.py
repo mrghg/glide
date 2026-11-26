@@ -470,14 +470,34 @@ class ConvectionConfig(_Frozen):
 class DepositionConfig(_Frozen):
     """Where in a step each particle's residence is counted (task A2, [PR-F4])."""
 
-    # `endpoint`: at the particle's position after the step's advection, turbulence
-    # and convection (endpoint quadrature; the long-standing behaviour). `step_mean`:
-    # at the mean of the particle's positions at the start and at the end of the step
-    # (all of the step's motion included; decision 0026, which replaces the spec's
-    # RK2-predictor `midpoint`). `trapezoid`: half the step at the start position and
-    # half at the end, each with its own time-ago bin and density (decision 0029).
-    # Kernel deposition (decision 0012) is deferred to after v1.
-    position: Literal["endpoint", "step_mean", "trapezoid"] = "endpoint"
+    # `endpoint`: all of the step at the particle's position after the step's
+    # advection, turbulence and convection (the long-standing behaviour).
+    # `trapezoid`: half the step at the start position and half at the end, each with
+    # its own time-ago bin and density (decision 0029). `step_mean` (decision 0026)
+    # was removed: scored against fine-time residence it undercounts the 0-40 m
+    # layer by 3-5% (up to 15% in strong turbulence). The RK2 `midpoint` was removed
+    # before it. Kernel deposition (decision 0012) is deferred to after v1.
+    position: Literal["endpoint", "trapezoid"] = "endpoint"
+
+    @field_validator("position", mode="before")
+    @classmethod
+    def _removed_positions(cls, value: object) -> object:
+        removed = {
+            "step_mean": (
+                "output_grid.deposition.position 'step_mean' was removed (decision 0029): "
+                "scored against fine-time residence it undercounts the 0-40 m layer "
+                "(3-5% on the smoke run, up to 15% in strong turbulence). Use 'endpoint' "
+                "(default) or 'trapezoid'."
+            ),
+            "midpoint": (
+                "output_grid.deposition.position 'midpoint' was removed (decision 0026): "
+                "it counts each first step at the release height. Use 'endpoint' or "
+                "'trapezoid'."
+            ),
+        }
+        if value in removed:
+            raise ValueError(removed[value])
+        return value
 
 
 class OutputGridConfig(_Frozen):

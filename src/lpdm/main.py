@@ -221,11 +221,6 @@ DEPOSITION_POSITION_DOC = {
         "each step's residence is counted at the particle's position at the end of the "
         "step (after advection, turbulence and convection)"
     ),
-    "step_mean": (
-        "each step's residence is counted at the mean of the particle's positions at the "
-        "start and at the end of the step (the end after advection, turbulence, "
-        "convection and surface reflection); longitude is averaged along the shorter arc"
-    ),
     "trapezoid": (
         "each step's residence is split in two halves: dt/2 counted at the particle's "
         "position at the start of the step and dt/2 at its position at the end (after "
@@ -1019,43 +1014,6 @@ def _advection_alpha_wind_mean(
     return alpha, wind_mean
 
 
-def _horizontal_step_difference(d_xy: torch.Tensor) -> torch.Tensor:
-    """End-minus-start horizontal displacement of a step, (N, 2), for averaging.
-
-    **Frame-dependent; the one place that knows the horizontal coordinates.** With
-    positions in degrees (lon, lat), the longitude difference is wrapped into
-    [-180, 180) so a step across the dateline is averaged along the shorter arc.
-    If positions are ever held in a metric frame (x, y in metres; PR 74 proposes
-    one), this wrap must NOT be applied: wrapping metres modulo 360 would corrupt
-    any step with |dx| > 180 m. Whichever of PRs 66 and 74 merges second makes this
-    function frame-aware (return `d_xy` unchanged in the metric frame).
-    """
-
-    d_lon = torch.remainder(d_xy[:, 0:1] + 180.0, 360.0) - 180.0
-    return torch.cat((d_lon, d_xy[:, 1:2]), dim=1)
-
-
-def _step_mean_position(start_xyz: torch.Tensor, end_xyz: torch.Tensor) -> torch.Tensor:
-    """Mean of a step's start and end positions, (N, 3) lon/lat/alt (task A2, decision 0026).
-
-    Both inputs are particle positions as the step leaves them (heights already
-    reflected at the ground), so their mean is too: the mean height is >= 0, and
-    below the met domain's top when both ends are. Longitude is averaged along the
-    shorter arc, start + wrap(end - start) / 2 with the difference taken into
-    [-180, 180), so a step that crosses the dateline (179.9 -> -179.9) is centred on
-    it, not on 0; the result keeps the start's longitude convention. The runtime does
-    not wrap particle longitudes today (a particle leaving the met domain's longitude
-    box is killed), so for current runs the difference is the plain one and the wrap
-    only guards periodic domains. The wrap lives in `_horizontal_step_difference`,
-    which assumes degrees (see the frame note there). `trapezoid` averages no
-    positions and needs no wrap.
-    """
-
-    d = end_xyz - start_xyz
-    d_h = _horizontal_step_difference(d[:, :2])
-    return start_xyz + 0.5 * torch.cat((d_h, d[:, 2:]), dim=1)
-
-
 def _time_ago_index(elapsed_s: torch.Tensor, time_bin_s: float, n_time_bins: int) -> torch.Tensor:
     """Per-particle time-ago bin of an age (seconds since its release window's end).
 
@@ -1110,8 +1068,6 @@ def _deposit_step(
 
     * ``endpoint``: all of ``delta_s`` at ``end_xyz``, in bin ``t_idx``, with the
       density at ``end_xyz`` and the step's time weight ``t_alpha``.
-    * ``step_mean``: as endpoint, at the mean of ``start_xyz`` and ``end_xyz``
-      (decision 0026).
     * ``trapezoid``: ``delta_s / 2`` at ``start_xyz`` and ``delta_s / 2`` at
       ``end_xyz``, two literal deposits. Each half stands for half the step's
       interval of ages: the start half for [e, e + delta_s/2), binned by e (=
@@ -1155,7 +1111,7 @@ def _deposit_step(
             )
         return
 
-    deposit_xyz = end_xyz if position == "endpoint" else _step_mean_position(start_xyz, end_xyz)
+    deposit_xyz = end_xyz
     inv_density = (
         None
         if particle_density is None
@@ -1653,11 +1609,10 @@ def _run(
             compile_core=use_static and bool(getattr(engine, "_compile_requested", False)),
         )
     LOGGER.info("footprint density weighting: %s", cfg.output_grid.density_weighting)
-    # Where each step's residence is counted (task A2, decisions 0026 and 0029): the
-    # endpoint (default), the mean of each particle's start- and end-of-step
-    # positions, or half at each (`_deposit_step`). The runtime keeps the start,
-    # outside the captured step, so the step's graph and its outputs are the same for
-    # all three.
+    # Where each step's residence is counted (task A2, decision 0029): the endpoint
+    # (default) or half at each end of the step (`_deposit_step`). The runtime keeps
+    # the start, outside the captured step, so the step's graph and its outputs are
+    # the same for both.
     deposition_position = cfg.output_grid.deposition.position
     accumulation_dtype = (
         torch.float64 if cfg.output_grid.accumulation_dtype == "float64" else torch.float32
