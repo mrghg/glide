@@ -54,6 +54,13 @@ Subcommands:
   closed form.
 
 Outputs ``<out>.json`` (summary) and ``<out>.npz`` (tallies).
+
+**Positions are assumed to be in degrees** (lon, lat, metres above ground): the
+grid binning, the receptor rings and the `step_mean` tally's longitude wrap all
+use degrees. If GLIDE gains a metric position frame (PR #74 proposes x, y in
+metres), run the scorer with ``GLIDE_POSITION_FRAME=degrees`` or add a conversion.
+``_assert_degrees`` fails loudly, rather than mis-binning, when the environment
+or the engine names another frame or the positions are not plausible degrees.
 """
 
 from __future__ import annotations
@@ -335,6 +342,34 @@ def summarise(T: Tallies, ref: str) -> dict:
 # --------------------------------------------------------------------------- config (production run)
 
 
+def _assert_degrees(xyz: torch.Tensor | None = None, engine=None) -> None:
+    """Refuse to score positions that are not (lon, lat) in degrees.
+
+    Checks ``GLIDE_POSITION_FRAME`` (if set), the engine's ``frame`` attribute (if
+    any), and that the horizontal positions are plausible degrees
+    (|lon| <= 720, |lat| <= 90); a metric frame (metres about the domain centre)
+    fails the last check for any step longer than a few hundred metres.
+    """
+
+    env = os.environ.get("GLIDE_POSITION_FRAME")
+    if env is not None and env.lower() not in ("degrees", "deg", "lonlat"):
+        raise SystemExit(f"scorer assumes degrees; GLIDE_POSITION_FRAME={env!r}")
+    frame = getattr(engine, "frame", None)
+    if frame is not None:
+        name = str(getattr(frame, "name", frame)).lower()
+        if "deg" not in name and "lonlat" not in name:
+            raise SystemExit(f"scorer assumes degrees; engine.frame is {frame!r}")
+    if (
+        xyz is not None
+        and xyz.numel()
+        and (float(xyz[:, 0].abs().max()) > 720.0 or float(xyz[:, 1].abs().max()) > 90.0)
+    ):
+        raise SystemExit(
+            "scorer assumes (lon, lat) in degrees; got horizontal positions outside "
+            "|lon| <= 720, |lat| <= 90 (a metric frame?)"
+        )
+
+
 def run_config(args) -> None:
     import logging
 
@@ -395,6 +430,7 @@ def run_config(args) -> None:
             dtype,
             wind_mean_cache=wind_mean_cache,
         )
+        _assert_degrees(active_particles[:, :3], engine)
         rec.update(
             x0=active_particles[:, :3].clone(),
             xa=out[0][:, :3].clone(),
