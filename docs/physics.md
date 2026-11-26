@@ -431,8 +431,8 @@ particle population lofted to ~2 km and stayed there.
 The random forcing is symmetric, so the noise term needs no sign treatment. The
 displacement of position simply runs the other way: $z_{n+1} = z_n - w'\Delta t$.
 
-**The reciprocity test** (`tests/test_reciprocity.py`, task A6) checks this
-construction directly. Flesch, Wilson & Yee's relation
+**The reciprocity test** (`tests/test_reciprocity.py`, task A6). Flesch,
+Wilson & Yee's relation
 $\rho(\mathbf{x}_r)\,P_b(\mathbf{x}_s \mid \mathbf{x}_r) = \rho(\mathbf{x}_s)\,P_f(\mathbf{x}_r \mid \mathbf{x}_s)$
 (velocities started from the Eulerian distribution at both ends) makes the
 backward footprint of a receptor cell, counted as $\Delta t/\rho$, equal the
@@ -441,35 +441,40 @@ spread over each source cell. The test runs the forward model through the
 production scheme with a private flag (`HannaScheme._forward_in_time`, which
 no configuration can set): the same code with the drift unnegated and the
 displacement $+w'\Delta t$; ground reflection, the boundary-layer-top
-interface (§5) and the velocity carry are shared unchanged. On a steady,
-horizontally uniform column with the Hanna profile, a hydrostatic density, a
-sheared wind and a boundary-layer top, at the shipped 60 s step and
-16 sub-steps (validation plan §3 procedure; 40,000 backward particles,
-10,000 forward particles per source row; results in `outputs/agents/A6/` and
-[VALIDATION.md §3](VALIDATION.md#3-the-analytic-verification-tests)):
+interface (§5) and the velocity carry are shared unchanged.
 
-- with the sign flip above removed, 8% of the tested cells agree for a surface
-  receptor in a convective boundary layer (88% with it); with the interface
-  rule of §5 disabled, 18% for a receptor just above $h$ and the sum over the
-  cells is 0.24 of the forward one; with the drift stencil straddling $h$
-  again (decision 0028), 15% and 1.13 (93% and 0.998 with neither change);
-- with the construction as written, every difference found shrinks as the
-  sub-steps go from 16 to 64, which points to the time discretisation rather
-  than the construction (argued from the trend, one seed at 64): at a surface
-  receptor the backward footprint exceeds the forward concentration by
-  1.6–1.8% (convective, three seeds; 0.8% at 64 sub-steps),
-  the forward model's own near-surface well-mixed deficit (0.981 of its share
-  in the lowest 150 m at 16 sub-steps); for a stable boundary layer the sum
-  is 2.1% low at 16 sub-steps and within noise at 64; for a receptor just
-  above a stable boundary layer the backward footprint in the boundary layer
-  is 1.5–3 times the forward concentration at 16 sub-steps and 1.2–1.4 times
-  at 64. Between the two counts the backward footprint summed over each of the
-  three rows below $h$ changes by at most 4%, the forward concentration by up
-  to 22% (one seed each), which suggests (argued, not shown) that most of the
-  difference at 16 sub-steps is the forward model's.
+What this can and cannot show:
 
-At the defaults the test therefore does not yet pass the plan's criteria in
-every case; see VALIDATION.md §3.
+- **It checks the sign construction above, exactly.** In a steady,
+  horizontally uniform column the backward step with noise $\eta$ is, bit for
+  bit, the forward step with $-\eta$ from the negated velocities: with
+  $w' \to -w'$ the negated drift, the reversed displacement and the symmetric
+  noise reproduce the forward path (derived; measured bit-identical over
+  120 steps, both regimes, `outputs/agents/A6/review/pathwise.log`, and
+  asserted in the default suite by
+  `test_backward_step_is_the_forward_step_with_the_velocity_negated`). The
+  companion that removes the sign flip breaks this identity.
+- **Beyond the signs it tests the shared scheme, not "backward against
+  forward".** Because the start distribution is symmetric in $w'$, the
+  backward run is the forward process in law, so the comparison reduces to
+  the transfer symmetry of the one discrete scheme both directions use:
+  $\rho_s K(s \to r) = \rho_r K(r \to s)$ between cells (derived). A failure
+  cannot be assigned to the forward or the backward side.
+- **It does not test the backward formulation where time matters.** The
+  column is steady with a fixed $h$. A moving-$h$, time-varying case is the
+  outstanding test of the backward construction itself.
+- **Its start is not production's.** The harness starts both directions
+  from the equilibrium (Eulerian) turbulent velocities, as the theorem
+  assumes; production releases start at $w' = 0$.
+
+At the shipped 60 s step and 16 sub-steps the test does not pass the
+validation plan's criteria in every case: near the ground by the scheme's
+near-surface well-mixed error, and for receptors near a stable
+boundary-layer top by the drift defect where $\sigma_w$ reaches its floor
+(decision 0030, proposed in PR #75, not yet merged; with it merged in, the
+stable-top cells move most of the way to agreement and one stable case still
+fails narrowly, away from $h$). Results and the open acceptance are in
+[VALIDATION.md §3](VALIDATION.md#3-the-analytic-verification-tests).
 
 **Mass bookkeeping.** Each particle carries a weight $m_p = 1/N$, where $N$ is
 the number of particles in that release — so one particle represents $1/N$ of the
