@@ -229,8 +229,13 @@ by Matt the same day). Both concern where deposits land, not the rule itself.
    the code before this fix except the aligned cases. *Rejected:* validating that
    bin widths, run lengths and release windows are multiples of $\Delta t$ (it
    was implemented first, then dropped at the coordinator's request): it would
-   refuse the misaligned windows that column and satellite releases need, and
-   the split costs only one more scatter per half.
+   refuse the misaligned windows that column and satellite releases need. The
+   split is not free: each piece is a full scatter, so with several bins a
+   trapezoid deposit took 2.2× as long as before the split on CPU (75.5 against
+   33.7 ms per step at 2M particles and 24 bins; single-bin runs unchanged;
+   measured on a loaded node, `outputs/agents/A2/fixes/review2/bench_deposit.txt`).
+   Computing each half's spatial index once and adding only the time stride per
+   piece is the obvious follow-up.
    **`endpoint` has the same issue and is not changed** (Matt's instruction): it
    counts a whole step in the bin of its starting age. Where windows end on the
    step grid and the width is a multiple of $\Delta t$ (every shipped

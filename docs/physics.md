@@ -959,7 +959,7 @@ are half-open, as above, so a release at 0 m is counted in the first layer.
 For `trapezoid` the runtime copies the start positions before the step, outside
 the captured graph, so the static (CUDA) step's graph, shapes and outputs are the
 same as for `endpoint` (decision 0004). Each half is one scatter per age-bin
-piece (two pieces per half with several bins, one with a single bin). Kernel
+piece ($\lceil(\Delta t/2)/w\rceil + 1$ pieces per half with several bins of width $w$, so two when $w \ge \Delta t/2$ and more for narrower bins; one with a single bin). Kernel
 deposition (decision 0012) is deferred to after v1; deposition is a delta at the
 chosen position(s).
 
