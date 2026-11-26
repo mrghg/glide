@@ -494,6 +494,17 @@ def run_config(args) -> None:
             .clamp(min=0.0)[active_mask]
             .to(torch.float64)
         )
+        # The offline trapezoid tally bins each half by one age; production splits a
+        # half that straddles an age-bin edge. They agree only when no half straddles
+        # one: ages on the step grid and the bin a whole number of steps wide.
+        if T.grid.bin_s % float(dt_seconds) or bool(
+            torch.any(torch.remainder(age0, float(dt_seconds)) != 0)
+        ):
+            raise SystemExit(
+                "score_residence_counting: ages off the step grid or bins not a whole "
+                "number of steps; the per-bin trapezoid tallies would differ from "
+                "production (which splits half steps between age bins)"
+            )
         w = weights[active_mask].to(torch.float64)
         mw, engine = rec["met_window"], rec["engine"]
 

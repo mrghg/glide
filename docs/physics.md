@@ -837,7 +837,12 @@ interval for all its particles. Every particle is followed for
 start of its window reaches an age of the length plus the window's duration.
 `n_time_bins` counts the bins of travel to resolve, and the `time_ago` axis adds
 one bin per started bin width of the longest release window, so that travel
-stays on the axis. `time_ago_start_hours` and `time_ago_end_hours` give each
+stays on the axis. (A particle is counted from the step boundary at or below its
+release, so when a window starts between steps its counted ages run up to that
+offset, less than one step, past the length plus the duration; with `trapezoid`,
+which splits each step's ages exactly between bins, the axis also covers that
+offset, which can add one bin; `endpoint` bins each step by its starting age,
+which stays on the axis, so its axis is unchanged.) `time_ago_start_hours` and `time_ago_end_hours` give each
 bin's edges. With `n_time_bins: 1` all ages collapse into one bin, giving the
 time-integrated footprint the FLEXPART comparison uses. With more bins,
 `n_time_bins × time_bin_seconds` must cover the simulation length; a

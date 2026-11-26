@@ -438,18 +438,20 @@ def test_misaligned_release_residence_and_one_bin_emission_are_exact(
         np.testing.assert_array_equal(total, fp.isel(latitude=1, longitude=1).values)
         per_bin[position] = total.astype(np.float64)
         datasets[position] = ds
-    n_bins = per_bin["trapezoid"].shape[1]
-    exact = _exact_seconds_by_bin(cfg, n_bins)
     # Each particle is counted for 3600 s, from the step boundary at or below its
-    # release; S1's oldest ages (up to 4220 s) pass the axis's 4200 s and are dropped.
-    np.testing.assert_allclose(exact[0].sum(), 3600.0, rtol=1e-12)
-    assert 3590.0 < exact[1].sum() < 3600.0
+    # release, so S1's oldest counted ages reach 4220 s: past the 30 + 5 bins
+    # (4200 s) that endpoint's axis has, so trapezoid's axis gets a bin more.
+    assert per_bin["endpoint"].shape[1] == 35
+    assert per_bin["trapezoid"].shape[1] == 36
+    exact = _exact_seconds_by_bin(cfg, 36)
+    np.testing.assert_allclose(exact.sum(axis=1), 3600.0, rtol=1e-12)
+    np.testing.assert_allclose(per_bin["trapezoid"].sum(axis=1), 3600.0, rtol=1e-6)
     assert np.count_nonzero(exact[1] % 120.0) > 2  # S1 has partly covered bins
     np.testing.assert_allclose(per_bin["trapezoid"], exact, rtol=1e-5, atol=1e-4)
-    np.testing.assert_allclose(per_bin["endpoint"][0], exact[0], rtol=1e-5, atol=1e-4)
+    np.testing.assert_allclose(per_bin["endpoint"][0], exact[0, :35], rtol=1e-5, atol=1e-4)
     # Endpoint moves 20 s of each S1 step into the next-younger bin; in fully
     # covered bins the shifts in and out cancel, in the partly covered ones not.
-    endpoint_error = np.abs(per_bin["endpoint"][1] - exact[1])
+    endpoint_error = np.abs(per_bin["endpoint"][1] - exact[1, :35])
     assert endpoint_error.max() > 1.0
     np.testing.assert_allclose(endpoint_error[6:29], 0.0, atol=1e-4)
 

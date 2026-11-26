@@ -19,7 +19,7 @@ import resource
 import sys
 import time
 from collections import OrderedDict
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -391,13 +391,41 @@ def _footprint_time_bin_count(cfg: RunConfig, releases: Sequence[ConcreteRelease
     adds enough bins for the longest release window, so no particle's resolved
     travel falls off the end. One bin stays one bin: the time-integrated
     footprint.
+
+    With `trapezoid` deposition the axis also covers the counted ages exactly. A
+    particle is counted from the step boundary at or below its release, for the
+    run length, so when a release window starts above the batch's step grid its
+    oldest counted ages run past the length plus the duration by that offset
+    (less than one step); trapezoid splits the step's ages exactly
+    (`_age_bin_pieces`), so the axis adds the largest such offset. `endpoint` bins
+    each step by its starting age, which stays inside the axis, so its axis is
+    unchanged.
     """
 
     n_time_bins = cfg.output_grid.n_time_bins
     if n_time_bins == 1:
         return 1
     longest_window_s = max(float(r.duration_seconds) for r in releases)
+    if cfg.output_grid.deposition.position == "trapezoid":
+        longest_window_s += _largest_start_offset_from_step_grid(cfg)
     return n_time_bins + math.ceil(longest_window_s / cfg.output_grid.time_bin_seconds)
+
+
+def _largest_start_offset_from_step_grid(cfg: RunConfig) -> float:
+    """Largest distance (s) of a release window's start above the step grid of its
+    batch. The runtime's steps end on the batch terminus (its earliest release start
+    minus the run length) plus whole steps; 0 when every start is on that grid."""
+
+    dt_s = float(cfg.simulation.dt_seconds)
+    largest = 0.0
+    for batch in cfg.expand_to_batches():
+        terminus = min(r.release_time for r in batch.releases) - timedelta(
+            seconds=cfg.simulation.length_seconds
+        )
+        for rel in batch.releases:
+            off = (rel.release_time - terminus).total_seconds() % dt_s
+            largest = max(largest, 0.0 if min(off, dt_s - off) < 1e-3 else off)
+    return largest
 
 
 def _build_footprint_dataset_metadata(
@@ -1041,8 +1069,12 @@ def _time_weight(met_window: HourlyMetTensors, t_eval_s: float) -> float:
 
 
 def _age_bin_pieces(
-    age_s: torch.Tensor, length_s: float, time_bin_s: float, n_time_bins: int
-) -> list[tuple[torch.Tensor, torch.Tensor | float]]:
+    age_s: torch.Tensor,
+    length_s: float,
+    time_bin_s: float,
+    n_time_bins: int,
+    dtype: torch.dtype = torch.float32,
+) -> Iterator[tuple[torch.Tensor, torch.Tensor | float]]:
     """Split each particle's age interval [age, age + length) by the time-ago bins.
 
     Returns ``(t_idx, seconds)`` pieces whose seconds sum to ``length_s`` for every
@@ -1052,23 +1084,23 @@ def _age_bin_pieces(
     length and the configured width, never on the data, so the shapes are static
     and there is no host sync. Pieces that do not overlap carry 0 s (an exact
     no-op in the scatter). With one bin (time-integrated) every age is bin 0 and
-    the interval is one piece.
+    the interval is one piece. The seconds are computed in float64 and returned in
+    ``dtype`` (the grid's); pieces are yielded one at a time, so only one piece's
+    temporaries are alive while it is scattered.
     """
 
     if n_time_bins == 1:
-        return [(_time_ago_index(age_s, time_bin_s, 1), length_s)]
-    # float64 so that interval ends that fall on bin edges stay exact.
+        yield _time_ago_index(age_s, time_bin_s, 1), length_s
+        return
     lo = age_s.to(torch.float64)
     hi = lo + length_s
     first = torch.floor(lo / time_bin_s)
-    pieces: list[tuple[torch.Tensor, torch.Tensor | float]] = []
     for j in range(math.ceil(length_s / time_bin_s) + 1):
         bin_lo = (first + j) * time_bin_s
         overlap = (torch.minimum(hi, bin_lo + time_bin_s) - torch.maximum(lo, bin_lo)).clamp_(
             min=0.0
         )
-        pieces.append(((first + j).to(torch.int64), overlap.to(age_s.dtype)))
-    return pieces
+        yield (first + j).to(torch.int64), overlap.to(dtype)
 
 
 def _deposit_step(
@@ -1130,7 +1162,8 @@ def _deposit_step(
                     xyz, met_window, _time_weight(met_window, t_eval_s), engine
                 )
             )
-            for piece_idx, piece_s in _age_bin_pieces(age_s, half_s, time_bin_s, gridder.n_t):
+            pieces = _age_bin_pieces(age_s, half_s, time_bin_s, gridder.n_t, gridder.dtype)
+            for piece_idx, piece_s in pieces:
                 gridder.accumulate(
                     particles=xyz,
                     active_mask=active_mask,

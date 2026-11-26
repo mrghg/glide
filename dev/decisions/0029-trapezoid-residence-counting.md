@@ -235,11 +235,15 @@ by Matt the same day). Both concern where deposits land, not the rule itself.
    neighbouring bin, which cancels in fully covered bins but not at the ends of
    a release's lifetime (up to 4.4 s of a 120 s bin in the test above,
    *measured*), and mistimes an emission active in only some bins by up to a
-   step. A related, separate property (*derived*, not changed): a particle is
-   counted from the step boundary at or below its release time, so its counted
-   ages are shifted older by up to one step; with a window ending off the grid,
-   up to that much of its oldest residence can fall past the end of the age axis
-   (20 s of 3,600 s for the test's second release).
+   step. A related property (*derived*): a particle is counted from the step
+   boundary at or below its release time, so its counted ages are shifted older
+   by up to one step. With a window starting off the step grid, splitting would
+   send up to that much of a particle's oldest residence past the end of the age
+   axis (*measured* by the fresh-context review: 3598.1 of 3600 s for the test's
+   second release); so for `trapezoid` the axis adds the largest offset of a
+   release start above its batch's step grid (`_footprint_time_bin_count`), one
+   more bin in that test, and each release keeps all 3600 s (*measured*, same
+   test). `endpoint`'s axis is unchanged.
 
 **Consequences.** Changing the default changes every surface-inlet footprint
 near the receptor (smoke: +11.6% in the receptor's cell, +1.25% on the 0–40 m
