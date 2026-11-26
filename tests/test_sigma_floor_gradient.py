@@ -370,9 +370,9 @@ def transfer_ratio(
 #   this code:                 1.03-1.27, mean 1.18, seed sd 0.08 (each seed's
 #                              standard error 0.085);
 #   the stencil only (main):   3.49-4.70, mean 3.80, seed sd 0.34.
-# The residual at 16 sub-steps is first-order sub-step error: at 64 sub-steps
-# this code gives GATE_N64_PROD and the stencil GATE_N64_FD
-# (n64_p10000.jsonl, 3 seeds). A tolerance of 0.5 is 3.0 seed sd above this
+# At 64 sub-steps (n64_p10000.jsonl, seeds 0-2) this code gives 1.04-1.10 and
+# the stencil 3.02-3.32: this code's residual shrinks with the sub-step (first
+# order, decision 0027), the stencil's does not. A tolerance of 0.5 is 3.0 seed sd above this
 # code's worst seed and fails main's best by 2.0. About 30 s on 6 CPU threads.
 GATE_N_PER_ROW = 10_000
 GATE_TOLERANCE = 0.5  # on |ratio − 1|

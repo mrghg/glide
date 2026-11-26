@@ -26,8 +26,8 @@ decision 0028 item 1. That had two defects there.
    at $h$, so it returns the gradient at the stencil's midpoint, up to δ/2 below
    the particle. Where $\sigma_H \to 0$ linearly, $\partial\sigma_H^2/\partial z
    \propto (h - z)$ and that is an O(1) relative error (*derived*). At a
-   $10^{-4}$ floor ($d$ = 0.07 m) in the thin-floor column below the stencil
-   gives 5.5 times the exact gradient 0.1 m below $h$
+   $10^{-4}$ floor ($d$ = 0.07 m), in the thin-floor column of the gate below, the
+   stencil gives 5.5 times the exact gradient 0.1 m below $h$
    (*measured*, `test_stencil_defects_at_a_stable_top`).
 
 **How common.** $d < 1$ m whenever $u_\ast > 7.7\times10^{-4}\,h$ at the
@@ -48,12 +48,21 @@ over the four boundary-layer rows below $h$ must be 1 (*derived*;
 | --- | --- | --- | --- | --- |
 | thin floor: h 400 m, u* 0.45, H −60 W m⁻², d 0.68 m | before (stencil) | 3.37 ± 0.19, 3.20 ± 0.17 | 3.05 ± 0.16 | `WM/sigma_floor/review/logs/rowmat_table.log` (forward, 40,000 per row, 2 seeds) |
 | | this decision | 1.11 ± 0.04, 1.10 ± 0.04 | 1.03 ± 0.03, 0.97 ± 0.03 | same |
-| | before (stencil) | GATE_FD_N16 | GATE_FD_N64 | `SF/gate/` (backward, 10,000 per row, GATE_NSEEDS) |
-| | this decision | GATE_PROD_N16 | GATE_PROD_N64 | same |
+| | before (stencil) | 3.80 (3.49–4.70) | 3.21 (3.02–3.32) | `SF/gate/n16_p10000.jsonl`, `n64_p10000.jsonl` (the gate's harness: backward, 10,000 per row; mean and range over seeds 0–9 at 16 sub-steps, 0–2 at 64) |
+| | this decision | 1.18 (1.03–1.27) | 1.07 (1.04–1.10) | same |
 | thick floor: h 400 m, u* 0.25, H −20 W m⁻², d 1.23 m | before | 1.215 ± 0.030 | 1.189 ± 0.029 | `WM/sigma_floor/logs/table.md` (2 seeds pooled) |
 | | this decision | 1.025 ± 0.024 | 1.004 ± 0.023 | same |
 | thick-floor column at a 10⁻⁴ floor (d 0.12 m) | before | 52 ± 25 | — | same |
 | | this decision | 1.12 ± 0.05 | 0.98 ± 0.04 | same |
+
+The two harnesses differ: the gate's backward harness reads about 0.07 higher
+than the review's forward row matrix at both 16 and 64 sub-steps for this
+decision's code, and 0.16–0.52 higher for the stencil (*measured*); with the
+review's column meteorology it still reads 1.19 over seeds 0–5
+(`SF/gate/metcheck.log`). The cause was not found: the review's run is forward
+through PR #73's private flag and weights residence by $1/\rho_d$, and both
+harnesses should have the same expectation (*argued*). It is 2–3 standard
+errors and changes no conclusion here.
 
 Before the fix the asymmetry does not converge with the sub-step count; with it
 the residual at 16 sub-steps is first order in the sub-step (it halves or
@@ -94,27 +103,54 @@ value and form are unchanged.
 - `in_bl_dsigw2_dz` matches 1 mm one-sided differences of the floored profile
   to 10⁻³ of its maximum, in all three regimes, over grids of $h$, $u_\ast$,
   $w_\ast$ and latitude, at floors 10⁻⁴, 10⁻³ and 10⁻² (the review's
-  `grad_check.py` check C, in float64);
+  `grad_check.py` checks A and B);
 - in eight columns (three regimes; thin and thick floor layers; a neutral
   column whose σ_w reaches the floor mid-layer) the production gradient
   equals the float64 analytic one wherever it departs from the stencil,
   departs only within δ of $h$ or of the floor, and every coefficient is
-  bit-identical to the stencil's elsewhere;
+  bit-identical to the stencil's elsewhere (the review's check C);
 - static and dynamic steps are bit-identical with half the particles within
   5 m of a stable $h$;
 - **the transfer-symmetry gate**: the thin-floor column at the default 16
-  sub-steps, 10,000 particles per row, $|r - 1| <$ GATE_TOL. Calibration
-  in `SF/gate/` (GATE_CALIB). It fails on main.
+  sub-steps, 10,000 particles per row, seed 0, $|r - 1| < 0.5$. Over seeds
+  0–9 this code's worst is 1.27 (3.0 seed standard deviations inside) and
+  main's best 3.49 (`SF/gate/n16_p10000.jsonl`). Run against main d19755d
+  itself it fails, 3.86 ± 0.48, and this code passes, 1.08 ± 0.08
+  (`SF/gate/gate_on_{main,branch}.log`); about 30 s on 6 CPU
+  threads.
 
 The two well-mixed gates pass unchanged (`tests/test_near_surface_well_mixed.py`,
 `tests/test_bl_top_well_mixed.py`; GATE_EXISTING).
 
-**Production effect** (*measured*, `SF/smoke/`; CPU smoke,
-`configs/smoke_mhd_single_release.yaml`, Mace Head, one 1-day release in
-January, 20,000 particles): SMOKE_EFFECT A winter release at Mace Head barely
-sees a stable boundary-layer top, so this is no measure of the fix's effect
-where it matters: a night-time tall-tower or elevated receptor above a shallow
-stable $h$ (*argued*).
+**Production effect** (*measured*, CPU, 20,000 particles, 1-day backward runs,
+this code against main with the same seed; `SF/smoke/compare_smoke.log`,
+`compare_tac.log`).
+
+| case | seed | 0–40 m | 40–1,000 m | 1–5 km | total |
+| --- | --- | --- | --- | --- | --- |
+| smoke config (Mace Head 10 m, 1 Jan 2024 00 UTC) | 42 | −0.012% | −0.0005% | −0.0007% | −0.0009% |
+| | 43 | −0.049% | −0.023% | +0.033% | +0.0015% |
+| Tacolneston 185 m, 31 Jan 2024 03 UTC | 42 | −0.67% | −0.005% | +0.18% | +0.001% |
+| | 43 | −0.73% | +0.04% | −0.18% | −0.001% |
+
+- The smoke release barely sees a stable boundary-layer top: a winter
+  release at Mace Head in a deep, unstable marine boundary layer (ERA5 at the
+  site in the 24 h before the release: $h$ 1.0–1.5 km, upward heat flux
+  19–42 W m⁻²; `SF/smoke/era5_sites.log`). Against the CPU golden fixture
+  (pre-0027 physics, not regenerated) main is +94.03% in 0–40 m and −6.55% in
+  total, this code +94.01% and −6.55%.
+- The Tacolneston case is the smoke configuration moved to the 185 m inlet
+  of `configs/example_multisite_january.yaml` at a night chosen from ERA5 for
+  a shallow stable boundary layer below the inlet: $h$ 112 m, $u_\ast$
+  0.20 m s⁻¹, $H$ −16 W m⁻² at the release (floor layer 0.44 m, under δ);
+  stable at the site from 17 UTC the evening before ($h$ 77–940 m, floor
+  layer 0.34–2.0 m; `SF/smoke/era5_sites.log`).
+  0–40 m is 0.7% lower in both seeds. That is the size of the seed-to-seed
+  spread of the 0–40 m total (0.7%), and same-seed runs share their
+  trajectories until they first come near $h$ (69% of endpoints differ), so
+  the shift is suggestive, not established. Nocturnal tall-tower receptors are
+  where the fix should matter (*argued*); one night at one site does not
+  measure it.
 
 ## The floor is an exchange parameter
 
@@ -213,6 +249,14 @@ is not used anywhere else, so it removes both defects at every floor tested
 without changing a single trajectory that never comes within δ of $h$ or of the
 floor. It adds no parameter. FLEXPART's default path uses the same analytic
 gradient.
+
+**Cost.** Static shapes mean the analytic gradient is computed for every
+particle and selected: `_vertical_coefficients` takes 11–17% longer on one CPU
+thread for 200,000 particles (72–74 ms against 80–85 ms per call; *measured*,
+`SF/logs/bench_coeffs.log`, `scripts/validation/sigma_floor/bench_coeffs.py`). It is one of several
+per-sub-step evaluations, so a whole step costs less than that more; not
+measured on the GPU, and the CPU smoke wall times (6:29–6:33 against 7:00–7:04)
+ran with different background load and are not a measurement.
 
 **Rejected alternatives** (*measured* in `WM/sigma_floor/SUMMARY.md` §2
 unless marked).
