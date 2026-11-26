@@ -320,8 +320,10 @@ def transfer_ratio(
     Σ_b M[above, b] / Σ_b M[b, above] over the four boundary-layer rows b. In a
     steady column the chain is reversible about the well-mixed state (uniform in
     z here: the air density varies by under 0.1% over these rows), so M is
-    symmetric and the ratio is 1 up to noise and sub-step error. Returns the
-    ratio and its standard error (independent particles, delta method)."""
+    symmetric and the ratio tends to 1 as the sub-step shrinks. At the default
+    16 sub-steps the first-order sub-step error leaves it at about 1.15 (1.07
+    at 64). Returns the ratio and its standard error (independent particles,
+    delta method)."""
 
     blh, ustar, shf = COLUMNS[column]
     met = _met(blh, ustar, shf)
@@ -365,24 +367,34 @@ def transfer_ratio(
 
 
 # Calibration (scripts/validation/sigma_floor/transfer_gate_calibration.py;
-# outputs/agents/SF/gate/n16_p10000.jsonl), this procedure at the default 16
-# sub-steps, 10,000 particles per row, seeds 0-9:
-#   this code:                 1.03-1.27, mean 1.18, seed sd 0.08 (each seed's
-#                              standard error 0.085);
-#   the stencil only (main):   3.49-4.70, mean 3.80, seed sd 0.34.
-# At 64 sub-steps (n64_p10000.jsonl, seeds 0-2) this code gives 1.04-1.10 and
-# the stencil 3.02-3.32: this code's residual shrinks with the sub-step (first
-# order, decision 0027), the stencil's does not. A tolerance of 0.5 is 3.0 seed sd above this
-# code's worst seed and fails main's best by 2.0. About 30 s on 6 CPU threads.
-GATE_N_PER_ROW = 10_000
-GATE_TOLERANCE = 0.5  # on |ratio − 1|
+# outputs/agents/SF/gate/ and gate2/ in the main checkout), this procedure at the
+# default 16 sub-steps:
+#   this code, 40,000 per row, seeds 0-9: 1.07-1.21, mean 1.149, seed sd 0.042
+#     (each seed's standard error 0.042);
+#   this code, 10,000 per row, seeds 0-9: 1.03-1.27, mean 1.18, seed sd 0.08;
+#   the stencil only (main), 40,000 per row, seeds 0-2: 3.54-4.44;
+#     10,000 per row, seeds 0-9: 3.49-4.70, mean 3.80;
+#   the stable analytic gradient halved (a planted error), 40,000 per row,
+#     seeds 0-2: 0.66-0.69.
+# The expected value is not 1 but about 1.15: decision 0027's first-order
+# sub-step error. At 64 sub-steps (n64_p10000.jsonl, seeds 0-2) this code gives
+# 1.04-1.10, and the stencil 3.02-3.32, down 16% from 3.80 but still far from 1.
+# GATE_BAND is the 40,000-per-row mean ± 4 seed sd (0.98-1.32): this code's
+# worst seeds are 2.1 (low) and 2.7 (high) sd inside it; it contains 1, the
+# short-sub-step limit; it fails main by 2.2 and the halved gradient by 0.29
+# (14 of that variant's standard errors). About 70 s on 6 CPU threads.
+GATE_N_PER_ROW = 40_000
+GATE_BAND = (0.98, 1.32)  # on the downward/upward ratio at 16 sub-steps
 
 
 def test_exchange_across_a_stable_top_is_symmetric() -> None:
     """The gate: downward/upward exchange across a stable h with a floor layer
-    thinner than the stencil (0.68 m) is 1 within GATE_TOLERANCE at the default
-    sub-step count. It was about 3.8 before decision 0030."""
+    thinner than the stencil (0.68 m), at the default sub-step count, lies in
+    GATE_BAND around its calibrated value (about 1.15; 1 in the limit of short
+    sub-steps). It was about 3.8 before decision 0030, and 0.67 with the stable
+    analytic gradient halved."""
 
     scheme = HannaScheme(meander_enabled=False, static_substeps=False)  # default 16 sub-steps
     r, se = transfer_ratio(scheme, GATE_N_PER_ROW, seed=0)
-    assert abs(r - 1.0) < GATE_TOLERANCE, f"downward/upward exchange across h {r:.3f} ± {se:.3f}"
+    lo, hi = GATE_BAND
+    assert lo < r < hi, f"downward/upward exchange across h {r:.3f} ± {se:.3f}, not in {GATE_BAND}"

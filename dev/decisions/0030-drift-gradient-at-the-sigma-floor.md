@@ -46,25 +46,46 @@ over the four boundary-layer rows below $h$ must be 1 (*derived*;
 
 | column | gradient | 16 sub-steps | 64 sub-steps | source (*measured*) |
 | --- | --- | --- | --- | --- |
-| thin floor: h 400 m, u* 0.45, H −60 W m⁻², d 0.68 m | before (stencil) | 3.37 ± 0.19, 3.20 ± 0.17 | 3.05 ± 0.16 | `WM/sigma_floor/review/logs/rowmat_table.log` (forward, 40,000 per row, 2 seeds) |
-| | this decision | 1.11 ± 0.04, 1.10 ± 0.04 | 1.03 ± 0.03, 0.97 ± 0.03 | same |
+| thin floor: h 400 m, u* 0.45, H −60 W m⁻², d 0.68 m | before (stencil) | 3.61 ± 0.19 (6 seeds) | 3.05 ± 0.16 (1 seed) | row matrix, 40,000 per row, forward and backward: `SF/review/harness/summary.log` (16 sub-steps, mean ± standard error over seeds), `WM/sigma_floor/review/logs/rowmat_table.log` (64) |
+| | this decision | 1.14 ± 0.014 (10 seeds) | 1.03 ± 0.03, 0.97 ± 0.03 (2 seeds) | same |
 | | before (stencil) | 3.80 (3.49–4.70) | 3.21 (3.02–3.32) | `SF/gate/n16_p10000.jsonl`, `n64_p10000.jsonl` (the gate's harness: backward, 10,000 per row; mean and range over seeds 0–9 at 16 sub-steps, 0–2 at 64) |
 | | this decision | 1.18 (1.03–1.27) | 1.07 (1.04–1.10) | same |
+| | before (stencil) | 3.93 (3.54–4.44) | — | `SF/gate2/n16_p40000.jsonl` (the gate as committed: 40,000 per row; seeds 0–2) |
+| | this decision | 1.149 (1.07–1.21), seed sd 0.042 | — | same, seeds 0–9 |
+| | stable analytic gradient halved (planted error) | 0.67 (0.66–0.69) | — | `SF/gate2/halfst_n16_p40000.jsonl`, seeds 0–2 |
 | thick floor: h 400 m, u* 0.25, H −20 W m⁻², d 1.23 m | before | 1.215 ± 0.030 | 1.189 ± 0.029 | `WM/sigma_floor/logs/table.md` (2 seeds pooled) |
 | | this decision | 1.025 ± 0.024 | 1.004 ± 0.023 | same |
 | thick-floor column at a 10⁻⁴ floor (d 0.12 m) | before | 52 ± 25 | — | same |
 | | this decision | 1.12 ± 0.05 | 0.98 ± 0.04 | same |
 
-The two harnesses differ: the gate's backward harness reads about 0.07 higher
-than the review's forward row matrix at both 16 and 64 sub-steps for this
-decision's code, and 0.16–0.52 higher for the stencil (*measured*); with the
-review's column meteorology it still reads 1.19 over seeds 0–5
-(`SF/gate/metcheck.log`). The cause was not found: the review's run is forward
-through PR #73's private flag and weights residence by $1/\rho_d$, and both
-harnesses should have the same expectation (*argued*). It is 2–3 standard
-errors and changes no conclusion here.
+The two harnesses agree within sampling noise (*measured*,
+`SF/review/harness/summary.log`): over 10 seeds the row matrix gives
+1.141 ± 0.014 for this decision's code at 16 sub-steps, and the gate's harness
+1.176 ± 0.026, a gap under 1.7 standard errors. An earlier impression of a gap
+came from the row matrix's first two seeds (1.11, 1.10), which were low.
+Forward and backward runs give the same values within noise (1.11–1.19
+forward, 1.10–1.23 backward, 4 seeds each, same file directory, `table.log`),
+so the direction of time does not matter, as derived.
 
-Before the fix the asymmetry does not converge with the sub-step count; with it
+**The defect is directional** (*measured*, `SF/review/harness/table.log`,
+forward row matrices, seeds 0–1). Main suppresses **upward** transfer, from the
+boundary layer into the 40 m above $h$: 36–37 (summed residence, arbitrary
+units) against 133–135 with this decision, about 3.7 times less. Downward
+transfer is only about 12% lower (131–134 against 148–152). In a column like the
+Tacolneston night below (h 112 m, u* 0.198 m s⁻¹, H −16 W m⁻², floor layer
+0.44 m, held steady for 7 h), particles released inside the boundary layer
+never leave it under main: 0 of 60,000 crossed $h$ for receptors at 10 m and
+60 m (3 seeds of 20,000), against 5.4–6.0% with this decision
+(*measured*, `SF/review/column/summary.log`, `night.jsonl`). So in-boundary-layer
+receptors at night (low inlets under a shallow stable $h$) are the most
+affected: under main their footprint never reaches the air above $h$. With
+this decision that exchange runs through the floor, so their escape rate
+scales with $\sigma_{\min}$ (*derived*, from the exchange velocity below; not
+measured in that column).
+
+Before the fix the asymmetry shrinks only slowly with the sub-step count and
+stays far from 1 (3.80 → 3.21 from 16 to 64 sub-steps in the gate's harness,
+−16%; 3.61 → 3.05 in the row matrix); with it
 the residual at 16 sub-steps is first order in the sub-step (it halves or
 better from 16 to 64), decision 0027's ordinary error (*measured*, above; the
 attribution is *argued*). Below $h$ (row $h$−40…$h$ with the three rows under
@@ -85,13 +106,23 @@ takes the analytic derivative of the floored boundary-layer profile,
 Every other particle, including every free-troposphere particle, keeps the
 stencil, bit for bit. The selection is a `torch.where` on data already
 computed (no new parameter, static shapes, no host synchronisation), so the
-static/graph and dynamic paths stay bit-identical (decision 0004). The floor
+static and dynamic paths stay bit-identical (*measured* on CPU, the parity
+tests) and CUDA-graph capture should be unaffected (decision 0004; *argued*,
+not run on a GPU). The floor
 value and form are unchanged.
 
 - The stencil-only behaviour remains as a private attribute,
   `HannaScheme._fd_drift_gradient_only`, for A/B tests. No configuration
   sets it; with it set, a run is bit-identical to main d19755d (*measured*,
   `SF/bitid/compare.log`).
+- That production equals main away from $h$ and the floor rests on the unit
+  tests (every coefficient bit-identical there) and on the review's trajectory
+  check (*measured*, `SF/review/equiv/compare.log`, `margin.log`; 20,000
+  particles, two seeds, floors 10⁻³ and 10⁻⁴). In the two stable columns no
+  particle that stayed more than 20 m below $h$ differs from the stencil-only
+  run. In the neutral and convective columns a few such particles do (6 and
+  114), because one outer step moves a particle up to about 80 and 240 m;
+  none that stayed more than 100 m below $h$ differs.
 - **With the opt-in surface-layer override** (`surface_layer_override=True`,
   off by default) the stencil is used everywhere, including at $h$ and the
   floor. The analytic form does not include the override's profile below
@@ -112,12 +143,18 @@ value and form are unchanged.
 - static and dynamic steps are bit-identical with half the particles within
   5 m of a stable $h$;
 - **the transfer-symmetry gate**: the thin-floor column at the default 16
-  sub-steps, 10,000 particles per row, seed 0, $|r - 1| < 0.5$. Over seeds
-  0–9 this code's worst is 1.27 (3.0 seed standard deviations inside) and
-  main's best 3.49 (`SF/gate/n16_p10000.jsonl`). Run against main d19755d
-  itself it fails, 3.86 ± 0.48, and this code passes, 1.08 ± 0.08
-  (`SF/gate/gate_on_{main,branch}.log`); about 30 s on 6 CPU
-  threads.
+  sub-steps, 40,000 particles per row, seed 0, ratio in the two-sided band
+  0.98–1.32. The expected value is not 1 but about 1.15, decision 0027's
+  first-order sub-step error (1.07 at 64 sub-steps). The band is the mean of
+  10 seeds at 40,000 per row (1.149) ± 4 seed standard deviations (0.042);
+  this code's extreme seeds, 1.07 and 1.21, are 2.1 and 2.7 sd inside it
+  (*measured*, `SF/gate2/summary.log`). It contains 1, the short-sub-step
+  limit. Run as committed it passes on this code (1.13 ± 0.04), and fails on
+  main d19755d itself (3.80 ± 0.23) and on the review's planted variant with
+  the stable analytic gradient halved (0.66 ± 0.02;
+  `SF/gate2/gate_on_{main,halfst}.log`, `pytest_targeted.log`). About 70 s
+  on 6 CPU threads. An earlier version (10,000 per row, $|r - 1| < 0.5$) let
+  the halved gradient pass (0.72; `SF/review/gate2/table.log`).
 
 The two well-mixed gates pass unchanged (`tests/test_near_surface_well_mixed.py`,
 `tests/test_bl_top_well_mixed.py`, three regimes each, in the full CPU suite,
@@ -148,12 +185,20 @@ this code against main with the same seed; `SF/smoke/compare_smoke.log`,
   0.20 m s⁻¹, $H$ −16 W m⁻² at the release (floor layer 0.44 m, under δ);
   stable at the site from 17 UTC the evening before ($h$ 77–940 m, floor
   layer 0.34–2.0 m; `SF/smoke/era5_sites.log`).
-  0–40 m is 0.7% lower in both seeds. That is the size of the seed-to-seed
-  spread of the 0–40 m total (0.7%), and same-seed runs share their
-  trajectories until they first come near $h$ (69% of endpoints differ), so
-  the shift is suggestive, not established. Nocturnal tall-tower receptors are
-  where the fix should matter (*argued*); one night at one site does not
-  measure it.
+  0–40 m is 0.67% and 0.73% lower (seeds 42 and 43). These are paired
+  same-seed differences, and the two seeds agree within 0.06%, so the shift is
+  resolved: the 0.7% seed-to-seed spread of unpaired runs is the wrong
+  yardstick for it. It is one night at one site.
+- **Column analogue** (*measured*, `SF/review/column/summary.log`; the
+  Tacolneston night's h, u* and H held steady for 7 h, backward from a point,
+  3 seeds of 20,000): 0–40 m residence changes by −16 to −18% for a receptor
+  at 185 m (above h), and by about −2% (−2.1 to −2.2% at 60 m, −1.6 to −1.7% at
+  10 m) for receptors inside the boundary layer. The production run is much
+  smaller (−0.7%) because the real column changes along the trajectory and
+  most of the day's residence comes from other hours (*argued*).
+- Not run in production: a nocturnal release from **inside** a shallow stable
+  boundary layer (a low inlet at night), where the directional defect above
+  bites hardest. That is the suggested follow-up.
 
 ## The floor is an exchange parameter
 

@@ -371,8 +371,9 @@ the floor layer where $\sigma_w$ is flat, and when $d < \delta$ (44% of
 stable ERA5 columns over Europe) the stencil cut at $h$ returned the gradient
 up to $\delta/2$ lower down, where it is several times larger. In a column
 with $d$ = 0.68 m the ratio of downward to upward exchange across $h$ was
-3.2–3.8 and did not converge with the sub-step count; with the analytic
-gradient it is 1.10–1.18 at 16 sub-steps and 0.97–1.07 at 64, a first-order
+3.6–3.9 and fell only 16% from 16 to 64 sub-steps (upward transfer out of
+the boundary layer was suppressed about 3.7-fold); with the analytic
+gradient it is 1.14–1.18 at 16 sub-steps and 0.97–1.07 at 64, a first-order
 sub-step residual (two harnesses, decision 0030; the gate in
 `tests/test_sigma_floor_gradient.py`). With the optional surface-layer
 override on, the stencil is used everywhere, $h$ and the floor included.
