@@ -1018,6 +1018,22 @@ def _advection_alpha_wind_mean(
     return alpha, wind_mean
 
 
+def _horizontal_step_difference(d_xy: torch.Tensor) -> torch.Tensor:
+    """End-minus-start horizontal displacement of a step, (N, 2), for averaging.
+
+    **Frame-dependent; the one place that knows the horizontal coordinates.** With
+    positions in degrees (lon, lat), the longitude difference is wrapped into
+    [-180, 180) so a step across the dateline is averaged along the shorter arc.
+    If positions are ever held in a metric frame (x, y in metres; PR 74 proposes
+    one), this wrap must NOT be applied: wrapping metres modulo 360 would corrupt
+    any step with |dx| > 180 m. Whichever of PRs 66 and 74 merges second makes this
+    function frame-aware (return `d_xy` unchanged in the metric frame).
+    """
+
+    d_lon = torch.remainder(d_xy[:, 0:1] + 180.0, 360.0) - 180.0
+    return torch.cat((d_lon, d_xy[:, 1:2]), dim=1)
+
+
 def _step_mean_position(start_xyz: torch.Tensor, end_xyz: torch.Tensor) -> torch.Tensor:
     """Mean of a step's start and end positions, (N, 3) lon/lat/alt (task A2, decision 0026).
 
@@ -1029,12 +1045,14 @@ def _step_mean_position(start_xyz: torch.Tensor, end_xyz: torch.Tensor) -> torch
     it, not on 0; the result keeps the start's longitude convention. The runtime does
     not wrap particle longitudes today (a particle leaving the met domain's longitude
     box is killed), so for current runs the difference is the plain one and the wrap
-    only guards periodic domains.
+    only guards periodic domains. The wrap lives in `_horizontal_step_difference`,
+    which assumes degrees (see the frame note there). `trapezoid` averages no
+    positions and needs no wrap.
     """
 
     d = end_xyz - start_xyz
-    d_lon = torch.remainder(d[:, 0:1] + 180.0, 360.0) - 180.0
-    return start_xyz + 0.5 * torch.cat((d_lon, d[:, 1:]), dim=1)
+    d_h = _horizontal_step_difference(d[:, :2])
+    return start_xyz + 0.5 * torch.cat((d_h, d[:, 2:]), dim=1)
 
 
 def _time_ago_index(elapsed_s: torch.Tensor, time_bin_s: float, n_time_bins: int) -> torch.Tensor:
