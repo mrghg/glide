@@ -20,23 +20,31 @@ uniformly in their cell with velocities drawn from the Eulerian Gaussian
 count ``dt / ρ_d`` (``ParticleDryAirDensity``, as the gridder) for 2 h at the
 shipped 60 s step and 16 sub-steps.
 
-**Procedure** (validation plan §3, Tier 0): a separate backward run chooses
-the cells at least 50 different particles pass through; each map is
-bootstrapped over its own particles; the test passes if at least 90% of the
-tested cells agree within their 95% noise range and the sum over the tested
-cells does too. Counts are per case in ``CASES``.
+**Procedure** (validation plan §3, Tier 0): two selection runs, one backward
+and one forward, each with its own seeds, keep the cells at least 50 different
+particles pass through in both; each map is bootstrapped over its own
+particles; the test passes if at least 90% of the tested cells agree within
+their 95% noise range and the sum over the tested cells does too. Counts are
+per case in ``CASES``.
+
+**What it tests.** In this steady, horizontally uniform column the backward
+step is, bit for bit, the forward step with w′ → −w′
+(``test_backward_step_is_the_forward_step_with_the_velocity_negated``). So
+beyond the sign construction the comparison tests the transfer symmetry of the
+scheme both directions share; it cannot assign an error to one direction. A
+moving-h, time-varying case remains the outstanding test of the backward
+formulation itself.
 
 **Results at the defaults** (seed 0, ``scripts/validation/reciprocity/run_cases.py``;
-outputs/agents/A6/cases/; docs/VALIDATION.md §3): convective surface receptor
-0.876 of the tested cells agree, sum 1.016 (fails); convective, just above h,
-0.927 and 0.998 (passes); stable surface 0.776 and 0.978, just below h 0.861
-and 1.011, just above h 0.673 and 1.007 (all fail). Every difference shrinks
-from 16 to 64 sub-steps; near the ground it matches the forward model's own
-well-mixed error. The companions fail as they must: without the backward sign
-flip 0.077 agree, without the interface rule 0.175 (sum 0.24), with the drift
-stencil straddling h 0.148 (sum 1.13). The slow tests therefore fail at the
-defaults for four of the five cases; what to accept is an open question for
-the validation plan (dev/agent/progress/A6.md), not something this file tunes.
+outputs/agents/A6/revise/main/; docs/VALIDATION.md §3): the slow cases are an
+explicit release check and do not all pass. Convective surface receptor 0.882
+of the tested cells agree, sum 1.016 (fails); convective, just above h, 0.938
+and 0.998 (passes); stable surface 0.769 and 0.978, just below h 0.852 and
+1.011 (fail); stable, just above h, 0.922 and 1.004 (passes, but the forward
+rule leaves no boundary-layer cell to test). Near the ground the difference is
+the scheme's near-surface well-mixed error; near a stable h it is the drift
+defect at the σ_w floor (decision 0030, PR #75). A6 stays open against the
+plan's criterion; nothing here is tuned to make the cases pass.
 """
 
 from __future__ import annotations
@@ -761,12 +769,16 @@ def test_backward_step_is_the_forward_step_with_the_velocity_negated(
 
 
 # ---------------------------------------------------------------------------
-# reciprocity: the plan's criteria (slow; GLIDE_SLOW_TESTS=1)
+# reciprocity: the plan's criteria (slow; GLIDE_SLOW_TESTS=1). An explicit
+# release check, not part of the default suite. At the defaults the five cases
+# do not all pass, and A6 stays open against the plan's criterion
+# (docs/VALIDATION.md §3); nothing here is tuned to make them pass.
 # ---------------------------------------------------------------------------
 
 SLOW = os.environ.get("GLIDE_SLOW_TESTS", "") not in ("", "0", "false", "False")
 slow = pytest.mark.skipif(
-    not SLOW, reason="minutes on CPU: set GLIDE_SLOW_TESTS=1 (docs/VALIDATION.md §3)"
+    not SLOW,
+    reason="release check, minutes on CPU: set GLIDE_SLOW_TESTS=1 (docs/VALIDATION.md §3)",
 )
 
 N_BACK = 40_000
@@ -794,17 +806,19 @@ QUICK_CASE = Case("convective", 0, n_back=10_000, n_fwd=2_500, n_steps=60)
 
 
 def test_removing_the_backward_sign_flip_breaks_reciprocity_quick() -> None:
-    """A quick companion for the default suite (about 40 s on 16 CPU threads):
+    """A quick companion for the default suite (about 55 s on 8 CPU threads):
     a surface receptor in a convective boundary layer, 1 h, 10,000 backward and
     2,500 forward particles per source row. With the backward drift's sign flip
     removed, the per-cell agreement collapses; the production construction keeps
-    most cells. Measured at seeds 0, 1, 2: production 0.89, 0.93, 0.90 of the
-    tested cells agree, the mutant 0.09, 0.10, 0.10
-    (outputs/agents/A6/explore/quick_config.log). The bounds below (0.8 and 0.3)
-    are this smoke check's own, not the plan's acceptance criterion, which the
-    slow tests apply; the production sum is not asserted here because at the
-    default 16 sub-steps it carries the forward model's near-surface well-mixed
-    error (docs/VALIDATION.md §3)."""
+    most cells. Measured with both selection runs at seeds 0, 1, 2 (63-64 cells
+    tested): production 0.89, 0.95, 0.89 of the tested cells agree, the mutant
+    0.08, 0.06, 0.05 (outputs/agents/A6/revise/logs/main_quick_seeds.log). The
+    bounds below (0.8 and 0.3) are this smoke check's own, not the plan's
+    acceptance criterion, which the slow tests apply; the production sum is not
+    asserted here because at the default 16 sub-steps it carries the scheme's
+    near-surface well-mixed error (docs/VALIDATION.md §3). The exact check of
+    the sign construction is
+    ``test_backward_step_is_the_forward_step_with_the_velocity_negated``."""
 
     prod = reciprocity(QUICK_CASE)
     mutant = reciprocity(QUICK_CASE, backward_variant="no_backward_sign_flip")
