@@ -9,8 +9,9 @@ grouped by site and by day / night / transition from the local solar time
 (UTC + lon/15 h) of the middle of the release window: day 09-16 h, night 18-07 h.
 Reports, per group, the mean over releases of (rule / endpoint - 1) for each seed,
 the mean and sample standard deviation of that over seeds, and, for scale, the
-spread of endpoint itself between seeds (the standard deviation over seeds of the
-group's mean 0-40 m total, relative to its mean).
+spread of endpoint itself between seeds: the standard deviation over seeds of the
+group's mean 0-40 m total, relative to its mean, and the median over releases of
+each release's 0-40 m coefficient of variation over seeds.
 
 Usage: compare_counting_runs.py --out <stem> <rule>:<seed>=<dir> ...
 """
@@ -102,13 +103,14 @@ def main() -> None:
         hdr = (
             "| group | n | "
             + " | ".join(f"{m}" for m in metrics)
-            + " | endpoint 0-40 m seed spread |"
+            + " | endpoint 0-40 m seed spread: group mean | per release (median) |"
         )
         lines.append(hdr)
-        lines.append("|" + "---|" * (len(metrics) + 3))
+        lines.append("|" + "---|" * (len(metrics) + 4))
         for gname, site, period in groups:
             per_seed = {m: [] for m in metrics}
             ep_tot = []
+            ep_rel = []
             n = 0
             for s in seeds:
                 if (rule, s) not in tables or ("endpoint", s) not in tables:
@@ -117,6 +119,7 @@ def main() -> None:
                 b = sel(tables[(rule, s)], site, period)
                 n = len(a)
                 ep_tot.append(a["z0"].mean())
+                ep_rel.append(a["z0"].values)
                 for m in metrics:
                     ok = a[m].values > 0
                     per_seed[m].append(float(np.mean(b[m].values[ok] / a[m].values[ok] - 1.0)))
@@ -132,9 +135,17 @@ def main() -> None:
                 if len(ep_tot) > 1
                 else float("nan")
             )
+            if len(ep_rel) > 1:
+                arr = np.array(ep_rel)  # (seeds, releases)
+                per_rel = float(np.median(arr.std(axis=0, ddof=1) / arr.mean(axis=0)) * 100)
+            else:
+                per_rel = float("nan")
             res["endpoint_z0_seed_spread_pct"] = spread
+            res["endpoint_z0_per_release_seed_cv_median_pct"] = per_rel
             result[rule][gname] = res
-            lines.append(f"| {gname} | {n} | " + " | ".join(cells) + f" | {spread:.2f}% |")
+            lines.append(
+                f"| {gname} | {n} | " + " | ".join(cells) + f" | {spread:.2f}% | {per_rel:.2f}% |"
+            )
     lines.insert(0, f"seeds: {seeds}; '±' is the sample s.d. over seeds of the per-seed mean")
     text = "\n".join(lines)
     print(text)
