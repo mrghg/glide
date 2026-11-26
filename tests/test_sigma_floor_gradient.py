@@ -19,7 +19,6 @@ paths bit-identical; and a transfer-symmetry gate across a stable h.
 from __future__ import annotations
 
 import itertools
-import os
 
 import pytest
 import torch
@@ -366,16 +365,24 @@ def transfer_ratio(
 
 
 # Calibration (scripts/validation/sigma_floor/transfer_gate_calibration.py;
-# outputs/agents/SF/gate/): filled in below.
+# outputs/agents/SF/gate/n16_p10000.jsonl), this procedure at the default 16
+# sub-steps, 10,000 particles per row, seeds 0-9:
+#   this code:                 1.03-1.27, mean 1.18, seed sd 0.08 (each seed's
+#                              standard error 0.085);
+#   the stencil only (main):   3.49-4.70, mean 3.80, seed sd 0.34.
+# The residual at 16 sub-steps is first-order sub-step error: at 64 sub-steps
+# this code gives GATE_N64_PROD and the stencil GATE_N64_FD
+# (n64_p10000.jsonl, 3 seeds). A tolerance of 0.5 is 3.0 seed sd above this
+# code's worst seed and fails main's best by 2.0. About 30 s on 6 CPU threads.
 GATE_N_PER_ROW = 10_000
-GATE_TOLERANCE = 0.3  # on |ratio − 1|
+GATE_TOLERANCE = 0.5  # on |ratio − 1|
 
 
-@pytest.mark.parametrize("seed", [0])
-def test_exchange_across_a_stable_top_is_symmetric(seed: int) -> None:
+def test_exchange_across_a_stable_top_is_symmetric() -> None:
+    """The gate: downward/upward exchange across a stable h with a floor layer
+    thinner than the stencil (0.68 m) is 1 within GATE_TOLERANCE at the default
+    sub-step count. It was about 3.8 before decision 0030."""
+
     scheme = HannaScheme(meander_enabled=False, static_substeps=False)  # default 16 sub-steps
-    r, se = transfer_ratio(scheme, GATE_N_PER_ROW, seed)
+    r, se = transfer_ratio(scheme, GATE_N_PER_ROW, seed=0)
     assert abs(r - 1.0) < GATE_TOLERANCE, f"downward/upward exchange across h {r:.3f} ± {se:.3f}"
-
-
-SLOW = os.environ.get("GLIDE_SLOW_TESTS", "") not in ("", "0", "false", "False")

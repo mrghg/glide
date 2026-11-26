@@ -37,3 +37,4 @@ alternatives → Status**, with a pointer to the relevant `docs/` page.
 | [0025](0025-hanna-column-pressure.md) | Hanna density and potential temperature from each column's own pressure, not the area mean per level |
 | [0027](0027-fixed-substep-count.md) | Hanna turbulence: one fixed sub-step count for every particle (default 16), coefficients re-evaluated every sub-step |
 | [0028](0028-boundary-layer-top-interface.md) | Hanna turbulence: the boundary-layer top as a Thomson, Physick & Maryon (1997) interface; one-sided drift stencil; velocities carried as u'/σ across steps |
+| [0030](0030-drift-gradient-at-the-sigma-floor.md) | Hanna turbulence: analytic drift gradient where the stencil is cut at a stable h or meets the σ_w floor (amends 0028 item 1); the floor's value left open |
