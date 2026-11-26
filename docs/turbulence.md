@@ -360,8 +360,8 @@ on each side of $h$ come from `_interface_sigmas`, once per outer step.
 **At a stable $h$ the floor is the exchange.** There $\sigma_w$ just below $h$
 is the floor, 1 mm s⁻¹, and the interface passes $\sigma_{\min}/\sqrt{2\pi}$
 (0.4 mm s⁻¹) each way; that resistance dominates the exchange between the
-free troposphere and the boundary layer, so the exchange is about proportional
-to $\sigma_{\min}$ below 10⁻² m s⁻¹ (0.11×, 1× and 6× at 10⁻⁴, 10⁻³ and
+free troposphere and the boundary layer, so the exchange scales with
+$\sigma_{\min}$ below about 10⁻² m s⁻¹ (0.11×, 1× and 6× at 10⁻⁴, 10⁻³ and
 10⁻², measured). FLEXPART has no such exchange: it reflects at $h$, has no
 vertical turbulence above it, and floors at 10⁻⁶. The floor value (10⁻³ now)
 and the options for it are an open question in decision 0030.

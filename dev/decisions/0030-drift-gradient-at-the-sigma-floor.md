@@ -120,7 +120,10 @@ value and form are unchanged.
   threads.
 
 The two well-mixed gates pass unchanged (`tests/test_near_surface_well_mixed.py`,
-`tests/test_bl_top_well_mixed.py`; GATE_EXISTING).
+`tests/test_bl_top_well_mixed.py`, three regimes each, in the full CPU suite,
+`SF/logs/pytest_full_1.log`). PR #72's recalibrated boundary-layer-top gate
+(150,000 particles; open, not merged) passes against this code in all three
+regimes too (`SF/logs/pr72_bl_top_gate_on_branch.log`).
 
 **Production effect** (*measured*, CPU, 20,000 particles, 1-day backward runs,
 this code against main with the same seed; `SF/smoke/compare_smoke.log`,
