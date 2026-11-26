@@ -25,7 +25,7 @@ _Last updated: 2026-11-25._
 | **Multi-site releases** | `multi_point_periodic` — sites share meteorology windows, so per-window costs amortise across the whole network. |
 | **Streaming output** | `footprints.zarr` (5-D), `endpoint_particles.parquet`, `trajectory_diagnostics.parquet`, `run_metadata.json`, written per batch. |
 | **GPU execution** | Whole per-step body captured as one CUDA graph, device-gated; the eager CPU path is the numerical reference. ([docs/architecture.md](docs/architecture.md)) The venv must be built on uv's own Python, which ships `Python.h`; without it `torch.compile` silently falls back to eager, and `scripts/gpu_env.sh` warns and borrows the `cray-python` headers. |
-| **Tests** | 597 (583 passed, 14 skipped without local data or DATEM/ETEX archives) on `main` at d19755d, 26 Nov 2026: 14 min on 8 CPU threads, no network. The boundary-layer-top gate is the largest single cost. Includes analytic dispersion checks, well-mixed gates near the ground (60 s step) and across the boundary-layer top, and fault-injection-checked tests for backward convection, terrain slope and multi-site assignment. ([docs/VALIDATION.md](docs/VALIDATION.md)) |
+| **Tests** | 597 (583 passed, 14 skipped without local data or DATEM/ETEX archives) on `main` at d19755d, 26 Nov 2026: 14 min on 8 CPU threads, no network. Includes analytic dispersion checks, well-mixed gates near the ground (60 s step) and across the boundary-layer top, and fault-injection-checked tests for backward convection, terrain slope and multi-site assignment. ([docs/VALIDATION.md](docs/VALIDATION.md)) |
 
 ---
 
