@@ -964,6 +964,19 @@ changes is ≤ 0.01 points for `trapezoid` and ≤ 0.08 for `step_mean` except i
 for scale, endpoint's own 0–40 m total varies between seeds by 0.26–0.44% per
 release (median).
 
+**Accumulation precision.** The footprint is summed in float32 by default.
+`output_grid.accumulation_dtype: float64` (a prototype, off by default) sums in
+float64 and rounds once when the batch is written; the store stays float32. On
+the reference configuration (seed 42, worst cell per release among cells above
+25% of the layer's maximum, outside the receptor's 3 × 3; decision 0029) the
+float32 error against float64 is p90 0.11–0.14%, max 0.29% in 40–1000 m for
+`endpoint`, and p90 0.51–0.76%, max 1.21% for `trapezoid`, which adds twice as
+many half-sized contributions. With float64 grids the two rules agree to
+≤ 0.026% in 0–1000 m outside the receptor's cells; the remaining 1–5 km
+difference is the half step `trapezoid` does not count at each particle's final
+position (correlation 0.9986 with that prediction). Cost: about 0.1 GiB more
+device memory (one batch's grid), no measurable time.
+
 **The dry-air density at the particle.** $\rho_d = (p - e)/(R_d T)$ with
 $R_d = 287.05$ J kg⁻¹ K⁻¹ and the vapour pressure $e = q p / (0.622 + 0.378 q)$
 from the specific humidity $q$. $T$, $q$ and the surface pressure $p_s$ are

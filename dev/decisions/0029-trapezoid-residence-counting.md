@@ -166,10 +166,41 @@ total) and so needs the golden fixtures regenerated, which is planned once the
 defaults settle. Two scatters and two density evaluations per step instead of
 one. Cost on the reference config (GPU, shared node, *measured*, single runs per
 seed): wall time 20:51 / 21:47 / 22:18 for `trapezoid` against 21:54 / 25:31 /
-20:36 for `endpoint`, so no cost is resolved at this noise (±2–5 min). The float32 footprint grid accumulates twice as many,
-half-sized contributions; the largest smoke cells (40–1000 m) then differ from a
-float64 tally by up to 0.2% (0.02% with `endpoint`; 0–40 m total 7e-5). *Measured,
-isolated:* the same run with a float64 grid matches the scorer to 2e-9 on the
-total (`scores/check_s42_f64grid.txt`). A float64 (or compensated) grid is a
-separate question, proposed as a follow-up.
+20:36 for `endpoint`, so no cost is resolved at this noise (±2–5 min). On the smoke run, the float32 grid's largest
+cells (40–1000 m) differ from a float64 tally by up to 0.2% with `trapezoid`
+(0.02% with `endpoint`); the same run with a float64 grid matches the scorer to
+2e-9 on the total (`scores/check_s42_f64grid.txt`).
+
+**Float32 accumulation** (outputs in `$GLIDE_AGENT_OUTPUTS/agents/A2/counting/f64/`;
+reference config, GPU, seed 42; metric: per release and layer, the cell with the
+largest relative difference among cells above 25% of the layer's maximum,
+outside the receptor's 3 × 3, as in the PR #66 review; `compare_footprint_cells.py`).
+The float32 grid loses precision as many small contributions are added to large
+cell totals. With the prototype `output_grid.accumulation_dtype: float64` (sum in
+float64, round once at write; default float32, unchanged):
+- *Measured:* `endpoint`'s own float32 error against a float64 grid (same
+  trajectories: endpoint particles identical): worst cell p90 0.11–0.14% and max
+  0.29% in 40–1000 m, ≤ 0.07% in 0–40 m, ≤ 0.02% in 1–5 km; layer totals
+  ≤ 0.07%.
+- *Measured:* `trapezoid`'s own float32 error is about five times larger in
+  40–1000 m (p90 0.51–0.76%, max 1.21%), because it adds twice as many,
+  half-sized contributions (*argued*).
+- *Measured:* with float64 grids, `trapezoid` against `endpoint` drops from
+  p90 0.53–0.71% / max 1.33% to p90 ≤ 0.0054% / max 0.026% in 40–1000 m and to
+  ≤ 0.008% in 0–40 m (outside the receptor's 3 × 3). What remains in 1–5 km
+  (p90 0.14–0.16%, max 1.0%, almost all negative) is not rounding: it is the
+  half step `trapezoid` does not count at each particle's final position. The
+  predicted map, −Δt/2 × weight / ρ at the final positions in
+  `endpoint_particles.parquet` (ρ from a scale height), matches the measured
+  difference with correlation 0.9986 and slope 0.96 (*measured, isolated*;
+  `f64/final_half_z2.txt`).
+- *Measured, cost:* device peak 1.51 GiB against 1.42 GiB (one batch's grid in
+  float64), host peak RSS unchanged (53.9 GB), wall time 20:52 and 20:51 against
+  21:54 and 20:51 for float32: no time cost resolved.
+So `trapezoid` should go with a float64 grid; the review recommends the two
+together. The default stays float32 here.
+
+**Proposed with it:** `trapezoid` together with `output_grid.accumulation_dtype:
+float64` (prototype here, off by default), decided together with the fixture
+regeneration.
 Docs: [docs/physics.md](../../docs/physics.md) §7 and §8.
