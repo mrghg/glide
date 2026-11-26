@@ -37,7 +37,7 @@ GLIDE_SLOW_TESTS=1 .venv/bin/python -m pytest -q   # also the slow full-strength
 Tests marked slow (minutes each on CPU) are skipped unless `GLIDE_SLOW_TESTS=1`
 is set; they are full-strength versions of default-suite gates (§4).
 
-**319 tests across 16 files, about 2.5 minutes, 90% statement coverage, no network access.**
+**597 tests on `main` at d19755d (26 Nov 2026): 583 passed and 14 skipped (local meteorology, DATEM and ETEX data absent), 14 minutes on 8 CPU threads, no network access.** This count predates PR #72, which split the boundary-layer-top gate into a default tier and a slow tier. The statement-coverage figure (90%) dates from an earlier, smaller suite and has not been remeasured.
 End-to-end tests use synthetic meteorology through `AnalyticMetReader`, so
 nothing depends on remote ERA5 or on the restricted validation datasets. Tests
 share no state and run order is irrelevant. Stochastic tests are seeded.
@@ -313,6 +313,13 @@ with this repository — see [../data/README.md](../data/README.md).
 ---
 
 ## 8. Golden fixtures
+
+> **Stale since PR #69 (2026-11-25).** The sub-stepping fix and the
+> boundary-layer-top interface (decisions 0027, 0028) change the output by far
+> more than any tolerance (reference config, 0–40 m: +48%). The fixtures below
+> describe the physics before that change. They will be regenerated once, after
+> the residence-counting decision (A2); until then a comparison against them
+> reports the change, not a pass.
 
 A golden fixture freezes the output of a named configuration at one git rev, on
 one device, with the configuration's fixed seed. Any later change is compared
