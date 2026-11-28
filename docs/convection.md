@@ -135,10 +135,34 @@ where $B$ crosses zero from positive) and
 
 $$
 \mathrm{CAPE} = \int_{\mathrm{LFC}}^{\mathrm{LNB}} g\ B\ \mathrm{d}z
+\ \approx \sum_{k = i_{\mathrm{LCL}}}^{i_{\mathrm{LNB}}} g\ \max(B_k, 0)\ \mathrm{d}z_k
 $$
 
 with layer thicknesses from the hypsometric relation,
-$\mathrm{d}z \approx R_d \bar{T}\ \mathrm{d}(\ln p)/g$.
+$\mathrm{d}z \approx R_d \bar{T}\ \mathrm{d}(\ln p)/g$ ($\mathrm{d}z_k$ is the
+layer below level $k$), and $i_{\mathrm{LCL}}$ the first level above the LCL
+(FLEXPART's `ICB`). The sum is the **cloud's** buoyant energy
+([decision 0031](../dev/decisions/0031-cape-bounded-at-the-cloud-top.md)):
+
+- **Upper bound: the diagnosed cloud top.** Positive buoyancy in a layer above
+  the LNB, separated from the cloud by stable air, does not count. Until
+  November 2026 it did: the sum ran to the top of the column, so a second
+  buoyant layer aloft could lift a lower cloud over the CAPE floor of §3.
+- **Lower bound: the LFC, within a level.** $B > 0$ at every level strictly
+  between $i_{\mathrm{LCL}}$ and $i_{\mathrm{LNB}}$ (that is how the LNB is
+  found), so the only level in the sum that can be negatively buoyant is
+  $i_{\mathrm{LCL}}$ itself. The LFC is therefore $i_{\mathrm{LCL}}$ or
+  $i_{\mathrm{LCL}} + 1$, and summing $\max(B, 0)$ from $i_{\mathrm{LCL}}$ is the
+  sum from the LFC.
+- **Convective inhibition is left out, not subtracted.** Negative buoyancy below
+  the LCL (the dry ascent) and at $i_{\mathrm{LCL}}$ does not reduce CAPE. A
+  column whose parcel is negatively buoyant at $i_{\mathrm{LCL}} + 1$ never fires,
+  whatever lies above: its cloud top is then $i_{\mathrm{LCL}} + 1$ and the
+  $\Delta T_v$ check of §3 fails there. GLIDE has no elevated LFC.
+
+The scalar reference (`compute_lcl_lnb_cape`) and the batched form
+(`compute_lcl_lnb_cape_columns`) apply the same bounds
+(`tests/test_cape_cloud_top.py`).
 
 ---
 
@@ -150,7 +174,7 @@ Convection fires only when **all** of the following hold:
 | --- | --- |
 | $i_{\mathrm{LCL}} \ge 0$ | the parcel reaches saturation somewhere in the column |
 | $i_{\mathrm{LNB}} > i_{\mathrm{LCL}}$ | positive cloud depth |
-| $\mathrm{CAPE} \ge 50\ \mathrm{J\ kg^{-1}}$ | sanity floor (`min_cape_j_kg`) |
+| $\mathrm{CAPE} \ge 50\ \mathrm{J\ kg^{-1}}$ | sanity floor (`min_cape_j_kg`), on the cloud's CAPE, LCL to LNB (§2) |
 | $\Delta T_v\big\vert_{\mathrm{LCL}+1} \ge 0.9\ \mathrm{K}$ | Forster (2007) Eq. 34 buoyancy threshold (`trigger_dtv_k`) |
 | cloud depth $\ge 500\ \mathrm{m}$ | deep convection only (`min_cloud_depth_m`) — shallow cumulus is the boundary-layer scheme's job |
 
@@ -173,6 +197,32 @@ with $c_{\text{closure}} = 0.03$ by default, evaluated in each column with that
 column's CAPE and its environmental temperature and pressure at the LCL level. One
 event moves $M_b\,\Delta t_{\mathrm{met}}$ per unit area, where
 $\Delta t_{\mathrm{met}}$ is the meteorology interval (§1).
+
+**At the defaults the cap binds in every column that fires.** It is reached at
+$\mathrm{CAPE} = 12.5\ \mathrm{J\ kg^{-1}}$ and the trigger needs
+$50\ \mathrm{J\ kg^{-1}}$, so a firing column always has
+$M_b = 5\,c_{\text{closure}}\,\rho_{\mathrm{LCL}}$: CAPE decides only *whether*
+a column convects, and $M_b$ varies between columns only through
+$\rho_{\mathrm{LCL}}$.
+
+**And the CFL cap of §5 binds as well, so neither sets the transport.** On ERA5
+over Europe it binds in more than 99% of firing columns, with a median scale of
+0.13 (January) and 0.25 (summer). In those columns the layer that limits was
+the one just below the LCL, $i_{\mathrm{LCL}} - 1$ (in general the scale is set
+by the largest fractional outflux over all rows, so a thin cloud layer can limit
+instead; decision 0031 gives a constructed counter-example): it passes on the whole updraft flux
+(its own entrainment plus the subsidence from the boundary layer below it), so
+it sheds $M_b\,\Delta t_{\mathrm{met}}$, and the scaled matrix entrains exactly
+$0.9\,m_{i_{\mathrm{LCL}}-1}$ per event. The mass a firing column moves in one
+event therefore depends on the vertical grid (the thickness of that layer) and
+on the meteorology cadence (one event per window), not on CAPE, $M_b$ or
+$c_{\text{closure}}$. On 80 levels instead of 40 the median mass per event
+falls from 79 to 37 kg m⁻², and about half as many columns fire. These are
+open questions about the closure, to be settled before the physics freeze; an
+external review raised them in November 2026, and they are recorded with what
+FLEXPART does in
+[decision 0031](../dev/decisions/0031-cape-bounded-at-the-cloud-top.md). The
+closure is not changed.
 
 The cap on $w_{\text{buoy}}$ is not decoration. Without it,
 $\mathrm{CAPE} > 500\ \mathrm{J\ kg^{-1}}$ gives
@@ -239,6 +289,11 @@ $\mathrm{fmass}[k+1, k]$ — a sub-diagonal term.
 **CFL cap.** Finally the whole matrix is scaled by a **single scalar** if any
 layer would shed more than 90% of its mass in one event. One scalar, so
 non-divergence survives, and so the "stay" diagonal of §6 stays non-negative.
+At the defaults this cap binds in almost every firing column, at the layer just
+below the LCL, so it sets how much one event moves (§4). FLEXPART has no
+counterpart: its `convect` flags a CFL violation (`IFLAG = 4`), but `calcmatrix`
+uses the matrix anyway, and it is called every `LSYNCTIME` (900 s by default)
+rather than once per met window.
 
 The matrix is identically zero when there is no cloud.
 

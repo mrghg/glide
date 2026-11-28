@@ -17,14 +17,19 @@ PY=/home/u6za/chxmr.u6za/code/glide/.venv/bin/python
 HERE=$(dirname "$(readlink -f "$0")")
 T=${A4_THREADS:-8}
 export GLIDE_NUM_THREADS=$T OMP_NUM_THREADS=$T CUDA_VISIBLE_DEVICES=""
+status=0
 for spec in "$@"; do
   IFS=: read -r name which stem variant envs <<<"$spec"
   snap=$MAIN; [ "$which" = a4 ] && snap=$A4
-  if [ -d "$OUT/$name$SUF" ]; then echo "skip $name$SUF (exists)"; continue; fi
+  # Skip only a run that finished: run_metadata.json is written at the end.
+  if [ -f "$OUT/$name$SUF/run_metadata.json" ]; then echo "skip $name$SUF (complete)"; continue; fi
   echo "start $(date -Is) $name$SUF"
   ( IFS=:; for kv in $envs; do export "${kv?}"; done
     cd "$snap" && /usr/bin/time -v "$PY" "$HERE/run_variant.py" --src "$snap/src" \
       --variant "$variant" -- --config "configs/$stem.yaml" --device cpu \
       --output-uri "$OUT/$name$SUF" ) > "$OUT/$name$SUF.log" 2>&1
-  echo "end $(date -Is) $name$SUF rc=$?"
+  rc=$?
+  echo "end $(date -Is) $name$SUF rc=$rc"
+  [ "$rc" -eq 0 ] || status=$rc
 done
+exit "$status"

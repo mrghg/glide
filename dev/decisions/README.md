@@ -40,4 +40,5 @@ alternatives → Status**, with a pointer to the relevant `docs/` page.
 | [0028](0028-boundary-layer-top-interface.md) | Hanna turbulence: the boundary-layer top as a Thomson, Physick & Maryon (1997) interface; one-sided drift stencil; velocities carried as u'/σ across steps |
 | [0029](0029-trapezoid-residence-counting.md) | Trapezoid residence counting (half of each step at each end), scored against fine-time residence; proposed as the default; removes step_mean |
 | [0030](0030-drift-gradient-at-the-sigma-floor.md) | Hanna turbulence: analytic drift gradient where the stencil is cut at a stable h or meets the σ_w floor (amends 0028 item 1); floor kept at 10⁻³ (28 Nov 2026) |
+| [0031](0031-cape-bounded-at-the-cloud-top.md) | Convection: the trigger's CAPE is the diagnosed cloud's, LCL to cloud top, not to the top of the column; the 5 m/s updraft cap, binding in every firing column, left open |
 | [0032](0032-wind-aligned-horizontal-turbulence.md) | Hanna turbulence: horizontal turbulence along and across the mean wind (`turbulence.horizontal_frame: wind`), carried east/north between steps; proposed as the default, code default still `grid` (proposed) |

@@ -15,12 +15,17 @@ export GLIDE_COMPILE=1
 unset GLIDE_POSITION_FRAME
 PY=${GLIDE_PYTHON:-/home/u6za/chxmr.u6za/code/glide/.venv/bin/python}
 cd "$SNAP" || exit 1
+status=0
 for stem in "$@"; do
   name=gpu-metric-$stem
-  if [ -d "$OUT/$name" ]; then echo "skip $name (exists)"; continue; fi
+  # Skip only a run that finished: run_metadata.json is written at the end.
+  if [ -f "$OUT/$name/run_metadata.json" ]; then echo "skip $name (complete)"; continue; fi
   echo "start $(date -Is) $name"
   /usr/bin/time -v "$PY" "$HERE/run_variant.py" --src "$SNAP/src" --variant plain -- \
     --config "configs/$stem.yaml" --device cuda --output-uri "$OUT/$name" \
     > "$OUT/$name.log" 2>&1
-  echo "end $(date -Is) $name rc=$?"
+  rc=$?
+  echo "end $(date -Is) $name rc=$rc"
+  [ "$rc" -eq 0 ] || status=$rc
 done
+exit "$status"

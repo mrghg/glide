@@ -31,4 +31,7 @@ so it conserves mass exactly.
 and matrix per (lon, lat) column ([0023](0023-convection-per-column.md), task A02).
 The 3600 s interval note above was already out of date: since September 2026
 the scheme scales by the met window's width, the store's time step. See [docs/convection.md](../../docs/convection.md). A negative-
-control test asserts it does **not** fire on a stable winter column.
+control test asserts it does **not** fire on a stable winter column. The
+trigger's CAPE is summed over the diagnosed cloud only, LCL to cloud top
+([0031](0031-cape-bounded-at-the-cloud-top.md), which also records the open
+question of the 5 m/s cap).

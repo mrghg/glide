@@ -67,6 +67,7 @@ share no state and run order is irrelevant. Stochastic tests are seeded.
 | `test_near_surface_well_mixed.py` | Near-surface well-mixed gate through the production Hanna scheme at $\Delta t = 60$ s, three regimes | 3 |
 | `test_bl_top_well_mixed.py` | Boundary-layer-top well-mixed gate: open column uniform in $[0, 2h]$ through the production Hanna scheme at $\Delta t = 60$ s, three regimes; a full-strength copy is slow (`GLIDE_SLOW_TESTS=1`) | 3 + 3 slow |
 | `test_reciprocity.py` | Forward–backward reciprocity through the production Hanna scheme (forward-in-time test mode; exact pathwise check of the backward sign construction; the plan's criteria and companions are a slow release check, `GLIDE_SLOW_TESTS=1`) | 8 (+8 slow) |
+| `test_cape_cloud_top.py` | CAPE bounded at the diagnosed cloud top (decision 0031): the review's two soundings (35 J/kg in the cloud, one with 30 J/kg more above its top) neither fires at 50 J/kg; scalar and batched CAPE agree and equal the cloud's positive buoyancy; edge cases (no LNB, LCL at the top level, a weak one-level dip ends the cloud) | 10 |
 | `test_sigma_floor_gradient.py` | The drift gradient at $h$ and the σ_w floor (decision 0030): analytic gradient in three regimes, bit identity with the stencil elsewhere, static/dynamic parity, transfer-symmetry gate across a stable $h$ | 33 |
 
 ---
