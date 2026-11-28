@@ -1,16 +1,35 @@
 # CAPE — CAPE bounded at the diagnosed cloud top
 
-- status: CLAIMED
+- status: PR OPEN #76
 - queue: A   model: claude-opus-5-5   branch: agent/CAPE-cloud-top-bound
 - started: 2026-11-28   updated: 2026-11-28
 - plan: External review ("GLIDE turbulence physics discussion notes.md", "CAPE above the diagnosed cloud top"): docs/convection.md defines CAPE from the LFC to the diagnosed cloud top (LNB), but `compute_lcl_lnb_cape` and `compute_lcl_lnb_cape_columns` in src/lpdm/convection/emanuel.py sum positive buoyancy from the LCL to the top of the column. Confirm in both paths; check the lower bound (LFC vs LCL, CIN); read FLEXPART conv_mod.f90 (convect43c); decision record 0031; bound CAPE at the cloud top identically in the scalar and batched paths (static shapes, no host sync in the batched path); regression test from the review (fails on main) and scalar–batched agreement; count trigger changes and mass-flux change on the reference config's convection columns over a few met windows (CPU); optional CPU smoke before/after; report (not change) the 5 m/s updraft cap; docs/convection.md; full CPU suite. CPU only, ≤8 threads, no GPU runs. Outputs: outputs/agents/CAPE/.
 - done:
+  - `emanuel.py`: CAPE summed over the cloud's levels [i_LCL, i_LNB] only, in `compute_lcl_lnb_cape` (levels above the LNB zeroed after the LNB is found) and `compute_lcl_lnb_cape_columns` (LNB computed first, then a `torch.where` mask `(k >= i_lcl) & (k <= i_lnb)`; static shapes, no host sync). Lower bound, CIN, cloud top, other trigger checks, closure and matrix unchanged.
+  - `tests/test_cape_cloud_top.py` (7): the review's two soundings built from a prescribed buoyancy profile (35 J/kg in the cloud; the second has 30 J/kg more in a layer above a three-level stable gap); construction check; scalar and batched CAPE 35 for both; through `column_state` at the defaults neither fires (float64 and float32), all other checks pass, and with a 30 J/kg floor both fire; scalar–batched agreement on 66 columns (float64, float32) with ≥10 columns buoyant above their top, and CAPE equal to an independent float64 sum of the cloud's positive buoyancy.
+  - On main (7b6c5eb) 6 of the 7 fail; the trigger test fails with `[False, True] == [False, False]` (second sounding fires, CAPE 65.0) (outputs/agents/CAPE/logs/new_tests_on_main.log).
+  - Scripts `scripts/validation/cape/`: `trigger_counts.py` (per-column diagnosis on real met, one code version), `compare_trigger_counts.py`, `gap_diagnostics.py` (the stable gap in columns that stop firing), `closure_diagnostics.py` (cap, M_b, CFL scale in firing columns).
+  - Decision 0031; docs/convection.md §2 (CAPE bounds, LFC, CIN), §3 (table), §4 (cap binds; CFL binds); decision 0007 status; decisions README; VALIDATION.md test table; STATUS.md convection row.
 - verified:
-- docs:
-- handoff:
+  - Targeted: tests/test_cape_cloud_top.py + tests/test_convection.py 35 passed.
+  - CPU suite: 705 passed, 38 skipped, 0 failed in 21.9 min on 8 threads under a node load of ~260 (outputs/agents/CAPE/logs/pytest_full.log, at f70f437; later commits are scripts and docs). +7 new tests, none skipped; the skips are in files this branch does not touch (no data/ in the worktree); no tolerance loosened, no test changed or removed.
+  - Trigger counts (outputs/agents/CAPE/trigger/{jan,jul}_compare.md), main vs branch, float32 CPU, configs/ab_multisite_perf.yaml columns: January EUROPE 9 h × 150,974 columns: firing 7,858 → 7,243 (615 stop, 7.8%; 0 start), Σ M_b cosφ −9.7% (−0.7 to −21.9% by hour); UK/Ireland box 563 → 561. Summer 2019 EUR 8 h × 45,241: 4,740 → 4,706 (0.7%), −0.8%; UK/Ireland box 128 → 122 (4.7%). Max |ΔM_b| in columns firing under both: 0 (as derived: cap binds).
+  - Columns that stop firing (trigger/{jan,jul}_gap.log): real stable gap (median 6 levels, 1.4 km, min T_v excess −1.5 K, CIN −49 J/kg; Jan), shallow cloud (median depth 670 m), median 254 J/kg above the gap.
+  - Closure (trigger/{jan,jul}_closure.log): √(2 CAPE) ≥ 10 m/s in 100% of firing columns (cap binds); M_b 0.150–0.191 (Jan), 0.092–0.179 (summer); CFL scale binds in 100% / 99.4% of firing columns, median 0.13 / 0.25; median 13% / 12% of sub-cloud air entrained per hourly event.
+  - CPU smoke (configs/smoke_mhd_single_release.yaml, seed 42), main vs branch: footprints and endpoints bit-identical; no particle ever in a firing column in either run (outputs/agents/CAPE/smoke/compare.log).
+  - Static/dynamic parity, graph capture: convection runs once per met window outside the captured step; the change is a `torch.where` mask on tensors already computed (argued); CPU capture-guard tests in the suite. GPU not used.
+  - Golden: not regenerated (stale since 0027, as before); the smoke shows no change on that config.
+- docs: dev/decisions/0031 (new), 0007 (status pointer), decisions README; docs/convection.md §2–§4; docs/VALIDATION.md; STATUS.md.
+- handoff: Matt decides (decision 0031 "Open question"): the 5 m/s cap binds in every firing column, and the CFL scale binds in >99%, so per-event transport is set by CFL_MAX_OUTFLUX_FRAC, not CAPE, the cap or closure_c; options (a) keep, (b) lower closure_c/cap until CFL rarely binds, (c) FLEXPART-like cloud-base buoyancy closure with memory, together with FLEXPART's highest-LNB cloud top. Suggested PROGRESS.md line: trigger CAPE bounded at the cloud top (decision 0031); the convection closure (cap and CFL scale) is open.
 - proposed follow-ups:
-- reference issues:
+  - Closure/cap/CFL decision (Matt), with a summer footprint run at a continental site to see whether any of it matters.
+  - Cloud top: first vs highest LNB (FLEXPART's), with signed CAPE; would make the columns 0031 switches off convect deeply.
+  - Trigger form vs FLEXPART: GLIDE needs T_v,parcel ≥ T_v,env + 0.9 K at LCL+1; FLEXPART skips only if the parcel is ≥ 0.9 K colder at ICB (= GLIDE's i_LCL) and then needs CBMF > 0. Check against Forster (2007) Eq. 34.
+- reference issues: none (FLEXPART's highest-LNB cloud top and buoyancy closure recorded in 0031 as differences, not errors).
 - incidents:
+  - The trigger's CAPE summed positive buoyancy from the LCL to the top of the column in both the scalar and batched code, while docs/convection.md defined it from the LFC to the cloud top; a buoyant layer above the cloud top could trigger the lower cloud. Affects every run with convection since the scheme existed: 7.8% of firing columns (Jan 2024, EUROPE domain), 0.7% (summer 2019 EUR), switched on by energy their cloud never reached. Caught by the external review (Nov 2026).
+  - The constructor docstring says the 0.9 K trigger "matches FLEXPART"; the value does, the test does not (sign and level differ, see follow-ups). Found by reading FLEXPART's conv_mod.f90 in this task.
+  - docs/convection.md says the 5 m/s cap keeps M_b in "FLEXPART's realistic 0.05–0.5 kg/m²/s" range; no source for the range was found, FLEXPART's closure steady state is ~0.008 per K of cloud-base buoyancy, and in practice the CFL scale, not the cap, sets what GLIDE moves (>99% of firing columns). Found in this task (measurement + FLEXPART source).
 - question: none
 - handled:
   - in-session: 2026-11-28 coordinator brief (Matt's request of 28 Nov 2026): fix the CAPE upper bound per the external review; decision record; regression test failing on main; trigger counts on representative meteorology; report the updraft cap as a question for Matt; open a PR, do not merge.
