@@ -149,7 +149,8 @@ layer below level $k$), and $i_{\mathrm{LCL}}$ the first level above the LCL
 - **Upper bound: the diagnosed cloud top.** Positive buoyancy in a layer above
   the LNB, separated from the cloud by stable air, does not count. Until
   November 2026 it did: the sum ran to the top of the column, so a second
-  buoyant layer aloft could lift a lower cloud over the CAPE floor of §3.
+  buoyant layer aloft could lift a lower cloud over the CAPE floor of the
+  trigger `glide` (§3).
 - **Lower bound: the LFC, within a level.** $B > 0$ at every level strictly
   between $i_{\mathrm{LCL}}$ and $i_{\mathrm{LNB}}$ (that is how the LNB is
   found), so the only level in the sum that can be negatively buoyant is
@@ -158,9 +159,10 @@ layer below level $k$), and $i_{\mathrm{LCL}}$ the first level above the LCL
   sum from the LFC.
 - **Convective inhibition is left out, not subtracted.** Negative buoyancy below
   the LCL (the dry ascent) and at $i_{\mathrm{LCL}}$ does not reduce CAPE. A
-  column whose parcel is negatively buoyant at $i_{\mathrm{LCL}} + 1$ never fires,
-  whatever lies above: its cloud top is then $i_{\mathrm{LCL}} + 1$ and the
-  $\Delta T_v$ check of §3 fails there. GLIDE has no elevated LFC.
+  column whose parcel is negatively buoyant at $i_{\mathrm{LCL}} + 1$ has its
+  cloud top there, whatever lies above. Under trigger `glide` it never fires
+  (the $\Delta T_v$ check fails at that level); under the default trigger (§3)
+  it can, with a one-level cloud. GLIDE has no elevated LFC.
 
 The scalar reference (`compute_lcl_lnb_cape`) and the batched form
 (`compute_lcl_lnb_cape_columns`) apply the same bounds
@@ -170,20 +172,53 @@ The scalar reference (`compute_lcl_lnb_cape`) and the batched form
 
 ## 3. The trigger
 
-Convection fires only when **all** of the following hold:
+Since decision [0034](../dev/decisions/0034-flexpart-cloud-base-trigger.md)
+(28 Nov 2026) the trigger is FLEXPART 11's (`convect` in `conv_mod.f90`),
+without its memory (`trigger: flexpart_cloud_base`,
+`flexpart_cloud_base_trigger_columns`). ICB is the first level above the LCL,
+$i_{\mathrm{LCL}}$. A column convects unless one of these holds:
 
-| Condition | Meaning |
+| Skip condition | FLEXPART |
 | --- | --- |
-| $i_{\mathrm{LCL}} \ge 0$ | the parcel reaches saturation somewhere in the column |
-| $i_{\mathrm{LNB}} > i_{\mathrm{LCL}}$ | positive cloud depth |
-| $\mathrm{CAPE} \ge 50\ \mathrm{J\ kg^{-1}}$ | sanity floor (`min_cape_j_kg`), on the cloud's CAPE, LCL to LNB (§2) |
-| $\Delta T_v\big\vert_{\mathrm{LCL}+1} \ge 0.9\ \mathrm{K}$ | Forster (2007) Eq. 34 buoyancy threshold (`trigger_dtv_k`) |
-| cloud depth $\ge 500\ \mathrm{m}$ | deep convection only (`min_cloud_depth_m`) — shallow cumulus is the boundary-layer scheme's job |
+| the parcel is 0.9 K or more **colder** than the environment at ICB: $\Delta T_v\big\vert_{\mathrm{ICB}} \le -0.9\ \mathrm{K}$ | `TVP(ICB) <= TV(ICB) - DTMAX`, with CBMF = 0 (no memory) |
+| $\mathrm{DTMIN} \le 0$, so the closure's $M_b$ (§4) would be zero | `CBMF > 0` |
+| the parcel level has $T < 250$ K or $q \le 0$ (GLIDE's parcel is the surface level; FLEXPART's is NK) | `T(NK) < 250`, `Q(NK) <= 0` |
+| the moist static energy has no minimum below the top two levels | `IHMIN >= NL - 1` |
+| the LCL is outside 200–2000 hPa, there is none, or ICB is one of the top two levels | `PLCL`, `ICB >= NL - 1` |
 
-The checks are made in each column separately. A column where any check fails
-has no convection in this meteorology update, and its particles are untouched. A negative
-control test asserts it does **not** fire on a stable winter sounding
+and the cloud must have at least one level ($i_{\mathrm{LNB}} > i_{\mathrm{LCL}}$;
+FLEXPART's INB is at least ICB + 1). There is **no CAPE floor and no
+cloud-depth check**: FLEXPART has neither. CAPE now only enters the CAPE
+diagnostic; the cloud, the closure and the matrix are as in §2, §4 and §5.
+The test needs `closure: buoyancy`, since its DTMIN test is the closure's.
+
+The checks are made in each column separately. A column that is skipped has no
+convection in this meteorology update, and its particles are untouched. A
+negative control test asserts it does **not** fire on a stable winter sounding
 (`test_emanuel_does_not_fire_on_winter_inversion_column`).
+
+**How often it fires** (decision 0034, measured on the Decision 6 study's
+columns, 40 levels): in 49% (January) and 60% (July) of column-hours, against
+FLEXPART's 56% and 61% on the same columns; 95–98% of its firing is where
+FLEXPART fires, and it catches 87–93% of FLEXPART's. The firing count changes
+by at most 3.5% between 23, 40 and 80 levels.
+
+**The trigger before 0034** (`trigger: glide`, kept for A/B and bit-identical
+to the earlier output) fired only when all of these held:
+
+| Condition | Option |
+| --- | --- |
+| $i_{\mathrm{LCL}} \ge 0$ and $i_{\mathrm{LNB}} > i_{\mathrm{LCL}}$ | |
+| $\mathrm{CAPE} \ge 50\ \mathrm{J\ kg^{-1}}$, the cloud's CAPE (§2) | `min_cape_j_kg` |
+| the parcel 0.9 K or more **warmer** at the level LCL+1: $\Delta T_v\big\vert_{\mathrm{LCL}+1} \ge 0.9\ \mathrm{K}$ | `trigger_dtv_k` (or at `trigger_height_above_lcl_m` above the LCL) |
+| cloud depth $\ge 500\ \mathrm{m}$ | `min_cloud_depth_m` |
+
+Its ΔT_v test has the opposite sign and level to FLEXPART's, and FLEXPART has
+neither the CAPE floor nor the depth check. Earlier versions of this page and
+the code attributed it to Forster et al. (2007) Eq. 34; that could not be
+checked, and it is not what FLEXPART does. It fired in 0.5–1.3% of
+column-hours, and its firing count halved from 40 to 80 levels, because the
+height of the level LCL+1 above the LCL depends on the grid.
 
 ---
 
@@ -435,13 +470,15 @@ Each of these is a deliberate simplification, listed with what it costs.
    meteorology is sampled. FLEXPART is different: it calls every 900 s, and its
    relaxed CBMF depends on the call interval.
 
-7. **Deferred, deliberately (decision 0033).** These differences from FLEXPART's
-   full scheme are known, and each is a study of its own:
+7. **Deferred, deliberately (decisions 0033 and 0034).** These differences from
+   FLEXPART's full scheme are known, and each is a study of its own:
    - **Detrainment profile.** In January GLIDE lifts about 10× less sub-cloud air above 3 km than FLEXPART in the same columns.
    - **Downdrafts** (item 3).
    - **Cloud top.** GLIDE uses the first LNB; FLEXPART uses the highest.
-   - **Parcel origin** (NK).
-   - **The trigger.** GLIDE fires in about 1% of column-hours, FLEXPART in about 60%. GLIDE's ΔT_v test at the level LCL+1 also depends on the grid: firing columns halve from 40 to 80 levels. `trigger_height_above_lcl_m` is an option, off by default, for that study.
+   - **Parcel origin** (NK). The trigger's parcel is GLIDE's surface parcel, not FLEXPART's NK.
+   - **Trigger memory.** FLEXPART skips the ΔT_v test of §3 in a column that was convecting at its previous call; GLIDE has no memory (decision 0033).
+
+   With FLEXPART's trigger (0034) GLIDE fires about as often as FLEXPART, and its domain-total cloud-base flux is 91–96% of FLEXPART's, but it lifts only 7% (January) and 40% (July) as much sub-cloud air above 3 km. That gap lies in the cloud top and the detrainment profile.
 
 ---
 
@@ -454,34 +491,33 @@ convection:
     closure: buoyancy         # M_b = buoyancy_mass_flux_per_k · max(DTMIN, 0) (decision 0033)
     buoyancy_mass_flux_per_k: 0.00833   # 0.1·ALPHA/DAMPS, FLEXPART's 0.025 and 0.3
     application: exponential  # exact exp(Δt·Q) over the met interval (§6)
-    trigger_dtv_k: 0.9        # ΔT_v at the level LCL+1, K (trigger unchanged by 0033)
-    min_cape_j_kg: 50.0       # CAPE floor below which convection never fires
-    min_cloud_depth_m: 500.0  # skip shallow convection
-    trigger_height_above_lcl_m: null    # option: test ΔT_v at this height above the LCL
-    trigger: glide            # or flexpart_cloud_base (study option, Decision 6; below)
+    trigger: flexpart_cloud_base   # FLEXPART's cloud-base test, no memory (decision 0034, §3)
 ```
 
 A YAML with no `convection:` block produces output identical to a run with no
 convection at all.
 
-**`trigger: flexpart_cloud_base`** (study option, Decision 6; off by default) replaces
-GLIDE's three checks (ΔT_v ≥ `trigger_dtv_k` at LCL+1, `min_cape_j_kg`,
-`min_cloud_depth_m`) with FLEXPART 11's `convect` tests, without its memory
-(`flexpart_cloud_base_trigger_columns`). A column convects unless:
-- the parcel is at least 0.9 K colder than the environment at the first level above the LCL;
-- DTMIN ≤ 0 (the buoyancy closure's M_b would be zero), so it needs `closure: buoyancy`;
-- the parcel level (GLIDE's surface) has T < 250 K or q ≤ 0;
-- the moist static energy has no minimum below the top two levels;
-- PLCL is outside 200–2000 hPa, or the first level above the LCL is one of the top two.
+**The trigger before decision 0034**, for A/B comparison: `trigger: glide`,
+with its options (§3):
 
-It has no CAPE floor and no depth check, as FLEXPART has neither. The cloud
-(first LNB), closure and matrix are unchanged. Study results:
-`outputs/agents/CONV/trigger/SUMMARY.md` in the main checkout.
+```yaml
+    trigger: glide
+    trigger_dtv_k: 0.9        # parcel ΔT_v at the level LCL+1, K
+    min_cape_j_kg: 50.0       # CAPE floor
+    min_cloud_depth_m: 500.0  # minimum cloud depth
+    trigger_height_above_lcl_m: null    # option: test ΔT_v this far above the LCL instead
+```
+
+It reproduces the earlier output bit for bit. These four options apply only to
+`glide`. Setting one under the default trigger is not an error, but the run
+logs a warning and records it in `runtime.physics_warnings` of
+run_metadata.json. The shipped configs no longer set them.
 
 **The scheme before decision 0033**, for A/B comparison:
 `closure: cape_velocity` (with `closure_c: 0.03`, `updraft_w_max_m_s: 5.0`,
-which apply only to it) and `application: cfl_scaled`. These reproduce the
-earlier output bit for bit. `application: substeps` with `n_substeps` applies
+which apply only to it), `application: cfl_scaled` and `trigger: glide` (the
+default trigger needs `closure: buoyancy`, and refuses `cape_velocity` with a
+message saying so). These reproduce the earlier output bit for bit. `application: substeps` with `n_substeps` applies
 n CFL-capped transfers per interval instead; it is approximate and is kept for
 comparison. `closure_c` and `updraft_w_max_m_s` apply only to
 `cape_velocity`, and `n_substeps` only to `substeps`. Setting one while another

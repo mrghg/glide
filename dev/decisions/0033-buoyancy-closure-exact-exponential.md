@@ -149,4 +149,4 @@ These differences from FLEXPART's full scheme are known and are not changed here
 
 ## Status
 
-In force from the PR "CONV: buoyancy closure with exact exponential application (decision 0033)". It supersedes the closure of [0007](0007-reduced-emanuel-convection.md) and closes the open question of [0031](0031-cape-bounded-at-the-cloud-top.md). See `docs/convection.md` §4, §6 and §7.
+In force from the PR "CONV: buoyancy closure with exact exponential application (decision 0033)". It supersedes the closure of [0007](0007-reduced-emanuel-convection.md) and closes the open question of [0031](0031-cape-bounded-at-the-cloud-top.md). See `docs/convection.md` §4, §6 and §7. Item 3 (trigger unchanged) is superseded by [0034](0034-flexpart-cloud-base-trigger.md) (28 Nov 2026): FLEXPART's cloud-base trigger without memory is the default.

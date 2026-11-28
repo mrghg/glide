@@ -37,4 +37,6 @@ trigger's CAPE is summed over the diagnosed cloud only, LCL to cloud top
 question of the 5 m/s cap). The closure is now FLEXPART's steady-state
 buoyancy closure, applied exactly over the met interval
 ([0033](0033-buoyancy-closure-exact-exponential.md)); the capped-CAPE closure
-with its CFL scale remains selectable for A/B.
+with its CFL scale remains selectable for A/B. The trigger is now FLEXPART's
+cloud-base test without memory ([0034](0034-flexpart-cloud-base-trigger.md));
+the original trigger remains selectable as `trigger: glide`.

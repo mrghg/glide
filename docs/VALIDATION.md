@@ -69,6 +69,7 @@ share no state and run order is irrelevant. Stochastic tests are seeded.
 | `test_reciprocity.py` | Forward–backward reciprocity through the production Hanna scheme (forward-in-time test mode; exact pathwise check of the backward sign construction; the plan's criteria and companions are a slow release check, `GLIDE_SLOW_TESTS=1`) | 8 (+8 slow) |
 | `test_cape_cloud_top.py` | CAPE bounded at the diagnosed cloud top (decision 0031): the review's two soundings (35 J/kg in the cloud, one with 30 J/kg more above its top) neither fires at 50 J/kg; scalar and batched CAPE agree and equal the cloud's positive buoyancy; edge cases (no LNB, LCL at the top level, a weak one-level dip ends the cloud) | 10 |
 | `test_convection_closure.py` | Decision 0033: the matrix exponential of the rate generator equals the true exponential, is non-negative, row-stochastic and keeps layer masses stationary; backward = time reversal of forward and the small-step limit of the Euler backward matrix (T1 cycle); 3 h = three 1 h; the scheme's hourly transport within 15% on 23/40/79 levels (old closure ×1.5+ per step); production defaults; the pre-0033 options reproduce the old matrix; Courant numbers beyond the squaring cap counted; the production path runs backward (upper-cloud rows reach the sub-cloud layers backward, not forward); substeps use Δt/n; config and kwargs wiring; ignored options warned | 28 |
+| `test_convection_trigger.py` | Decision 0034: the default (FLEXPART cloud-base) trigger fires exactly where the Decision 6 study's did on a fixture of 229 real ERA5 columns (40 levels, stratified near its thresholds), and `glide` where the pre-0034 trigger did; `glide` bit-identical to the pre-0034 expression on 12–80 levels; each FLEXPART skip condition on its own; a parcel 0.5 K colder than the environment at ICB fires and 1.0 K colder does not; glide-only options warned and recorded in run_metadata.json; config default and validation | 16 |
 | `test_sigma_floor_gradient.py` | The drift gradient at $h$ and the σ_w floor (decision 0030): analytic gradient in three regimes, bit identity with the stencil elsewhere, static/dynamic parity, transfer-symmetry gate across a stable $h$ | 33 |
 
 ---
@@ -499,7 +500,10 @@ with this repository — see [../data/README.md](../data/README.md).
 > more than any tolerance (reference config, 0–40 m: +48%). The fixtures below
 > describe the physics before that change. They will be regenerated once, after
 > the residence-counting decision (A2); until then a comparison against them
-> reports the change, not a pass.
+> reports the change, not a pass. The convection decisions 0031, 0033 and 0034
+> (FLEXPART's cloud-base trigger as the default, under which the smoke run now
+> meets convecting columns) also change the output; they are included in the
+> same single regeneration.
 
 A golden fixture freezes the output of a named configuration at one git rev, on
 one device, with the configuration's fixed seed. Any later change is compared

@@ -249,4 +249,7 @@ Eq. 34, which could not be checked.
 The open question on the cap and the CFL scale was settled by
 [0033](0033-buoyancy-closure-exact-exponential.md) (28 Nov 2026): FLEXPART's
 steady-state buoyancy closure, applied as the exact exponential over the met
-interval, replaces both as the default.
+interval, replaces both as the default. The trigger difference recorded above
+was settled by [0034](0034-flexpart-cloud-base-trigger.md) (28 Nov 2026):
+FLEXPART's cloud-base trigger, without memory, is the default, and has no
+CAPE floor; this decision's CAPE now gates only the trigger `glide`.
