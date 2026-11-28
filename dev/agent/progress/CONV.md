@@ -38,3 +38,4 @@
 - handled:
   - in-session: 2026-11-28 coordinator brief: investigate and prototype, branch only.
   - in-session: 2026-11-28 coordinator: Matt adopted Decision 5. Turn the branch into a PR; do not change the trigger.
+  - in-session: 2026-11-28 coordinator: review of PR #78. Done: production-path direction test (the default transition equals the backward exponential; upper-cloud rows reach the sub-cloud layers 0.0077 backward vs 2e-5 forward); warnings for options the selected closure/application ignores; wiring tests (config default constant, kwargs passing closure/application, substeps dt/n); closure_c removed from shipped/validation configs; decision 0033 cites the review's JFJ legacy bit-identity and three-seed statistics.
