@@ -976,8 +976,14 @@ class EmanuelReducedConvection(ConvectionScheme):
         # column by column).
         with phase("convection.matrices"):
             n_col = cols.fires.numel()
+            # Particle and grid positions in the engine's horizontal frame (task A4;
+            # affine in lon and lat, so the nearest column is the same column).
+            frame = engine.frame
             particle_col = nearest_column_index(
-                particles[:, 0], particles[:, 1], met_window.metadata.lon, met_window.metadata.lat
+                particles[:, 0],
+                particles[:, 1],
+                frame.x_from_lon(np.asarray(met_window.metadata.lon, dtype=np.float64)),
+                frame.y_from_lat(np.asarray(met_window.metadata.lat, dtype=np.float64)),
             )
             occupied = torch.zeros(n_col, dtype=torch.bool, device=device)
             occupied[particle_col[active_mask]] = True

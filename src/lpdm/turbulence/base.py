@@ -61,7 +61,14 @@ class TurbulenceScheme(ABC):
         """Apply one turbulence step to the particle cloud.
 
         Args:
-                particles: (N, 4) tensor [lon, lat, alt, weight] for the entire ensemble.
+                particles: (N, 4) tensor [x, y, alt, weight] for the entire ensemble.
+                        x, y are the horizontal position in ``engine.frame``
+                        (`lpdm.local_frame`: metres from the met domain's centre in
+                        the runtime, lon/lat degrees in the degrees frame); convert
+                        with ``engine.frame`` where degrees are needed (e.g.
+                        ``lat_from_y`` for the Coriolis parameter) and sample met
+                        fields with grid bounds in the frame
+                        (``gpu_engine.frame_grid_bounds``). alt is metres above ground.
                 state: per-particle turbulence state (e.g. perturbation velocities).
                 met_window: bracketing hourly met fields for temporal interpolation.
                 t_alpha: temporal interpolation weight in [0, 1] for met blending.

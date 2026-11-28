@@ -60,6 +60,7 @@ import torch
 
 from lpdm.air_density import ParticleDryAirDensity
 from lpdm.gpu_engine import GPUEngine
+from lpdm.local_frame import DEGREES, HorizontalFrame
 from lpdm.main import _advect_active_particles
 from lpdm.met_reader import HourlyMetTensors, MetFieldMetadata
 from lpdm.turbulence import HannaScheme
@@ -171,20 +172,22 @@ def eulerian_sigmas(
     """(σ_u, σ_v, σ_w) of the scheme's profile at each particle, [N, 3], with the
     column inputs gathered as ``HannaScheme.step`` gathers them (dynamic path)."""
 
-    device, dtype = engine.device, engine.dtype
-    lon, lat = xyz[:, 0], xyz[:, 1]
+    device, dtype, frame = engine.device, engine.dtype, engine.frame
+    # Horizontal position in the engine's frame; latitude in degrees for Coriolis.
+    x, y = xyz[:, 0], xyz[:, 1]
+    lat = frame.lat_from_y(y)
 
     def surf(name):
-        return scheme._interp_surface_field(met, name, 0.5, lon, lat, device, dtype)
+        return scheme._interp_surface_field(met, name, 0.5, x, y, device, dtype, frame=frame)
 
     blh = scheme._limit_blh(surf("blh"))
     sp = surf("sp")
     ustar = surf("ustar").clamp(min=USTAR_MIN_M_S)
     shf = surf("shf")
-    t_surface = scheme._interp_t_at_lowest_level(met, 0.5, lon, lat, device, dtype)
+    t_surface = scheme._interp_t_at_lowest_level(met, 0.5, x, y, device, dtype, frame=frame)
     L = obukhov_length(ustar, shf, t_surface, sp)
     w_star = convective_velocity(blh, shf, t_surface, sp, blh_min_m=scheme.blh_min_m)
-    ft_fields, grid_bounds = scheme._free_trop_fields(met, device, dtype)
+    ft_fields, grid_bounds = scheme._free_trop_fields(met, device, dtype, frame=frame)
     return scheme._sigmas_at(
         xyz[:, 2],
         blh=blh,
@@ -193,7 +196,8 @@ def eulerian_sigmas(
         h_over_L=blh / L,
         L=L,
         lat=lat,
-        lon=lon,
+        x=x,
+        y=y,
         ft_fields=ft_fields,
         grid_bounds=grid_bounds,
         engine=engine,
@@ -694,19 +698,32 @@ class _NegatedNoiseEngine(GPUEngine):
         )
 
 
+def _pathwise_frame(kind: str) -> HorizontalFrame:
+    """The degrees frame, or the runtime's local metric frame of the
+    reciprocity window's domain (task A4)."""
+
+    if kind == "degrees":
+        return DEGREES
+    md = reciprocity_met(*REGIMES["stable"]).metadata
+    return HorizontalFrame.local_metric((md.lon[0], md.lon[-1]), (md.lat[0], md.lat[-1]))
+
+
 def _pathwise_run(
     regime: str, scheme_cls: type[HannaScheme], *, forward: bool, static: bool,
-    n: int = 4000, n_steps: int = 30,
+    n: int = 4000, n_steps: int = 30, frame: HorizontalFrame = DEGREES,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:  # fmt: skip
     """Particles through ``n_steps`` production steps in a still, steady,
     horizontally uniform column, backward with the noise η and the Eulerian
     start velocities, or forward with −η and the start velocities negated.
-    Returns the heights after every step ``[n_steps, n]`` and the final state
-    (with the final particles under ``"particles"``)."""
+    Positions are held in ``frame``. Returns the heights after every step
+    ``[n_steps, n]`` and the final state (with the final particles, in the
+    frame, under ``"particles"``)."""
 
     met = reciprocity_met(*REGIMES[regime], u_surface=0.0, u_top=0.0)
     h = REGIMES[regime][0]
-    engine = (_NegatedNoiseEngine if forward else GPUEngine)(device="cpu", dtype=torch.float32)
+    engine = (_NegatedNoiseEngine if forward else GPUEngine)(
+        device="cpu", dtype=torch.float32, frame=frame
+    )
     scheme = scheme_cls(n_substeps=N_SUBSTEPS_DEFAULT, static_substeps=static)
     scheme._forward_in_time = forward
     gen = torch.Generator().manual_seed(5)
@@ -715,6 +732,7 @@ def _pathwise_run(
     particles[:, 1] = LAT0 + 0.1 * torch.rand(n, generator=gen)
     particles[:, 2] = 1.3 * h * torch.rand(n, generator=gen)
     particles[:, 3] = 1.0 / n
+    particles = frame.to_frame(particles)
     state = scheme.initialize_state(n, device=torch.device("cpu"), dtype=torch.float32)
     sig = eulerian_sigmas(scheme, met, particles[:, :3], engine)
     eta0 = torch.randn(n, 3, generator=gen)
@@ -732,10 +750,11 @@ def _pathwise_run(
     return torch.stack(heights), state
 
 
+@pytest.mark.parametrize("frame_kind", ["degrees", "local_metric"])
 @pytest.mark.parametrize("static", [False, True], ids=["dynamic", "static"])
 @pytest.mark.parametrize("regime", list(REGIMES))
 def test_backward_step_is_the_forward_step_with_the_velocity_negated(
-    regime: str, static: bool
+    regime: str, static: bool, frame_kind: str
 ) -> None:
     """The backward sign construction (docs/physics.md §4), exactly. In a steady,
     horizontally uniform column, a backward run with the noise η is, bit for bit,
@@ -749,11 +768,14 @@ def test_backward_step_is_the_forward_step_with_the_velocity_negated(
     and the slow reciprocity cases below test the shared scheme's transfer
     symmetry (ρ-weighted detailed balance between cells), not a separate
     backward error. The review measured the same identity at 20,000 particles
-    and 120 steps (outputs/agents/A6/review/pathwise.log)."""
+    and 120 steps (outputs/agents/A6/review/pathwise.log). The identity holds
+    with positions in the degrees frame and in the runtime's local metric frame
+    (task A4)."""
 
     h = REGIMES[regime][0]
-    zb, sb = _pathwise_run(regime, HannaScheme, forward=False, static=static)
-    zf, sf = _pathwise_run(regime, HannaScheme, forward=True, static=static)
+    frame = _pathwise_frame(frame_kind)
+    zb, sb = _pathwise_run(regime, HannaScheme, forward=False, static=static, frame=frame)
+    zf, sf = _pathwise_run(regime, HannaScheme, forward=True, static=static, frame=frame)
     assert torch.equal(sb["particles"], sf["particles"])
     assert torch.equal(zb, zf)
     for key in ("u_prime", "v_prime", "w_prime"):
@@ -764,7 +786,7 @@ def test_backward_step_is_the_forward_step_with_the_velocity_negated(
     assert int((side[1:] != side[:-1]).sum()) > 0
     assert float(zb.min()) < 0.05 * h
     # Teeth: the backward drift with the forward sign is a different process.
-    zm, _ = _pathwise_run(regime, NoBackwardSignFlip, forward=False, static=static)
+    zm, _ = _pathwise_run(regime, NoBackwardSignFlip, forward=False, static=static, frame=frame)
     assert float((zm - zf).abs().max()) > 0.05 * h
 
 

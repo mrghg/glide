@@ -37,6 +37,7 @@ from interface_study import column_sigmas, met_window
 from scipy.linalg import solve_banded
 
 from lpdm.gpu_engine import GPUEngine
+from lpdm.local_frame import DEGREES
 from lpdm.turbulence import HannaScheme
 from lpdm.turbulence import hanna as hanna_mod
 
@@ -51,10 +52,10 @@ def k_profile(regime: str, z: np.ndarray, ft_n: float) -> tuple[np.ndarray, floa
     sp, tk, blh, us = full(101325.0), full(280.0), full(h), full(ustar)
     L = hanna_mod.obukhov_length(us, full(shf), tk, sp)
     w_star = hanna_mod.convective_velocity(blh, full(shf), tk, sp, blh_min_m=scheme.blh_min_m)
-    ft_fields, gb = scheme._free_trop_fields(met, torch.device("cpu"), torch.float32)
+    ft_fields, gb = scheme._free_trop_fields(met, torch.device("cpu"), torch.float32, frame=DEGREES)
     col = dict(
         blh=blh, ustar=us, w_star=w_star, h_over_L=blh / L, L=L, lat=full(45.0),
-        lon=full(0.0), ft_fields=ft_fields, grid_bounds=gb, engine=GPUEngine(device="cpu"),
+        x=full(0.0), y=full(45.0), ft_fields=ft_fields, grid_bounds=gb, engine=GPUEngine(device="cpu"),
     )  # fmt: skip
     zq = torch.as_tensor(z, dtype=torch.float32).clamp(min=scheme.z_ubl_m)
     _, _, sw, _, _, tlw = scheme._column_turbulence(zq, **col)

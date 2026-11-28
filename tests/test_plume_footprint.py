@@ -35,6 +35,7 @@ from scipy.special import ndtr
 from lpdm.comparison import to_stilt_surface_footprint
 from lpdm.footprint_gridder import FootprintGridder
 from lpdm.gpu_engine import GPUEngine
+from lpdm.local_frame import DEGREES
 
 U_MS = 5.0
 SIGMA2 = 0.25  # sigma_v = sigma_w = 0.5 m/s
@@ -70,6 +71,7 @@ def plume() -> dict:
         n_x=NX,
         device="cpu",
         dtype=torch.float64,
+        frame=DEGREES,
     )
 
     particles = torch.zeros((N_PART, 4), dtype=torch.float64)

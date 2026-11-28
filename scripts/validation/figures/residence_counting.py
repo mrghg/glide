@@ -31,6 +31,8 @@ import torch  # noqa: E402
 from scipy.interpolate import PchipInterpolator  # noqa: E402
 
 from lpdm.footprint_gridder import FootprintGridder  # noqa: E402
+from lpdm.gpu_engine import GPUEngine  # noqa: E402
+from lpdm.local_frame import DEGREES  # noqa: E402
 from lpdm.main import _age_bin_pieces, _deposit_step, _time_ago_index  # noqa: E402
 
 DT = 60.0
@@ -54,6 +56,7 @@ def _counted_in_layer(position: str, z_nodes: np.ndarray) -> float:
         n_x=1,
         device="cpu",
         dtype=torch.float64,
+        frame=DEGREES,
     )
     t0 = datetime(2024, 1, 1, 12, tzinfo=UTC)
     met = SimpleNamespace(metadata=SimpleNamespace(time_start=t0, time_end=t0 + timedelta(hours=1)))
@@ -77,7 +80,7 @@ def _counted_in_layer(position: str, z_nodes: np.ndarray) -> float:
             particle_density=None,
             met_window=met,
             t_alpha=0.5,
-            engine=None,
+            engine=GPUEngine(device="cpu", frame=DEGREES),
         )
     return float(grid.tensor[0, 0, 0].sum())
 

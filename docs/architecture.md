@@ -285,7 +285,11 @@ so the position is unchanged, reflecting a particle already above ground does
 nothing, and a particle that did not move cannot cross the boundary-layer top,
 so the interface rule (decision 0028) leaves it alone too. Every active particle takes the same `n_substeps` sub-steps on both
 paths (decision 0027), so with every particle active the two paths do the same
-arithmetic and draw the same random numbers, and agree bit for bit. Inactive
+arithmetic and draw the same random numbers, and agree bit for bit, provided
+the step's time-interpolation weight is a float32 number (the selective path
+uses it as a Python float, the uniform path as a float32 tensor, so a weight
+such as 3570/3600 is rounded differently and the paths then agree to one ulp;
+the parity tests use weights that are exact, task A4). Inactive
 particles are held still by *multiplying* by zero rather than by being excluded
 from the array — that is what keeps the array sizes fixed.
 
@@ -339,6 +343,22 @@ insist on a single unbroken unit and fails if anything splits it, and
 `test_step_core_does_not_recompile_per_step` fails if anything triggers a rebuild
 while $\alpha$, the meteorology values and the level heights all change. Both
 faults are silent in production, which is what makes the tests worth having.
+
+### Half-precision winds (optional, off)
+
+`simulation.wind_gather_dtype: bfloat16` holds the window's two `[3, Z, Y, X]`
+wind stacks on the device in bfloat16 (task A4). They cannot go through
+`grid_sample`, which samples a bfloat16 volume at bfloat16 coordinates (eight
+bits of mantissa cannot place a particle on a 551-point grid), so
+`gpu_engine.trilinear_sample` computes the corner indices and weights in float32,
+gathers the eight corners of both stacks in bfloat16, and sums in float32; both
+step paths share it. Its error is the bfloat16 rounding of the winds, at most
+2⁻⁸ of a value (on an ERA5 window 0.02 m s⁻¹ rms in u, unbiased). The gather alone,
+compiled, on 1.44 million particles: 0.56 ms for float32 `grid_sample`, 0.37 ms
+for the bfloat16 gather. That is the only part of the run it changes: the
+meteorology fetch, which dominates, reads and resamples on the host before any
+of this. The A/B on `ab_multisite_perf`, and why it stays off, are in
+dev/agent/progress/A4.md.
 
 ### Where the time goes now
 
@@ -436,6 +456,7 @@ All of these are environment variables, and all are optional.
 | --- | --- |
 | `GLIDE_COMPILE=0/1` | Turn compilation and step recording off or on. Off avoids the one-off compilation cost at startup — useful when debugging. |
 | `GLIDE_STATIC_SUBSTEPS=0/1` | Force the uniform or selective step path (§5), overriding the automatic choice by device. |
+| `GLIDE_POSITION_FRAME=degrees` | Hold particle positions as longitude and latitude in degrees, the arithmetic GLIDE used before task A4, instead of metres from the met domain's centre (the default, `local_metric`; [physics.md §2](physics.md#2-coordinates-state-and-notation)). For A/B checks: the two differ by float32 rounding of the positions. |
 | `GLIDE_PROFILE=1` | Record about 20 steps in detail, print how busy the GPU was, where it waited, and which operations ran most often, write a timeline file viewable in a browser, then exit. `GLIDE_PROFILE_STEPS` / `_WARMUP` / `_TRACE` / `_CONTINUE` adjust it. |
 | `GLIDE_PHASE_TIMERS=1` | Break the whole run's elapsed time down by phase: set-up, meteorology fetch, the step, convection and its parts (`convection.columns`, `.lift`, `.matrices`, `.redistribute`, `.log`), gridding, the wind-mean diagnostic, mask and liveness bookkeeping, per-step diagnostics, logging and memory guards, garbage collection, particle generation, batch set-up and end, output writes, and the Python overhead of the step loop (`loop_overhead`). Phases nest and each row is the phase's own time, so the rows add up to the wall time; the untimed residual is what falls between them. `_EVERY` adjusts the running log; `_SYNC=1` synchronises the GPU at every phase boundary, so GPU work is charged to the phase that issued it (otherwise to whichever phase next waits for the GPU). Code in `lpdm/phase_timers.py`. |
 | `GLIDE_NUM_THREADS=N` | How many CPU cores PyTorch uses within a single operation (CPU runs only). About 16 measured best on a 48-core node; using all 48 was the *slowest* option, ~25% worse, because the arrays are small enough that the cores spend more time coordinating than working. |

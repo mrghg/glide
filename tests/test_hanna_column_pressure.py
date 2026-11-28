@@ -16,6 +16,7 @@ from datetime import UTC, datetime, timedelta
 import numpy as np
 import torch
 
+from lpdm.local_frame import DEGREES
 from lpdm.met_reader import HourlyMetTensors, MetFieldMetadata
 from lpdm.turbulence import HannaScheme
 from lpdm.turbulence.hanna import GRAVITY_M_S2, R_DRY_AIR_J_KG_K
@@ -164,18 +165,22 @@ def test_horizontally_uniform_met_is_bit_identical_to_area_mean() -> None:
     rho_old = p_old / (R * t_mid.clamp(min=1.0))
     assert torch.equal(d_with[0], rho_old)
 
-    ft_with = HannaScheme()._free_trop_fields(with_p, DEV, f32)[0]
-    ft_without = HannaScheme()._free_trop_fields(without_p, DEV, f32)[0]
+    ft_with = HannaScheme()._free_trop_fields(with_p, DEV, f32, frame=DEGREES)[0]
+    ft_without = HannaScheme()._free_trop_fields(without_p, DEV, f32, frame=DEGREES)[0]
     assert torch.equal(ft_with, ft_without)
 
 
 def test_free_troposphere_theta_from_own_column() -> None:
     """θ (and so N², Ri, K_z, σ_w, T_L) of a column depends only on that column."""
 
-    base = HannaScheme()._free_trop_fields(_window(PS_PA, T_SFC), DEV, torch.float64)[0]
+    base = HannaScheme()._free_trop_fields(
+        _window(PS_PA, T_SFC), DEV, torch.float64, frame=DEGREES
+    )[0]
     ps2 = PS_PA.copy()
     ps2[0, 1:] = 60000.0
-    other = HannaScheme()._free_trop_fields(_window(ps2, T_SFC), DEV, torch.float64)[0]
+    other = HannaScheme()._free_trop_fields(_window(ps2, T_SFC), DEV, torch.float64, frame=DEGREES)[
+        0
+    ]
     assert torch.equal(base[:, :, 0, 0], other[:, :, 0, 0])
 
 
@@ -192,6 +197,8 @@ def test_free_troposphere_theta_uses_column_pressure(monkeypatch) -> None:
         return real(t_kelvin, pressure_pa)
 
     monkeypatch.setattr(hanna, "potential_temperature", spy)
-    HannaScheme()._free_trop_fields(_window(PS_PA, T_SFC, p_end_scale=1.02), DEV, torch.float64)
+    HannaScheme()._free_trop_fields(
+        _window(PS_PA, T_SFC, p_end_scale=1.02), DEV, torch.float64, frame=DEGREES
+    )
     p = _column_profiles(PS_PA, T_SFC)[1]
     np.testing.assert_allclose(seen["p"].numpy(), 1.01 * p, rtol=1e-12)

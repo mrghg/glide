@@ -58,10 +58,12 @@ Outputs ``<out>.json`` (summary) and ``<out>.npz`` (tallies).
 
 **Positions are assumed to be in degrees** (lon, lat, metres above ground): the
 grid binning, the receptor rings and the `step_mean` tally's longitude wrap all
-use degrees. If GLIDE gains a metric position frame (PR #74 proposes x, y in
-metres), run the scorer with ``GLIDE_POSITION_FRAME=degrees`` or add a conversion.
-``_assert_degrees`` fails loudly, rather than mis-binning, when the environment
-or the engine names another frame or the positions are not plausible degrees.
+use degrees. GLIDE's runtime holds positions in a local metric frame (task A4,
+``lpdm.local_frame``), so the config mode sets ``GLIDE_POSITION_FRAME=degrees``
+unless the caller set it (the degrees frame is the pre-A4 arithmetic; the
+metric frame differs from it only by float32 rounding). ``_assert_degrees``
+fails loudly, rather than mis-binning, when the environment or the engine names
+another frame or the positions are not plausible degrees.
 """
 
 from __future__ import annotations
@@ -357,10 +359,8 @@ def _assert_degrees(xyz: torch.Tensor | None = None, engine=None) -> None:
     if env is not None and env.lower() not in ("degrees", "deg", "lonlat"):
         raise SystemExit(f"scorer assumes degrees; GLIDE_POSITION_FRAME={env!r}")
     frame = getattr(engine, "frame", None)
-    if frame is not None:
-        name = str(getattr(frame, "name", frame)).lower()
-        if "deg" not in name and "lonlat" not in name:
-            raise SystemExit(f"scorer assumes degrees; engine.frame is {frame!r}")
+    if frame is not None and getattr(frame, "kind", None) != "degrees":
+        raise SystemExit(f"scorer assumes degrees; engine.frame is {frame!r}")
     if (
         xyz is not None
         and xyz.numel()
@@ -384,6 +384,9 @@ def run_config(args) -> None:
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
     )
+    # The tallies are in degrees: run GLIDE in the degrees frame (task A4) unless
+    # the caller chose a frame, in which case `_assert_degrees` checks it.
+    os.environ.setdefault("GLIDE_POSITION_FRAME", "degrees")
     cfg = RunConfig.from_yaml(args.config).with_overrides(device="cpu", output_uri=args.output_uri)
     if cfg.output_grid.deposition.position != "endpoint":
         raise SystemExit("run the scorer on an endpoint config (the rules are scored offline)")
