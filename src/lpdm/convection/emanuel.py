@@ -130,7 +130,8 @@ BUOYANCY_DTMAX_K = 0.9
 # on FLEXPART's other skip conditions as GLIDE's columns allow them: parcel-level
 # T < 250 K or q <= 0 (GLIDE's parcel is the surface level), moist static energy
 # with no minimum below the top two levels (IHMIN = NL - 1), PLCL outside
-# 200-2000 hPa, ICB >= NL - 1. No CAPE floor. `min_cloud_depth_m` applies to both.
+# 200-2000 hPa, ICB >= NL - 1. No CAPE floor and no cloud-depth check (FLEXPART has
+# neither); `trigger_dtv_k`, `min_cape_j_kg` and `min_cloud_depth_m` apply to `glide` only.
 TRIGGERS = ("glide", "flexpart_cloud_base")
 FLEXPART_TRIGGER_DTMAX_K = 0.9
 FLEXPART_PARCEL_T_MIN_K = 250.0
@@ -1150,8 +1151,8 @@ class EmanuelReducedConvection(ConvectionScheme):
                         ``trigger_height_above_lcl_m``, and ``min_cape_j_kg``) or
                         ``flexpart_cloud_base`` (FLEXPART's tests without memory,
                         `flexpart_cloud_base_trigger_columns`; ignores
-                        ``trigger_dtv_k`` and ``min_cape_j_kg``). Both apply
-                        ``min_cloud_depth_m``.
+                        ``trigger_dtv_k``, ``min_cape_j_kg`` and
+                        ``min_cloud_depth_m``, which FLEXPART does not have).
         """
 
         if closure_c <= 0:
@@ -1311,7 +1312,9 @@ class EmanuelReducedConvection(ConvectionScheme):
             passes, dtv = flexpart_cloud_base_trigger_columns(
                 t_col, q_col, height_col, extra["p_lcl"], i_lcl, extra["dtv"], dtmin
             )
-            fires = passes & (i_lnb > i_lcl) & (cloud_depth_m.double() >= self.min_cloud_depth_m)
+            # FLEXPART has no cloud-depth or CAPE floor; GLIDE's first-LNB depth
+            # check would make this trigger depend on the vertical grid (study).
+            fires = passes & (i_lnb > i_lcl)
         if self.closure == "buoyancy":
             m_b = self.buoyancy_mass_flux_per_k * dtmin.double().clamp(min=0.0)
         else:

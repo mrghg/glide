@@ -110,8 +110,8 @@ def test_flexpart_trigger_on_synthetic_soundings() -> None:
     """On the convective sounding both triggers fire on 23 levels with the same
     M_b; on 40 levels ΔT_v at LCL+1 is 0.887 K and only FLEXPART's test fires
     (the grid dependence of GLIDE's). A parcel 0.3 K warmer than the environment
-    at ICB in a stable layer fires FLEXPART's test without a CAPE floor, but its
-    first-LNB cloud is one level deep, so only without the depth check."""
+    at ICB in a stable layer fires FLEXPART's test, with no CAPE floor and no
+    depth check (its first-LNB cloud is one level deep); GLIDE's does not."""
 
     glide = EmanuelReducedConvection()
     fp = EmanuelReducedConvection(trigger="flexpart_cloud_base")
@@ -134,9 +134,11 @@ def test_flexpart_trigger_on_synthetic_soundings() -> None:
 
     w2 = _build_convective_met_window(column=(t2, q_, p))
     a2, b2 = _state(glide, w2, torch.float64), _state(fp, w2, torch.float64)
-    fp0 = EmanuelReducedConvection(trigger="flexpart_cloud_base", min_cloud_depth_m=0.0)
-    c2 = _state(fp0, w2, torch.float64)
-    assert not bool(a2.fires.any()) and not bool(b2.fires.any())
+    # min_cloud_depth_m applies to the glide trigger only.
+    fp9 = EmanuelReducedConvection(trigger="flexpart_cloud_base", min_cloud_depth_m=9000.0)
+    c2 = _state(fp9, w2, torch.float64)
+    assert torch.equal(c2.fires, b2.fires)
+    assert not bool(a2.fires.any())
     assert bool((c2.dtmin_k > 0).all()) and bool(c2.fires.all())
     assert bool((c2.i_lnb == c2.i_lcl + 1).all()) and bool((c2.cloud_depth_m < 500.0).all())
     assert float(c2.dtv_lcl_plus_1[0]) == pytest.approx(0.3, abs=0.05)

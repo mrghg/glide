@@ -502,8 +502,9 @@ class EmanuelConvectionConfig(_Frozen):
             "'glide': ΔT_v ≥ trigger_dtv_k at LCL+1 and CAPE ≥ min_cape_j_kg. "
             "'flexpart_cloud_base': FLEXPART 11's tests without memory (parcel not "
             "0.9 K colder than the environment at the first level above the LCL, "
-            "DTMIN > 0, and its other skip conditions); no CAPE floor. Both apply "
-            "min_cloud_depth_m. Needs closure 'buoyancy'."
+            "DTMIN > 0, and its other skip conditions); no CAPE floor and no depth "
+            "check (trigger_dtv_k, min_cape_j_kg and min_cloud_depth_m apply to 'glide' "
+            "only). Needs closure 'buoyancy'."
         ),
     )
 
