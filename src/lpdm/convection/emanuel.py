@@ -6,9 +6,18 @@ Stohl et al. (2005, ACP 5, 2461-2474) §4.6. The full Emanuel scheme in
 ``convect43c.f`` is ~3000 FORTRAN lines; this version captures the key physics
 in pure torch at a higher level of abstraction:
 
-1. **Trigger.** Surface parcel lifted to LCL + 1 layer; convection fires when
-   ``T_v_parcel(LCL+1) ≥ T_v_env(LCL+1) + T_threshold`` with
-   ``T_threshold = 0.9 K`` (Forster 2007 Eq 34).
+1. **Trigger** (decision 0034). FLEXPART 11's cloud-base test, without its
+   memory: the surface parcel, lifted to the first level above the LCL (ICB),
+   must not be 0.9 K or more *colder* than the environment there
+   (``T_v_parcel(ICB) > T_v_env(ICB) − 0.9 K``, FLEXPART ``convect``
+   ``TVP(ICB) <= TV(ICB) - DTMAX``), the buoyancy closure's DTMIN must be
+   positive, and FLEXPART's other skip conditions apply
+   (`flexpart_cloud_base_trigger_columns`). There is no CAPE floor and no
+   cloud-depth check. The trigger before 0034 (``trigger="glide"``: the parcel
+   at least ``trigger_dtv_k`` = 0.9 K *warmer* at ICB + 1, CAPE ≥ 50 J/kg and
+   a cloud ≥ 500 m deep) stays selectable for A/B. It is GLIDE's own form:
+   FLEXPART's code has the opposite sign and level, and the attribution to
+   Forster et al. (2007) Eq. 34 in earlier versions could not be checked.
 
 2. **Cloud extent.** Surface parcel continues moist-adiabatically until it
    becomes neutrally buoyant — Level of Neutral Buoyancy (LNB). The cloud
@@ -92,10 +101,12 @@ L_V_J_KG = 2.5e6  # latent heat of vapourisation at 0 °C
 P0_PA = 100000.0
 KAPPA_POISSON = R_DRY_AIR_J_KG_K / C_P_DRY_AIR_J_KG_K  # ≈ 0.2854
 
-# Scheme thresholds (Forster 2007 / typical Emanuel defaults).
-TRIGGER_DELTA_TV_K = 0.9  # T_threshold in Forster 2007 Eq 34
-MIN_CAPE_J_KG = 50.0  # floor on CAPE before we even consider triggering
-CLOUD_TOP_MIN_DEPTH_M = 500.0  # require at least 500 m of cloud depth (i.e. shallow → skip)
+# Thresholds of the trigger 'glide' (the default before decision 0034, kept for
+# A/B). GLIDE's own: FLEXPART's test has the opposite sign and level (the parcel
+# may be up to 0.9 K colder at ICB), and no CAPE floor or depth check.
+TRIGGER_DELTA_TV_K = 0.9  # parcel at least this much warmer at LCL+1 (trigger 'glide')
+MIN_CAPE_J_KG = 50.0  # CAPE floor (trigger 'glide')
+CLOUD_TOP_MIN_DEPTH_M = 500.0  # minimum cloud depth (trigger 'glide')
 
 # Mass-flux closure (Emanuel 1991, simplified). M_b = CLOSURE_C · ρ_LCL · w_buoy
 # where w_buoy = √(2 · CAPE_partial). The Emanuel paper gives much more
@@ -121,9 +132,10 @@ FLEXPART_DAMPS = 0.3
 BUOYANCY_MASS_FLUX_PER_K = 0.1 * FLEXPART_ALPHA / FLEXPART_DAMPS  # 0.00833 kg m-2 s-1 K-1
 BUOYANCY_DTMAX_K = 0.9
 
-# Trigger options (Decision 6, controlled study). `glide` (default): ΔT_v ≥
+# Trigger options (decision 0034). `glide` (the default before 0034): ΔT_v ≥
 # trigger_dtv_k at the level LCL+1 (or trigger_height_above_lcl_m above the LCL),
-# CAPE ≥ min_cape_j_kg. `flexpart_cloud_base`: FLEXPART 11 `convect` without memory
+# CAPE ≥ min_cape_j_kg, cloud depth ≥ min_cloud_depth_m. `flexpart_cloud_base`
+# (the default): FLEXPART 11 `convect` without memory
 # (CBMF of the previous call = 0, decision 0033): skip if the parcel at the first
 # level above the LCL (ICB, GLIDE's i_lcl) is at least DTMAX = 0.9 K colder than
 # the environment, if the buoyancy closure's M_b is not positive (DTMIN <= 0), or
@@ -131,8 +143,15 @@ BUOYANCY_DTMAX_K = 0.9
 # T < 250 K or q <= 0 (GLIDE's parcel is the surface level), moist static energy
 # with no minimum below the top two levels (IHMIN = NL - 1), PLCL outside
 # 200-2000 hPa, ICB >= NL - 1. No CAPE floor and no cloud-depth check (FLEXPART has
-# neither); `trigger_dtv_k`, `min_cape_j_kg` and `min_cloud_depth_m` apply to `glide` only.
+# neither); `trigger_dtv_k`, `min_cape_j_kg`, `min_cloud_depth_m` and
+# `trigger_height_above_lcl_m` apply to `glide` only.
 TRIGGERS = ("glide", "flexpart_cloud_base")
+GLIDE_TRIGGER_OPTIONS = (
+    "trigger_dtv_k",
+    "min_cape_j_kg",
+    "min_cloud_depth_m",
+    "trigger_height_above_lcl_m",
+)
 FLEXPART_TRIGGER_DTMAX_K = 0.9
 FLEXPART_PARCEL_T_MIN_K = 250.0
 FLEXPART_PLCL_MIN_PA = 20000.0
@@ -365,7 +384,7 @@ def compute_lcl_lnb_cape(
       convention). ``-1`` if no neutral level found.
     - ``cape``: integrated buoyancy from LFC to LNB, in J/kg.
     - ``parcel_minus_env_tv_at_lcl_plus_1``: ``T_v_parcel − T_v_env`` at level
-      LCL+1. Drives the Forster (2007) Eq 34 trigger.
+      LCL+1. Drives the trigger 'glide' (GLIDE's own form, decision 0034).
 
     Uses θ_e conservation along the moist adiabat: at every level above LCL
     we solve `lift_parcel_moist_pseudo_adiabatic` for the parcel temperature.
@@ -1123,7 +1142,7 @@ class EmanuelReducedConvection(ConvectionScheme):
         buoyancy_mass_flux_per_k: float = BUOYANCY_MASS_FLUX_PER_K,
         updraft_w_max_m_s: float = UPDRAFT_W_MAX_M_S,
         trigger_height_above_lcl_m: float | None = None,
-        trigger: str = "glide",
+        trigger: str = "flexpart_cloud_base",
     ) -> None:
         """Construct the scheme.
 
@@ -1131,12 +1150,13 @@ class EmanuelReducedConvection(ConvectionScheme):
                 closure_c: cloud-base mass-flux closure constant. Higher values →
                         more aggressive convective redistribution. Default 0.03 gives
                         `M_b ~ 0.01–0.1 kg/m²/s` for typical CAPE.
-                trigger_dtv_k: buoyancy excess (K) at LCL+1 required to trigger
-                        convection (Forster 2007 Eq 34). Default 0.9 K matches FLEXPART.
-                min_cape_j_kg: minimum CAPE (J/kg) below which convection never
-                        fires regardless of the LCL+1 buoyancy check. Default 50 J/kg.
-                min_cloud_depth_m: skip shallow convection (cloud depth < this).
-                        Default 500 m — the scheme is for DEEP convection only.
+                trigger_dtv_k: trigger ``glide`` only: buoyancy excess (K) at
+                        LCL+1 required to fire. Default 0.9 K. GLIDE's own form:
+                        FLEXPART lets the parcel be up to 0.9 K *colder* at ICB.
+                min_cape_j_kg: trigger ``glide`` only: CAPE floor (J/kg).
+                        Default 50 J/kg.
+                min_cloud_depth_m: trigger ``glide`` only: minimum cloud depth.
+                        Default 500 m.
                 closure: cloud-base mass flux. ``buoyancy`` (default, decision
                         0033): FLEXPART's steady state,
                         ``buoyancy_mass_flux_per_k·max(DTMIN, 0)``.
@@ -1147,12 +1167,16 @@ class EmanuelReducedConvection(ConvectionScheme):
                         the rate matrix), ``cfl_scaled`` (before 0033: one
                         CFL-scaled transfer per interval) or ``substeps``
                         (``n_substeps`` CFL-capped transfers per interval).
-                trigger: ``glide`` (default: ``trigger_dtv_k`` at LCL+1 or at
-                        ``trigger_height_above_lcl_m``, and ``min_cape_j_kg``) or
-                        ``flexpart_cloud_base`` (FLEXPART's tests without memory,
-                        `flexpart_cloud_base_trigger_columns`; ignores
-                        ``trigger_dtv_k``, ``min_cape_j_kg`` and
-                        ``min_cloud_depth_m``, which FLEXPART does not have).
+                trigger: ``flexpart_cloud_base`` (default, decision 0034:
+                        FLEXPART's tests without memory,
+                        `flexpart_cloud_base_trigger_columns`; it ignores
+                        ``trigger_dtv_k``, ``min_cape_j_kg``,
+                        ``min_cloud_depth_m`` and ``trigger_height_above_lcl_m``,
+                        which FLEXPART does not have, and needs closure
+                        ``buoyancy``) or ``glide`` (before 0034:
+                        ``trigger_dtv_k`` at LCL+1 or at
+                        ``trigger_height_above_lcl_m``, ``min_cape_j_kg`` and
+                        ``min_cloud_depth_m``).
         """
 
         if closure_c <= 0:
@@ -1177,10 +1201,12 @@ class EmanuelReducedConvection(ConvectionScheme):
             raise ValueError("trigger_height_above_lcl_m must be > 0 (or None)")
         if trigger not in TRIGGERS:
             raise ValueError(f"trigger must be one of {TRIGGERS}, got {trigger!r}")
-        if trigger != "glide" and trigger_height_above_lcl_m is not None:
-            raise ValueError("trigger_height_above_lcl_m applies only to trigger 'glide'")
         if trigger != "glide" and closure != "buoyancy":
-            raise ValueError("trigger 'flexpart_cloud_base' needs closure 'buoyancy' (M_b > 0)")
+            raise ValueError(
+                "trigger 'flexpart_cloud_base' (the default, decision 0034) needs closure "
+                "'buoyancy' (its DTMIN > 0 test is the closure's M_b > 0); for closure "
+                "'cape_velocity' set trigger 'glide'"
+            )
         self.trigger = trigger
         self.trigger_height_above_lcl_m = (
             None if trigger_height_above_lcl_m is None else float(trigger_height_above_lcl_m)
@@ -1282,7 +1308,7 @@ class EmanuelReducedConvection(ConvectionScheme):
                 t_col, q_col, pressure_pa, return_extra=True
             )
         dtmin = extra["dtmin"]
-        if self.trigger_height_above_lcl_m is not None:
+        if self.trigger == "glide" and self.trigger_height_above_lcl_m is not None:
             # Grid-independent trigger level (task CONV): ΔT_v at a fixed height
             # above the LCL instead of at the level LCL + 1.
             dtv = trigger_dtv_at_height_above_lcl(
@@ -1294,8 +1320,8 @@ class EmanuelReducedConvection(ConvectionScheme):
                 self.trigger_height_above_lcl_m,
             )
 
-        # Trigger (Forster 2007 Eq 34, CAPE floor, deep cloud only). Thresholds
-        # are compared in float64, as the single-column code compared Python floats.
+        # Trigger (decision 0034). Thresholds are compared in float64, as the
+        # single-column code compared Python floats.
         n_lev = t_col.shape[1]
         cloud_depth_m = (
             height_col.gather(1, i_lnb.clamp(min=0, max=n_lev - 1).unsqueeze(1))
@@ -1310,7 +1336,7 @@ class EmanuelReducedConvection(ConvectionScheme):
                 & (cloud_depth_m.double() >= self.min_cloud_depth_m)
             )
         else:
-            # FLEXPART's cloud-base trigger (Decision 6 study): no CAPE floor;
+            # FLEXPART's cloud-base trigger (decision 0034): no CAPE floor;
             # `dtv` becomes ΔT_v at ICB, the first level above the LCL.
             passes, dtv = flexpart_cloud_base_trigger_columns(
                 t_col, q_col, height_col, extra["p_lcl"], i_lcl, extra["dtv"], dtmin

@@ -44,10 +44,11 @@ from lpdm.convection.emanuel import (
 from lpdm.met_reader import HourlyMetTensors
 
 # The closure and time integration before decision 0033 (CAPE-velocity M_b, one
-# CFL-scaled transfer per interval). The tests below that pin the matrix
+# CFL-scaled transfer per interval) with the trigger before decision 0034. The
+# tests below that pin the matrix
 # construction and the column batching of task A02 select it explicitly; the
 # production defaults are covered in tests/test_convection_closure.py.
-LEGACY = {"closure": "cape_velocity", "application": "cfl_scaled"}
+LEGACY = {"closure": "cape_velocity", "application": "cfl_scaled", "trigger": "glide"}
 
 # ---------------------------------------------------------------------------
 # Registry

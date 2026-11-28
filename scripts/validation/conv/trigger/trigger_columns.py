@@ -7,7 +7,7 @@ Same met, same closure (buoyancy) and application (exponential) as the defaults;
 only the trigger differs. For each grid and met window, every column is diagnosed
 with three schemes:
 
-- ``glide``: the default trigger (ΔT_v ≥ 0.9 K at LCL+1, CAPE ≥ 50 J/kg, depth ≥ 500 m);
+- ``glide``: the trigger before decision 0034 (ΔT_v ≥ 0.9 K at LCL+1, CAPE ≥ 50 J/kg, depth ≥ 500 m);
 - ``fpcb0``: ``trigger=flexpart_cloud_base`` (no depth check, as FLEXPART);
 - ``fpcb``: the same with GLIDE's 500 m depth check added (``fpcb0`` and
   cloud depth >= 500 m; the option as first written, before the depth check
@@ -44,7 +44,7 @@ from lpdm.turbulence import get_scheme
 from lpdm.vertical_grid import default_agl_levels, stretched_agl_levels
 
 SCHEMES = {
-    "glide": dict(),
+    "glide": dict(trigger="glide"),
     "fpcb0": dict(trigger="flexpart_cloud_base"),
 }
 

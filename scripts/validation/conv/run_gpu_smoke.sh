@@ -14,7 +14,7 @@ mkdir -p "$O"
 E=convection.emanuel
 status=0
 for v in default legacy; do
-  if [ "$v" = legacy ]; then SET="$E.closure=cape_velocity $E.application=cfl_scaled"; else SET=""; fi
+  if [ "$v" = legacy ]; then SET="$E.closure=cape_velocity $E.application=cfl_scaled $E.trigger=glide"; else SET=""; fi
   /usr/bin/time -v .venv/bin/python "$W/scripts/validation/conv/run_footprint.py" \
     "$W/configs/smoke_mhd_single_release.yaml" "$O/$v" --device cuda --set $SET > "$O/$v.log" 2>&1
   rc=$?

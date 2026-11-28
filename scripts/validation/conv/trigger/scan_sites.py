@@ -41,7 +41,7 @@ def main() -> None:
         device="cpu",
         agl_levels_m=stretched_agl_levels(40, 15000.0, first_layer_m=10.0),
     )
-    glide = em.EmanuelReducedConvection()
+    glide = em.EmanuelReducedConvection(trigger="glide")
     fp = em.EmanuelReducedConvection(trigger="flexpart_cloud_base")
     spatial = SpatialBounds(
         lon_min=-2.0, lon_max=21.0, lat_min=42.0, lat_max=55.0, z_min=0.0, z_max=15000.0

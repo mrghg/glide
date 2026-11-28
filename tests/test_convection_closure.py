@@ -19,7 +19,7 @@ import torch
 from lpdm.convection import emanuel as em
 from lpdm.convection.emanuel import EmanuelReducedConvection
 
-LEGACY = {"closure": "cape_velocity", "application": "cfl_scaled"}
+LEGACY = {"closure": "cape_velocity", "application": "cfl_scaled", "trigger": "glide"}
 CPU = torch.device("cpu")
 
 
@@ -310,7 +310,7 @@ def test_production_transition_is_well_mixed_and_non_negative(application: str) 
     the layer masses stationary, is row-stochastic and has no negative entry."""
 
     met = _window(40)
-    scheme = EmanuelReducedConvection(trigger_dtv_k=0.1, application=application)
+    scheme = EmanuelReducedConvection(trigger="glide", trigger_dtv_k=0.1, application=application)
     cols = scheme.column_state(met, t_alpha=0.5, device=CPU, dtype=torch.float32)
     idx = cols.fires.nonzero().squeeze(1)
     assert idx.numel() > 0 and bool((cols.m_b[idx] > 0).all())
@@ -341,7 +341,8 @@ def test_scheme_transport_is_grid_independent_on_a_synthetic_column() -> None:
     decision 0033 leaves to a separate study.)"""
 
     new = {
-        n: _hourly_transport(EmanuelReducedConvection(trigger_dtv_k=0.1), n) for n in (23, 40, 79)
+        n: _hourly_transport(EmanuelReducedConvection(trigger="glide", trigger_dtv_k=0.1), n)
+        for n in (23, 40, 79)
     }
     old = {
         n: _hourly_transport(EmanuelReducedConvection(**LEGACY, trigger_dtv_k=0.1), n)
@@ -357,7 +358,7 @@ def test_scheme_transport_is_grid_independent_on_a_synthetic_column() -> None:
 def test_scheme_is_cadence_independent() -> None:
     """A 3-hour window moves exactly what three 1-hour windows do (same met)."""
 
-    scheme = EmanuelReducedConvection(trigger_dtv_k=0.1)
+    scheme = EmanuelReducedConvection(trigger="glide", trigger_dtv_k=0.1)
     c1 = scheme.column_state(_window(40, 1.0), t_alpha=0.5, device=CPU, dtype=torch.float64)
     c3 = scheme.column_state(_window(40, 3.0), t_alpha=0.5, device=CPU, dtype=torch.float64)
     idx = torch.tensor([0])
@@ -367,7 +368,7 @@ def test_scheme_is_cadence_independent() -> None:
 
 
 def test_run_diagnostics_count_courant_numbers_beyond_the_squaring_cap() -> None:
-    scheme = EmanuelReducedConvection(trigger_dtv_k=0.1)
+    scheme = EmanuelReducedConvection(trigger="glide", trigger_dtv_k=0.1)
     assert scheme.run_diagnostics()["closure"] == "buoyancy"
     cols = scheme.column_state(_window(40), t_alpha=0.5, device=CPU, dtype=torch.float64)
     idx = torch.tensor([0])
@@ -391,7 +392,7 @@ def test_production_defaults_move_aloft_particles_back_to_the_boundary_layer() -
 
     torch.manual_seed(20261128)
     met = _window(40)
-    scheme = EmanuelReducedConvection(trigger_dtv_k=0.1)
+    scheme = EmanuelReducedConvection(trigger="glide", trigger_dtv_k=0.1)
     cols = scheme.column_state(met, t_alpha=0.5, device=CPU, dtype=torch.float32)
     z_base = float(cols.height_m[0, int(cols.i_lcl[0])])
     z_top = float(cols.height_m[0, int(cols.i_lnb[0])])
@@ -424,7 +425,7 @@ def test_production_transition_is_the_backward_exponential_of_the_rate() -> None
     `backward_transition_matrices_exponential` of the column's rate matrix over the
     met interval: the runtime's exponential branch runs backward, not forward."""
 
-    scheme = EmanuelReducedConvection(trigger_dtv_k=0.1)
+    scheme = EmanuelReducedConvection(trigger="glide", trigger_dtv_k=0.1)
     cols = scheme.column_state(_window(40), t_alpha=0.5, device=CPU, dtype=torch.float64)
     idx = cols.fires.nonzero().squeeze(1)
     assert idx.numel() > 0
@@ -443,7 +444,7 @@ def test_backward_rows_reach_the_sub_cloud_layer_and_forward_rows_do_not() -> No
     rows put probability on the sub-cloud layers; forward, that air only subsides
     a layer or so in an hour and essentially never reaches them."""
 
-    scheme = EmanuelReducedConvection(trigger_dtv_k=0.1)
+    scheme = EmanuelReducedConvection(trigger="glide", trigger_dtv_k=0.1)
     cols = scheme.column_state(_window(40), t_alpha=0.5, device=CPU, dtype=torch.float64)
     idx = torch.tensor([0])
     lcl, lnb = int(cols.i_lcl[0]), int(cols.i_lnb[0])
@@ -461,7 +462,9 @@ def test_substeps_apply_the_interval_over_n_per_substep() -> None:
     """`substeps` is n CFL-capped transfers of M_b·Δt/n each, not of M_b·Δt."""
 
     n = 4
-    scheme = EmanuelReducedConvection(trigger_dtv_k=0.1, application="substeps", n_substeps=n)
+    scheme = EmanuelReducedConvection(
+        trigger="glide", trigger_dtv_k=0.1, application="substeps", n_substeps=n
+    )
     cols = scheme.column_state(_window(40), t_alpha=0.5, device=CPU, dtype=torch.float64)
     idx = torch.tensor([0])
     p = cols.pressure_pa[idx]
@@ -498,7 +501,7 @@ def _run_config(emanuel: dict | None):
     "emanuel",
     [
         None,
-        {"closure": "cape_velocity", "application": "cfl_scaled", "closure_c": 0.05},
+        {**LEGACY, "closure_c": 0.05},
         {"closure": "buoyancy", "application": "substeps", "n_substeps": 3},
     ],
 )
@@ -513,6 +516,7 @@ def test_main_passes_the_convection_options_to_the_scheme(emanuel: dict | None) 
     scheme = get_scheme("emanuel_reduced", **_convection_scheme_kwargs(cfg))
     e = cfg.convection.emanuel
     assert (scheme.closure, scheme.application) == (e.closure, e.application)
+    assert scheme.trigger == e.trigger
     assert scheme.closure_c == e.closure_c
     assert scheme.n_substeps == e.n_substeps
     assert scheme.buoyancy_mass_flux_per_k == e.buoyancy_mass_flux_per_k
@@ -536,4 +540,5 @@ def test_options_the_selected_closure_ignores_are_warned() -> None:
     assert len(msgs) == 3
     assert any("closure_c" in m for m in msgs) and any("n_substeps" in m for m in msgs)
     legacy = {"closure": "cape_velocity", "application": "substeps", "closure_c": 0.03}
+    legacy["trigger"] = "glide"
     assert _convection_option_warnings(_run_config({**legacy, "n_substeps": 2})) == []

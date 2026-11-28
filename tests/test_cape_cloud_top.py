@@ -212,14 +212,15 @@ def test_cape_stops_at_the_cloud_top_columns(soundings) -> None:
 
 @pytest.mark.parametrize("dtype", [torch.float64, torch.float32])
 def test_buoyancy_above_the_cloud_top_does_not_trigger(soundings, dtype) -> None:
-    """The review's regression test, through the scheme's own trigger at its
+    """The review's regression test, through the trigger 'glide' (which has the
+    CAPE floor; the default since decision 0034 has none) at its
     defaults: every other check passes in both columns, and neither fires at
     the 50 J/kg floor. (Before decision 0031 the second column had 65 J/kg and
     fired.) With the floor lowered to 30 J/kg both fire, so CAPE alone decides."""
 
     met = _window(soundings)
     cpu = torch.device("cpu")
-    scheme = EmanuelReducedConvection()
+    scheme = EmanuelReducedConvection(trigger="glide")  # the CAPE floor is glide's (0034)
     cols = scheme.column_state(met, t_alpha=0.0, device=cpu, dtype=dtype)
 
     assert cols.i_lcl.tolist() == [soundings["i_lcl"]] * 2
@@ -230,7 +231,7 @@ def test_buoyancy_above_the_cloud_top_does_not_trigger(soundings, dtype) -> None
     assert cols.cape.tolist() == pytest.approx([CAPE_BELOW_TOP] * 2, abs=1e-3)
     assert bool((cols.m_b == 0.0).all())
 
-    lower_floor = EmanuelReducedConvection(min_cape_j_kg=30.0)
+    lower_floor = EmanuelReducedConvection(trigger="glide", min_cape_j_kg=30.0)
     cols30 = lower_floor.column_state(met, t_alpha=0.0, device=cpu, dtype=dtype)
     assert cols30.fires.tolist() == [True, True]
     assert float(cols30.m_b[0]) == float(cols30.m_b[1])
@@ -407,7 +408,7 @@ def test_weak_one_level_dip_ends_the_cloud() -> None:
     assert b_no[2] > em.MIN_CAPE_J_KG
 
     met = _window({"p_pa": p, "q": q, "t": (t, t_no)})
-    cols = EmanuelReducedConvection().column_state(
+    cols = EmanuelReducedConvection(trigger="glide").column_state(
         met, t_alpha=0.0, device=torch.device("cpu"), dtype=torch.float64
     )
     assert cols.fires.tolist() == [False, True]

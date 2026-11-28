@@ -44,6 +44,7 @@ from lpdm.convection import (
 from lpdm.convection import (
     list_schemes as list_convection_schemes,
 )
+from lpdm.convection.emanuel import GLIDE_TRIGGER_OPTIONS
 from lpdm.footprint_gridder import FootprintGridder
 from lpdm.gpu_engine import (
     GPUEngine,
@@ -1559,11 +1560,13 @@ def _physics_warnings(scheme: TurbulenceScheme) -> list[str]:
 
 def _convection_option_warnings(cfg: RunConfig) -> list[str]:
     """Messages for convection options set in the config that the selected
-    closure or application ignores (decision 0033), for
+    closure, application or trigger ignores (decisions 0033 and 0034), for
     ``runtime.physics_warnings``. Warned, not refused, so old configs still run.
 
     ``closure_c`` and ``updraft_w_max_m_s`` act only with ``closure:
-    cape_velocity``; ``n_substeps`` only with ``application: substeps``.
+    cape_velocity``; ``n_substeps`` only with ``application: substeps``;
+    ``trigger_dtv_k``, ``min_cape_j_kg``, ``min_cloud_depth_m`` and
+    ``trigger_height_above_lcl_m`` only with ``trigger: glide``.
     """
 
     if cfg.convection.scheme != "emanuel_reduced":
@@ -1582,6 +1585,14 @@ def _convection_option_warnings(cfg: RunConfig) -> list[str]:
             "convection.emanuel.n_substeps is set but ignored: it applies only to "
             f"application 'substeps', and the application is {e.application!r}."
         )
+    if e.trigger != "glide":
+        for name in GLIDE_TRIGGER_OPTIONS:
+            if name in given:
+                warnings.append(
+                    f"convection.emanuel.{name} is set but ignored: it applies only to "
+                    f"trigger 'glide', and the trigger is {e.trigger!r}, which has no "
+                    "such test (decision 0034)."
+                )
     return warnings
 
 

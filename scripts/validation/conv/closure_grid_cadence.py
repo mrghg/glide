@@ -99,7 +99,9 @@ def main() -> None:
     cfg = RunConfig.from_yaml(args.config)
     store = args.zarr_store or cfg.io.zarr_store
     schemes = {
-        v: em.EmanuelReducedConvection(**VARIANTS[v], trigger_height_above_lcl_m=args.trigger_dz)
+        v: em.EmanuelReducedConvection(
+            **VARIANTS[v], trigger="glide", trigger_height_above_lcl_m=args.trigger_dz
+        )
         for v in args.variants
     }
     base = schemes[args.variants[0]]

@@ -57,7 +57,7 @@ def main() -> None:
         idx = torch.arange(u, device=dev)
         row = []
         for app in ("cfl_scaled", "exponential", "substeps"):
-            s = em.EmanuelReducedConvection(application=app)
+            s = em.EmanuelReducedConvection(application=app, trigger="glide")
             s.transition_matrices(cols, idx)
             ts = []
             for _ in range(args.repeats):
@@ -73,7 +73,7 @@ def main() -> None:
     if dev.type == "cuda":
         cols = columns(512, 40, dev)
         idx = torch.arange(512, device=dev)
-        s = em.EmanuelReducedConvection(application="exponential")
+        s = em.EmanuelReducedConvection(application="exponential", trigger="glide")
         with torch.profiler.profile(
             activities=[torch.profiler.ProfilerActivity.CUDA, torch.profiler.ProfilerActivity.CPU]
         ) as prof:

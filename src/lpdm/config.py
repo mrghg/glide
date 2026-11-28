@@ -447,17 +447,20 @@ class EmanuelConvectionConfig(_Frozen):
     trigger_dtv_k: float = Field(
         0.9,
         ge=0,
-        description="Buoyancy excess at LCL+1 required to trigger convection (Forster 2007 Eq 34, default 0.9 K).",
+        description=(
+            "Trigger 'glide' only: buoyancy excess (K) of the parcel at LCL+1 required to fire "
+            "(GLIDE's own form; FLEXPART lets the parcel be up to 0.9 K colder at ICB)."
+        ),
     )
     min_cape_j_kg: float = Field(
         50.0,
         ge=0,
-        description="CAPE floor below which convection never fires regardless of trigger check.",
+        description="Trigger 'glide' only: CAPE floor (J/kg) below which convection never fires.",
     )
     min_cloud_depth_m: float = Field(
         500.0,
         ge=0,
-        description="Skip shallow convection (cloud depth < this). This scheme is for DEEP convection.",
+        description="Trigger 'glide' only: skip clouds shallower than this (m).",
     )
     # Closure and time integration (decision 0033). The defaults are FLEXPART's
     # steady-state buoyancy closure applied exactly over the met interval; the
@@ -492,33 +495,33 @@ class EmanuelConvectionConfig(_Frozen):
         None,
         gt=0,
         description=(
-            "If set, test the ΔT_v trigger at this height above the LCL (interpolated) "
-            "instead of at the level LCL+1, whose height depends on the vertical grid."
+            "Trigger 'glide' only: if set, test ΔT_v at this height above the LCL "
+            "(interpolated) instead of at the level LCL+1, whose height depends on the "
+            "vertical grid."
         ),
     )
+    # Trigger (decision 0034). The default is FLEXPART's cloud-base test without
+    # memory; "glide" is the trigger before 0034, kept for A/B (trigger_dtv_k,
+    # min_cape_j_kg, min_cloud_depth_m and trigger_height_above_lcl_m apply only to it).
     trigger: Literal["glide", "flexpart_cloud_base"] = Field(
-        "glide",
+        "flexpart_cloud_base",
         description=(
-            "'glide': ΔT_v ≥ trigger_dtv_k at LCL+1 and CAPE ≥ min_cape_j_kg. "
-            "'flexpart_cloud_base': FLEXPART 11's tests without memory (parcel not "
-            "0.9 K colder than the environment at the first level above the LCL, "
-            "DTMIN > 0, and its other skip conditions); no CAPE floor and no depth "
-            "check (trigger_dtv_k, min_cape_j_kg and min_cloud_depth_m apply to 'glide' "
-            "only). Needs closure 'buoyancy'."
+            "'flexpart_cloud_base' (default, decision 0034): FLEXPART 11's tests without "
+            "memory (the parcel not 0.9 K or more colder than the environment at the first "
+            "level above the LCL, DTMIN > 0, and FLEXPART's other skip conditions); no CAPE "
+            "floor and no depth check. Needs closure 'buoyancy'. 'glide' (before 0034): "
+            "ΔT_v ≥ trigger_dtv_k at LCL+1, CAPE ≥ min_cape_j_kg, depth ≥ min_cloud_depth_m."
         ),
     )
 
     @model_validator(mode="after")
     def _check_trigger(self) -> EmanuelConvectionConfig:
-        if self.trigger != "glide":
-            if self.closure != "buoyancy":
-                raise ValueError(
-                    "convection.emanuel.trigger 'flexpart_cloud_base' needs closure 'buoyancy'"
-                )
-            if self.trigger_height_above_lcl_m is not None:
-                raise ValueError(
-                    "convection.emanuel.trigger_height_above_lcl_m applies only to trigger 'glide'"
-                )
+        if self.trigger != "glide" and self.closure != "buoyancy":
+            raise ValueError(
+                "convection.emanuel.trigger 'flexpart_cloud_base' (the default, decision "
+                "0034) needs closure 'buoyancy'; for closure 'cape_velocity' set "
+                "convection.emanuel.trigger: glide"
+            )
         return self
 
 

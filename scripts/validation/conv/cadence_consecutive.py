@@ -60,7 +60,9 @@ def main() -> None:
         lon0, lon1, lat0, lat1 = args.met_domain
         bounds = replace(bounds, lon_min=lon0, lon_max=lon1, lat_min=lat0, lat_max=lat1)
     schemes = {
-        v: em.EmanuelReducedConvection(**kw, trigger_height_above_lcl_m=args.trigger_dz)
+        v: em.EmanuelReducedConvection(
+            **kw, trigger="glide", trigger_height_above_lcl_m=args.trigger_dz
+        )
         for v, kw in VARIANTS.items()
     }
     totals = {v: [0.0, 0.0] for v in VARIANTS}

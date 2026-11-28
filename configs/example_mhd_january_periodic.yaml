@@ -67,9 +67,7 @@ convection:                              # deep convection (Emanuel & Živković
   scheme: emanuel_reduced                #   reduced port of FLEXPART convect43c.f, per Forster 2007
   emanuel:                               #   reduced port of FLEXPART convect43c.f, per Forster 2007
     closure: buoyancy                    # FLEXPART's steady-state cloud-base mass flux, 0.00833 kg/m²/s per K of DTMIN (decision 0033)
-    # trigger_dtv_k: 0.9                 # Forster 2007 Eq 34 buoyancy threshold (default)
-    # min_cape_j_kg: 50.0                # skip if CAPE < this
-    # min_cloud_depth_m: 500.0           # skip shallow convection (this scheme is for DEEP convection)
+    # trigger: flexpart_cloud_base      # FLEXPART's cloud-base trigger, no memory (default, decision 0034)
 
 # Output footprint grid: aligned cell-for-cell with the FLEXPART reference fixture.
 # Bounds are *outer cell edges*; n_x equal cells fill the interval.
