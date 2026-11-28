@@ -29,6 +29,7 @@ from lpdm.turbulence import HannaScheme
 M_LAT = 110540.0  # metres per degree of latitude (GPUEngine)
 M_LON = 111320.0  # metres per degree of longitude at the equator (GPUEngine)
 STABLE = (400.0, 0.3, -20.0)  # h (m), u* (m/s), sensible heat flux (W m-2)
+NEUTRAL = (300.0, 0.4, 0.0)
 CONVECTIVE = (1500.0, 0.3, 200.0)
 
 
@@ -410,65 +411,93 @@ def test_wind_turning_through_calm_keeps_velocity_statistics_and_adds_no_drift(
 # --- a spatially turning wind with a calm centre ---------------------------------------
 
 
-def test_vortex_with_a_calm_centre_loses_only_the_derived_neglected_drift_term() -> None:
-    """Horizontal homogeneity in a vortex (u = −Ωy, v = Ωx, Ω = 4.5e-4 s⁻¹, calm
-    within ~1.3 km of the centre), uniform stable turbulence, particles uniform in
-    the column and over ±3.2 km, no advection, 1 h.
+VORTEX_OMEGA = 9e-4  # s-1: calm (speed <= sigma_u) within ~0.9 km of the centre
+VORTEX_HALF_M = 5000.0  # particles start uniform over +-5 km
+VORTEX_DISK_M = 2400.0  # the calm region plus ~0.8 km of diffusion from it
+VORTEX_RING_M = (2400.0, 3200.0)  # outside it, 1.8 km from the box edge (diffusion ~0.8 km)
 
-    GLIDE has no horizontal well-mixed drift (∇·K), so its horizontal transport is
-    ∂c/∂t = ∂i∂j(K_ij c) in the diffusion limit. With K aligned to the wind,
-    K = K_v I + (K_u − K_v) t tᵀ (t the unit tangent), ∂i∂j K_ij is zero everywhere
-    except at the calm centre, where it is a point sink of strength 2π(K_u − K_v),
-    whatever the calm treatment (decision 0032, derived). So: (i) outside the calm
-    region, the occupancy stays uniform; (ii) the disk of 1.8 km round the centre
-    loses 2π⟨K_u − K_v⟩ t c particles, ⟨⟩ over the well-mixed column. A wrong sense
-    of rotation (K_u radial) gives a gain of about the same size (planted, +627
-    against −740). The deficit does not depend on the calm treatment, so a fault
-    there is the turning test's to catch. Tolerances: 4 standard deviations of the
-    count change, binomial over the particles that cross the disk edge (estimated
-    in the test)."""
 
-    n, steps, dt, half_m = 200_000, 60, 60.0, 3200.0
-    blh, ustar, shf = STABLE
-    omega = 4.5e-4
+def _vortex_run(
+    frame: str,
+    seed: int,
+    *,
+    regime: tuple[float, float, float] = NEUTRAL,
+    n: int = 156_250,
+    steps: int = 60,
+    dt: float = 60.0,
+):
+    """One run of the vortex case; returns (disk change, its sd, expected disk change,
+    ring change, its sd). Changes are particle counts after - before; sd is the
+    square root of the number of particles that crossed the region's edge."""
+
+    blh = regime[0]
     half_deg, ng = 0.1, 21
     lon = torch.linspace(-half_deg, half_deg, ng)
     lat = torch.linspace(-half_deg, half_deg, ng)
-    u = (-omega * lat * M_LAT).view(ng, 1).expand(ng, ng)
-    v = (omega * lon * M_LON).view(1, ng).expand(ng, ng)
-    met = _met(u, v, half_deg=half_deg, n=ng)
+    u = (-VORTEX_OMEGA * lat * M_LAT).view(ng, 1).expand(ng, ng)
+    v = (VORTEX_OMEGA * lon * M_LON).view(1, ng).expand(ng, ng)
+    met = _met(u, v, half_deg=half_deg, n=ng, regime=regime)
 
-    gen = torch.Generator().manual_seed(5)
+    gen = torch.Generator().manual_seed(seed)
     p = _particles(n, torch.rand(n, generator=gen) * blh)
-    p[:, 0] = (torch.rand(n, generator=gen) * 2 - 1) * half_m / M_LON
-    p[:, 1] = (torch.rand(n, generator=gen) * 2 - 1) * half_m / M_LAT
-    x0, y0 = _metres(p)
-    r0 = torch.hypot(x0, y0)
-    scheme = HannaScheme(horizontal_frame="wind", static_substeps=False)
-    p, _ = _run(scheme, met, p, steps=steps, dt=dt, seed=6)
-    x1, y1 = _metres(p)
-    r1 = torch.hypot(x1, y1)
+    p[:, 0] = (torch.rand(n, generator=gen) * 2 - 1) * VORTEX_HALF_M / M_LON
+    p[:, 1] = (torch.rand(n, generator=gen) * 2 - 1) * VORTEX_HALF_M / M_LAT
+    r0 = torch.hypot(*_metres(p))
+    scheme = HannaScheme(horizontal_frame=frame, static_substeps=False)
+    p, _ = _run(scheme, met, p, steps=steps, dt=dt, seed=seed + 1)
+    r1 = torch.hypot(*_metres(p))
 
-    # ⟨K_u − K_v⟩ over the column, from the scheme's own profile (T_L floors on).
-    z = torch.linspace(0.5, blh - 0.5, 4000)
-    one = torch.ones_like(z)
-    obukhov = H.obukhov_length(ustar * one, shf * one, 280.0 * one, 101325.0 * one)
-    su, sv, _, tu, tv, _ = H.in_bl_sigma_TL(
-        z.clamp(min=scheme.z_ubl_m), blh * one, ustar * one, 0 * one, blh / obukhov, 0 * one
-    )
-    tu, tv = tu.clamp(min=H.T_LU_FLOOR_FLEXPART_S), tv.clamp(min=H.T_LV_FLOOR_FLEXPART_S)
-    dk = float((su.pow(2) * tu - sv.pow(2) * tv).mean())
-    conc = n / (2 * half_m) ** 2
-    expected = -2 * math.pi * dk * steps * dt * conc
+    # The derived sink is 2π·½(Var_along − Var_cross)·c: the along-wind minus
+    # cross-wind displacement variance after the same time, from rest, of particles
+    # started the same way in the same column, measured in a uniform eastward wind
+    # (a companion run; the model's own effective K_u − K_v, including how u′ and v′
+    # follow the particles' vertical motion, which a column average of σ²T_L misses).
+    expected = 0.0
+    if frame == "wind":
+        nc = 40_000
+        gen = torch.Generator().manual_seed(seed + 2)
+        pc = _particles(nc, torch.rand(nc, generator=gen) * blh)
+        # A fresh scheme: its per-window field cache is keyed by the window's time.
+        companion = HannaScheme(horizontal_frame=frame, static_substeps=False)
+        pc, _ = _run(
+            companion, _met(5.0, 0.0, regime=regime), pc, steps=steps, dt=dt, seed=seed + 3
+        )
+        xc, yc = _metres(pc)
+        dvar = float(xc.var() - yc.var())
+        expected = -2 * math.pi * 0.5 * dvar * n / (2 * VORTEX_HALF_M) ** 2
 
     def change(lo: float, hi: float) -> tuple[float, float]:
         before = (r0 >= lo) & (r0 < hi)
         after = (r1 >= lo) & (r1 < hi)
-        crossed = int((before ^ after).sum())
-        return float(after.sum() - before.sum()), math.sqrt(crossed)
+        return float(after.sum() - before.sum()), math.sqrt(int((before ^ after).sum()))
 
-    d_disk, sd_disk = change(0.0, 1800.0)
+    d_disk, sd_disk = change(0.0, VORTEX_DISK_M)
+    d_ring, sd_ring = change(*VORTEX_RING_M)
+    return d_disk, sd_disk, expected, d_ring, sd_ring
+
+
+def test_vortex_with_a_calm_centre_loses_only_the_derived_neglected_drift_term() -> None:
+    """Horizontal homogeneity in a vortex (u = −Ωy, v = Ωx, Ω = 9e-4 s⁻¹, so calm,
+    |U| ≤ σ_u, within ~0.9 km of the centre), uniform neutral turbulence (h 300 m,
+    u* 0.4 m/s: σ_u/σ_v ≈ 1.5, T_L ≤ ~5 min), particles uniform in the column and
+    over ±5 km, no advection, 1 h.
+
+    GLIDE has no horizontal well-mixed drift (∇·K), so its horizontal transport is
+    ∂c/∂t = ∂i∂j(K_ij c) in the diffusion limit. With K aligned to the wind,
+    K = K_v I + (K_u − K_v) t tᵀ (t the unit tangent), ∂i∂j K_ij is zero everywhere
+    outside the calm region and integrates to −2π(K_u − K_v) over it, whatever the
+    calm treatment (decision 0032, derived). So: (i) a ring outside the calm region
+    keeps its particles; (ii) the disk round the centre loses 2π·½ΔVar·c
+    particles, ΔVar the along-wind minus cross-wind displacement variance over the
+    same hour, measured in a uniform wind (``_vortex_run``). The neutral column keeps
+    T_L ≪ 1 h, where the diffusion limit holds; in a stable column (T_Lu up to ~30
+    min near h) the deficit was ~0.75 of this (decision 0032). A wrong sense of
+    rotation (K_u radial) gives a gain of about the same size instead (planted:
+    caught). The deficit does not depend on the calm treatment, so a fault there is
+    the turning test's to catch. Tolerance: 4 standard deviations of each count
+    change; calibration over seeds in the decision record."""
+
+    d_disk, sd_disk, expected, d_ring, sd_ring = _vortex_run("wind", seed=5)
+    assert expected < -4 * sd_disk  # the test resolves the effect it checks
     assert d_disk == pytest.approx(expected, abs=4 * sd_disk), (d_disk, expected, sd_disk)
-    assert expected < -3 * sd_disk  # the test resolves the effect it checks
-    d_ring, sd_ring = change(1800.0, 2500.0)  # outside the calm region: no source
     assert abs(d_ring) < 4 * sd_ring, (d_ring, sd_ring)

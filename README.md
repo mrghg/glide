@@ -208,6 +208,14 @@ runs compared with FLEXPART and NAME set 100 and 4500, as those models do
 ([docs/turbulence.md](docs/turbulence.md) §2). An unset
 `turbulence.meander.timescale_seconds` is half the store's met interval.
 
+**`turbulence.horizontal_frame`** (`grid` or `wind`) sets which way the Hanna
+scheme's along-wind and cross-wind turbulence statistics point. `grid`, the
+default, applies them east and north whatever the wind, as GLIDE always has;
+`wind` applies them along and across the local mean wind, as FLEXPART does. It
+changes stable and neutral dispersion only. `wind` is proposed as the default and
+awaits a decision ([decision 0032](dev/decisions/0032-wind-aligned-horizontal-turbulence.md),
+[docs/physics.md](docs/physics.md) §3.4).
+
 **`batch.max_releases_per_batch`** controls how many releases are integrated
 together in one engine pass, and it is the main memory lever. Keep it a multiple
 of the site count for multi-site runs; `make_multisite_config.py` sizes it

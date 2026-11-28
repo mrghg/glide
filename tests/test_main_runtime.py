@@ -1928,7 +1928,8 @@ def test_step_profiler_captures_window_and_exits(tmp_path: Path, monkeypatch) ->
     assert trace.exists() and trace.stat().st_size > 0  # trace was written before exit
 
 
-def test_step_core_traces_as_one_graph_no_breaks() -> None:
+@pytest.mark.parametrize("frame", ["grid", "wind"])
+def test_step_core_traces_as_one_graph_no_breaks(frame: str) -> None:
     """The whole per-step core must trace as ONE graph (no graph breaks) so it captures
     as a single CUDA graph on GPU — otherwise the eager glue between sub-graphs keeps the
     run launch-bound (the phase-4 failure mode). `fullgraph=True` + `backend="eager"`
@@ -1947,7 +1948,8 @@ def test_step_core_traces_as_one_graph_no_breaks() -> None:
     torch._dynamo.config.suppress_errors = False  # make breaks raise, don't swallow
     try:
         engine = GPUEngine(device="cpu")
-        scheme = HannaScheme(meander_enabled=True, n_substeps=4)  # meander on → trace that path too
+        # meander on → trace that path too; both horizontal frames (decision 0032)
+        scheme = HannaScheme(meander_enabled=True, n_substeps=4, horizontal_frame=frame)
         met = _wmc_met_window(blh_m=2000.0, ustar_m_s=0.4)
 
         n = 48
@@ -1980,7 +1982,8 @@ def test_step_core_traces_as_one_graph_no_breaks() -> None:
         torch._dynamo.reset()
 
 
-def test_step_core_does_not_recompile_per_step() -> None:
+@pytest.mark.parametrize("frame", ["grid", "wind"])
+def test_step_core_does_not_recompile_per_step(frame: str) -> None:
     """The compiled core must NOT recompile as `alpha` and the met-field VALUES change
     step to step (only shapes/grid are constant). Passing `alpha` (the RK2-midpoint
     weight, different every step) as a Python float would specialize the graph per value
@@ -2000,7 +2003,7 @@ def test_step_core_does_not_recompile_per_step() -> None:
     torch._dynamo.config.error_on_recompile = True
     try:
         engine = GPUEngine(device="cpu")
-        scheme = HannaScheme(meander_enabled=True, n_substeps=4)
+        scheme = HannaScheme(meander_enabled=True, n_substeps=4, horizontal_frame=frame)
         n = 48
         compiled = torch.compile(scheme._step_core, fullgraph=True, backend="eager")
 
