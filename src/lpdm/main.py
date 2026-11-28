@@ -1342,6 +1342,12 @@ def _convection_scheme_kwargs(cfg: RunConfig) -> dict[str, object]:
         "trigger_dtv_k": e.trigger_dtv_k,
         "min_cape_j_kg": e.min_cape_j_kg,
         "min_cloud_depth_m": e.min_cloud_depth_m,
+        "closure": e.closure,
+        "application": e.application,
+        "n_substeps": e.n_substeps,
+        "buoyancy_mass_flux_per_k": e.buoyancy_mass_flux_per_k,
+        "updraft_w_max_m_s": e.updraft_w_max_m_s,
+        "trigger_height_above_lcl_m": e.trigger_height_above_lcl_m,
     }
 
 
