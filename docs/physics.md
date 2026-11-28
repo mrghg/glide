@@ -357,6 +357,34 @@ depending on the sub-step. The jump is handled instead by the interface rule
 of §5. (The optional surface layer's seam at $0.1h$ is still differenced
 across; it is off by default.)
 
+**Where the stencil is replaced by the analytic gradient** (decision 0030). A
+boundary-layer particle whose stencil is cut at $h$ ($z + \delta > h$) or
+touches the floor $\sigma_{\min}$ = `SIGMA_MIN_M_S` = 1 mm s⁻¹ (at either
+probe or at the particle) takes the analytic $\partial\sigma_w^2/\partial z$
+of the floored profile $\max(\sigma_H, \sigma_{\min})$ instead
+(`in_bl_dsigw2_dz`: the regime formula's derivative, zero where the floor
+binds). Every other particle keeps the stencil, bit for bit. In a stable
+boundary layer $\sigma_H = 1.3u_\ast(1 - z/h)$ reaches the floor a depth
+$d = \sigma_{\min}h/(1.3u_\ast)$ below $h$, and the stencil was wrong there
+twice over: it differenced across the floor's corner, putting a drift inside
+the floor layer where $\sigma_w$ is flat, and when $d < \delta$ (44% of
+stable ERA5 columns over Europe) the stencil cut at $h$ returned the gradient
+up to $\delta/2$ lower down, where it is several times larger. In a column
+with $d$ = 0.68 m the ratio of downward to upward exchange across $h$ was
+3.6–3.9 and fell only 16% from 16 to 64 sub-steps (upward transfer out of
+the boundary layer was suppressed about 3.7-fold); with the analytic
+gradient it is 1.14–1.18 at 16 sub-steps and 0.97–1.07 at 64, a first-order
+sub-step residual (two harnesses, decision 0030; the gate in
+`tests/test_sigma_floor_gradient.py`). With the optional surface-layer
+override on, the stencil is used everywhere, $h$ and the floor included.
+
+Once the gradient is right, the floor is what sets turbulent exchange across a
+stable $h$: the Hanna profile has none, and the interface (§5) passes
+$\sigma_{\min}/\sqrt{2\pi}$, 0.4 mm s⁻¹, each way. Exchange scales with
+$\sigma_{\min}$ below about 10⁻² m s⁻¹ (0.11, 1 and 6 times the 10⁻³ value at
+10⁻⁴, 10⁻³ and 10⁻²). FLEXPART floors at 10⁻⁶ and reflects
+at $h$ instead. The floor is kept at 10⁻³ m/s; choosing its value from physics or data is left for after the freeze (decision 0030).
+
 **The density term** exists because the well-mixed condition is enforced in
 Cartesian $z$, but the equilibrium distribution of air is $\propto \rho(z)$. Over
 a deep boundary layer $\rho$ at the top can be 20% below the surface value.
@@ -1171,6 +1199,7 @@ Stated plainly, because they bound what the model can be trusted for.
 | Gaussian vertical velocity PDF everywhere — no skewed convective-boundary-layer PDF | Under-represents the updraft/downdraft asymmetry of a strongly convective BL. Thomson (1987, §5.2) found ground-level concentration relatively insensitive to skewness even where dispersion aloft is sensitive, so this is defensible for a surface-flux footprint model — but it is a modelling choice, not a free lunch. |
 | A fixed sub-step count, $n = 16$ at $\Delta t = 60$ s (3.75 s) | Near-surface well-mixed error, closed boundary layer: +3.9% / +4.0% (stable, lowest 5% / 0–40 m), +0.4% / +0.7% (neutral), −2.9% / −3.6% (convective), particle noise about ±1% (§6); the same first-order error leaves the top 50 m of a stable boundary layer 3% short. In the free troposphere $T_{Lw}$ can fall below the sub-step; how often is recorded per run (`runtime.substep_exceedance`). |
 | The boundary-layer top is a jump of $\sigma_w$ and $T_{Lw}$ to the free-troposphere closure, treated as a Thomson–Physick–Maryon interface (§5, decision 0028) | Well-mixed-consistent for any sub-step if $\sigma$ were constant on each side; the interface does not smooth the jump, which is a property of the two parameterisations, not of the atmosphere. $h$ is fixed per particle within an outer step. Horizontal velocities are scaled on transmission like $w'$. The optional surface layer's seam at $0.1h$ is not treated as an interface. |
+| Turbulent exchange across a stable boundary-layer top is set by the numerical floor $\sigma_{\min}$ = 1 mm s⁻¹ (§3.3, decision 0030) | The Hanna profile vanishes at a stable $h$, so the floor, through the interface, passes $\sigma_{\min}/\sqrt{2\pi}$ (0.4 mm s⁻¹) each way; exchange scales with $\sigma_{\min}$ below about 10⁻² m s⁻¹. The value was chosen for numerical safety, not as a physical exchange rate; FLEXPART reflects at $h$ instead. Open question. |
 | Turbulence support fields ($\rho$, free-troposphere $\sigma/T_L$, meander $\sigma$) built once per meteorology hour at the window midpoint | A met-cadence approximation (<1%/hr drift), matching how FLEXPART-class models refresh turbulence fields. Per-particle interpolation through those fields is unchanged. |
 | Deep convection assigns each particle to the nearest meteorology column | Each (lon, lat) column has its own parcel lift, trigger and matrix (task A02), fired once per meteorology interval read from the store. A particle near a column boundary takes the nearest column's matrix rather than a blend. See [convection.md](convection.md) §1 and §7. |
 | Each step's residence is counted from at most two positions: the step's end (`output_grid.deposition.position: endpoint`, the default) or half at each end (`trapezoid`; decision 0029) | The cell indicator is sampled at 60 s, so a particle crossing a cell or bin edge during a step is credited by where its sample points fall, not by when it crossed. Scored against fine-time residence on the same trajectories (§7): `endpoint` misses the first half step at the release point (−10.8% in the receptor's 0–40 m cell and −1.25% on the 0–40 m total of the smoke run) and is otherwise within ±0.2%; the removed `step_mean` undercounted the 0–40 m layer wherever a step's vertical displacement is comparable to it (−3 to −5% outside the receptor's cell on the smoke run, up to −15% in strong turbulence); `trapezoid` is within 0.5% in every region scored. Where cells are only a few steps wide, single crossings leave errors of a few per cent per cell for every rule (±2% with 1 km cells at 3 m s⁻¹), and with deterministic along-wind motion (the analytic plume) they alias. |

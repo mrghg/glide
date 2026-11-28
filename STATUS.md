@@ -16,7 +16,7 @@ _Last updated: 2026-11-25._
 
 | Area | State |
 | --- | --- |
-| **Core backward LPDM** | RK2 advection, exact-OU Langevin turbulence with the full Thomson well-mixed drift and Stohl–Thomson density correction, ground reflection, turbulence sub-stepping with one fixed count for every particle (16 at the 60 s step), every coefficient re-evaluated each sub-step (decision 0027); the boundary-layer top treated as a Thomson–Physick–Maryon interface (decision 0028). Mass-conserving. ([docs/physics.md](docs/physics.md)) |
+| **Core backward LPDM** | RK2 advection, exact-OU Langevin turbulence with the full Thomson well-mixed drift and Stohl–Thomson density correction, ground reflection, turbulence sub-stepping with one fixed count for every particle (16 at the 60 s step), every coefficient re-evaluated each sub-step (decision 0027); the boundary-layer top treated as a Thomson–Physick–Maryon interface (decision 0028), with the analytic drift gradient where the stencil is cut at $h$ or meets the σ_w floor (decision 0030; the floor's value, which sets exchange across a stable $h$, is open). Mass-conserving. ([docs/physics.md](docs/physics.md)) |
 | **Turbulence** | Hanna (1982) in three regimes, aligned to FLEXPART v11; gradient-Richardson free-troposphere closure; Maryon meander. Behind a swappable `TurbulenceScheme` interface. ([docs/turbulence.md](docs/turbulence.md)) |
 | **Convection** | Reduced Emanuel mass-flux scheme, non-divergent matrix, in each meteorology column, once per meteorology interval. ([docs/convection.md](docs/convection.md)) |
 | **Terrain-following vertical coordinate** | Meteorology resampled onto a fixed AGL grid per window, with slope-corrected vertical velocity. Fixed the zero-surface-footprint problem over high terrain. |
