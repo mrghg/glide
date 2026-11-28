@@ -245,3 +245,8 @@ trigger's sign and level relative to FLEXPART (GLIDE requires the parcel to be
 *colder* at $i_{\mathrm{LCL}}$) is a further difference found here, recorded
 for Matt and not changed; the code attributes GLIDE's form to Forster (2007)
 Eq. 34, which could not be checked.
+
+The open question on the cap and the CFL scale was settled by
+[0033](0033-buoyancy-closure-exact-exponential.md) (28 Nov 2026): FLEXPART's
+steady-state buoyancy closure, applied as the exact exponential over the met
+interval, replaces both as the default.

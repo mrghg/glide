@@ -52,8 +52,10 @@ The runtime tracks the current meteorology bracket's start time and fires
 convection exactly once whenever the cursor crosses into a new bracket. A
 bracket is one time step of the meteorology store (`reader.met_interval_seconds`,
 measured from the store's time coordinate): 3,600 s on hourly ERA5, 10,800 s on a
-3-hourly source. The mass flux is scaled by that interval (§4), so the scheme
-follows the store's cadence.
+3-hourly source. The transition each event applies is the exact exponential of
+the convective rate over that interval (§6, decision
+[0033](../dev/decisions/0033-buoyancy-closure-exact-exponential.md)), so one
+3-hourly event moves what three hourly ones would on the same meteorology.
 
 **Columns.** Each event works on every column of the meteorology window at once:
 the profiles are tensors of shape [columns, levels], interpolated in time to the
@@ -187,49 +189,53 @@ control test asserts it does **not** fire on a stable winter sounding
 
 ## 4. Cloud-base mass flux
 
+Since decision [0033](../dev/decisions/0033-buoyancy-closure-exact-exponential.md)
+(28 Nov 2026) the cloud-base mass flux is FLEXPART's, in its steady state:
+
 $$
-w_{\text{buoy}} = \min\left(\sqrt{2\ \mathrm{CAPE}},\ 5\ \mathrm{m\ s^{-1}}\right),
+M_b = k\ \max(\mathrm{DTMIN},\ 0),
 \qquad
-M_b = c_{\text{closure}} \  \rho_{\mathrm{LCL}} \  w_{\text{buoy}}
+k = \frac{0.1\ \alpha}{\mathrm{DAMPS}} = \frac{0.1 \times 0.025}{0.3}
+= 0.00833\ \mathrm{kg\ m^{-2}\ s^{-1}\ K^{-1}}
 $$
 
-with $c_{\text{closure}} = 0.03$ by default, evaluated in each column with that
-column's CAPE and its environmental temperature and pressure at the LCL level. One
-event moves $M_b\,\Delta t_{\mathrm{met}}$ per unit area, where
-$\Delta t_{\mathrm{met}}$ is the meteorology interval (§1).
+$$
+\mathrm{DTMIN} = \Delta T_v(\mathrm{LCL}) + 0.9\ \mathrm{K} + \overline{\Delta T_v}_{\text{sub-cloud}}
+$$
 
-**At the defaults the cap binds in every column that fires.** It is reached at
-$\mathrm{CAPE} = 12.5\ \mathrm{J\ kg^{-1}}$ and the trigger needs
-$50\ \mathrm{J\ kg^{-1}}$, so a firing column always has
-$M_b = 5\,c_{\text{closure}}\,\rho_{\mathrm{LCL}}$: CAPE decides only *whether*
-a column convects, and $M_b$ varies between columns only through
-$\rho_{\mathrm{LCL}}$.
+where $\Delta T_v$ is the parcel's virtual-temperature excess over its
+environment.
+- $\Delta T_v(\mathrm{LCL})$ is interpolated linearly in pressure to the LCL, between the levels either side of it.
+- $\overline{\Delta T_v}_{\text{sub-cloud}}$ is its layer-mass-weighted mean over the levels below the LCL.
 
-**And the CFL cap of §5 binds as well, so neither sets the transport.** On ERA5
-over Europe it binds in more than 99% of firing columns, with a median scale of
-0.13 (January) and 0.25 (summer). In those columns the layer that limits was
-the one just below the LCL, $i_{\mathrm{LCL}} - 1$ (in general the scale is set
-by the largest fractional outflux over all rows, so a thin cloud layer can limit
-instead; decision 0031 gives a constructed counter-example): it passes on the whole updraft flux
-(its own entrainment plus the subsidence from the boundary layer below it), so
-it sheds $M_b\,\Delta t_{\mathrm{met}}$, and the scaled matrix entrains exactly
-$0.9\,m_{i_{\mathrm{LCL}}-1}$ per event. The mass a firing column moves in one
-event therefore depends on the vertical grid (the thickness of that layer) and
-on the meteorology cadence (one event per window), not on CAPE, $M_b$ or
-$c_{\text{closure}}$. On 80 levels instead of 40 the median mass per event
-falls from 79 to 37 kg m⁻², and about half as many columns fire. These are
-open questions about the closure, to be settled before the physics freeze; an
-external review raised them in November 2026, and they are recorded with what
-FLEXPART does in
-[decision 0031](../dev/decisions/0031-cape-bounded-at-the-cloud-top.md). The
-closure is not changed.
+This is the quantity Emanuel's scheme as FLEXPART 11 runs it relaxes towards (`convect` in
+`conv_mod.f90`: `CBMF = (1 − DAMPS)·CBMF + 0.1·ALPHA·DTMA`, with ALPHA = 0.025,
+and DAMPS = 0.3 whatever the time step). GLIDE computes DTMIN from its own surface
+parcel (`cloud_base_buoyancy_excess_columns`).
 
-The cap on $w_{\text{buoy}}$ is not decoration. Without it,
-$\mathrm{CAPE} > 500\ \mathrm{J\ kg^{-1}}$ gives
-$w_{\text{buoy}} > 30\ \mathrm{m\ s^{-1}}$ and an $M_b$ far outside FLEXPART's
-realistic $0.05\text{–}0.5\ \mathrm{kg\ m^{-2}\ s^{-1}}$ range.
-5 m s⁻¹ represents a typical updraft-cell peak rather than the rare 15 m s⁻¹
-extreme. This stands in for the full Emanuel quasi-equilibrium closure (§7).
+**How it compares with FLEXPART.** In GLIDE's firing columns, FLEXPART's own
+`convect`, run on the same ERA5 hours, gives a median CBMF of 0.0184 (January) and
+0.0197 kg m⁻² s⁻¹ (July 2019); GLIDE gives 0.0179 and 0.0188. Over every column
+where both are positive the correlation is 0.95 and the median ratio is 1.01–1.02.
+
+**No memory.** FLEXPART remembers CBMF per column between calls. GLIDE
+uses the steady state, a function of the meteorology alone, because a
+backward model visits the hours in reverse (decision 0033).
+
+The transport per unit time is $M_b$. It no longer depends on the vertical grid
+or the met cadence, as it did under the closure below (§6).
+
+**The closure before decision 0033** (`closure: cape_velocity`, kept for A/B) was
+
+$$
+M_b = c_{\text{closure}} \  \rho_{\mathrm{LCL}} \  \min\left(\sqrt{2\ \mathrm{CAPE}},\ 5\ \mathrm{m\ s^{-1}}\right),
+\qquad c_{\text{closure}} = 0.03,
+$$
+
+applied as one transfer of $M_b\,\Delta t_{\mathrm{met}}$ with the CFL scale of §5
+(`application: cfl_scaled`).
+- The cap binds in every firing column, so $M_b = 0.15\,\rho_{\mathrm{LCL}} \approx 0.17$ kg m⁻² s⁻¹, about ten times FLEXPART's.
+- The CFL scale then binds in more than 99% of firing columns: an event moves $0.9\,m_{i_{\mathrm{LCL}}-1}$, set by the thickness of the layer below cloud base and by the cadence (decisions 0031 and 0033).
 
 ---
 
@@ -286,11 +292,13 @@ $$
 and the environment sinks at the same rate, adding $\Phi_k$ to
 $\mathrm{fmass}[k+1, k]$ — a sub-diagonal term.
 
-**CFL cap.** Finally the whole matrix is scaled by a **single scalar** if any
+**CFL cap (only with `application: cfl_scaled`, before decision 0033).** With the
+default exponential application (§6) the matrix is a rate and is not scaled.
+In the single-transfer application the whole matrix is scaled by a **single scalar** if any
 layer would shed more than 90% of its mass in one event. One scalar, so
 non-divergence survives, and so the "stay" diagonal of §6 stays non-negative.
-At the defaults this cap binds in almost every firing column, at the layer just
-below the LCL, so it sets how much one event moves (§4). FLEXPART has no
+With the closure before 0033 this cap bound in almost every firing column, at the
+layer just below the LCL, so it set how much one event moved (§4). FLEXPART has no
 counterpart: its `convect` flags a CFL violation (`IFLAG = 4`), but `calcmatrix`
 uses the matrix anyway, and it is called every `LSYNCTIME` (900 s by default)
 rather than once per met window.
@@ -300,6 +308,38 @@ The matrix is identically zero when there is no cloud.
 ---
 
 ## 6. Particle redistribution, and the backward transpose
+
+**The transition over an interval (decision 0033).** With the default
+`application: exponential`, $\mathrm{fmass}$ is a rate (kg m⁻² s⁻¹, built from
+$M_b$ itself), and its generator is
+
+$$
+Q_{ij} = \frac{\mathrm{fmass}[j,i]}{m_i}\ (i \ne j), \qquad
+Q_{ii} = -\sum_{j \ne i} Q_{ij}
+$$
+
+for GLIDE's backward runs: the transposed column, weighted by layer mass, as
+below. The forward generator is $\mathrm{fmass}[i,j]/m_i$.
+
+The transition over the met interval is the exact exponential
+$P = \exp(\Delta t_{\mathrm{met}}\,Q)$ (`generator_exponential`):
+- It uses uniformised scaling and squaring in float64, with static shapes and no host synchronisation.
+- It is non-negative and row-stochastic by construction.
+- Because $\mathbf{m}^{\mathsf T}Q = 0$, the layer masses are stationary.
+- The backward $P$ equals $D^{-1}P_{\mathrm{fwd}}^{\mathsf T}D$ with $D = \mathrm{diag}(m)$: the time reversal of the forward transition.
+- For a short interval it reduces to the one-step matrices below.
+
+Accuracy against `scipy.linalg.expm` is ≤ 10⁻¹¹ up to a Courant number (Δt × the largest
+fractional exchange rate of a layer) of about 1,700 on 23–137 levels. Columns
+above the squaring cap of 2,048 are counted in `runtime.convection` of
+run_metadata.json and logged; the buoyancy closure gives at most 5.6 on ERA5
+over Europe. Because $\exp(3\Delta t\,Q) = \exp(\Delta t\,Q)^3$, the transport
+does not depend on the met cadence. Because no layer's mass caps it, it does not
+depend on the vertical grid either: per firing column the median changes by
+less than 20% between 23, 40 and 80 levels, against ×2 per doubling before.
+
+**The one-step matrices** (`application: cfl_scaled` and `substeps`, and
+FLEXPART's `calcmatrix`/`redist`):
 
 Following FLEXPART's `calcmatrix`/`redist`, the diagonal closure makes each row
 sum to the layer's air mass — the diagonal is the mass that *stays*:
@@ -373,10 +413,12 @@ Each of these is a deliberate simplification, listed with what it costs.
    separate downdraft mass-flux matrix; here the compensating environmental
    subsidence carries the return flux instead. A few-percent effect.
 
-4. **Capped buoyancy velocity** in place of the quasi-equilibrium closure (§4).
-   The full scheme balances the mass flux against large-scale destabilisation;
-   GLIDE caps $\sqrt{2\ \mathrm{CAPE}}$ to keep $M_b$ realistic. Revisit if
-   validation shows under-convective transport.
+4. **Steady-state buoyancy closure without memory** (decision 0033). This is
+   FLEXPART's relaxed CBMF at steady state, from GLIDE's surface parcel. Two
+   differences remain:
+   - FLEXPART's parcel starts at the level of maximum moist static energy (NK), and its updraft draws only from that level, with turbulence refilling it. GLIDE entrains from the whole sub-cloud layer by mass.
+   - FLEXPART's onset and decay lag by its relaxation time, about 40 min at its 900 s call.
+   The closure before 0033 (capped $\sqrt{2\,\mathrm{CAPE}}$) remains selectable.
 
 5. **Adjacent-layer subsidence.** The environmental return flux moves mass one
    layer down per event, while the updraft is non-local. Physically apt — a fast
@@ -384,12 +426,20 @@ Each of these is a deliberate simplification, listed with what it costs.
    non-displaced environmental air is a random walk rather than a prescribed
    velocity.
 
-6. **Convection fires once per met window**, and scales the mass flux by that
-   window's own duration, which the reader sets to the store's time step
-   (`reader.met_interval_seconds`). It therefore follows whatever cadence the
-   meteorology has rather than assuming an hour (since September 2026; the
-   acceptance tests of A02 pin 3,600 s for hourly and 10,800 s for a 3-hourly
-   store).
+6. **Convection fires once per met window**, over that window's own duration,
+   which the reader sets to the store's time step
+   (`reader.met_interval_seconds`). Since decision 0033 the transition over the
+   window is exact in time (§6), so the cadence changes only how often the
+   meteorology is sampled. FLEXPART is different: it calls every 900 s, and its
+   relaxed CBMF depends on the call interval.
+
+7. **Deferred, deliberately (decision 0033).** These differences from FLEXPART's
+   full scheme are known, and each is a study of its own:
+   - **Detrainment profile.** In January GLIDE lifts about 10× less sub-cloud air above 3 km than FLEXPART in the same columns.
+   - **Downdrafts** (item 3).
+   - **Cloud top.** GLIDE uses the first LNB; FLEXPART uses the highest.
+   - **Parcel origin** (NK).
+   - **The trigger.** GLIDE fires in about 1% of column-hours, FLEXPART in about 60%. GLIDE's ΔT_v test at the level LCL+1 also depends on the grid: firing columns halve from 40 to 80 levels. `trigger_height_above_lcl_m` is an option, off by default, for that study.
 
 ---
 
@@ -399,39 +449,25 @@ Each of these is a deliberate simplification, listed with what it costs.
 convection:
   scheme: emanuel_reduced     # or "none" (default; bit-equivalent to no convection)
   emanuel:
-    closure_c: 0.03           # cloud-base mass-flux closure constant
-    trigger_dtv_k: 0.9        # Forster 2007 Eq 34 buoyancy threshold, K
+    closure: buoyancy         # M_b = buoyancy_mass_flux_per_k · max(DTMIN, 0) (decision 0033)
+    buoyancy_mass_flux_per_k: 0.00833   # 0.1·ALPHA/DAMPS, FLEXPART's 0.025 and 0.3
+    application: exponential  # exact exp(Δt·Q) over the met interval (§6)
+    trigger_dtv_k: 0.9        # ΔT_v at the level LCL+1, K (trigger unchanged by 0033)
     min_cape_j_kg: 50.0       # CAPE floor below which convection never fires
     min_cloud_depth_m: 500.0  # skip shallow convection
+    trigger_height_above_lcl_m: null    # option: test ΔT_v at this height above the LCL
 ```
 
 A YAML with no `convection:` block produces output identical to a run with no
 convection at all.
 
-**Prototype closure options (task CONV, branch `agent/CONV-closure`; not
-adopted).** The defaults reproduce the behaviour above bit for bit. The options
-exist for A/B comparison while Matt decides the closure:
-
-```yaml
-    closure: cape_velocity        # or "buoyancy": FLEXPART's steady-state CBMF,
-                                  #   buoyancy_mass_flux_per_k · max(DTMIN, 0)
-    buoyancy_mass_flux_per_k: 0.00833   # 0.1·ALPHA/DAMPS with FLEXPART's 0.025, 0.3
-    updraft_w_max_m_s: 5.0        # the cap on √(2·CAPE) in cape_velocity
-    application: cfl_scaled       # or "exponential": exact exp(Δt·Q) of the rate
-                                  #   matrix, no CFL scale; or "substeps"
-    n_substeps: 4                 # transfers per interval for "substeps"
-    trigger_height_above_lcl_m: null   # if set, test ΔT_v at this height above
-                                  #   the LCL instead of at the level LCL+1
-```
-
-With `exponential` the matrix of §5 is a rate (kg m⁻² s⁻¹, no CFL scale) and the
-transition over the interval is $\exp(\Delta t\,Q)$ of its generator
-(`generator_exponential`: uniformised scaling and squaring, non-negative and
-row-stochastic by construction, layer masses stationary, static shapes, no host
-synchronisation). One 3-hour event then equals three 1-hour events, and the
-transport per unit time no longer depends on the thickness of the layer below
-cloud base. The evidence and the choice are in
-`outputs/agents/CONV/SUMMARY.md` (main checkout).
+**The scheme before decision 0033**, for A/B comparison:
+`closure: cape_velocity` (with `closure_c: 0.03`, `updraft_w_max_m_s: 5.0`,
+which apply only to it) and `application: cfl_scaled`. These reproduce the
+earlier output bit for bit. `application: substeps` with `n_substeps` applies
+n CFL-capped transfers per interval instead; it is approximate and is kept for
+comparison. A config that sets only `closure_c` (as the shipped examples do)
+uses the new closure, because `closure_c` applies only to `cape_velocity`.
 
 **What to expect when you turn it on:** more particles in the free troposphere at
 long backward times, and a more dispersed surface footprint (convective lofting

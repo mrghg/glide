@@ -1,26 +1,40 @@
-# CONV — Grid- and cadence-independent convective closure (investigation and prototype)
+# CONV — Buoyancy closure with exact exponential application (decision 0033)
 
-- status: HANDOFF (investigation branch, no PR, by instruction)
-- queue: none (Matt's request of 28 Nov 2026)   model: claude-opus-5-5   branch: agent/CONV-closure (on agent/CAPE-cloud-top-bound, PR #76)
+- status: PR OPEN (see the PR "CONV: buoyancy closure with exact exponential application (decision 0033)")
+- queue: none (Matt's request and approval of 28 Nov 2026; adopted as "Decision 5")   model: claude-opus-5-5   branch: agent/CONV-closure
 - started: 2026-11-28   updated: 2026-11-28
-- plan: Diagnose why the CFL scale of the reduced Emanuel matrix binds in ~100% of firing columns (review of #76, outputs/agents/CAPE/review/). Prototype rate closures as config options (defaults unchanged), applied exactly over the interval (matrix exponential) or in sub-steps. Show transport per unit time against levels (23, 40, 80) and cadence (1 h, synthetic 3 h) on the January hours of the CAPE review and on July 2019. Compare with FLEXPART 11's own CONVECT on the same columns. Smoke and a summer elevated-receptor footprint before/after. CPU first, ≤ 8 threads; GPU only for a micro-benchmark under the lock.
+- plan:
+  - Investigation (done): why the CFL scale of the reduced Emanuel matrix binds in ~100% of firing columns. Rate closures prototyped as options, with the transport measured against levels (23/40/80) and cadence on the CAPE review's January hours and on July 2019. Compared with FLEXPART 11's own CONVECT.
+  - PR: buoyancy + exponential as the default, trigger unchanged, Courant guard, decision 0033, docs, tests, a compiled CUDA smoke run, and CPU smoke and Jungfraujoch runs before and after.
 - done:
-  - `src/lpdm/convection/emanuel.py`: options `closure` (`cape_velocity` default | `buoyancy` = FLEXPART steady state 0.1·ALPHA/DAMPS·DTMIN), `application` (`cfl_scaled` default | `exponential` | `substeps`), `n_substeps`, `buoyancy_mass_flux_per_k`, `updraft_w_max_m_s`, `trigger_height_above_lcl_m`; new `cloud_base_buoyancy_excess_columns` (DTMIN), `trigger_dtv_at_height_above_lcl`, `rate_generator`, `generator_exponential` (uniformised scaling and squaring: static shapes, no host sync, non-negative and row-stochastic by construction), `backward_transition_matrices_exponential`, `EmanuelReducedConvection.transition_matrices`. Config fields and `_convection_scheme_kwargs` wired.
-  - `tests/test_convection_closure.py` (14 tests): exponential equals torch.linalg.matrix_exp (≤1e-11), non-negative, stochastic; stationarity and adjointness; one 3-h interval = three 1-h; 40→79-level refinement changes the exponential transport < 10% while the CFL-scaled one falls below 0.7×; DTMIN; trigger interpolation; defaults unchanged (bit-equal transition).
-  - `scripts/validation/conv/`: grid/cadence diagnostics, real-cadence composition, FLEXPART CONVECT driver (extracted at build time from a local FLEXPART checkout, not copied), FLEXPART comparison, footprint runner and comparison, transition benchmark.
-  - `docs/convection.md` §8: prototype options.
-- verified: tests/test_convection*.py, test_cape_cloud_top.py, test_config*.py 49 passed; test_phase_timers.py, test_main_runtime.py, test_golden_harness.py 94 passed (full suite not run). Defaults bit-identical (test + smoke). Every number with its file: dev/agent/progress/CONV-SUMMARY.md (copy at outputs/agents/CONV/SUMMARY.md).
-- docs: docs/convection.md §8 (prototype options). No decision record: the choice is Matt's.
-- handoff: Matt decides the closure (SUMMARY.md "Decision needed"). If adopted: decision record superseding the closure part of 0007/0031, defaults switched, tests of the old defaults kept for A/B, golden regenerated, STATUS.
+  - Investigation summary: outputs/agents/CONV/SUMMARY.md (main checkout). Independent review: outputs/agents/CONV/review/.
+  - Merged origin/main (#76, #74). The convection column lookup uses `engine.frame` (from #74); nothing added here reads positions.
+  - Defaults: `closure: buoyancy` (M_b = 0.00833·max(DTMIN, 0)) and `application: exponential` (`generator_exponential`).
+  - The previous scheme stays selectable: `cape_velocity` + `cfl_scaled`.
+  - The trigger is as on main. `trigger_height_above_lcl_m` is an option, off by default.
+  - Guard: Courant numbers above 0.5·2¹² are counted in `runtime.convection` of run_metadata.json (`ConvectionScheme.run_diagnostics`) and logged at the end of the run.
+  - Tests:
+    - `tests/test_convection_closure.py` (20): generator, exponential, adjoint, T1 small-step limit, cadence, grid independence of the scheme on a synthetic column, production defaults, legacy reproduces the old matrix, guard, end to end.
+    - `tests/test_convection.py`: the A02/T1 construction tests pin the legacy options.
+  - Decision 0033. Updated: docs/convection.md §1, §4–§8; README; STATUS; VALIDATION; decisions 0007, 0031 and the decisions README.
+  - Scripts under `scripts/validation/conv/`.
+- verified: see the PR description (full CPU suite, GPU compiled smoke, CPU smoke and JFJ before/after with the seed pair).
+- docs: dev/decisions/0033 (new), 0007 and 0031 status lines, decisions README; docs/convection.md; docs/VALIDATION.md; README; STATUS.md.
+- handoff: Decision 6 (trigger) is the next study. The trigger's ΔT_v test at the level LCL+1 depends on the grid (firing columns 11,263 / 7,243 / 3,849 on 23 / 40 / 80 levels, January), and GLIDE fires in ~1% of column-hours against FLEXPART's ~60%. See outputs/agents/CONV/review/fp_trigger_split.log and trigger_grid.log.
 - proposed follow-ups:
-  - Detrainment profile: GLIDE's index-linear profile puts ~10× less sub-cloud air above 3 km than FLEXPART on the same columns (first vs highest LNB as cloud top, and FLEXPART's M ∝ |ΔT_v| + entrainment). Sensitivity test as the external review proposes.
-  - Trigger form vs FLEXPART (FLEXPART convects in ~56–61% of columns; GLIDE in 0.5–1.3%).
+  - Trigger study (Decision 6): level, sign, CAPE floor.
+  - Detrainment profile and cloud top (first vs highest LNB). In January GLIDE lifts ~10× less sub-cloud air above 3 km than FLEXPART in the same columns.
 - reference issues:
-  - FLEXPART 11 keeps the remembered cloud-base mass flux per OpenMP thread (`cbaseflux(ix,jy,ithread)`, dynamic schedule) and updates it only in columns that hold particles, so a column's memory depends on thread scheduling and particle presence (derived, conv_mod.f90 at d4e0a86).
-  - FLEXPART's CBMF relaxation is per call, so its spin-up time scales with lsynctime: one 3600 s call gives 0.395× the CBMF of four 900 s calls (measured); and at 3600 s its explicit matrix would move more than a level holds in 34–40% of convecting columns (measured), 0.03–0.5% at 900 s.
+  - FLEXPART 11 keeps the remembered CBMF per OpenMP thread (`cbaseflux(ix,jy,ithread)`, dynamic schedule) and updates it only in columns holding particles (derived, conv_mod.f90 at d4e0a86).
+  - Its relaxation is per call, so spin-up depends on lsynctime: one 3,600 s call gives 0.395× the CBMF of four 900 s calls (measured).
 - incidents:
-  - The reduced Emanuel matrix's CFL scale, added as a non-negativity guard (bb5c266, July 2026), has set the convective transport in essentially every firing column since then: per event 0.9 × the mass of the layer below cloud base, so transport scaled with the vertical grid (×2.07 / ×0.54 domain total for 23 / 80 vs 40 levels, January) and fell 2.3× per unit time at 3-hourly cadence. The code comment saying FLEXPART enforces the equivalent limit is wrong (calcmatrix accepts its CFL flag IFLAG = 4). Found by the review of PR #76 and this task.
-  - The trigger tests buoyancy at the level LCL+1, whose height above the LCL depends on the grid (median 371 / 135 / 59 m on 23 / 40 / 80 levels, January): firing columns 11,263 / 7,243 / 3,849. Found in this task.
+  - The CFL scale was added as a non-negativity guard (bb5c266, July 2026). Since then it set the convective transport in essentially every firing column: 0.9 × the mass of the layer below cloud base per event.
+    - So the transport depended on the vertical grid: domain totals ×3.66 / ×0.26 on 23 / 80 levels vs 40 (January).
+    - And on the cadence: 0.43× per unit time at 3-hourly.
+    - The code comment saying FLEXPART enforces the same limit was wrong (#76 corrected the comment).
+    - Found by the review of PR #76 and task CONV.
+  - The trigger tests buoyancy at the level LCL+1, whose height above the LCL depends on the grid (median 371 / 135 / 59 m on 23 / 40 / 80 levels, January). Found in task CONV; not changed (Decision 6).
 - question: none
 - handled:
-  - in-session: 2026-11-28 coordinator brief (Matt's approval of 28 Nov 2026): investigate and prototype; branch only, no PR.
+  - in-session: 2026-11-28 coordinator brief: investigate and prototype, branch only.
+  - in-session: 2026-11-28 coordinator: Matt adopted Decision 5. Turn the branch into a PR; do not change the trigger.

@@ -4,8 +4,8 @@
         configs/smoke_mhd_single_release.yaml outputs/agents/CONV/smoke/buoy_exp \
         --set convection.emanuel.closure=buoyancy convection.emanuel.application=exponential
 
-Writes the effective config next to the output, then runs ``lpdm.main`` on the
-CPU in this process (the code on PYTHONPATH; the run refuses to start if lpdm is
+Writes the effective config next to the output, then runs ``lpdm.main`` (on the
+CPU unless ``--device``) in this process (the code on PYTHONPATH; the run refuses to start if lpdm is
 imported from anywhere else). ``--set`` takes dotted keys; values are parsed as
 YAML scalars.
 """
@@ -26,6 +26,7 @@ def main() -> None:
     ap.add_argument("config")
     ap.add_argument("out")
     ap.add_argument("--set", nargs="*", default=[])
+    ap.add_argument("--device", default="cpu")
     args = ap.parse_args()
 
     cfg = yaml.safe_load(Path(args.config).read_text())
@@ -46,7 +47,15 @@ def main() -> None:
     src = os.environ.get("PYTHONPATH", "").split(os.pathsep)[0]
     assert src and lpdm.__file__.startswith(src), (lpdm.__file__, src)
     print(f"lpdm from {lpdm.__file__}; config {cfg_path}", flush=True)
-    sys.argv = ["lpdm.main", "--config", str(cfg_path), "--device", "cpu", "--output-uri", str(out)]
+    sys.argv = [
+        "lpdm.main",
+        "--config",
+        str(cfg_path),
+        "--device",
+        args.device,
+        "--output-uri",
+        str(out),
+    ]
     runpy.run_module("lpdm.main", run_name="__main__")
 
 
