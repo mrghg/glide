@@ -1,7 +1,7 @@
 #!/bin/bash
 # Task CONV: production effect on CPU. One run per variant, 3 threads each.
 # usage: run_footprints.sh <case: smoke|jfj> <variant> [variant ...]
-# variants: legacy | buoy_exp | buoy_exp_trig | c003_exp | legacy_sub4
+# variants: legacy | legacy_s43 (seed 43: noise) | buoy_exp | buoy_exp_trig | c003_exp | legacy_sub4
 set -e
 W=$(cd "$(dirname "$0")/../../.." && pwd)
 MAIN=${GLIDE_MAIN:-/home/u6za/chxmr.u6za/code/glide}
@@ -24,6 +24,7 @@ for v in "$@"; do
   buoy_exp_trig) SET="$E.closure=buoyancy $E.application=exponential $E.trigger_height_above_lcl_m=${TRIG_DZ:-150}" ;;
   c003_exp) SET="$E.closure_c=0.003 $E.application=exponential" ;;
   legacy_sub4) SET="$E.application=substeps $E.n_substeps=4" ;;
+  legacy_s43) SET="release.seed=43" ;;
   *) echo "unknown variant $v"; exit 1 ;;
   esac
   /usr/bin/time -v .venv/bin/python $W/scripts/validation/conv/run_footprint.py $CFG $O/$v --set $EXTRA $SET > $O/$v.log 2>&1 &

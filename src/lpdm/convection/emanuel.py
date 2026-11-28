@@ -132,7 +132,7 @@ APPLICATIONS = ("cfl_scaled", "exponential", "substeps")
 # Courant number Δt·(outflux/mass) up to EXPM_THETA·2^EXPM_MAX_SQUARINGS.
 EXPM_THETA = 0.5
 EXPM_TAYLOR_DEGREE = 12
-EXPM_MAX_SQUARINGS = 20
+EXPM_MAX_SQUARINGS = 12
 
 # Numerical floors / ceilings.
 P_MIN_PA = 1.0
