@@ -43,7 +43,9 @@ def displaced(log: Path) -> tuple[int, int]:
 
 
 def pct(a) -> str:
-    a = np.asarray(a) * 100.0
+    a = np.asarray(a, dtype=np.float64) * 100.0
+    if a.size == 0 or not np.isfinite(a).all():
+        return "    n/a"
     return f"{a.mean():+7.2f}% [{a.min():+7.2f}, {a.max():+7.2f}]"
 
 
@@ -77,7 +79,8 @@ def main() -> None:
             )
 
     def rel(f, g, sel):
-        return f[sel].sum() / g[sel].sum() - 1.0
+        den = g[sel].sum()
+        return f[sel].sum() / den - 1.0 if den > 0 else np.nan
 
     s0 = seeds[0]
     noise = [G[s].sum() for s in seeds]
