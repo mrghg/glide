@@ -814,7 +814,15 @@ class HannaScheme(TurbulenceScheme):
     # PRIVATE, for A/B tests only (no configuration sets it): with the "wind" frame,
     # True carries u', v' from step to step as along-wind and cross-wind components,
     # unrotated when the wind turns, as FLEXPART does; False (production) carries
-    # them as east/north components (decision 0032, "A turning wind").
+    # them as east/north components. Neither is exact everywhere (decision 0032,
+    # "A turning wind"): the wind-relative carry keeps the wind-frame distribution
+    # through a turn in time, but where the direction varies in space a particle's
+    # own turbulent motion turns its velocity, which makes calm points sources of
+    # order 2π·K·c even in isotropic turbulence (measured: a convective vortex
+    # gained 7,000 particles at its centre in an hour, against 0 for the east/north
+    # carry and for "grid"); the east/north carry is exact for isotropic turbulence
+    # and leaves a covariance (σ_u² − σ_v²) sinΔ cosΔ after a turn Δ in time,
+    # relaxing over T_L.
     _carry_wind_relative: bool = False
 
     def step(

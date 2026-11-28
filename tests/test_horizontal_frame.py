@@ -4,7 +4,8 @@ Hanna's σ_u, T_Lu are along the mean wind and σ_v, T_Lv across it. With
 ``turbulence.horizontal_frame: grid`` GLIDE applies u' eastward and v' northward;
 with ``wind`` the OU updates run on along-wind and cross-wind components, which
 are rotated to east/north for each displacement by the mean wind direction at the
-particle, and the carried state stays east/north.
+particle; between steps the carried u', v' are east/north (decision 0032; FLEXPART
+carries them wind-relative, the private ``_carry_wind_relative``).
 
 The plume-width tests use the dynamic (CPU) step path, which does not advect (the
 runtime advects before calling the scheme), so the displacements are turbulent
@@ -217,15 +218,26 @@ def test_wind_frame_is_bit_identical_to_grid_for_an_eastward_or_calm_wind(
     [(False, torch.float32), (True, torch.float32), (True, torch.bfloat16)],
     ids=["degrees", "metric", "metric-bf16"],
 )
+@pytest.mark.parametrize("sheared", [False, True], ids=["uniform", "sheared"])
 def test_static_and_dynamic_paths_agree_in_the_wind_frame(
-    metric: bool, wind_dtype: torch.dtype
+    metric: bool, wind_dtype: torch.dtype, sheared: bool
 ) -> None:
     """The static path advects inside the step; the dynamic path is given the same
     advected particles. With every particle active the two are bit-identical, in the
     degrees frame and in the runtime's local metric frame with float32 or bfloat16
-    winds (task A4)."""
+    winds (task A4). ``sheared``: the wind turns through 180° and speeds up from 2 to
+    8 m/s over the column, so the axes depend on height and a mismatch in the
+    vertical mapping between the two paths' wind samples would show (PR #77
+    review, parity_shear.log)."""
 
     met = _met(3.0, -4.0, u_end=-2.0, v_end=1.0)
+    if sheared:
+        for stack in (met.hour_start, met.hour_end):
+            nz = stack.shape[1]
+            turn = torch.linspace(0.0, math.pi, nz).view(nz, 1, 1)
+            speed = torch.linspace(2.0, 8.0, nz).view(nz, 1, 1)
+            stack[0] = (speed * torch.cos(turn)).expand_as(stack[0])
+            stack[1] = (speed * torch.sin(turn)).expand_as(stack[1])
     z = torch.linspace(5.0, 390.0, 256)
     frame = HorizontalFrame.local_metric((-2.0, 2.0), (-2.0, 2.0)) if metric else DEGREES
     engine = GPUEngine(device="cpu", frame=frame, wind_gather_dtype=wind_dtype)
@@ -520,3 +532,20 @@ def test_vortex_with_a_calm_centre_loses_only_the_derived_neglected_drift_term()
     assert expected < -4 * sd_disk  # the test resolves the effect it checks
     assert d_disk == pytest.approx(expected, abs=4 * sd_disk), (d_disk, expected, sd_disk)
     assert abs(d_ring) < 4 * sd_ring, (d_ring, sd_ring)
+
+
+def test_isotropic_vortex_has_no_calm_point_source_with_the_east_north_carry() -> None:
+    """The same vortex in a convective column (σ_u = σ_v, T_Lu = T_Lv): K is
+    isotropic and uniform, so the exact answer is no change at all, and `grid` gives
+    none. The production carry (u′, v′ east/north between steps) keeps the disk round
+    the calm centre within 4 standard deviations of zero. Carrying u′, v′
+    wind-relative instead (FLEXPART; the private ``_carry_wind_relative``) turns a
+    particle's velocity with the wind direction as its own turbulent motion carries
+    it across the vortex, which collects particles at the calm centre: +7,048 and
+    +7,195 particles in this setup (z ≈ +45, two seeds; decision 0032,
+    outputs/agents/ROT/logs/vortex_carry.log). The ring is not checked here: with
+    the convective K (~150 m² s⁻¹) the losses at the ±5 km box edge reach it in an
+    hour, with every convention."""
+
+    d_disk, sd_disk, _, _, _ = _vortex_run("wind", seed=5, regime=CONVECTIVE)
+    assert abs(d_disk) < 4 * sd_disk, (d_disk, sd_disk)
