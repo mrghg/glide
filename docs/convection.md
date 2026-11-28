@@ -456,10 +456,25 @@ convection:
     min_cape_j_kg: 50.0       # CAPE floor below which convection never fires
     min_cloud_depth_m: 500.0  # skip shallow convection
     trigger_height_above_lcl_m: null    # option: test ΔT_v at this height above the LCL
+    trigger: glide            # or flexpart_cloud_base (study option, Decision 6; below)
 ```
 
 A YAML with no `convection:` block produces output identical to a run with no
 convection at all.
+
+**`trigger: flexpart_cloud_base`** (study option, Decision 6; off by default) replaces
+GLIDE's three checks (ΔT_v ≥ `trigger_dtv_k` at LCL+1, `min_cape_j_kg`,
+`min_cloud_depth_m`) with FLEXPART 11's `convect` tests, without its memory
+(`flexpart_cloud_base_trigger_columns`). A column convects unless:
+- the parcel is at least 0.9 K colder than the environment at the first level above the LCL;
+- DTMIN ≤ 0 (the buoyancy closure's M_b would be zero), so it needs `closure: buoyancy`;
+- the parcel level (GLIDE's surface) has T < 250 K or q ≤ 0;
+- the moist static energy has no minimum below the top two levels;
+- PLCL is outside 200–2000 hPa, or the first level above the LCL is one of the top two.
+
+It has no CAPE floor and no depth check, as FLEXPART has neither. The cloud
+(first LNB), closure and matrix are unchanged. Study results:
+`outputs/agents/CONV/trigger/SUMMARY.md` in the main checkout.
 
 **The scheme before decision 0033**, for A/B comparison:
 `closure: cape_velocity` (with `closure_c: 0.03`, `updraft_w_max_m_s: 5.0`,
