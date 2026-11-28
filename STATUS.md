@@ -214,6 +214,14 @@ relevant docs page with its consequence.
   now converged in the sub-step count (8 against 16 sub-steps: 0.4%); the
   Mace Head smoke run's 0–40 m footprint nearly doubles (+94%). The golden
   fixtures are not yet regenerated.
+- **Orientation of horizontal turbulence: open (decision 0032).** Hanna's
+  along-wind ($\sigma_u$, $T_{Lu}$) and cross-wind ($\sigma_v$, $T_{Lv}$)
+  statistics were applied east and north whatever the wind, so stable and
+  neutral plumes were shaped by the grid (found by an external review);
+  FLEXPART rotates them with the wind. `turbulence.horizontal_frame: wind` does
+  the same; the default is still `grid` (bit-identical to before) and `wind` is
+  proposed. On the Mace Head smoke run (near-westerly flow, so the frames nearly
+  coincide) the change is SMOKE_SUMMARY ([docs/physics.md](docs/physics.md) §3.4).
 - **Forward/backward reciprocity test** (task A6, `tests/test_reciprocity.py`;
   open). The backward *sign construction* is confirmed exactly: in a steady
   column the backward step is the forward step with w′ → −w′, bit for bit.
