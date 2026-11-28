@@ -2434,6 +2434,9 @@ def _run(
             # Configured physics options that are not well-mixed consistent, as
             # logged at the start of the run; empty for the defaults.
             physics_warnings=physics_warnings,
+            # Convection closure and its transition-matrix totals (decision 0033):
+            # Courant numbers beyond the exponential's squaring cap are counted.
+            convection=convection_scheme.run_diagnostics(),
         ),
         "schedule": {
             "n_batches": len(batches),

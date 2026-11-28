@@ -442,7 +442,7 @@ class EmanuelConvectionConfig(_Frozen):
     closure_c: float = Field(
         0.03,
         gt=0,
-        description="Cloud-base mass-flux closure constant. M_b ∝ closure_c · ρ_LCL · √(2·CAPE).",
+        description="Cloud-base mass-flux constant of closure 'cape_velocity' only: M_b = closure_c · ρ_LCL · min(√(2·CAPE), updraft_w_max_m_s).",
     )
     trigger_dtv_k: float = Field(
         0.9,
@@ -459,10 +459,12 @@ class EmanuelConvectionConfig(_Frozen):
         ge=0,
         description="Skip shallow convection (cloud depth < this). This scheme is for DEEP convection.",
     )
-    # Task CONV (prototype): grid- and cadence-independent closure options. The
-    # defaults keep the behaviour before CONV, for A/B comparison.
+    # Closure and time integration (decision 0033). The defaults are FLEXPART's
+    # steady-state buoyancy closure applied exactly over the met interval; the
+    # behaviour before 0033 is closure "cape_velocity" with application
+    # "cfl_scaled" (closure_c and updraft_w_max_m_s apply only to it).
     closure: Literal["cape_velocity", "buoyancy"] = Field(
-        "cape_velocity",
+        "buoyancy",
         description=(
             "Cloud-base mass flux. 'cape_velocity': closure_c·ρ_LCL·min(√(2·CAPE), "
             "updraft_w_max_m_s). 'buoyancy': FLEXPART's steady state, "
@@ -470,7 +472,7 @@ class EmanuelConvectionConfig(_Frozen):
         ),
     )
     application: Literal["cfl_scaled", "exponential", "substeps"] = Field(
-        "cfl_scaled",
+        "exponential",
         description=(
             "How the matrix acts over the met interval: 'cfl_scaled' (one transfer, scaled "
             "so no layer sheds > 90%), 'exponential' (exact exp(Δt·Q) of the rate), "

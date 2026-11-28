@@ -19,9 +19,15 @@ in pure torch at a higher level of abstraction:
    so mass leaving every layer equals mass entering it. The updraft entrains
    from the BL (mass-weighted, total ``M_b``) and detrains across the cloud
    [LCL, LNB] with a linear profile; subsidence returns the same interface flux
-   downward. The cloud-base mass flux ``M_b`` closes the scheme via the dilution
-   closure (Emanuel 1991): ``M_b ∝ (T_v_parcel(LCL+1) − T_v_env(LCL+1)) · ρ_LCL``.
-   See ``compute_mass_flux_matrix``.
+   downward. See ``compute_mass_flux_matrix``. The cloud-base mass flux ``M_b``
+   (kg m⁻² s⁻¹) closes the scheme with FLEXPART's steady-state buoyancy closure
+   (decision 0033): ``M_b = 0.00833 · max(DTMIN, 0)``, with DTMIN the parcel's
+   virtual-temperature excess at the LCL + 0.9 K + its mean excess below cloud.
+   The matrix is a RATE, and the transition over the met interval is the exact
+   ``exp(Δt·Q)`` of its generator (`generator_exponential`), so the transport per
+   unit time depends on neither the vertical grid nor the cadence. The closure
+   before decision 0033 (`closure="cape_velocity"`, one CFL-scaled transfer,
+   `application="cfl_scaled"`) stays selectable for A/B.
 
 4. **Particle redistribution.** FLEXPART ``calcmatrix``/``redist``: apply the
    diagonal closure (each row of ``fmassfrac`` sums to the layer air mass), then
@@ -45,10 +51,9 @@ Documented departures from full Emanuel:
 - **No explicit saturated-downdraft branch** (Emanuel 1991 §4.b); the
   environmental subsidence carries the compensating return flux. Few-percent
   effect on the redistribution profile for deep cumulus.
-- The mass-flux closure is a simplified buoyancy-times-density relation
-  rather than Emanuel's full quasi-equilibrium closure. Calibrated against
-  Forster (2007)'s order-of-magnitude values for typical deep-convection
-  cases (M_b ≈ 0.01–0.1 kg/m²/s).
+- The closure is the steady state of FLEXPART's relaxed cloud-base mass flux,
+  without its memory between calls (decision 0033), on GLIDE's surface parcel
+  rather than FLEXPART's parcel-origin level NK.
 
 Columns (task A02, decision 0023): every (lon, lat) column of the met window is
 diagnosed at once (`compute_lcl_lnb_cape_columns`, `compute_mass_flux_matrices`,
@@ -103,8 +108,8 @@ MASS_FLUX_CLOSURE_C = 0.03
 # representative MEAN-cell peak rather than the rare ~15 m/s extreme).
 UPDRAFT_W_MAX_M_S = 5.0
 
-# Closure options (task CONV, prototype). `cape_velocity` is the closure above;
-# `buoyancy` is FLEXPART's (Emanuel 4.3c as FLEXPART sets it): the cloud-base mass
+# Closure options (decision 0033). `cape_velocity` is the closure above (the
+# default before 0033, kept for A/B); `buoyancy` (the default) is FLEXPART's (Emanuel 4.3c as FLEXPART sets it): the cloud-base mass
 # flux relaxes, each call, as CBMF <- (1 - DAMPS)·CBMF + 0.1·ALPHA·DTMIN with
 # ALPHA = 0.025 and DAMPS = 0.3 (FLEXPART fixes DELT0 = DELT/3, so DAMPS does not
 # depend on its time step). Its steady state is CBMF = (0.1·ALPHA/DAMPS)·DTMIN.
@@ -116,11 +121,11 @@ FLEXPART_DAMPS = 0.3
 BUOYANCY_MASS_FLUX_PER_K = 0.1 * FLEXPART_ALPHA / FLEXPART_DAMPS  # 0.00833 kg m-2 s-1 K-1
 BUOYANCY_DTMAX_K = 0.9
 
-# How the matrix is applied over the convection interval Δt (task CONV, prototype):
+# How the matrix is applied over the convection interval Δt (decision 0033):
+# - `exponential` (default): the matrix is a rate (kg m-2 s-1) and the transition
+#   over Δt is the exact exp(Δt·Q) of the rate generator Q, with no CFL scale;
 # - `cfl_scaled`: one transfer of M_b·Δt, the whole matrix scaled down so no layer
-#   sheds more than CFL_MAX_OUTFLUX_FRAC (the behaviour before task CONV);
-# - `exponential`: the matrix is a rate (kg m-2 s-1) and the transition over Δt is
-#   the exact exp(Δt·Q) of the rate generator Q, with no CFL scale;
+#   sheds more than CFL_MAX_OUTFLUX_FRAC (the behaviour before decision 0033);
 # - `substeps`: `n_substeps` transfers of M_b·Δt/n, each CFL-capped (FLEXPART's
 #   900 s cadence at n = 4 on hourly meteorology).
 APPLICATIONS = ("cfl_scaled", "exponential", "substeps")
@@ -129,10 +134,15 @@ APPLICATIONS = ("cfl_scaled", "exponential", "substeps")
 # squaring with the scaled generator's diagonal bounded by EXPM_THETA, a Taylor
 # series of EXPM_TAYLOR_DEGREE terms on the non-negative shifted matrix
 # (uniformisation), and at most EXPM_MAX_SQUARINGS squarings: enough for a
-# Courant number Δt·(outflux/mass) up to EXPM_THETA·2^EXPM_MAX_SQUARINGS.
+# Courant number Δt·(outflux/mass) up to EXPM_COURANT_MAX = EXPM_THETA·2^12 =
+# 2048. Beyond it the result stays non-negative and stochastic but loses
+# accuracy (1e-8 to 1e-3 at Courant 3e3–5e5, review of task CONV); such columns
+# are counted (`run_diagnostics`) and logged. The buoyancy closure gives at
+# most 5.6 on ERA5 over Europe (23–80 levels), the old nominal M_b at most 108.
 EXPM_THETA = 0.5
 EXPM_TAYLOR_DEGREE = 12
 EXPM_MAX_SQUARINGS = 12
+EXPM_COURANT_MAX = EXPM_THETA * 2.0**EXPM_MAX_SQUARINGS
 
 # Numerical floors / ceilings.
 P_MIN_PA = 1.0
@@ -146,8 +156,9 @@ Q_MIN_KG_KG = 0.0
 # well-mixed property) is preserved. FLEXPART has no counterpart: convect sets
 # IFLAG = 4 when its own CFL test fails, but calcmatrix accepts IFLAG = 4 and
 # updates fmassfrac anyway, and it is called every lsynctime (900 s by default)
-# rather than once per met window. With the default closure this scale binds in
-# almost every firing column, at the layer just below the LCL (decision 0031).
+# rather than once per met window. With the `cape_velocity` closure this scale
+# binds in almost every firing column, at the layer just below the LCL (decision
+# 0031), which is why decision 0033 replaced it as the default.
 CFL_MAX_OUTFLUX_FRAC = 0.9
 
 
@@ -898,6 +909,14 @@ def generator_exponential(
     return p
 
 
+def generator_courant(q: torch.Tensor, dt_s: float) -> torch.Tensor:
+    """Courant number of each generator over ``dt_s``, [C]: ``dt·max_i |Q_ii|``,
+    the largest fraction of a layer's mass exchanged per interval at the initial
+    rate. `generator_exponential` is accurate up to ``EXPM_COURANT_MAX``."""
+
+    return (-torch.diagonal(q.double(), dim1=1, dim2=2)).clamp(min=0.0).amax(dim=1) * float(dt_s)
+
+
 def backward_transition_matrices_exponential(
     fmass_rate: torch.Tensor, layer_mass: torch.Tensor, dt_s: float
 ) -> torch.Tensor:
@@ -1018,8 +1037,8 @@ class EmanuelReducedConvection(ConvectionScheme):
         trigger_dtv_k: float = TRIGGER_DELTA_TV_K,
         min_cape_j_kg: float = MIN_CAPE_J_KG,
         min_cloud_depth_m: float = CLOUD_TOP_MIN_DEPTH_M,
-        closure: str = "cape_velocity",
-        application: str = "cfl_scaled",
+        closure: str = "buoyancy",
+        application: str = "exponential",
         n_substeps: int = 4,
         buoyancy_mass_flux_per_k: float = BUOYANCY_MASS_FLUX_PER_K,
         updraft_w_max_m_s: float = UPDRAFT_W_MAX_M_S,
@@ -1037,14 +1056,16 @@ class EmanuelReducedConvection(ConvectionScheme):
                         fires regardless of the LCL+1 buoyancy check. Default 50 J/kg.
                 min_cloud_depth_m: skip shallow convection (cloud depth < this).
                         Default 500 m — the scheme is for DEEP convection only.
-                closure: cloud-base mass flux. ``cape_velocity`` (default):
+                closure: cloud-base mass flux. ``buoyancy`` (default, decision
+                        0033): FLEXPART's steady state,
+                        ``buoyancy_mass_flux_per_k·max(DTMIN, 0)``.
+                        ``cape_velocity`` (before 0033; ``closure_c`` and
+                        ``updraft_w_max_m_s`` apply only to it):
                         ``closure_c·ρ_LCL·min(√(2·CAPE), updraft_w_max_m_s)``.
-                        ``buoyancy``: FLEXPART's steady state,
-                        ``buoyancy_mass_flux_per_k·max(DTMIN, 0)`` (task CONV).
-                application: ``cfl_scaled`` (default, one CFL-scaled transfer
-                        per interval), ``exponential`` (exact ``exp(Δt·Q)`` of the
-                        rate matrix) or ``substeps`` (``n_substeps`` CFL-capped
-                        transfers per interval).
+                application: ``exponential`` (default, exact ``exp(Δt·Q)`` of
+                        the rate matrix), ``cfl_scaled`` (before 0033: one
+                        CFL-scaled transfer per interval) or ``substeps``
+                        (``n_substeps`` CFL-capped transfers per interval).
         """
 
         if closure_c <= 0:
@@ -1072,6 +1093,10 @@ class EmanuelReducedConvection(ConvectionScheme):
         )
         self.closure = closure
         self.application = application
+        # Run totals for `run_diagnostics`, kept on the device (no host sync per
+        # event): events with transition matrices, matrices built, the largest
+        # Courant number and the columns beyond EXPM_COURANT_MAX.
+        self._diag: dict[str, torch.Tensor] | None = None
         self.n_substeps = int(n_substeps)
         self.buoyancy_mass_flux_per_k = float(buoyancy_mass_flux_per_k)
         self.updraft_w_max_m_s = float(updraft_w_max_m_s)
@@ -1246,6 +1271,8 @@ class EmanuelReducedConvection(ConvectionScheme):
                 p.double(), lcl, lnb, mb.double(), cfl_max_outflux_frac=None
             )
             q = rate_generator(rate, layer_mass.double(), backward=backward)
+            if backward:
+                self._record_courant(generator_courant(q, dt))
             return generator_exponential(q, dt).to(dtype)
         n = self.n_substeps if self.application == "substeps" else 1
         fmass = compute_mass_flux_matrices(p, lcl, lnb, (mb * (dt / n)).to(dtype))
@@ -1257,6 +1284,57 @@ class EmanuelReducedConvection(ConvectionScheme):
         out = step
         for _ in range(n - 1):
             out = torch.bmm(out, step)
+        return out
+
+    def _record_courant(self, courant: torch.Tensor) -> None:
+        """Accumulate the run's exponential-path diagnostics on the device."""
+
+        if self._diag is None:
+            zero = torch.zeros((), dtype=torch.float64, device=courant.device)
+            self._diag = {
+                "events": zero.clone(),
+                "matrices": zero.clone(),
+                "courant_max": zero.clone(),
+                "beyond_cap": zero.clone(),
+            }
+        d = self._diag
+        d["events"] += 1.0
+        d["matrices"] += float(courant.numel())
+        if courant.numel() > 0:
+            d["courant_max"] = torch.maximum(d["courant_max"], courant.max())
+            d["beyond_cap"] += (courant > EXPM_COURANT_MAX).sum().double()
+
+    def run_diagnostics(self) -> dict[str, object] | None:
+        """Run totals of the convective transition for run_metadata.json (decision
+        0033): events and matrices built with the exponential, the largest Courant
+        number met and how many columns exceeded ``EXPM_COURANT_MAX`` (accurate
+        only to ~1e-3 beyond it). One host read per call; ``None`` if no
+        exponential transition was built."""
+
+        out: dict[str, object] = {
+            "closure": self.closure,
+            "application": self.application,
+            "expm_courant_max": EXPM_COURANT_MAX,
+        }
+        if self._diag is None:
+            return out
+        d = {k: float(v) for k, v in self._diag.items()}
+        out.update(
+            {
+                "exponential_events": int(d["events"]),
+                "exponential_matrices": int(d["matrices"]),
+                "courant_max": d["courant_max"],
+                "columns_beyond_courant_cap": int(d["beyond_cap"]),
+            }
+        )
+        if d["beyond_cap"] > 0:
+            LOGGER.warning(
+                "convection: %d column-events had a Courant number above %.0f (max %.0f); "
+                "their exponential is accurate only to ~1e-3",
+                int(d["beyond_cap"]),
+                EXPM_COURANT_MAX,
+                d["courant_max"],
+            )
         return out
 
     def maybe_convect(
@@ -1310,8 +1388,8 @@ class EmanuelReducedConvection(ConvectionScheme):
             # 5) Mass-flux matrices of the occupied firing columns (kg/m² per event:
             # the flux times the met interval, which follows the store's cadence).
             if n_use > 0:
-                # [U, Z, Z]; `application` picks one CFL-scaled transfer (the
-                # default), the exact exponential of the rate, or sub-steps.
+                # [U, Z, Z]; `application` picks the exact exponential of the
+                # rate (the default), one CFL-scaled transfer, or sub-steps.
                 prob = self.transition_matrices(cols, use_idx)
             else:
                 # No active particle under convection: nothing moves, and (as when
