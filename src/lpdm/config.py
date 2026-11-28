@@ -381,6 +381,15 @@ class TurbulenceConfig(_Frozen):
         False,
         description="Enable the legacy GLIDE-only Monin-Obukhov surface-layer override below 0.1·BLH (FLEXPART has no such override). For A/B comparisons only: sigma_w jumps at 0.1·BLH, so the model is not well-mixed consistent there; a run with it on logs a warning and records it in run_metadata.json (runtime.physics_warnings).",
     )
+    # Orientation of the horizontal turbulent velocities (decision 0032). Hanna's
+    # σ_u, T_Lu are along the mean wind and σ_v, T_Lv across it; "grid" applies them
+    # east and north (GLIDE's behaviour before 0032), "wind" rotates them with the
+    # local mean wind as FLEXPART does. The default is Matt's decision (0032).
+    # Hanna-only.
+    horizontal_frame: Literal["grid", "wind"] = Field(
+        "grid",
+        description="Frame of the horizontal turbulent velocities: 'grid' applies the along-wind statistics (σ_u, T_Lu) eastward and the cross-wind ones (σ_v, T_Lv) northward; 'wind' applies them along and across the local mean wind, as FLEXPART does (decision 0032).",
+    )
     # Limits on the boundary-layer depth h from the meteorology (decision 0024).
     # Applied wherever the turbulence scheme uses h. The defaults keep GLIDE's
     # long-standing behaviour (50 m floor, no ceiling); the validation runs set
