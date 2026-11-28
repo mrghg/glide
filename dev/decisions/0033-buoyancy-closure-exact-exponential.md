@@ -63,7 +63,10 @@ Before this decision, the reduced Emanuel scheme had two parts that together set
 
 3. **The trigger is unchanged.** It stays the level LCL+1, +0.9 K, CAPE ≥ 50 J kg⁻¹ and depth ≥ 500 m. Testing ΔT_v at a fixed height above the LCL (`trigger_height_above_lcl_m`) is an option, off by default; the trigger is a separate, controlled study (Decision 6).
 
-4. **The previous scheme stays selectable** for A/B: `closure: cape_velocity` with `application: cfl_scaled`. It reproduces the earlier output bit for bit. `substeps` (n CFL-capped transfers per interval) is kept for comparison.
+4. **The previous scheme stays selectable** for A/B: `closure: cape_velocity` with `application: cfl_scaled`. It reproduces the earlier output bit for bit.
+   - It is bit-identical to main on the Jungfraujoch case, which has 24 events with occupied firing columns (measured, review of PR #78, `review_pr78/runs/compare_vs_main_s42.log`). It is also bit-identical on the smoke run, which has none.
+   - `substeps` (n CFL-capped transfers per interval) is kept for comparison.
+   - **Warnings.** `closure_c` and `updraft_w_max_m_s` act only with `cape_velocity`, and `n_substeps` only with `substeps`. Setting one under another closure or application is warned, not refused, and recorded in `runtime.physics_warnings`. The shipped configs no longer set `closure_c`.
 
 ## Evidence
 
@@ -114,11 +117,12 @@ So the domain total of sub-cloud air lifted above 3 km in an hour falls (measure
 
 The old closure's apparent agreement was an artefact of the CFL scale, not of the physics (argued). The trigger is where the remaining gap lies (`review/fp_trigger_split.log`).
 
-**Footprint effect on CPU**: main 27cd98a against this decision, release seeds 42 and 43 (measured, `pr/after/{smoke,jfj}/compare*.log`).
-- **Smoke** (Mace Head, January): bit-identical. No particle was ever in a firing column.
-- **Jungfraujoch** (1,000 m AGL, July 2019, 3 days back):
-  - 0–40 m changes by −2.1% (seed 42) and −0.1% (seed 43). Total changes by +0.05% and −0.01%.
-  - Changing only the seed moves 0–40 m by 3.3%, so the effect is within Monte Carlo noise.
+**Footprint effect on CPU**: main 27cd98a against this decision (measured, `pr/after/{smoke,jfj}/compare*.log`; `review_pr78/runs/seed_stats.log`).
+- **Smoke** (Mace Head, January, seeds 42 and 43): bit-identical. No particle was ever in a firing column.
+- **Jungfraujoch** (1,000 m AGL, July 2019, 3 days back), with paired seeds 42, 43 and 44:
+  - **0–40 m:** −2.1%, −0.1% and +1.8%. The mean is −0.1%, with a standard error of 1.1%, so the effect is below about 3% here.
+  - **40–1000 m:** −0.28 ± 0.13%.
+  - **Total:** within ±0.1%.
   - Convection displaces about half as many particle-events (2.2% against 4.2%).
   - The largest Courant number met is 1.5, and no column exceeds the cap.
 
@@ -129,6 +133,10 @@ These differences from FLEXPART's full scheme are known and are not changed here
 - **Downdrafts.** There is no saturated-downdraft branch.
 - **Cloud top.** GLIDE uses the first LNB; FLEXPART uses the highest.
 - **Parcel origin.** GLIDE starts from the surface; FLEXPART from NK, the maximum moist static energy below its minimum, with its updraft drawing from that one level.
+- **DTMIN at the LCL.** GLIDE interpolates the parcel-minus-environment ΔT_v linearly in pressure between the levels either side of the LCL. FLEXPART treats the two sides separately:
+  - the parcel is extrapolated dry-adiabatically from ICB−1;
+  - the environment is extrapolated from ICB with the parcel's lapse rate.
+  The two agree to first order: the medians match FLEXPART's CBMF within 3–5% (above).
 - **The trigger.** Its form and frequency (Decision 6).
 
 ## Rejected alternatives

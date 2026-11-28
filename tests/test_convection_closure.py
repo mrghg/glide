@@ -412,3 +412,128 @@ def test_production_defaults_move_aloft_particles_back_to_the_boundary_layer() -
     assert torch.equal(out[:, 3], particles[:, 3])
     to_bl = int((out[:, 2] < z_base).sum())
     assert to_bl > 20, to_bl
+
+
+# ---------------------------------------------------------------------------
+# The production path and the wiring (review of PR #78)
+# ---------------------------------------------------------------------------
+
+
+def test_production_transition_is_the_backward_exponential_of_the_rate() -> None:
+    """Under the defaults, `transition_matrices` (what `maybe_convect` uses) equals
+    `backward_transition_matrices_exponential` of the column's rate matrix over the
+    met interval: the runtime's exponential branch runs backward, not forward."""
+
+    scheme = EmanuelReducedConvection(trigger_dtv_k=0.1)
+    cols = scheme.column_state(_window(40), t_alpha=0.5, device=CPU, dtype=torch.float64)
+    idx = cols.fires.nonzero().squeeze(1)
+    assert idx.numel() > 0
+    p = cols.pressure_pa[idx]
+    rate = em.compute_mass_flux_matrices(
+        p, cols.i_lcl[idx], cols.i_lnb[idx], cols.m_b[idx], cfl_max_outflux_frac=None
+    )
+    m = em._layer_masses_per_area(p).clamp(min=1e-6)
+    expected = em.backward_transition_matrices_exponential(rate, m, cols.interval_s)
+    torch.testing.assert_close(scheme.transition_matrices(cols, idx), expected, rtol=0.0, atol=0.0)
+
+
+def test_backward_rows_reach_the_sub_cloud_layer_and_forward_rows_do_not() -> None:
+    """Physical direction: air now high in the cloud (levels LCL+3 to LNB) came,
+    backward in time, partly from below cloud base (the updraft), so the backward
+    rows put probability on the sub-cloud layers; forward, that air only subsides
+    a layer or so in an hour and essentially never reaches them."""
+
+    scheme = EmanuelReducedConvection(trigger_dtv_k=0.1)
+    cols = scheme.column_state(_window(40), t_alpha=0.5, device=CPU, dtype=torch.float64)
+    idx = torch.tensor([0])
+    lcl, lnb = int(cols.i_lcl[0]), int(cols.i_lnb[0])
+    assert lnb > lcl + 3
+    back = scheme.transition_matrices(cols, idx, backward=True)[0]
+    fwd = scheme.transition_matrices(cols, idx, backward=False)[0]
+    rows = slice(lcl + 3, lnb + 1)
+    to_sub_cloud_back = back[rows, :lcl].sum(dim=1)
+    to_sub_cloud_fwd = fwd[rows, :lcl].sum(dim=1)
+    assert float(to_sub_cloud_back.mean()) > 1e-3, to_sub_cloud_back
+    assert float(to_sub_cloud_fwd.max()) < 1e-2 * float(to_sub_cloud_back.mean()), to_sub_cloud_fwd
+
+
+def test_substeps_apply_the_interval_over_n_per_substep() -> None:
+    """`substeps` is n CFL-capped transfers of M_b·Δt/n each, not of M_b·Δt."""
+
+    n = 4
+    scheme = EmanuelReducedConvection(trigger_dtv_k=0.1, application="substeps", n_substeps=n)
+    cols = scheme.column_state(_window(40), t_alpha=0.5, device=CPU, dtype=torch.float64)
+    idx = torch.tensor([0])
+    p = cols.pressure_pa[idx]
+    lm = em._layer_masses_per_area(p).clamp(min=1e-6)
+    fmass = em.compute_mass_flux_matrices(
+        p, cols.i_lcl[idx], cols.i_lnb[idx], cols.m_b[idx] * (cols.interval_s / n)
+    )
+    expected = torch.linalg.matrix_power(em.backward_transition_matrices(fmass, lm), n)
+    torch.testing.assert_close(scheme.transition_matrices(cols, idx), expected)
+
+
+def test_config_default_flux_per_kelvin_is_the_scheme_constant() -> None:
+    from lpdm.config import EmanuelConvectionConfig  # noqa: PLC0415
+
+    assert EmanuelConvectionConfig().buoyancy_mass_flux_per_k == em.BUOYANCY_MASS_FLUX_PER_K
+
+
+def _run_config(emanuel: dict | None):
+    from pathlib import Path  # noqa: PLC0415
+
+    import yaml  # noqa: PLC0415
+
+    from lpdm.config import RunConfig  # noqa: PLC0415
+
+    path = Path(__file__).resolve().parents[1] / "configs/smoke_mhd_single_release.yaml"
+    data = yaml.safe_load(path.read_text())
+    data["convection"] = {"scheme": "emanuel_reduced"}
+    if emanuel is not None:
+        data["convection"]["emanuel"] = emanuel
+    return RunConfig.model_validate(data)
+
+
+@pytest.mark.parametrize(
+    "emanuel",
+    [
+        None,
+        {"closure": "cape_velocity", "application": "cfl_scaled", "closure_c": 0.05},
+        {"closure": "buoyancy", "application": "substeps", "n_substeps": 3},
+    ],
+)
+def test_main_passes_the_convection_options_to_the_scheme(emanuel: dict | None) -> None:
+    """`main._convection_scheme_kwargs` carries closure, application and their
+    parameters, the defaults and the legacy values, through to the scheme."""
+
+    from lpdm.convection import get_scheme  # noqa: PLC0415
+    from lpdm.main import _convection_scheme_kwargs  # noqa: PLC0415
+
+    cfg = _run_config(emanuel)
+    scheme = get_scheme("emanuel_reduced", **_convection_scheme_kwargs(cfg))
+    e = cfg.convection.emanuel
+    assert (scheme.closure, scheme.application) == (e.closure, e.application)
+    assert scheme.closure_c == e.closure_c
+    assert scheme.n_substeps == e.n_substeps
+    assert scheme.buoyancy_mass_flux_per_k == e.buoyancy_mass_flux_per_k
+    if emanuel is None:
+        assert (scheme.closure, scheme.application) == ("buoyancy", "exponential")
+    else:
+        assert (scheme.closure, scheme.application) == (emanuel["closure"], emanuel["application"])
+
+
+def test_options_the_selected_closure_ignores_are_warned() -> None:
+    """closure_c / updraft_w_max_m_s without closure cape_velocity, and n_substeps
+    without application substeps, are warned (not refused) for
+    runtime.physics_warnings; nothing is warned when they apply or are unset."""
+
+    from lpdm.main import _convection_option_warnings  # noqa: PLC0415
+
+    assert _convection_option_warnings(_run_config(None)) == []
+    msgs = _convection_option_warnings(
+        _run_config({"closure_c": 0.03, "updraft_w_max_m_s": 5.0, "n_substeps": 4})
+    )
+    assert len(msgs) == 3
+    assert any("closure_c" in m for m in msgs) and any("n_substeps" in m for m in msgs)
+    legacy = {"closure": "cape_velocity", "application": "substeps", "closure_c": 0.03}
+    assert _convection_option_warnings(_run_config({**legacy, "n_substeps": 2})) == []

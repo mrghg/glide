@@ -1189,7 +1189,10 @@ class EmanuelReducedConvection(ConvectionScheme):
         self.application = application
         # Run totals for `run_diagnostics`, kept on the device (no host sync per
         # event): events with transition matrices, matrices built, the largest
-        # Courant number and the columns beyond EXPM_COURANT_MAX.
+        # Courant number and the column-events beyond EXPM_COURANT_MAX. They
+        # accumulate over the scheme instance's life: the runtime builds one
+        # instance per run, so they are run totals; a reused instance (tests,
+        # scripts) keeps adding to them.
         self._diag: dict[str, torch.Tensor] | None = None
         self.n_substeps = int(n_substeps)
         self.buoyancy_mass_flux_per_k = float(buoyancy_mass_flux_per_k)
@@ -1340,9 +1343,12 @@ class EmanuelReducedConvection(ConvectionScheme):
         )
 
     def column_mass_flux_matrices(self, cols: ColumnConvection) -> torch.Tensor:
-        """The mass-flux matrix of every column, [C, Z, Z] (zeros where no
-        convection fires). For diagnostics and tests; the runtime builds only
-        the columns that fire and hold active particles."""
+        """The LEGACY CFL-scaled mass-flux matrix of every column, [C, Z, Z]
+        (kg m⁻² per event: ``m_b · interval`` with the CFL scale of
+        `compute_mass_flux_matrices`; zeros where no convection fires), whatever
+        ``application`` is selected. For diagnostics and tests; the runtime builds
+        only the columns that fire and hold active particles, with
+        `transition_matrices`."""
 
         return compute_mass_flux_matrices(
             cols.pressure_pa,
@@ -1411,8 +1417,9 @@ class EmanuelReducedConvection(ConvectionScheme):
     def run_diagnostics(self) -> dict[str, object] | None:
         """Run totals of the convective transition for run_metadata.json (decision
         0033): events and matrices built with the exponential, the largest Courant
-        number met and how many columns exceeded ``EXPM_COURANT_MAX`` (accurate
-        only to ~1e-3 beyond it). One host read per call; ``None`` if no
+        number met and how many column-events (one column in one convection
+        event; a column firing in several events counts once per event) exceeded
+        ``EXPM_COURANT_MAX`` (accurate only to ~1e-3 beyond it). One host read per call; ``None`` if no
         exponential transition was built."""
 
         out: dict[str, object] = {

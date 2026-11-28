@@ -324,7 +324,7 @@ def main() -> None:
             "scheme": "hanna_1982",
             "meander": {"enabled": True, "coefficient": 0.16},
         },
-        "convection": {"scheme": "emanuel_reduced", "emanuel": {"closure_c": 0.03}},
+        "convection": {"scheme": "emanuel_reduced"},
         "output_grid": OUTPUT_GRID,
         "met_domain": met_domain,
         # Batch size is auto-chosen to the "active window" (releases whose backward
