@@ -221,7 +221,7 @@ relevant docs page with its consequence.
   FLEXPART rotates them with the wind. `turbulence.horizontal_frame: wind` does
   the same; the default is still `grid` (bit-identical to before) and `wind` is
   proposed. On the Mace Head smoke run (near-westerly flow, so the frames nearly
-  coincide) the change was within particle noise (0–40 m +0.36% / −0.11% over two seeds, total ≤ 0.06%), and on a stable night at Tacolneston 0–40 m −0.5% ([docs/physics.md](docs/physics.md) §3.4).
+  coincide) the change was within particle noise (0–40 m +0.36% / −0.11% over two seeds, total ≤ 0.06%), on a stable night at Tacolneston 0–40 m −0.5%, and in a cross-grid (southerly) Tacolneston case, reviewed independently, within noise with the cross-wind spread 0.2–0.9% narrower ([docs/physics.md](docs/physics.md) §3.4).
 - **Forward/backward reciprocity test** (task A6, `tests/test_reciprocity.py`;
   open). The backward *sign construction* is confirmed exactly: in a steady
   column the backward step is the forward step with w′ → −w′, bit for bit.

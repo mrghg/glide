@@ -38,7 +38,10 @@ same code, no line numbers verified there):
 - `advance_mod.f90` 273–276: `call windalign(dxsave,dysave,dawsave,dcwsave,ux,vy)`,
   then `dxsave=dxsave+ux`, `dysave=dysave+vy`, once per synchronisation
   interval, after the mesoscale ("meander") displacement has been added to
-  `dxsave`, `dysave` (`turbulence_mod.f90` 249–250).
+  `dxsave`, `dysave` (`turbulence_mod.f90` 249–250). So the axis is that of the
+  mean-plus-mesoscale displacement, and for a particle that leaves the boundary
+  layer within the interval it also includes the above-boundary-layer
+  displacement, turbulent part included (`advance_mod.f90` 431–432).
 - `turbulence_mod.f90` 612–663, `windalign`: `ffinv=1./max(sqrt(u*u+v*v),eps)`
   with `eps=1.e-30`, `sinphi=v*ffinv`, `cosphi=u*ffinv`, along-wind to
   $(\cos\phi, \sin\phi)$, cross-wind to $(-\sin\phi, \cos\phi)$.
@@ -73,59 +76,77 @@ turbulence, which affects the Tier 1 FLEXPART comparisons.
   per particle per outer step; the sub-steps' turbulent displacements (tens of
   metres) do not change it materially.
 - **Carried state.** $u'$, $v'$ are rotated into the wind frame at the start of
-  each outer step and back to east/north at its end. Between steps the state is
-  east/north, so its meaning and the output contract are unchanged (see "A
-  turning wind").
+  each outer step and back to east/north at its end, so between steps the state
+  is east/north (see "A turning wind" for why, and for FLEXPART's wind-relative
+  alternative).
 - **Calm winds.** A particle whose mean wind speed is no more than its
   along-wind $\sigma_u$ keeps the grid axes for that step (see "Calm winds").
 - Static shapes, `torch.where` only, no host sync; both step paths run the same
   code and are bit-identical (test). The meander is unchanged: its
   $\sigma$s are defined on the grid's u and v, as in FLEXPART.
 
-**Proposed default: `wind`.** It is the parameterisation as published, it
-removes a dependence on the grid's orientation, and it is what FLEXPART does,
-so it *improves* comparability with the FLEXPART reference runs. What it costs:
+**Proposed default: `wind`, with the east/north carry.** It is the
+parameterisation as published, it removes a dependence on the grid's
+orientation, and FLEXPART rotates too, so it *improves* comparability with the
+FLEXPART reference runs. The independent review of PR #77 recommended `wind` as
+the default together with the wind-relative carry; the second part is not taken
+here, because the wind-relative carry collects tracer at calm points (measured,
+"A turning wind"); Matt decides both. What it costs:
 every Tier 1–3 result produced with `grid` (and the golden fixtures, already stale
 since 0027) would change in stable and neutral conditions; see "Effect".
 
 **A turning wind.** When the wind direction at a particle changes between steps,
-the carried velocity can either keep its wind-relative components (FLEXPART) or
-keep its east/north components (this record). Write $V = R(\theta)DR(\theta)^T$
-for the Eulerian covariance of $(u', v')$ in the fixed frame,
-$D = \mathrm{diag}(\sigma_u^2, \sigma_v^2)$. Thomson's (1987) well-mixed condition
-for a Gaussian PDF has the drift term
-$\tfrac12 (\mathrm{d}V/\mathrm{d}t)\,V^{-1}u'$ along the particle path (plus
-$\tfrac12\partial_l V_{il}$ for spatial variation, below). Integrated over a
-change $\Delta\theta$ with $D$ fixed, it rotates the *normalised* wind-frame
-velocity $(a/\sigma_u, c/\sigma_v)$ by
-$-\tfrac12(\sigma_u/\sigma_v + \sigma_v/\sigma_u)\Delta\theta$ (derived). Then:
+the carried velocity can keep its wind-relative components (FLEXPART) or its
+east/north components (this record). Write $V = R(\theta)DR(\theta)^T$ for the
+Eulerian covariance of $(u', v')$ in the fixed frame,
+$D = \mathrm{diag}(\sigma_u^2, \sigma_v^2)$, $k = \sigma_u^2/\sigma_v^2 \le 2.37$
+in the Hanna stable regime. In two dimensions the well-mixed solution is not
+unique: any map that sends $N(0, V_{\rm old})$ to $N(0, V_{\rm new})$ keeps a
+well-mixed state well-mixed (Thomson 1987's drift is one choice; integrated over a
+turn $\Delta$ with $D$ fixed it rotates the normalised wind-frame velocity by
+$-\tfrac12(k^{1/2} + k^{-1/2})\Delta$, derived). Two cases differ:
 
-| carry | normalised rotation | Eulerian PDF after a turn | isotropic case ($\sigma_u = \sigma_v$) |
-| --- | --- | --- | --- |
-| Thomson (1987), exact | $-\tfrac12(k^{1/2} + k^{-1/2})\Delta\theta$ | kept | east/north velocity unchanged |
-| east/north (this record) | a rotation by $-\Delta\theta$ in the unnormalised components | distorted, relaxing over $T_L$ | east/north velocity unchanged |
-| wind-relative (FLEXPART; private `_carry_wind_relative`) | 0 | kept | velocity turned with the wind |
+- *The wind turns in time* (the direction at a fixed place changes). The
+  wind-relative carry maps $N(0, D)$ in the old wind frame to $N(0, D)$ in the new
+  one, so it is exact in every regime (with $\sigma_u = \sigma_v$ any rotation
+  leaves the isotropic Gaussian unchanged). The east/north carry is exact only
+  when $\sigma_u = \sigma_v$; otherwise a turn $\Delta$ leaves a spurious
+  along/cross covariance $(\sigma_u^2 - \sigma_v^2)\sin\Delta\cos\Delta$ and
+  variances off by up to a factor $k$, relaxing over $T_L$ (PR #77 review,
+  derived). Measured
+  (`test_wind_turning_through_calm_keeps_velocity_statistics_and_adds_no_drift`,
+  a wind turning through 180° via calm, half of it in ~3 min, particles below
+  $0.75h$, `outputs/agents/ROT/logs/turning_series.log`): wind-relative, both
+  normalised variances within 0.02 of 1 throughout; east/north, 0.89 (along) and
+  1.17 (cross) for about five minutes at the turn, back within 0.02 a minute after.
+- *The direction varies in space* (a particle crosses a turning or calm region by
+  its own turbulent motion). Here the wind-relative carry turns the particle's
+  velocity with the direction it moves through, a term $(u'\cdot\nabla\theta)$ in
+  the velocity equation that does not vanish for isotropic turbulence and that
+  the well-mixed condition does not allow (derived: with $p = c\,N(w; 0, D)$ in
+  wind-frame velocity $w$, stationarity of a uniform $c$ needs
+  $\nabla_x\cdot(R(\theta(x))w) = 0$ for every $w$, false wherever $\nabla\theta \ne 0$).
+  Measured in the calm-centre vortex (`outputs/agents/ROT/logs/vortex_carry.log`,
+  1 h, two seeds): in a convective, isotropic column, where the exact answer is
+  no change and `grid` and the east/north carry give −116/−193 and −167/−31
+  particles in the disk round the centre, the wind-relative carry *gained*
+  +7,048/+7,195 (z ≈ +45); in the neutral column it gave +728/+716 against the
+  −1,444 of the derived $\nabla\cdot K$ sink (z ≈ +23). The east/north carry is
+  exact for isotropic turbulence whatever the direction field, so it adds
+  nothing beyond the neglected $\nabla\cdot K$ term below.
 
-($k = \sigma_u^2/\sigma_v^2 \le 2.37$ in the Hanna stable regime.) Neither
-practical option is Thomson's: the east/north carry gets the isotropic limit
-exactly (so the convective boundary layer and the free troposphere behave
-exactly as in `grid`, in distribution) and distorts the anisotropic covariance
-for about $T_L$ after a turn; the wind-relative carry keeps the anisotropic PDF
-exactly but turns an isotropic velocity with the wind. In the diffusion limit
-($T_L \to 0$) the two are the same. Measured
-(`test_wind_turning_through_calm_keeps_velocity_statistics_and_adds_no_drift`, a
-wind turning through 180° via calm, half of it in ~3 min): the wind-relative
-carry kept both normalised variances within 0.02 of 1 below $0.75h$; the
-east/north carry went to 0.89 (along-wind) and 1.17 (cross-wind) for about five
-minutes at the turn, with the mean of the two within the derived range
-$[1, \tfrac12(k + 1/k)]$, and was back within 0.02 a minute after the turn
-(`outputs/agents/ROT/logs/turning_series.log`). The exact form needs the previous direction per
-particle as a new state tensor. It is not implemented: wind directions change by
-a degree or less in a boundary-layer $T_L$ except at calm points. The east/north
-carry is chosen for the exact isotropic limit (the review expects "no change in
-the free troposphere") and because a calm-zone frame switch then leaves the
-velocity continuous. The wind-relative carry stays as a private A/B switch for
-FLEXPART-like runs. Smoke effect of the choice: see "Effect".
+So neither practical carry is exact everywhere. The east/north carry's error is a
+velocity-covariance transient that lasts about $T_L$ after a fast turn in time and
+moves no tracer in a horizontally uniform field; the wind-relative carry's error
+is a systematic drift that collects tracer at calm points, in every regime. **The
+east/north carry is production**, guarded by
+`test_isotropic_vortex_has_no_calm_point_source_with_the_east_north_carry`; the
+wind-relative carry stays as the private A/B switch `_carry_wind_relative`. The
+carried $u'$, $v'$ are not part of any output, so the choice is physics only. An
+exact treatment of both cases would rotate the carried velocity by Thomson's
+normalised angle for the along-path change of direction, which needs the previous
+direction per particle as a new state tensor (follow-up). Smoke effect of the
+choice: see "Effect".
 
 **Calm winds.** Below some speed the mean wind no longer defines an along-wind
 axis. The threshold is $|U| \le \sigma_u$, per particle, on the step's own
@@ -141,7 +162,8 @@ treatment: it uses any non-zero accumulated displacement for the direction, and
 at exactly zero it drops the horizontal turbulent displacement (`windalign`).
 Fraction of particle-steps under the threshold in the smoke run: see "Effect".
 
-**What the rotation does not fix: the horizontal drift.** GLIDE has no horizontal
+**What the rotation does not fix: the horizontal drift (a known error,
+characterised).** GLIDE has no horizontal
 well-mixed drift ($\nabla\cdot K$ in the diffusion limit), with either frame, and
 neither has FLEXPART. Without it the horizontal transport is
 $\partial c/\partial t = \partial_i\partial_j(K_{ij}c)$, which does not keep a
@@ -151,7 +173,8 @@ $K = K_v I + (K_u - K_v)\,t\,t^T$ ($t$ the unit vector along the wind).
 For a vortex, $\partial_i\partial_j(t_it_j)$ vanishes everywhere except at the
 calm centre, where it integrates to $-2\pi$, whatever the calm treatment
 (derived). So a calm centre is a point sink of
-$2\pi(K_u - K_v)c$, and nothing else changes. The test
+$2\pi(K_u - K_v)c$, and nothing else changes. The vortex test characterises this
+known error; it does not show its absence
 (`test_vortex_with_a_calm_centre_loses_only_the_derived_neglected_drift_term`:
 a neutral column, $h$ = 300 m, $u_*$ = 0.4 m s⁻¹, a vortex with a 0.9 km calm
 region, 156,250 particles over ±5 km, 1 h, the expectation from the along-wind
@@ -205,24 +228,44 @@ PR #74 (`outputs/agents/ROT/logs/compare_smoke.log`):
 
 The idealised test (stable, 10 min, 90° rotation) shows what the switch is for:
 a plume's along-wind and cross-wind widths differ by 1.75:1 and with `grid` that
-ratio follows the grid, not the wind. Effects on footprints are largest for
-receptors in stable or neutral air with winds across the grid axes, and in
-the Tier 1 comparisons with FLEXPART, which rotates. Not run: a calm-prone
-case, a GPU run.
+ratio follows the grid, not the wind. A cross-grid case (PR #77 review,
+`outputs/agents/ROT/review/compare_tac28.log`; Tacolneston 185 m, 28 Jan 2024
+03 UTC, southerly wind, 6 h, seeds 42 and 43, meander on and off): footprints
+within particle noise (0–40 m totals −0.11% to +0.02% against a seed spread of
+0.4–0.7%; cell-by-cell L1 0.0014–0.0027 against 0.0067–0.0087 seed to seed), and
+the cross-wind (east–west) spread of the endpoints 0.2–0.9% narrower with
+`wind`. That is small because at hours the horizontal spread comes from the
+resolved wind (shear, meander), and Hanna's horizontal $K$ adds only about 1% to
+it (review). So the switch matters most where the boundary-layer turbulence
+itself sets the spread: near the receptor, in the first tens of minutes of
+travel, in stable or neutral air with the wind across the grid axes, and in the
+Tier 1 comparisons with FLEXPART, which rotates. Not run: a calm-prone case;
+the compiled GPU smoke with `wind` (the GPU run was not permitted in this
+session; the CPU capture guards pass for both frames).
 
 **Rejected alternatives.**
 - *Rotate the displacement functions* (`apply_horizontal_turbulence` taking a
   direction): ties the fix to the position frame that PR #74 changes; the
   velocity-space rotation is frame-independent.
-- *The wind-relative carry as production* (FLEXPART): see "A turning wind";
-  kept as a private A/B switch.
-- *Thomson's exact rotation of the carried state*: a new per-particle state
-  tensor through both step paths for an effect confined to near-calm turns.
+- *The wind-relative carry as production* (FLEXPART; recommended by the PR #77
+  review): exact for a turn in time, but a source of tracer at calm points where
+  the direction varies in space, in every regime (see "A turning wind"); kept as
+  a private A/B switch.
+- *Thomson's exact rotation of the carried state* (along-path, normalised): exact
+  in both cases apart from the ∇·K term, but needs the previous direction per particle as a new state
+  tensor through both step paths; a follow-up.
 - *Isotropic calm fallback*: needs a $T_L$ choice; arbitrary either way.
 - *No calm treatment* (FLEXPART): the direction of a 0.01 m/s wind then sets an
   anisotropy of 3.3 in $K$.
 - *The direction of the step's RK2 displacement* (FLEXPART uses the accumulated
   displacement): the dynamic step path does not see the advection.
+
+**Related, not in this record.** $u'$, $v'$ carry no correction for the
+vertical gradient of $\sigma_u$, $\sigma_v$ (found by this record's tests; both
+frames; FLEXPART the same). A cheap exact fix is to rescale them at every
+sub-step by $\sigma(z_{\rm new})/\sigma(z_{\rm old})$, $u' \to
+u'\,\sigma_u(z_{\rm new})/\sigma_u(z_{\rm old})$ and likewise $v'$, the same
+treatment the $\sigma$ carry (0028) gives a change in time; not part of this PR.
 
 **Status.** Proposed; implemented behind `turbulence.horizontal_frame`, default
 `grid`. Matt decides the default. Docs: [physics.md](../../docs/physics.md) §3.4,
