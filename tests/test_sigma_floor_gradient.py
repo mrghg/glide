@@ -51,19 +51,23 @@ def _col(scheme: HannaScheme, met, n: int) -> dict:
     """Column inputs as ``HannaScheme.step`` gathers them (dynamic path)."""
 
     eng = GPUEngine(device="cpu")
-    lon, lat = torch.zeros(n), torch.full((n,), 45.0)
+    frame = eng.frame
+    # Horizontal position in the engine's frame (lon 0, lat 45); latitude in degrees
+    # for Coriolis.
+    x, y = frame.x_from_lon(torch.zeros(n)), frame.y_from_lat(torch.full((n,), 45.0))
+    lat = frame.lat_from_y(y)
 
     def surf(k):
-        return scheme._interp_surface_field(met, k, 0.5, lon, lat, eng.device, eng.dtype)
+        return scheme._interp_surface_field(met, k, 0.5, x, y, eng.device, eng.dtype, frame=frame)
 
     h = scheme._limit_blh(surf("blh"))
     sp = surf("sp")
     us = surf("ustar").clamp(min=H.USTAR_MIN_M_S)
-    ts = scheme._interp_t_at_lowest_level(met, 0.5, lon, lat, eng.device, eng.dtype)
+    ts = scheme._interp_t_at_lowest_level(met, 0.5, x, y, eng.device, eng.dtype, frame=frame)
     L = obukhov_length(us, surf("shf"), ts, sp)
     ws = convective_velocity(h, surf("shf"), ts, sp, blh_min_m=scheme.blh_min_m)
-    ft, gb = scheme._free_trop_fields(met, eng.device, eng.dtype)
-    return dict(blh=h, ustar=us, w_star=ws, h_over_L=h / L, L=L, lat=lat, lon=lon,
+    ft, gb = scheme._free_trop_fields(met, eng.device, eng.dtype, frame=frame)
+    return dict(blh=h, ustar=us, w_star=ws, h_over_L=h / L, L=L, lat=lat, x=x, y=y,
                 ft_fields=ft, grid_bounds=gb, engine=eng)  # fmt: skip
 
 

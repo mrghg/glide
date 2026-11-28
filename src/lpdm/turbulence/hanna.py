@@ -30,7 +30,14 @@ from typing import ClassVar
 import numpy as np
 import torch
 
-from lpdm.gpu_engine import GPUEngine, GridInterpolationBounds, use_static_step_path
+from lpdm.gpu_engine import (
+    GPUEngine,
+    GridInterpolationBounds,
+    frame_grid_bounds,
+    trilinear_sample,
+    use_static_step_path,
+)
+from lpdm.local_frame import HorizontalFrame
 from lpdm.met_reader import HourlyMetTensors
 from lpdm.turbulence.base import TurbulenceScheme, TurbulenceState, register_scheme
 
@@ -831,7 +838,14 @@ class HannaScheme(TurbulenceScheme):
             # it captures as a single graph, collapsing the ~1000+ eager kernel launches
             # per step that left the GPU launch-bound (profile 2026-06-26). Inactive
             # particles are frozen by the mask (sub_dt=0 in the loop + a where at the end).
-            inputs = self._gather_static_inputs(met_window, t_alpha, device, dtype)
+            inputs = self._gather_static_inputs(
+                met_window,
+                t_alpha,
+                device,
+                dtype,
+                frame=engine.frame,
+                wind_dtype=engine.wind_dtype,
+            )
             graph_core = self._maybe_graph_compile(engine)
             core_fn = graph_core if graph_core is not None else self._step_core
             if graph_core is not None:
@@ -878,29 +892,32 @@ class HannaScheme(TurbulenceScheme):
         u_prime_in = state["u_prime"][active_mask]
         v_prime_in = state["v_prime"][active_mask]
         w_prime_in = state["w_prime"][active_mask]
-        lon_deg = active_xyz[:, 0]
-        lat_deg = active_xyz[:, 1]
+        # Horizontal position in the engine's frame (`lpdm.local_frame`); latitude
+        # in degrees for the Coriolis parameter.
+        frame = engine.frame
+        x = active_xyz[:, 0]
+        y = active_xyz[:, 1]
+        lat_deg = frame.lat_from_y(y)
         z_agl = active_xyz[:, 2]
 
-        blh = self._limit_blh(
-            self._interp_surface_field(met_window, "blh", t_alpha, lon_deg, lat_deg, device, dtype)
-        )
-        sp = self._interp_surface_field(met_window, "sp", t_alpha, lon_deg, lat_deg, device, dtype)
-        ustar = self._interp_surface_field(
-            met_window, "ustar", t_alpha, lon_deg, lat_deg, device, dtype
-        ).clamp(min=USTAR_MIN_M_S)
-        shf = self._interp_surface_field(
-            met_window, "shf", t_alpha, lon_deg, lat_deg, device, dtype
-        )
+        def surface(name: str) -> torch.Tensor:
+            return self._interp_surface_field(
+                met_window, name, t_alpha, x, y, device, dtype, frame=frame
+            )
+
+        blh = self._limit_blh(surface("blh"))
+        sp = surface("sp")
+        ustar = surface("ustar").clamp(min=USTAR_MIN_M_S)
+        shf = surface("shf")
         t_surface = self._interp_t_at_lowest_level(
-            met_window, t_alpha, lon_deg, lat_deg, device, dtype
+            met_window, t_alpha, x, y, device, dtype, frame=frame
         )
 
         L = obukhov_length(ustar, shf, t_surface, sp)
         h_over_L = blh / L
         w_star = convective_velocity(blh, shf, t_surface, sp, blh_min_m=self.blh_min_m)
 
-        ft_fields, grid_bounds = self._free_trop_fields(met_window, device, dtype)
+        ft_fields, grid_bounds = self._free_trop_fields(met_window, device, dtype, frame)
         density_fields = self._density_fields(met_window, device, dtype)
         col_kwargs = dict(
             blh=blh,
@@ -909,7 +926,8 @@ class HannaScheme(TurbulenceScheme):
             h_over_L=h_over_L,
             L=L,
             lat=lat_deg,
-            lon=lon_deg,
+            x=x,
+            y=y,
             ft_fields=ft_fields,
             grid_bounds=grid_bounds,
             engine=engine,
@@ -932,14 +950,15 @@ class HannaScheme(TurbulenceScheme):
         ) = coeffs_at(z_agl)
         wind_axes = None
         if self.horizontal_frame == "wind":
+            # The u, v stacks in the wind-gather dtype, as the static path holds them.
             uv_start, uv_end = met_window.channels("u", "v")
             wind_axes = self._wind_axes(
-                uv_start.to(device=device, dtype=dtype),
-                uv_end.to(device=device, dtype=dtype),
+                uv_start.to(device=device, dtype=engine.wind_dtype),
+                uv_end.to(device=device, dtype=engine.wind_dtype),
                 t_alpha,
                 sigma_u,
-                lon=lon_deg,
-                lat=lat_deg,
+                x=x,
+                y=y,
                 z=z_eval,
                 grid_bounds=grid_bounds,
                 engine=engine,
@@ -992,10 +1011,10 @@ class HannaScheme(TurbulenceScheme):
         sigma_last_active = self._sigmas_at(moved[:, 2], **col_kwargs)
 
         if self.meander_enabled:
-            meander_fields, meander_bounds = self._meander_sigma_fields(met_window, device, dtype)
-            sm = self._interp_3d_field(
-                meander_fields, meander_bounds, lon_deg, lat_deg, z_eval, engine
+            meander_fields, meander_bounds = self._meander_sigma_fields(
+                met_window, device, dtype, frame
             )
+            sm = self._interp_3d_field(meander_fields, meander_bounds, x, y, z_eval, engine)
             u_meander_active = engine.update_langevin_velocity(
                 state["u_meander"][active_mask],
                 t_lagrangian=self.meander_timescale_seconds,
@@ -1096,8 +1115,8 @@ class HannaScheme(TurbulenceScheme):
         density_at_p = self._interp_3d_field(
             density_fields,
             col_kwargs["grid_bounds"],
-            col_kwargs["lon"],
-            col_kwargs["lat"],
+            col_kwargs["x"],
+            col_kwargs["y"],
             z_eval,
             col_kwargs["engine"],
             level_arr=col_kwargs.get("level_arr"),
@@ -1122,7 +1141,9 @@ class HannaScheme(TurbulenceScheme):
             density_drift_backward,
         )
 
-    def _cached_raw_device_met(self, met_window, device, dtype) -> dict:
+    def _cached_raw_device_met(
+        self, met_window, device, dtype, wind_dtype: torch.dtype | None = None
+    ) -> dict:
         """Raw met moved to the device ONCE per window (keyed by window start time).
 
         Returns the surface hour-start/end slices (as (start, end) pairs, for the
@@ -1130,11 +1151,17 @@ class HannaScheme(TurbulenceScheme):
         per-level AGL ``level_arr`` and the ``ascending`` flag. All constant within a
         met window, so this replaces the per-step host->device copy + allocation that
         ``_gather_static_inputs`` used to do every step. See ``_raw_met_cache``.
+
+        The wind stacks are held in ``wind_dtype`` (``simulation.wind_gather_dtype``,
+        task A4): float32, or bfloat16 for the 16-bit trilinear gather of
+        ``_advect_rk2``.
         """
 
+        wind_dtype = dtype if wind_dtype is None else wind_dtype
         ts = met_window.metadata.time_start
+        key = (ts, wind_dtype)
         entry = self._raw_met_cache
-        if entry is not None and entry[0] == ts:
+        if entry is not None and entry[0] == key:
             return entry[1]
 
         def _surf_pair(name, lev):
@@ -1155,10 +1182,10 @@ class HannaScheme(TurbulenceScheme):
             # The wind stacks and level array enter the compiled core directly:
             # static buffers, refilled once per window (perf #1).
             m_start_uvw=self._to_static_buffer(
-                "met.m_start_uvw", m_start_uvw.to(device=device, dtype=dtype)
+                "met.m_start_uvw", m_start_uvw.to(device=device, dtype=wind_dtype)
             ),
             m_end_uvw=self._to_static_buffer(
-                "met.m_end_uvw", m_end_uvw.to(device=device, dtype=dtype)
+                "met.m_end_uvw", m_end_uvw.to(device=device, dtype=wind_dtype)
             ),
             # per-level AGL heights — the F9 vertical-lookup axis; a dynamic
             # TENSOR so dynamo doesn't specialise the graph on the per-window values.
@@ -1170,15 +1197,26 @@ class HannaScheme(TurbulenceScheme):
             # pressure-level ORDER is genuinely constant, so it stays a plain bool.
             ascending=bool(level[-1] > level[0]),
         )
-        self._raw_met_cache = (ts, bundle)
+        self._raw_met_cache = (key, bundle)
         return bundle
 
-    def _gather_static_inputs(self, met_window, t_alpha, device, dtype):
+    def _gather_static_inputs(
+        self,
+        met_window,
+        t_alpha,
+        device,
+        dtype,
+        *,
+        frame: HorizontalFrame,
+        wind_dtype: torch.dtype | None = None,
+    ):
         """Assemble the per-step pure-tensor inputs for `_step_core` (the torch.compile
         target). The raw met + derived stacks are cached per window; only the cheap
         per-step time interpolation of the surface fields and the ``alpha`` scalar are
-        rebuilt each step. Behaviour-preserving vs the pre-cache path (identical math)."""
-        raw = self._cached_raw_device_met(met_window, device, dtype)
+        rebuilt each step. Behaviour-preserving vs the pre-cache path (identical math).
+        ``frame`` is the engine's horizontal frame (the grid bounds are expressed in
+        it) and ``wind_dtype`` the dtype of the wind stacks (task A4)."""
+        raw = self._cached_raw_device_met(met_window, device, dtype, wind_dtype)
 
         def _interp(name, pair):
             # Per-step surface lerp, written INTO a stable buffer (perf #1): the
@@ -1193,10 +1231,10 @@ class HannaScheme(TurbulenceScheme):
             torch.lerp(s, e, 1.0 if held else float(t_alpha), out=buf)
             return buf
 
-        ft_fields, grid_bounds = self._free_trop_fields(met_window, device, dtype)
+        ft_fields, grid_bounds = self._free_trop_fields(met_window, device, dtype, frame)
         meander_fields = None
         if self.meander_enabled:
-            meander_fields, _ = self._meander_sigma_fields(met_window, device, dtype)
+            meander_fields, _ = self._meander_sigma_fields(met_window, device, dtype, frame)
 
         # alpha (the RK2-midpoint time-interp weight) changes EVERY step. Pass it as
         # a 0-d TENSOR, not a Python float: dynamo specializes the compiled graph on
@@ -1247,25 +1285,36 @@ class HannaScheme(TurbulenceScheme):
     ):
         """RK2 backward advection on the full particle buffer (folded into `_step_core`
         so the whole step captures as one graph). Bit-identical to the pre-fold
-        `main._advect_active_particles` wind_fn + `engine.rk2_advect_backward`."""
+        `main._advect_active_particles` wind_fn + `engine.rk2_advect_backward`.
+        Positions are in the engine's frame (`lpdm.local_frame`); the wind stacks
+        are float32 (``grid_sample``) or 16-bit (``trilinear_sample``, task A4)."""
+        frame = engine.frame
         m_start = m_start_uvw.unsqueeze(0)
         m_end = m_end_uvw.unsqueeze(0)
+        sample_16bit = m_start_uvw.dtype.itemsize == 2
 
         def wind(xyz: torch.Tensor) -> torch.Tensor:
             xyz_norm = engine.normalize_particle_coordinates(
                 xyz, grid_bounds, level_arr=level_arr, ascending=ascending
             )
-            grid = xyz_norm.view(1, 1, 1, -1, 3)
-            v_start = (
-                torch.nn.functional.grid_sample(m_start, grid, align_corners=True).view(3, -1).t()
-            )
-            v_end = torch.nn.functional.grid_sample(m_end, grid, align_corners=True).view(3, -1).t()
+            if sample_16bit:
+                s, e = trilinear_sample((m_start_uvw, m_end_uvw), xyz_norm)
+                v_start, v_end = s.t(), e.t()
+            else:
+                grid = xyz_norm.view(1, 1, 1, -1, 3)
+                v_start = (
+                    torch.nn.functional.grid_sample(m_start, grid, align_corners=True)
+                    .view(3, -1)
+                    .t()
+                )
+                v_end = (
+                    torch.nn.functional.grid_sample(m_end, grid, align_corners=True).view(3, -1).t()
+                )
             v = v_start * (1.0 - alpha) + v_end * alpha
-            lat = xyz[:, 1]
-            m_lon = 111320.0 * torch.cos(torch.deg2rad(lat)).abs().clamp(min=0.05)
+            lat = frame.lat_from_y(xyz[:, 1])
             out = torch.empty_like(xyz)
-            out[:, 0] = v[:, 0] / m_lon
-            out[:, 1] = v[:, 1] / 110540.0
+            out[:, 0] = v[:, 0] / frame.metres_per_x(lat)
+            out[:, 1] = v[:, 1] / frame.metres_per_y
             out[:, 2] = v[:, 2]
             return out
 
@@ -1334,21 +1383,20 @@ class HannaScheme(TurbulenceScheme):
             ascending=ascending,
         )
 
-        lon_deg = particles[:, 0]
-        lat_deg = particles[:, 1]
+        # Horizontal position in the engine's frame; `grid_bounds` are in it too.
+        # Latitude in degrees only for the Coriolis parameter.
+        x = particles[:, 0]
+        y = particles[:, 1]
+        lat_deg = engine.frame.lat_from_y(y)
         z_agl = particles[:, 2]
-        lon0, lon1 = grid_bounds.lon_first, grid_bounds.lon_last
-        lat0, lat1 = grid_bounds.lat_first, grid_bounds.lat_last
+        x0, x1 = grid_bounds.lon_first, grid_bounds.lon_last
+        y0, y1 = grid_bounds.lat_first, grid_bounds.lat_last
 
-        blh = self._limit_blh(
-            self._bilinear_at(blh_field, lon0, lon1, lat0, lat1, lon_deg, lat_deg)
-        )
-        sp = self._bilinear_at(sp_field, lon0, lon1, lat0, lat1, lon_deg, lat_deg)
-        ustar = self._bilinear_at(ustar_field, lon0, lon1, lat0, lat1, lon_deg, lat_deg).clamp(
-            min=USTAR_MIN_M_S
-        )
-        shf = self._bilinear_at(shf_field, lon0, lon1, lat0, lat1, lon_deg, lat_deg)
-        t_surface = self._bilinear_at(t_field, lon0, lon1, lat0, lat1, lon_deg, lat_deg)
+        blh = self._limit_blh(self._bilinear_at(blh_field, x0, x1, y0, y1, x, y))
+        sp = self._bilinear_at(sp_field, x0, x1, y0, y1, x, y)
+        ustar = self._bilinear_at(ustar_field, x0, x1, y0, y1, x, y).clamp(min=USTAR_MIN_M_S)
+        shf = self._bilinear_at(shf_field, x0, x1, y0, y1, x, y)
+        t_surface = self._bilinear_at(t_field, x0, x1, y0, y1, x, y)
 
         L = obukhov_length(ustar, shf, t_surface, sp)
         h_over_L = blh / L
@@ -1361,7 +1409,8 @@ class HannaScheme(TurbulenceScheme):
             h_over_L=h_over_L,
             L=L,
             lat=lat_deg,
-            lon=lon_deg,
+            x=x,
+            y=y,
             ft_fields=ft_fields,
             grid_bounds=grid_bounds,
             engine=engine,
@@ -1391,8 +1440,8 @@ class HannaScheme(TurbulenceScheme):
                 m_end_uvw[:2],
                 alpha,
                 sigma_u,
-                lon=lon_deg,
-                lat=lat_deg,
+                x=x,
+                y=y,
                 z=z_eval,
                 grid_bounds=grid_bounds,
                 engine=engine,
@@ -1443,8 +1492,8 @@ class HannaScheme(TurbulenceScheme):
             sm = self._interp_3d_field(
                 meander_fields,
                 grid_bounds,
-                lon_deg,
-                lat_deg,
+                x,
+                y,
                 z_eval,
                 engine,
                 level_arr=level_arr,
@@ -1827,7 +1876,8 @@ class HannaScheme(TurbulenceScheme):
         h_over_L: torch.Tensor,
         L: torch.Tensor,
         lat: torch.Tensor,
-        lon: torch.Tensor,
+        x: torch.Tensor,
+        y: torch.Tensor,
         ft_fields: torch.Tensor,
         grid_bounds: GridInterpolationBounds,
         engine: GPUEngine,
@@ -1892,8 +1942,8 @@ class HannaScheme(TurbulenceScheme):
         ft = self._interp_3d_field(
             ft_fields,
             grid_bounds,
-            lon,
-            lat,
+            x,
+            y,
             z_query,
             engine,
             level_arr=level_arr,
@@ -1925,7 +1975,8 @@ class HannaScheme(TurbulenceScheme):
         h_over_L: torch.Tensor,
         L: torch.Tensor,
         lat: torch.Tensor,
-        lon: torch.Tensor,
+        x: torch.Tensor,
+        y: torch.Tensor,
         ft_fields: torch.Tensor,
         grid_bounds: GridInterpolationBounds,
         engine: GPUEngine,
@@ -1953,8 +2004,8 @@ class HannaScheme(TurbulenceScheme):
         ft_sw = self._interp_3d_field(
             ft_fields[:1],
             grid_bounds,
-            lon,
-            lat,
+            x,
+            y,
             z_query,
             engine,
             level_arr=level_arr,
@@ -1977,8 +2028,8 @@ class HannaScheme(TurbulenceScheme):
         alpha: torch.Tensor | float,
         sigma_u: torch.Tensor,
         *,
-        lon: torch.Tensor,
-        lat: torch.Tensor,
+        x: torch.Tensor,
+        y: torch.Tensor,
         z: torch.Tensor,
         grid_bounds: GridInterpolationBounds,
         engine: GPUEngine,
@@ -1988,19 +2039,30 @@ class HannaScheme(TurbulenceScheme):
         """Unit vector ``[cos φ, sin φ]`` (``[2, N]``, east and north components) of
         the mean horizontal wind at each particle, for the ``"wind"`` frame
         (decision 0032). ``uv_start`` / ``uv_end`` are the ``[2, Z, Y, X]`` u and v
-        stacks at the window's ends, interpolated in time with ``alpha`` as the
-        advection does; ``z`` is the basally clamped height the coefficients use.
+        stacks (m/s) at the window's ends, sampled as the advection samples the wind
+        (``grid_sample``, or ``trilinear_sample`` for a 16-bit wind-gather dtype) and
+        interpolated in time with ``alpha``; ``(x, y)`` is the position in the frame
+        of ``grid_bounds`` and ``z`` the basally clamped height the coefficients use.
+        The direction does not depend on the position frame: u and v are east and
+        north in every frame.
 
         Where the speed is at most ``WIND_FRAME_CALM_RATIO · σ_u`` the axes are the
         grid's (``[1, 0]``), so u' stays east and v' north for that particle and
         step. A ``torch.where`` on the device: no host sync, the same on both step
         paths."""
 
-        a = torch.as_tensor(alpha, device=lon.device, dtype=lon.dtype)
-        kw = dict(level_arr=level_arr, ascending=ascending)
-        s = self._interp_3d_field(uv_start, grid_bounds, lon, lat, z, engine, **kw)
-        e = self._interp_3d_field(uv_end, grid_bounds, lon, lat, z, engine, **kw)
-        uv = s * (1.0 - a) + e * a
+        a = torch.as_tensor(alpha, device=x.device, dtype=x.dtype)
+        xyz_norm = engine.normalize_particle_coordinates(
+            torch.stack([x, y, z], dim=1), grid_bounds, level_arr=level_arr, ascending=ascending
+        )
+        if uv_start.dtype.itemsize == 2:
+            s, e = trilinear_sample((uv_start, uv_end), xyz_norm)
+        else:
+            grid = xyz_norm.view(1, 1, 1, -1, 3)
+            sample = torch.nn.functional.grid_sample
+            s = sample(uv_start.unsqueeze(0), grid, align_corners=True).view(2, -1)
+            e = sample(uv_end.unsqueeze(0), grid, align_corners=True).view(2, -1)
+        uv = s.to(x.dtype) * (1.0 - a) + e.to(x.dtype) * a
         speed = torch.hypot(uv[0], uv[1])
         windy = speed > WIND_FRAME_CALM_RATIO * sigma_u
         inv = 1.0 / speed.clamp(min=SIGMA_MIN_M_S)
@@ -2081,7 +2143,8 @@ class HannaScheme(TurbulenceScheme):
         w_star: torch.Tensor,
         h_over_L: torch.Tensor,
         lat: torch.Tensor,
-        lon: torch.Tensor,
+        x: torch.Tensor,
+        y: torch.Tensor,
         ft_fields: torch.Tensor,
         grid_bounds: GridInterpolationBounds,
         engine: GPUEngine,
@@ -2100,8 +2163,8 @@ class HannaScheme(TurbulenceScheme):
         ft = self._interp_3d_field(
             ft_fields[:2],
             grid_bounds,
-            lon,
-            lat,
+            x,
+            y,
             blh,
             engine,
             level_arr=level_arr,
@@ -2285,6 +2348,7 @@ class HannaScheme(TurbulenceScheme):
         met_window: HourlyMetTensors,
         device: torch.device,
         dtype: torch.dtype,
+        frame: HorizontalFrame,
     ) -> tuple[torch.Tensor, GridInterpolationBounds]:
         """Build free-troposphere (σ_w, σ_uv, T_Lw, T_Luv) on the met grid [4, Z, Y, X].
 
@@ -2327,7 +2391,7 @@ class HannaScheme(TurbulenceScheme):
             return torch.stack([sigma_w_ft, sigma_w_ft, t_lw_ft, t_lw_ft], dim=0)
 
         fields = self._cached_window_field(met_window, "freetrop", _build)
-        return fields, self._grid_bounds(met_window)
+        return fields, self._grid_bounds(met_window, frame)
 
     def _density_fields(
         self,
@@ -2368,6 +2432,7 @@ class HannaScheme(TurbulenceScheme):
         met_window: HourlyMetTensors,
         device: torch.device,
         dtype: torch.dtype,
+        frame: HorizontalFrame,
     ) -> tuple[torch.Tensor, GridInterpolationBounds]:
         """Meander (σ_u, σ_v) on the met grid [2, Z, Y, X] from local wind variability.
 
@@ -2388,7 +2453,7 @@ class HannaScheme(TurbulenceScheme):
             return torch.stack([sigma_u, sigma_v], dim=0)
 
         fields = self._cached_window_field(met_window, "meander", _build)
-        return fields, self._grid_bounds(met_window)
+        return fields, self._grid_bounds(met_window, frame)
 
     @staticmethod
     def _windowed_std(field: torch.Tensor, radius: int) -> torch.Tensor:
@@ -2410,8 +2475,11 @@ class HannaScheme(TurbulenceScheme):
         return var.sqrt().squeeze(0)
 
     @staticmethod
-    def _grid_bounds(met_window: HourlyMetTensors) -> GridInterpolationBounds:
-        """Interpolation bounds for sampling met-grid fields per-particle.
+    def _grid_bounds(
+        met_window: HourlyMetTensors, frame: HorizontalFrame
+    ) -> GridInterpolationBounds:
+        """Interpolation bounds for sampling met-grid fields per-particle, with the
+        horizontal end points in ``frame`` (``gpu_engine.frame_grid_bounds``).
 
         Passes the per-level AGL array (F9 fix, audit 2026-05-30) so the
         vertical normalisation done by ``GPUEngine.normalize_particle_coordinates``
@@ -2419,18 +2487,7 @@ class HannaScheme(TurbulenceScheme):
         linear-in-AGL approximation that was biased for pressure-level data.
         """
 
-        lon_arr = met_window.metadata.lon
-        lat_arr = met_window.metadata.lat
-        level_arr = met_window.metadata.level
-        return GridInterpolationBounds(
-            lon_first=float(lon_arr[0]),
-            lon_last=float(lon_arr[-1]),
-            lat_first=float(lat_arr[0]),
-            lat_last=float(lat_arr[-1]),
-            alt_first=float(level_arr[0]),
-            alt_last=float(level_arr[-1]),
-            level_agl_m=tuple(float(v) for v in level_arr),
-        )
+        return frame_grid_bounds(met_window.metadata, frame)
 
     @staticmethod
     def _vertical_gradient(field: torch.Tensor, height: torch.Tensor) -> torch.Tensor:
@@ -2452,20 +2509,21 @@ class HannaScheme(TurbulenceScheme):
     def _interp_3d_field(
         fields_stacked: torch.Tensor,
         grid_bounds: GridInterpolationBounds,
-        lon: torch.Tensor,
-        lat: torch.Tensor,
+        x: torch.Tensor,
+        y: torch.Tensor,
         z: torch.Tensor,
         engine: GPUEngine,
         level_arr: torch.Tensor | None = None,
         ascending: bool | None = None,
     ) -> torch.Tensor:
-        """Trilinear interp of a [C, Z, Y, X] field stack at particle (lon, lat, z).
+        """Trilinear interp of a [C, Z, Y, X] field stack at particle (x, y, z), the
+        horizontal position in the frame ``grid_bounds`` is expressed in.
         Returns [C, N]. Reuses the engine's coordinate normalisation so the vertical
         mapping matches the wind advection. ``level_arr`` (dynamic tensor) + ``ascending``
         (constant bool) are threaded to ``normalize_particle_coordinates`` on the compiled
         path so the per-window level VALUES don't trigger recompiles (see that method)."""
 
-        xyz = torch.stack([lon, lat, z], dim=1)
+        xyz = torch.stack([x, y, z], dim=1)
         xyz_norm = engine.normalize_particle_coordinates(
             xyz, grid_bounds, level_arr=level_arr, ascending=ascending
         )
@@ -2512,12 +2570,14 @@ class HannaScheme(TurbulenceScheme):
         met_window: HourlyMetTensors,
         channel_name: str,
         t_alpha: float,
-        lon: torch.Tensor,
-        lat: torch.Tensor,
+        x: torch.Tensor,
+        y: torch.Tensor,
         device: torch.device,
         dtype: torch.dtype,
+        *,
+        frame: HorizontalFrame,
     ) -> torch.Tensor:
-        """Interpolate a surface (z-broadcast) channel at particle (lon, lat).
+        """Interpolate a surface (z-broadcast) channel at particle (x, y) in ``frame``.
 
         In time: linear for a snapshot; a mean/accumulation channel (decision
         0020) is held at its window-end value, the mean over this window.
@@ -2532,10 +2592,10 @@ class HannaScheme(TurbulenceScheme):
             field_2d = field_start * (1.0 - t_alpha) + field_end * t_alpha
         return cls._interp_2d_bilinear(
             field_2d,
-            met_window.metadata.lon,
-            met_window.metadata.lat,
-            lon,
-            lat,
+            frame.x_from_lon(met_window.metadata.lon),
+            frame.y_from_lat(met_window.metadata.lat),
+            x,
+            y,
         )
 
     @classmethod
@@ -2543,10 +2603,12 @@ class HannaScheme(TurbulenceScheme):
         cls,
         met_window: HourlyMetTensors,
         t_alpha: float,
-        lon: torch.Tensor,
-        lat: torch.Tensor,
+        x: torch.Tensor,
+        y: torch.Tensor,
         device: torch.device,
         dtype: torch.dtype,
+        *,
+        frame: HorizontalFrame,
     ) -> torch.Tensor:
         """Interpolate temperature at the lowest model level (surface proxy)."""
 
@@ -2558,8 +2620,8 @@ class HannaScheme(TurbulenceScheme):
         field_2d = field_start * (1.0 - t_alpha) + field_end * t_alpha
         return cls._interp_2d_bilinear(
             field_2d,
-            met_window.metadata.lon,
-            met_window.metadata.lat,
-            lon,
-            lat,
+            frame.x_from_lon(met_window.metadata.lon),
+            frame.y_from_lat(met_window.metadata.lat),
+            x,
+            y,
         )

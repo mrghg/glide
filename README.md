@@ -221,6 +221,13 @@ together in one engine pass, and it is the main memory lever. Keep it a multiple
 of the site count for multi-site runs; `make_multisite_config.py` sizes it
 automatically.
 
+`simulation.wind_gather_dtype` (`float32`, the default, or `bfloat16`) is the
+precision the per-window wind stacks are held in on the device for the
+advection's trilinear gather; the weights and the sum stay in float32 (task A4,
+[docs/architecture.md](docs/architecture.md) §5). Particle positions are held in
+metres from the met domain's centre and written out in degrees
+([docs/physics.md](docs/physics.md) §2).
+
 Memory controls live under `memory:` — `met_cache_max_hours` (set it above
 `simulation.length_seconds/3600 + batch_advance_hours` or consecutive batches
 re-fetch; a startup warning fires if it is too small), `met_cache_on_host`,

@@ -21,6 +21,7 @@ import torch
 import xarray as xr
 
 from lpdm.config import RunConfig
+from lpdm.local_frame import DEGREES
 from lpdm.main import PreflightValidationError, _run, _within_met_domain
 from lpdm.met_reader import (
     BoundingBoxRequest,
@@ -1704,7 +1705,7 @@ def test_within_met_domain_flags_out_of_bounds_particles() -> None:
         ],
         dtype=torch.float64,
     )
-    within = _within_met_domain(particles, cfg)
+    within = _within_met_domain(particles, cfg, frame=DEGREES)
     assert within.tolist() == [True, True, False, False, False, False, True]
 
 
@@ -1928,8 +1929,34 @@ def test_step_profiler_captures_window_and_exits(tmp_path: Path, monkeypatch) ->
     assert trace.exists() and trace.stat().st_size > 0  # trace was written before exit
 
 
-@pytest.mark.parametrize("frame", ["grid", "wind"])
-def test_step_core_traces_as_one_graph_no_breaks(frame: str) -> None:
+_CAPTURE_CASES = pytest.mark.parametrize(
+    "frame_kind, wind_dtype",
+    [("degrees", torch.float32), ("local_metric", torch.float32), ("local_metric", torch.bfloat16)],
+    ids=["degrees", "metric", "metric-bf16"],
+)
+
+
+def _capture_engine(frame_kind: str, wind_dtype: torch.dtype):
+    """Engine for the capture guards: the degrees frame and float32 winds (the
+    pre-A4 arithmetic), and the runtime's local metric frame with float32 or
+    bfloat16 winds (task A4), so the guards hold in every mode."""
+
+    from lpdm.gpu_engine import GPUEngine
+    from lpdm.local_frame import DEGREES, HorizontalFrame
+
+    frame = (
+        DEGREES
+        if frame_kind == "degrees"
+        else HorizontalFrame.local_metric((-98.0, 39.5), (10.75, 79.0))
+    )
+    return GPUEngine(device="cpu", frame=frame, wind_gather_dtype=wind_dtype)
+
+
+@pytest.mark.parametrize("horizontal_frame", ["grid", "wind"])  # decision 0032
+@_CAPTURE_CASES
+def test_step_core_traces_as_one_graph_no_breaks(
+    frame_kind: str, wind_dtype: torch.dtype, horizontal_frame: str
+) -> None:
     """The whole per-step core must trace as ONE graph (no graph breaks) so it captures
     as a single CUDA graph on GPU — otherwise the eager glue between sub-graphs keeps the
     run launch-bound (the phase-4 failure mode). `fullgraph=True` + `backend="eager"`
@@ -1940,16 +1967,15 @@ def test_step_core_traces_as_one_graph_no_breaks(frame: str) -> None:
 
     import torch._dynamo
 
-    from lpdm.gpu_engine import GPUEngine
     from lpdm.turbulence import HannaScheme
 
     torch._dynamo.reset()
     prev = torch._dynamo.config.suppress_errors
     torch._dynamo.config.suppress_errors = False  # make breaks raise, don't swallow
     try:
-        engine = GPUEngine(device="cpu")
+        engine = _capture_engine(frame_kind, wind_dtype)
         # meander on → trace that path too; both horizontal frames (decision 0032)
-        scheme = HannaScheme(meander_enabled=True, n_substeps=4, horizontal_frame=frame)
+        scheme = HannaScheme(meander_enabled=True, n_substeps=4, horizontal_frame=horizontal_frame)
         met = _wmc_met_window(blh_m=2000.0, ustar_m_s=0.4)
 
         n = 48
@@ -1957,9 +1983,17 @@ def test_step_core_traces_as_one_graph_no_breaks(frame: str) -> None:
         particles[:, 1] = 45.0
         particles[:, 2] = torch.rand(n) * 1500.0 + 100.0
         particles[:, 3] = 1.0
+        particles = engine.frame.to_frame(particles)
         state = scheme.initialize_state(n, device=torch.device("cpu"), dtype=torch.float32)
         active = torch.ones(n, dtype=torch.bool)
-        inputs = scheme._gather_static_inputs(met, 0.5, torch.device("cpu"), torch.float32)
+        inputs = scheme._gather_static_inputs(
+            met,
+            0.5,
+            torch.device("cpu"),
+            torch.float32,
+            frame=engine.frame,
+            wind_dtype=engine.wind_dtype,
+        )
 
         compiled = torch.compile(scheme._step_core, fullgraph=True, backend="eager")
         out = compiled(
@@ -1982,8 +2016,11 @@ def test_step_core_traces_as_one_graph_no_breaks(frame: str) -> None:
         torch._dynamo.reset()
 
 
-@pytest.mark.parametrize("frame", ["grid", "wind"])
-def test_step_core_does_not_recompile_per_step(frame: str) -> None:
+@pytest.mark.parametrize("horizontal_frame", ["grid", "wind"])  # decision 0032
+@_CAPTURE_CASES
+def test_step_core_does_not_recompile_per_step(
+    frame_kind: str, wind_dtype: torch.dtype, horizontal_frame: str
+) -> None:
     """The compiled core must NOT recompile as `alpha` and the met-field VALUES change
     step to step (only shapes/grid are constant). Passing `alpha` (the RK2-midpoint
     weight, different every step) as a Python float would specialize the graph per value
@@ -1993,7 +2030,6 @@ def test_step_core_does_not_recompile_per_step(frame: str) -> None:
 
     import torch._dynamo
 
-    from lpdm.gpu_engine import GPUEngine
     from lpdm.turbulence import HannaScheme
 
     torch._dynamo.reset()
@@ -2002,8 +2038,8 @@ def test_step_core_does_not_recompile_per_step(frame: str) -> None:
     torch._dynamo.config.suppress_errors = False
     torch._dynamo.config.error_on_recompile = True
     try:
-        engine = GPUEngine(device="cpu")
-        scheme = HannaScheme(meander_enabled=True, n_substeps=4, horizontal_frame=frame)
+        engine = _capture_engine(frame_kind, wind_dtype)
+        scheme = HannaScheme(meander_enabled=True, n_substeps=4, horizontal_frame=horizontal_frame)
         n = 48
         compiled = torch.compile(scheme._step_core, fullgraph=True, backend="eager")
 
@@ -2013,9 +2049,17 @@ def test_step_core_does_not_recompile_per_step(frame: str) -> None:
             particles[:, 1] = 45.0
             particles[:, 2] = torch.rand(n) * 1500.0 + 100.0
             particles[:, 3] = 1.0
+            particles = engine.frame.to_frame(particles)
             state = scheme.initialize_state(n, device=torch.device("cpu"), dtype=torch.float32)
             active = torch.ones(n, dtype=torch.bool)
-            inputs = scheme._gather_static_inputs(met, t_alpha, torch.device("cpu"), torch.float32)
+            inputs = scheme._gather_static_inputs(
+                met,
+                t_alpha,
+                torch.device("cpu"),
+                torch.float32,
+                frame=engine.frame,
+                wind_dtype=engine.wind_dtype,
+            )
             compiled(
                 particles=particles,
                 u_prime=state["u_prime"],

@@ -23,6 +23,7 @@ from pydantic import ValidationError
 
 import lpdm.turbulence.hanna as H
 from lpdm.gpu_engine import GPUEngine
+from lpdm.local_frame import DEGREES, HorizontalFrame
 from lpdm.met_reader import HourlyMetTensors, MetFieldMetadata
 from lpdm.turbulence import HannaScheme
 
@@ -170,15 +171,15 @@ def test_wind_axes_follow_the_wind_and_fall_back_to_the_grid_when_calm() -> None
     for s, a in zip(speeds.tolist(), angles.tolist(), strict=True):
         met = _met(s * math.cos(math.radians(a)), s * math.sin(math.radians(a)))
         uv_s, uv_e = met.channels("u", "v")
-        _, bounds = scheme._free_trop_fields(met, torch.device("cpu"), torch.float32)
+        _, bounds = scheme._free_trop_fields(met, torch.device("cpu"), torch.float32, DEGREES)
         axes.append(
             scheme._wind_axes(
                 uv_s,
                 uv_e,
                 0.5,
                 sigma_u[:1],
-                lon=torch.zeros(1),
-                lat=torch.zeros(1),
+                x=torch.zeros(1),
+                y=torch.zeros(1),
                 z=torch.full((1,), 50.0),
                 grid_bounds=bounds,
                 engine=engine,
@@ -211,15 +212,26 @@ def test_wind_frame_is_bit_identical_to_grid_for_an_eastward_or_calm_wind(
         assert torch.equal(g, w)
 
 
-def test_static_and_dynamic_paths_agree_in_the_wind_frame() -> None:
+@pytest.mark.parametrize(
+    "metric, wind_dtype",
+    [(False, torch.float32), (True, torch.float32), (True, torch.bfloat16)],
+    ids=["degrees", "metric", "metric-bf16"],
+)
+def test_static_and_dynamic_paths_agree_in_the_wind_frame(
+    metric: bool, wind_dtype: torch.dtype
+) -> None:
     """The static path advects inside the step; the dynamic path is given the same
-    advected particles. With every particle active the two are bit-identical."""
+    advected particles. With every particle active the two are bit-identical, in the
+    degrees frame and in the runtime's local metric frame with float32 or bfloat16
+    winds (task A4)."""
 
     met = _met(3.0, -4.0, u_end=-2.0, v_end=1.0)
     z = torch.linspace(5.0, 390.0, 256)
-    engine = GPUEngine(device="cpu")
+    frame = HorizontalFrame.local_metric((-2.0, 2.0), (-2.0, 2.0)) if metric else DEGREES
+    engine = GPUEngine(device="cpu", frame=frame, wind_gather_dtype=wind_dtype)
     p0 = _particles(256, z)
     p0[:, 0] = torch.linspace(-0.5, 0.5, 256)
+    p0 = frame.to_frame(p0)
     t_alpha, dt = 0.3, 60.0
 
     static = HannaScheme(horizontal_frame="wind", static_substeps=True)
@@ -229,7 +241,14 @@ def test_static_and_dynamic_paths_agree_in_the_wind_frame() -> None:
     p_s, p_d = p0.clone(), p0.clone()
     active = torch.ones(256, dtype=torch.bool)
     for k in range(3):
-        inputs = static._gather_static_inputs(met, t_alpha, torch.device("cpu"), torch.float32)
+        inputs = static._gather_static_inputs(
+            met,
+            t_alpha,
+            torch.device("cpu"),
+            torch.float32,
+            frame=frame,
+            wind_dtype=engine.wind_dtype,
+        )
         advected = static._advect_rk2(
             p_d,
             inputs["m_start_uvw"],

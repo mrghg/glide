@@ -72,6 +72,14 @@ class SimulationConfig(_Frozen):
     )
     dt_seconds: int = Field(..., gt=0, description="Integration timestep in seconds")
     device: str = Field("auto", description="Torch device: auto, cpu, cuda, mps, or cuda:N")
+    wind_gather_dtype: Literal["float32", "bfloat16"] = Field(
+        "float32",
+        description=(
+            "dtype the per-window (u, v, w) stacks are held in on the device for the "
+            "advection's trilinear gather; bfloat16 halves their memory and traffic, with "
+            "float32 weights and accumulation (task A4). Off (float32) by default."
+        ),
+    )
 
     @field_validator("start_time", mode="before")
     @classmethod

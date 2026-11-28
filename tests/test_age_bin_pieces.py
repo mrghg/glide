@@ -23,6 +23,8 @@ from torch.utils._python_dispatch import TorchDispatchMode
 import lpdm.main as lpdm_main
 from lpdm.config import MPS_FLOAT64_ACCUMULATION_MESSAGE
 from lpdm.footprint_gridder import FootprintGridder
+from lpdm.gpu_engine import GPUEngine
+from lpdm.local_frame import DEGREES
 from lpdm.main import (
     PreflightValidationError,
     _age_bin_pieces,
@@ -56,6 +58,7 @@ def _one_cell_gridder(n_time_bins: int, dtype: torch.dtype) -> FootprintGridder:
         n_x=1,
         device="cpu",
         dtype=dtype,
+        frame=DEGREES,
     )
 
 
@@ -85,7 +88,7 @@ def _trapezoid_step(gridder, age_s: float, dt: float, bin_s: float) -> None:
         particle_density=None,
         met_window=met_window,
         t_alpha=0.5,
-        engine=None,
+        engine=GPUEngine(device="cpu", frame=DEGREES),
     )
 
 
