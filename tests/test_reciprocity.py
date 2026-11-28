@@ -171,20 +171,22 @@ def eulerian_sigmas(
     """(σ_u, σ_v, σ_w) of the scheme's profile at each particle, [N, 3], with the
     column inputs gathered as ``HannaScheme.step`` gathers them (dynamic path)."""
 
-    device, dtype = engine.device, engine.dtype
-    lon, lat = xyz[:, 0], xyz[:, 1]
+    device, dtype, frame = engine.device, engine.dtype, engine.frame
+    # Horizontal position in the engine's frame; latitude in degrees for Coriolis.
+    x, y = xyz[:, 0], xyz[:, 1]
+    lat = frame.lat_from_y(y)
 
     def surf(name):
-        return scheme._interp_surface_field(met, name, 0.5, lon, lat, device, dtype)
+        return scheme._interp_surface_field(met, name, 0.5, x, y, device, dtype, frame=frame)
 
     blh = scheme._limit_blh(surf("blh"))
     sp = surf("sp")
     ustar = surf("ustar").clamp(min=USTAR_MIN_M_S)
     shf = surf("shf")
-    t_surface = scheme._interp_t_at_lowest_level(met, 0.5, lon, lat, device, dtype)
+    t_surface = scheme._interp_t_at_lowest_level(met, 0.5, x, y, device, dtype, frame=frame)
     L = obukhov_length(ustar, shf, t_surface, sp)
     w_star = convective_velocity(blh, shf, t_surface, sp, blh_min_m=scheme.blh_min_m)
-    ft_fields, grid_bounds = scheme._free_trop_fields(met, device, dtype)
+    ft_fields, grid_bounds = scheme._free_trop_fields(met, device, dtype, frame=frame)
     return scheme._sigmas_at(
         xyz[:, 2],
         blh=blh,
@@ -193,7 +195,8 @@ def eulerian_sigmas(
         h_over_L=blh / L,
         L=L,
         lat=lat,
-        lon=lon,
+        x=x,
+        y=y,
         ft_fields=ft_fields,
         grid_bounds=grid_bounds,
         engine=engine,

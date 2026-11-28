@@ -76,7 +76,12 @@ class ConvectionScheme(ABC):
         in those columns according to a per-column mass-flux matrix.
 
         Args:
-                particles: (N, 4) tensor [lon, lat, alt, weight].
+                particles: (N, 4) tensor [x, y, alt, weight]. x, y are the
+                        horizontal position in ``engine.frame`` (`lpdm.local_frame`:
+                        metres from the met domain's centre in the runtime, lon/lat
+                        degrees in the degrees frame); compare them with met grid
+                        coordinates converted to the frame (``engine.frame.x_from_lon``,
+                        ``y_from_lat``), never with raw degrees.
                 state: per-scheme state from `initialize_state` (or `{}`).
                 met_window: bracketing hourly met fields; convection uses the
                         time-interpolated profile at ``t_alpha``.
@@ -88,8 +93,8 @@ class ConvectionScheme(ABC):
                         reads from the window itself (`metadata.time_end - time_start`)
                         rather than assuming hourly.
                 active_mask: (N,) bool. Particles outside this mask must be unchanged.
-                engine: `GPUEngine` instance — exposed for future use (currently
-                        only the device/dtype are read).
+                engine: `GPUEngine` instance: its device, dtype and horizontal
+                        ``frame`` (the frame of ``particles``) are read.
                 generator: optional `torch.Generator` for reproducible random draws.
 
         Returns:
