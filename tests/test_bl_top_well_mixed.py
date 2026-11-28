@@ -11,36 +11,69 @@ density varies by ~3% over [h, 2h], but its drift moves particles by less than
 near-surface gate (tests/test_near_surface_well_mixed.py): stable (h 400 m),
 neutral (h 1,500 m, u* 0.4 m s⁻¹), convective (h 1,500 m, H +200 W m⁻²).
 
-Two checks, both from a 6-h run (records every 15 min from 2 h): every one of
+Two checks, both on occupancies averaged over records every 5 min: every one of
 the four 50 m bands from h - 100 to h + 100 m holds its uniform share to within
-TOLERANCE, and the occupancy is continuous across h (the 50 m above minus the
-50 m below, within JUMP_TOLERANCE). A well-mixed-consistent interface keeps the
+a tolerance, and the occupancy is continuous across h (the 50 m above minus the
+50 m below, within a jump tolerance). A well-mixed-consistent interface keeps the
 concentration continuous across h whatever the integration error elsewhere
 (decision 0028), so the second check isolates the interface from the
 first-order error of the stable boundary layer near its top, which the first
 check also sees.
 
+Two tiers (``Gate``):
+
+- default suite (``FAST``, ~2.7 min at 8 threads): stable 60,000 particles,
+  6 h, records from 1 h, tolerances 0.08; neutral and convective 40,000
+  particles, 2 h, records from 15 min, tolerances 0.20;
+- full strength (``FULL``, GLIDE_SLOW_TESTS=1, ~8.5 min): 150,000 particles,
+  6 h, records from 1 h, tolerances 0.08, all three regimes.
+
+The stable regime keeps the 0.08 jump tolerance and the 6-h run because the
+pre-0028 defect there is small (+0.12 on the jump at 6 h, +0.09 at 2 h). The
+neutral and convective defects are large (jump -0.59 and +3.2 already at 2 h),
+so the default suite checks them with a shorter run, fewer particles and a wider
+tolerance; the full tier holds them to 0.08.
+
+Particle count. The seed-to-seed spread is set by the bands just above h, where
+particles barely move (K_z 0.1 m² s⁻¹) and the counting noise stays frozen, so
+more records do not reduce it; only more particles per metre do. The deep
+neutral and convective columns (2h = 3 km) need the most: with 20,000 particles
+the jump's spread there was 0.03-0.04, and 1 of 12 fresh seeds failed the 0.08
+tolerance on correct code (jump -0.106, neutral). 100 m bands at h would halve
+the noise but dilute the pre-0028 stable failure to about the tolerance (+0.09),
+so the bands stay 50 m. Design study and per-seed values:
+outputs/agents/T2/calib/designs_summary.txt (main checkout).
+
 Before decision 0028 the drift's ±1 m finite difference straddled h, and a
-particle crossing h kept its w'. Calibration with this test's procedure
-(bl_top_gate_calibration.py; outputs/agents/WM/interface/gate/gate.jsonl):
+particle crossing h kept its w'. Calibration, mean ± sd over seeds, default 16
+sub-steps, margin = (tolerance - |mean|) / sd:
 
-- this branch, default 16 sub-steps, 6 seeds: worst band deviation 0.056
-  (stable; neutral 0.038, convective 0.044), worst jump 0.043; at 8 sub-steps
-  0.067 and 0.080;
-- PR #69 head 0de5f94, 16 sub-steps, 3 seeds: jump +0.11 to +0.17 (stable),
-  -0.76 to -0.85 (neutral), +5.1 (convective); worst band 0.07-0.09, 0.51-0.57
-  and 5.0;
-- main 20db902, 3 seeds: jump -0.14 to -0.19, +4.0, +9.7; worst band 0.48-0.50,
-  3.4-3.6, 9.0.
+- default suite (outputs/agents/T2/fast/pooled_summary.txt; calib.jsonl seeds
+  401-412, confirm.jsonl 501-512 through this file's run_column): current code
+  0 failures; stable, 12 seeds, worst band h..h+50 -0.033 ± 0.009 (5.2 sd),
+  jump -0.014 ± 0.011 (5.8 sd); neutral and convective, 24 seeds each, worst
+  the jump, -0.012 ± 0.026 and -0.008 ± 0.027 (7.3 and 7.2 sd). PR #69 head
+  0de5f94 fails every seed: stable 8/8 by the jump only, +0.124 ± 0.009
+  (+0.110 to +0.138); neutral 10/10, jump -0.59 ± 0.02 and the two bands at h;
+  convective 10/10, jump +3.17 ± 0.05 and the two bands above h;
+- full strength (outputs/agents/T2/gate/gate.jsonl and summary.txt; seeds
+  201-212): current code 0 failures, closest the convective h..h+50 band,
+  -0.005 ± 0.014, and jump, -0.001 ± 0.014 (5.4 and 5.6 sd); neutral 6.3 and
+  6.5 sd; stable worst band -0.032 ± 0.006 (8.0 sd). 0de5f94, 5 seeds, 5/5
+  failures in each regime: stable only by the jump, +0.121 ± 0.010; neutral
+  jump -0.80 ± 0.01 and every band; convective jump +4.86 ± 0.02 and three or
+  four bands.
 
-Both tolerances, 0.08, leave this branch's worst seed a margin of 0.024 and
-0.037 and fail PR #69's head and main in every regime (by the jump in the
-stable one).
+An earlier calibration at 20,000 particles and 15-min records from 2 h
+(outputs/agents/WM/interface/gate/gate.jsonl) also failed main 20db902 in every
+regime (jump -0.14 to -0.19, +4.0, +9.7).
 """
 
 from __future__ import annotations
 
+import os
 from datetime import UTC, datetime, timedelta
+from typing import NamedTuple
 
 import numpy as np
 import pytest
@@ -58,8 +91,30 @@ REGIMES = {
 }
 FT_N = 0.015  # free-troposphere buoyancy frequency, s-1
 GRAVITY = 9.80665
-TOLERANCE = 0.08  # on each 50 m band's occupancy relative to uniform
-JUMP_TOLERANCE = 0.08  # on (h..h+50) - (h-50..h)
+RECORD_EVERY = 5  # steps (5 min) between records
+
+
+class Gate(NamedTuple):
+    particles: int
+    steps: int  # 60 s outer steps; 360 = 6 h
+    record_from_step: int  # first record (then every RECORD_EVERY steps)
+    tolerance: float  # on each 50 m band's occupancy relative to uniform
+    jump_tolerance: float  # on (h..h+50) - (h-50..h)
+
+
+# Default suite: per-regime cost and tolerance (calibration in the docstring).
+FAST = {
+    "stable": Gate(60_000, 360, 60, 0.08, 0.08),
+    "neutral": Gate(40_000, 120, 15, 0.20, 0.20),
+    "convective": Gate(40_000, 120, 15, 0.20, 0.20),
+}
+# Full strength (GLIDE_SLOW_TESTS=1): one design, the tightest tolerances.
+FULL = Gate(150_000, 360, 60, 0.08, 0.08)
+
+SLOW = os.environ.get("GLIDE_SLOW_TESTS", "") not in ("", "0", "false", "False")
+slow = pytest.mark.skipif(
+    not SLOW, reason="~8.5 min on CPU: set GLIDE_SLOW_TESTS=1 (docs/VALIDATION.md §4)"
+)
 
 
 def _met(blh_m: float, ustar: float, shf: float) -> HourlyMetTensors:
@@ -117,18 +172,21 @@ class _LidEngine(GPUEngine):
         return p, torch.where(over, -w, w)
 
 
-def run_column(regime: str, scheme: HannaScheme, seed: int = 20261125) -> dict[str, float]:
+def run_column(
+    regime: str, scheme: HannaScheme, gate: Gate = FULL, seed: int = 20261125
+) -> dict[str, float]:
     """Occupancy of the four 50 m bands around h, relative to uniform, averaged
-    over records every 15 min from 2 h to 6 h. The start is stratified (one
-    particle per equal slot of [0, 2h], jittered within it): above h particles
-    move little in 6 h, so the binomial noise of an independent uniform start
-    would stay frozen in the free-troposphere bands."""
+    over records every 5 min from ``gate.record_from_step`` to the end of a run
+    of ``gate.steps`` 60 s steps with ``gate.particles`` particles. The start is
+    stratified (one particle per equal slot of [0, 2h], jittered within it):
+    above h particles move little in 6 h, so the binomial noise of an
+    independent uniform start would stay frozen in the free-troposphere bands."""
 
     blh, ustar, shf = REGIMES[regime]
+    n = gate.particles
     torch.manual_seed(seed)
     engine = _LidEngine(2.0 * blh, device="cpu")
     met = _met(blh, ustar, shf)
-    n = 20_000
     span = 2.0 * blh
     particles = torch.zeros(n, 4, dtype=torch.float32)
     particles[:, 1] = 45.0
@@ -138,11 +196,11 @@ def run_column(regime: str, scheme: HannaScheme, seed: int = 20261125) -> dict[s
     active = torch.ones(n, dtype=torch.bool)
 
     samples = []
-    for step in range(1, 361):  # 6 h at 60 s; record every 15 min from 2 h
+    for step in range(1, gate.steps + 1):
         particles, state = scheme.step(
             particles, state, met, t_alpha=0.5, dt_seconds=60.0, active_mask=active, engine=engine
         )
-        if step >= 120 and step % 15 == 0:
+        if step >= gate.record_from_step and step % RECORD_EVERY == 0:
             samples.append(particles[:, 2].clone())
     z = torch.stack(samples)
     assert float(z.max()) <= span and float(z.min()) >= 0.0
@@ -159,13 +217,33 @@ def run_column(regime: str, scheme: HannaScheme, seed: int = 20261125) -> dict[s
     }
 
 
+def failures(bands: dict[str, float], gate: Gate) -> list[str]:
+    """The checks a run fails: bands off uniform by >= gate.tolerance, and the
+    jump across h, (h..h+50) - (h-50..h), by >= gate.jump_tolerance."""
+
+    bad = [k for k, v in bands.items() if abs(v - 1.0) >= gate.tolerance]
+    if abs(bands["h..h+50"] - bands["h-50..h"]) >= gate.jump_tolerance:
+        bad.append("jump")
+    return bad
+
+
+def _check(regime: str, gate: Gate) -> None:
+    scheme = HannaScheme(meander_enabled=False, static_substeps=False)  # default n_substeps
+    bands = run_column(regime, scheme, gate)
+    jump = bands["h..h+50"] - bands["h-50..h"]
+    bad = failures(bands, gate)
+    assert not bad, (
+        f"{regime}: fails {bad} (tolerance {gate.tolerance}, jump {gate.jump_tolerance}); "
+        f"jump {jump:+.3f}, occupancy relative to uniform {bands}"
+    )
+
+
 @pytest.mark.parametrize("regime", sorted(REGIMES))
 def test_uniform_column_stays_uniform_across_the_boundary_layer_top(regime: str) -> None:
-    scheme = HannaScheme(meander_enabled=False, static_substeps=False)  # default n_substeps
-    bands = run_column(regime, scheme)
-    bad = {k: round(v, 3) for k, v in bands.items() if abs(v - 1.0) >= TOLERANCE}
-    assert not bad, f"{regime}: occupancy near h relative to uniform {bad} (all: {bands})"
-    jump = bands["h..h+50"] - bands["h-50..h"]
-    assert abs(jump) < JUMP_TOLERANCE, (
-        f"{regime}: occupancy jumps by {jump:+.3f} across h (all: {bands})"
-    )
+    _check(regime, FAST[regime])
+
+
+@slow
+@pytest.mark.parametrize("regime", sorted(REGIMES))
+def test_uniform_column_stays_uniform_across_the_boundary_layer_top_full(regime: str) -> None:
+    _check(regime, FULL)

@@ -44,6 +44,10 @@ synchronisation, bit-identical between the paths with every particle active):
    free-troposphere closure for $z > h$, each evaluated on its own side even at
    $z = h$ (`_column_sigma_w(..., side_ft=)`). More than $\delta$ from $h$ it is
    the centred stencil, bit for bit.
+   *Amended by [decision 0030](0030-drift-gradient-at-the-sigma-floor.md):* a
+   boundary-layer particle whose stencil is cut at $h$, or touches the
+   $\sigma_w$ floor, takes the analytic gradient of the floored profile
+   instead; the cut stencil over-stated the gradient at a stable $h$.
 2. **Crossing rule at $h$** (`_cross_interface`), inside every sub-step, after
    the displacement and before the ground reflection. With $A$ the side the
    particle starts the sub-step on, $B$ the other, $\sigma_A, \sigma_B$ the

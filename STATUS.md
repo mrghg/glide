@@ -16,7 +16,7 @@ _Last updated: 2026-11-25._
 
 | Area | State |
 | --- | --- |
-| **Core backward LPDM** | RK2 advection, exact-OU Langevin turbulence with the full Thomson well-mixed drift and Stohl–Thomson density correction, ground reflection, turbulence sub-stepping with one fixed count for every particle (16 at the 60 s step), every coefficient re-evaluated each sub-step (decision 0027); the boundary-layer top treated as a Thomson–Physick–Maryon interface (decision 0028). Mass-conserving. ([docs/physics.md](docs/physics.md)) |
+| **Core backward LPDM** | RK2 advection, exact-OU Langevin turbulence with the full Thomson well-mixed drift and Stohl–Thomson density correction, ground reflection, turbulence sub-stepping with one fixed count for every particle (16 at the 60 s step), every coefficient re-evaluated each sub-step (decision 0027); the boundary-layer top treated as a Thomson–Physick–Maryon interface (decision 0028), with the analytic drift gradient where the stencil is cut at $h$ or meets the σ_w floor (decision 0030; the floor's value, which sets exchange across a stable $h$, is open). Mass-conserving. ([docs/physics.md](docs/physics.md)) |
 | **Turbulence** | Hanna (1982) in three regimes, aligned to FLEXPART v11; gradient-Richardson free-troposphere closure; Maryon meander. Behind a swappable `TurbulenceScheme` interface. ([docs/turbulence.md](docs/turbulence.md)) |
 | **Convection** | Reduced Emanuel mass-flux scheme, non-divergent matrix, in each meteorology column, once per meteorology interval. ([docs/convection.md](docs/convection.md)) |
 | **Terrain-following vertical coordinate** | Meteorology resampled onto a fixed AGL grid per window, with slope-corrected vertical velocity. Fixed the zero-surface-footprint problem over high terrain. |
@@ -25,7 +25,7 @@ _Last updated: 2026-11-25._
 | **Multi-site releases** | `multi_point_periodic` — sites share meteorology windows, so per-window costs amortise across the whole network. |
 | **Streaming output** | `footprints.zarr` (5-D), `endpoint_particles.parquet`, `trajectory_diagnostics.parquet`, `run_metadata.json`, written per batch. |
 | **GPU execution** | Whole per-step body captured as one CUDA graph, device-gated; the eager CPU path is the numerical reference. ([docs/architecture.md](docs/architecture.md)) Particle positions are held in metres from the met domain's centre (task A4; a float32-rounding-level change, [docs/physics.md](docs/physics.md) §2); an optional bfloat16 wind gather exists and is off (no measurable gain; dev/agent/progress/A4.md). The venv must be built on uv's own Python, which ships `Python.h`; without it `torch.compile` silently falls back to eager, and `scripts/gpu_env.sh` warns and borrows the `cray-python` headers. |
-| **Tests** | 332 passing, about 2.5 minutes, no network. Includes analytic dispersion checks and well-mixed gates. ([docs/VALIDATION.md](docs/VALIDATION.md)) |
+| **Tests** | 597 (583 passed, 14 skipped without local data or DATEM/ETEX archives) on `main` at d19755d, 26 Nov 2026: 14 min on 8 CPU threads, no network. Includes analytic dispersion checks, well-mixed gates near the ground (60 s step) and across the boundary-layer top, and fault-injection-checked tests for backward convection, terrain slope and multi-site assignment. ([docs/VALIDATION.md](docs/VALIDATION.md)) |
 
 ---
 
@@ -72,6 +72,14 @@ Three things a reader should know about the comparison history:
 The same "changes magnitudes everywhere" argument applies to the switch to native
 model levels, which is why it is sequenced before the physics freeze and the
 validation (task A01).
+
+The largest such change so far came on 2026-11-25: the sub-stepping fix and the
+boundary-layer-top interface (decisions 0027 and 0028, PR #69) raise the 0–40 m
+footprint by a median +48% on the reference multi-site run (40–1,000 m +119%,
+1–5 km −31%, total −4%), because the old code over-filled the lowest layers in
+some regimes and let boundary-layer particles leak into the free troposphere.
+**Every GLIDE footprint made before PR #69, including the golden fixtures and
+the fixtures preview page, predates this and should not be used for magnitudes.**
 
 ---
 
@@ -132,13 +140,19 @@ scope and release gate, and the sequence. The tasks themselves are in
    - **Not started:** the FLEXPART reference runs (waiting for MARS access,
      then flex_extract and task B13); the ERA5 ensemble columns; CH₄ and radon
      observations; CI and branch protection on GitHub; an OSF account.
-2. **Before the physics freeze**, in order: fix the footprint time-bin labels
-   (A00); validate model-level meteorology and make it the default (A01); golden
-   fixtures and benchmarks (A0); sub-time the residual phase (A1); optional
-   kernel deposition (A2); per-particle time steps (A3); local coordinates and
+2. **Before the physics freeze.** Done: the footprint time-bin labels (A00);
+   model-level meteorology as the default (A01); golden fixtures and benchmarks
+   (A0, to be regenerated); sub-timing the residual phase (A1); the sub-stepping
+   and boundary-layer-top fixes (decisions 0027, 0028). Next, in order: the
+   residence-counting rule (A2, PR #66: endpoint, step-mean or trapezoid, scored
+   against finely sampled trajectories on the new turbulence); regenerate the
+   golden fixtures and benchmark baseline once; local coordinates and
    half-precision meteorology (A4); sorting particles for memory locality
-   (A4b); convergence studies that set the defaults
-   (A5); the reciprocity test (A6); in-batch parameter ensembles (A7).
+   (A4b); convergence studies that set the defaults (A5); the reciprocity test
+   (A6); in-batch parameter ensembles (A7). Per-particle time steps (A3) are on
+   hold: a step length that depends on a particle's position biases the
+   well-mixed state (decision 0027), so the spec needs revising first, and the
+   step is only ~7–17% of wall time.
    In parallel: meteorology from [met-bazarr](https://github.com/mrghg/met-bazarr)
    (B1, [decision 0018](dev/decisions/0018-met-bazarr.md)), smaller outputs,
    column and satellite releases, the high-resolution near-receptor footprint,
@@ -200,8 +214,16 @@ relevant docs page with its consequence.
   now converged in the sub-step count (8 against 16 sub-steps: 0.4%); the
   Mace Head smoke run's 0–40 m footprint nearly doubles (+94%). The golden
   fixtures are not yet regenerated.
-- **Forward/backward reciprocity test.** It tests the backward formulation
-  directly, which nothing else does. Planned as task A6.
+- **Forward/backward reciprocity test** (task A6, `tests/test_reciprocity.py`;
+  open). The backward *sign construction* is confirmed exactly: in a steady
+  column the backward step is the forward step with w′ → −w′, bit for bit.
+  Beyond that the test checks the shared scheme's transfer symmetry, and at
+  16 sub-steps the plan's criteria fail near the ground (the near-surface
+  well-mixed error, ~2%) and near a stable boundary-layer top (the drift
+  defect at the σ_w floor, decision 0030 / PR #75; with #75 merged in, three
+  of five cases still fail, one narrowly). The slow cases are a
+  release check; a moving-h case is still needed
+  ([docs/VALIDATION.md](docs/VALIDATION.md) §3).
 - **The source of u\*.** From the surface stresses for v1; ERA5's `zust` is
   the alternative, about half as large over land. To compare against the
   tracer experiments and radon after v1 (roadmap §5).

@@ -49,6 +49,7 @@ class AnalyticMetReader(MetReader):
     t_kelvin: float = 280.0
     ustar_m_s: float = 0.4
     shf_w_m2: float = 0.0
+    q_kg_kg: float = 0.0
     channel_names: tuple[str, ...] = ("u", "v", "w", "blh", "sp")
     device: torch.device | str = "cpu"
     dtype: torch.dtype = torch.float32
@@ -82,6 +83,7 @@ class AnalyticMetReader(MetReader):
                 "t": torch.full(shape, self.t_kelvin, dtype=self.dtype, device=self.device),
                 "ustar": torch.full(shape, self.ustar_m_s, dtype=self.dtype, device=self.device),
                 "shf": torch.full(shape, self.shf_w_m2, dtype=self.dtype, device=self.device),
+                "q": torch.full(shape, self.q_kg_kg, dtype=self.dtype, device=self.device),
             }
             missing = [k for k in self.channel_names if k not in available]
             if missing:
@@ -2559,6 +2561,45 @@ def test_substep_exceedance_absent_for_scheme_without_substeps(tmp_path: Path) -
     cfg = _make_run_config(output_uri=str(tmp_path / "out"))
     metadata = _run(cfg, reader=_make_reader(cfg, wind_fn=lambda _: (5.0, 0.0, 0.0)))
     assert metadata["runtime"]["substep_exceedance"] is None
+
+
+@pytest.mark.parametrize("override", [False, True])
+def test_surface_layer_override_warns_once_and_is_recorded(
+    tmp_path: Path, caplog, override: bool
+) -> None:
+    """The opt-in surface-layer override is not well-mixed consistent at 0.1 h
+    (decision 0028, "Other boundaries"): a run built from a config with it on logs
+    one warning saying so and records it in run_metadata.json
+    (``runtime.physics_warnings``). The default logs nothing and records []."""
+
+    import logging
+
+    from lpdm.turbulence.hanna import SURFACE_LAYER_OVERRIDE_WARNING
+
+    cfg = _make_run_config(
+        output_uri=str(tmp_path / "out"),
+        turbulence_scheme="hanna_1982",
+        simulation_length_seconds=7200,
+        n_particles=64,
+    )
+    turbulence = cfg.turbulence.model_copy(update={"surface_layer_override": override})
+    cfg = cfg.model_copy(update={"turbulence": turbulence})
+    reader = _make_hanna_reader(cfg, wind_fn=lambda _: (5.0, 0.0, 0.0))
+    with caplog.at_level(logging.WARNING):
+        metadata = _run(cfg, reader=reader)  # the scheme is built from cfg
+    warned = [r for r in caplog.records if "surface_layer_override" in r.getMessage()]
+    on_disk = json.loads((tmp_path / "out" / "run_metadata.json").read_text())
+    if override:
+        assert len(warned) == 1 and warned[0].levelno == logging.WARNING
+        message = warned[0].getMessage()
+        assert message == SURFACE_LAYER_OVERRIDE_WARNING
+        assert "A/B comparisons only" in message
+        assert "not well-mixed consistent at 0.1 h" in message
+        assert metadata["runtime"]["physics_warnings"] == [SURFACE_LAYER_OVERRIDE_WARNING]
+    else:
+        assert not warned
+        assert metadata["runtime"]["physics_warnings"] == []
+    assert on_disk["runtime"]["physics_warnings"] == metadata["runtime"]["physics_warnings"]
 
 
 def test_static_and_dynamic_exceedance_counts_agree_with_inactive_particles() -> None:

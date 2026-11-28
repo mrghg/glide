@@ -85,6 +85,15 @@ which side of $h$ to use: the drift's stencil never crosses $h$, decision
 5. Numerical floors              σ ≥ 1e-3 m/s ; T_L ≥ 1 s
 ```
 
+The σ floor is not only numerical at a stable boundary-layer top: there the
+profile $1.3u_\ast(1 - z/h)$ falls below it in a layer
+$\sigma_{\min}h/(1.3u_\ast)$ deep (under 1 m in 44% of stable ERA5 columns
+over Europe), and it sets the turbulent exchange across $h$ (§6, decision
+0030). The drift's $\partial\sigma_w^2/\partial z$ is the analytic derivative of
+the floored profile (zero where the floor binds) for a boundary-layer particle
+whose ±1 m stencil is cut at $h$ or touches the floor, and the stencil
+everywhere else ([physics.md §3.3](physics.md), `in_bl_dsigw2_dz`).
+
 Step 3 comes **before** step 4 deliberately. The free-troposphere closure derives
 $(\sigma_w, T_{Lw})$ as a *pair* satisfying $K_z = \sigma_w^2 T_{Lw}$; flooring
 its $T_L$ afterwards would silently change the diffusivity it was constructed to
@@ -348,6 +357,15 @@ of the $\sigma$ on the two sides) or reflected, and velocities are carried as
 $u'/\sigma$ across outer steps so that a moving $h$ rescales them. The $\sigma$
 on each side of $h$ come from `_interface_sigmas`, once per outer step.
 
+**At a stable $h$ the floor is the exchange.** There $\sigma_w$ just below $h$
+is the floor, 1 mm s⁻¹, and the interface passes $\sigma_{\min}/\sqrt{2\pi}$
+(0.4 mm s⁻¹) each way; that resistance dominates the exchange between the
+free troposphere and the boundary layer, so the exchange scales with
+$\sigma_{\min}$ below about 10⁻² m s⁻¹ (0.11×, 1× and 6× at 10⁻⁴, 10⁻³ and
+10⁻², measured). FLEXPART has no such exchange: it reflects at $h$, has no
+vertical turbulence above it, and floors at 10⁻⁶. The floor value (10⁻³ now)
+and the options for it are an open question in decision 0030.
+
 The air density of the well-mixed density drift ([physics.md §3](physics.md)),
 $\rho = p/(R_d T)$, and its vertical gradient are built the same way: once per
 window on the grid, from each column's own pressure and the local $T$, with
@@ -489,6 +507,9 @@ $z \to 0$, undercutting the floors that §5 exists to impose. Second, it puts a
 discontinuity in $\sigma_w$ and $K$ at the $0.1h$ seam, which the drift's finite
 difference straddles. That is the same defect decision 0028 removed at $h$, and
 the seam is not treated as an interface: enabling the override reintroduces it.
+A run with the override on logs a warning saying so once, at the start, and records
+the same message in `run_metadata.json` under `runtime.physics_warnings` (an empty
+list for the defaults).
 
 The stable branch being **constant in height** is itself a correction. An earlier
 form, $1.3u_\ast(1 + 5z/L)$, *grew* with stability — that expression is the $\phi_m$

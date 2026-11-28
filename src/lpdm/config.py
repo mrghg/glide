@@ -387,7 +387,7 @@ class TurbulenceConfig(_Frozen):
     )
     surface_layer_override: bool = Field(
         False,
-        description="Enable the legacy GLIDE-only Monin-Obukhov surface-layer override below 0.1·BLH (FLEXPART has no such override).",
+        description="Enable the legacy GLIDE-only Monin-Obukhov surface-layer override below 0.1·BLH (FLEXPART has no such override). For A/B comparisons only: sigma_w jumps at 0.1·BLH, so the model is not well-mixed consistent there; a run with it on logs a warning and records it in run_metadata.json (runtime.physics_warnings).",
     )
     # Limits on the boundary-layer depth h from the meteorology (decision 0024).
     # Applied wherever the turbulence scheme uses h. The defaults keep GLIDE's
@@ -475,6 +475,40 @@ class ConvectionConfig(_Frozen):
     emanuel: EmanuelConvectionConfig = EmanuelConvectionConfig()
 
 
+class DepositionConfig(_Frozen):
+    """Where in a step each particle's residence is counted (task A2, [PR-F4])."""
+
+    # `endpoint`: all of the step at the particle's position after the step's
+    # advection, turbulence and convection (the long-standing behaviour).
+    # `trapezoid`: half the step at the start position and half at the end, each
+    # split between time-ago bins by its overlap with them and with its own density
+    # (decision 0029).
+    # `step_mean` (decision 0026) was removed: scored against fine-time residence it
+    # undercounts the 0-40 m layer by 3-5% (up to 15% in strong turbulence). The RK2 `midpoint` was removed
+    # before it. Kernel deposition (decision 0012) is deferred to after v1.
+    position: Literal["endpoint", "trapezoid"] = "endpoint"
+
+    @field_validator("position", mode="before")
+    @classmethod
+    def _removed_positions(cls, value: object) -> object:
+        removed = {
+            "step_mean": (
+                "output_grid.deposition.position 'step_mean' was removed (decision 0029): "
+                "scored against fine-time residence it undercounts the 0-40 m layer "
+                "(3-5% on the smoke run, up to 15% in strong turbulence). Use 'endpoint' "
+                "(default) or 'trapezoid'."
+            ),
+            "midpoint": (
+                "output_grid.deposition.position 'midpoint' was removed (decision 0026): "
+                "it counts each first step at the release height. Use 'endpoint' or "
+                "'trapezoid'."
+            ),
+        }
+        if value in removed:
+            raise ValueError(removed[value])
+        return value
+
+
 class OutputGridConfig(_Frozen):
     """Grid onto which residence-time footprints are accumulated."""
 
@@ -497,6 +531,14 @@ class OutputGridConfig(_Frozen):
     # time; the footprint is in s m3 kg-1 of dry air, and M_air / h gives
     # m2 s mol-1 with no further density. `none`: plain residence seconds.
     density_weighting: Literal["dry_air", "none"] = "dry_air"
+    # Where in each step residence is counted (task A2); default endpoint.
+    deposition: DepositionConfig = DepositionConfig()
+    # Precision of the in-memory footprint accumulator (A2 follow-up, prototype).
+    # `float32` (default) is the long-standing behaviour. `float64` sums each cell's
+    # contributions in double precision and rounds to float32 once, when the batch
+    # is written; the store stays float32. It doubles the accumulator's memory (one
+    # batch's grid).
+    accumulation_dtype: Literal["float32", "float64"] = "float32"
     # Footprint storage (task B2). Both None (default) keep the store's default
     # encoding, so existing output is unchanged. `footprint_keep_mantissa_bits`
     # rounds each value to that many float32 mantissa bits before compression
@@ -625,6 +667,13 @@ class MemoryConfig(_Frozen):
     guard_check_every_steps: int = Field(1, gt=0)
 
 
+MPS_FLOAT64_ACCUMULATION_MESSAGE = (
+    "output_grid.accumulation_dtype: float64 cannot run on an MPS (Apple GPU) device: "
+    "PyTorch's MPS backend has no float64 tensors. Use accumulation_dtype: float32 "
+    "(the default), or run on cuda or cpu."
+)
+
+
 class RunConfig(_Frozen):
     """Top-level GLIDE run configuration.
 
@@ -666,6 +715,15 @@ class RunConfig(_Frozen):
                 f"{self.simulation.length_seconds}, so older residence would be dropped. "
                 "Add bins, widen them, or set output_grid.drop_older_ages: true (decision 0016)."
             )
+        return self
+
+    @model_validator(mode="after")
+    def _check_accumulation_dtype_on_mps(self) -> RunConfig:
+        # Apple's MPS backend has no float64, so a float64 footprint grid cannot be
+        # allocated there. `device: auto` is checked at run time, once the device
+        # is resolved (`lpdm.main._check_device_dtypes`).
+        if self.simulation.device == "mps" and self.output_grid.accumulation_dtype == "float64":
+            raise ValueError(MPS_FLOAT64_ACCUMULATION_MESSAGE)
         return self
 
     @model_validator(mode="after")
