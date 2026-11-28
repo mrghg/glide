@@ -114,10 +114,13 @@ So the domain total of sub-cloud air lifted above 3 km in an hour falls (measure
 
 The old closure's apparent agreement was an artefact of the CFL scale, not of the physics (argued). The trigger is where the remaining gap lies (`review/fp_trigger_split.log`).
 
-**Footprint effect on CPU** (measured, `pr/footprints/`, see the PR):
-- Smoke: Mace Head, January.
-- Jungfraujoch, 1,000 m AGL, July 2019, 3 days back.
-- Both with release seeds 42 and 43.
+**Footprint effect on CPU**: main 27cd98a against this decision, release seeds 42 and 43 (measured, `pr/after/{smoke,jfj}/compare*.log`).
+- **Smoke** (Mace Head, January): bit-identical. No particle was ever in a firing column.
+- **Jungfraujoch** (1,000 m AGL, July 2019, 3 days back):
+  - 0–40 m changes by −2.1% (seed 42) and −0.1% (seed 43). Total changes by +0.05% and −0.01%.
+  - Changing only the seed moves 0–40 m by 3.3%, so the effect is within Monte Carlo noise.
+  - Convection displaces about half as many particle-events (2.2% against 4.2%).
+  - The largest Courant number met is 1.5, and no column exceeds the cap.
 
 ## Deferred deliberately
 
