@@ -203,13 +203,24 @@ $\mathrm{CAPE} = 12.5\ \mathrm{J\ kg^{-1}}$ and the trigger needs
 $50\ \mathrm{J\ kg^{-1}}$, so a firing column always has
 $M_b = 5\,c_{\text{closure}}\,\rho_{\mathrm{LCL}}$: CAPE decides only *whether*
 a column convects, and $M_b$ varies between columns only through
-$\rho_{\mathrm{LCL}}$. On ERA5 over Europe the CFL scale of §5 binds as well,
-in more than 99% of firing columns with a median scale of 0.13 (January) and
-0.25 (summer), so the mass an event moves is set by that cap rather than by
-$M_b$ (decision 0031). An external review raised this in November 2026. It is an open
-question, recorded with what FLEXPART does in
-[decision 0031](../dev/decisions/0031-cape-bounded-at-the-cloud-top.md), and is
-not changed.
+$\rho_{\mathrm{LCL}}$.
+
+**And the CFL cap of §5 binds as well, so neither sets the transport.** On ERA5
+over Europe it binds in more than 99% of firing columns, with a median scale of
+0.13 (January) and 0.25 (summer). The layer that limits is always the one just
+below the LCL, $i_{\mathrm{LCL}} - 1$: it passes on the whole updraft flux
+(its own entrainment plus the subsidence from the boundary layer below it), so
+it sheds $M_b\,\Delta t_{\mathrm{met}}$, and the scaled matrix entrains exactly
+$0.9\,m_{i_{\mathrm{LCL}}-1}$ per event. The mass a firing column moves in one
+event therefore depends on the vertical grid (the thickness of that layer) and
+on the meteorology cadence (one event per window), not on CAPE, $M_b$ or
+$c_{\text{closure}}$. On 80 levels instead of 40 the median mass per event
+falls from 79 to 37 kg m⁻², and about half as many columns fire. These are
+open questions about the closure, to be settled before the physics freeze; an
+external review raised them in November 2026, and they are recorded with what
+FLEXPART does in
+[decision 0031](../dev/decisions/0031-cape-bounded-at-the-cloud-top.md). The
+closure is not changed.
 
 The cap on $w_{\text{buoy}}$ is not decoration. Without it,
 $\mathrm{CAPE} > 500\ \mathrm{J\ kg^{-1}}$ gives
@@ -276,6 +287,11 @@ $\mathrm{fmass}[k+1, k]$ — a sub-diagonal term.
 **CFL cap.** Finally the whole matrix is scaled by a **single scalar** if any
 layer would shed more than 90% of its mass in one event. One scalar, so
 non-divergence survives, and so the "stay" diagonal of §6 stays non-negative.
+At the defaults this cap binds in almost every firing column, at the layer just
+below the LCL, so it sets how much one event moves (§4). FLEXPART has no
+counterpart: its `convect` flags a CFL violation (`IFLAG = 4`), but `calcmatrix`
+uses the matrix anyway, and it is called every `LSYNCTIME` (900 s by default)
+rather than once per met window.
 
 The matrix is identically zero when there is no cloud.
 

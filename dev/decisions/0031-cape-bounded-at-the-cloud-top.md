@@ -60,11 +60,18 @@ the vertical grid), which the matrix does not.
 **What FLEXPART does** (*derived*, FLEXPART 11 `src/conv_mod.f90`, `convect`, at
 commit d4e0a86 of the local checkout; Forster et al. (2007) itself was not
 available to check):
-- **No CAPE trigger.** Convection is skipped when the column was not convecting
-  and the parcel at `ICB` is at least `DTMAX` = 0.9 K *colder* than the
-  environment (`TVP(ICB) <= TV(ICB) - DTMAX`); otherwise the cloud-base mass
-  flux is relaxed, `CBMF = (1 - DAMPS)·CBMF + 0.1·ALPHA·DTMA`, and the column
-  convects while `CBMF > 0`.
+- **The parcel starts at the level of maximum moist static energy** (`NK`,
+  searched from `MINORIG` up to the level of minimum moist static energy),
+  not at the surface as in GLIDE.
+- **No CAPE trigger.** Convection is skipped when: the parcel level has
+  $T < 250$ K or $q \le 0$; moist static energy increases monotonically with
+  height (no minimum below the top, `IHMIN = NL - 1`); `PLCL` is outside
+  200–2000 hPa; the first level above the LCL is too high (`ICB >= NL - 1`);
+  or the column was not convecting and the parcel at `ICB` is at least
+  `DTMAX` = 0.9 K *colder* than the environment
+  (`TVP(ICB) <= TV(ICB) - DTMAX`). Otherwise the cloud-base mass flux is
+  relaxed, `CBMF = (1 - DAMPS)·CBMF + 0.1·ALPHA·DTMA`, and the column convects
+  while `CBMF > 0`.
 - **CAPE sets the cloud top only.** From `ICB + 1` upwards FLEXPART accumulates
   the *signed* buoyancy (negative layers subtract), takes `INB` as the highest
   level where that running sum is positive, `INB1` as one above the highest
@@ -115,6 +122,18 @@ with a cloud top at the highest buoyant level (below). Which of the two is
 better for these columns is part of the cloud-top question below, not of this
 fix.
 
+**The trigger is now sensitive to a weak one-level dip** (*measured*,
+`review/edge_cases.log`, and `test_weak_one_level_dip_ends_the_cloud` in
+`tests/test_cape_cloud_top.py`). Because the cloud top is the first level with
+$B \le 0$, one level that is barely non-buoyant ends the cloud, and now also
+ends the CAPE sum. In the review's example a −0.15 K dip ($B$ = −0.0005) at one
+level cut CAPE from 82 to 38 J kg⁻¹, which turns a firing column into a
+non-firing one at the 50 J kg⁻¹ floor. Before this decision the dip already
+ended the cloud (and the matrix) there, but not the CAPE. In the real columns
+that stop firing such dips are rare (6% in January, 0% in summer have a gap
+whose deficit never exceeds 0.1 K; above), but a tolerance on the cloud top
+(or FLEXPART's signed sum) belongs to the cloud-top question.
+
 **Rejected alternatives.**
 - *Keep the column-top sum and fix the docs.* The trigger would keep describing
   a cloud the scheme does not build, and depend on the vertical extent of the
@@ -127,8 +146,9 @@ fix.
   partly below the LCL; subtracting it would change many columns' CAPE by a
   discretisation artefact for no physical gain.
 
-**Open question for Matt, not changed: the updraft cap binds in every firing
-column.** `cloud_base_mass_flux_columns` uses
+**Open question for Matt before the physics freeze, not changed: the updraft
+cap binds in every firing column, and the CFL scale behind it sets the
+transport.** `cloud_base_mass_flux_columns` uses
 $w = \min(\sqrt{2\,\mathrm{CAPE}}, 5\ \mathrm{m\,s^{-1}})$. The cap is reached at
 12.5 J kg⁻¹ and the trigger needs 50, so every firing column has
 $M_b = 0.03 \times 5 \times \rho_{\mathrm{LCL}} = 0.15\,\rho_{\mathrm{LCL}}$
@@ -147,11 +167,34 @@ January (0.092–0.179 in summer, where $\rho_{\mathrm{LCL}}$ falls to
 well**, in 100% (January) and 99.4% (summer) of firing columns, with median
 scale 0.13 (0.25): one event moves an eighth to a quarter of $M_b\,\Delta t$,
 and the updraft entrains a median 13% (12%) of the sub-cloud air mass per hourly
-event, range 9–30%. So at the defaults the mass a firing column transports in
-an event is set by `CFL_MAX_OUTFLUX_FRAC` (0.9) and the column's layer masses,
-not by CAPE, the 5 m s⁻¹ cap or `closure_c` (*derived* from the two
-measurements: a lower $M_b$ would change the transport only once it fell below
-the CFL limit, by a factor of 4–8 at the median).
+event, range 9–30%.
+
+**The limiting layer is always the one just below the LCL, and the mass per
+event is exactly $0.9\,m_{i_{\mathrm{LCL}}-1}$.** Layer $i_{\mathrm{LCL}} - 1$
+sheds its own entrainment plus the subsidence it passes down,
+$e_{i_{\mathrm{LCL}}-1} + \Phi_{i_{\mathrm{LCL}}-2} = \sum_{i<i_{\mathrm{LCL}}} e_i
+= M_b\,\Delta t$, the whole updraft (*derived*, §5 of `docs/convection.md`),
+so whenever $M_b\,\Delta t > 0.9\,m_{i_{\mathrm{LCL}}-1}$ the scale makes the
+entrained mass $0.9\,m_{i_{\mathrm{LCL}}-1}$. The independent review measured
+it: in 3,069 firing columns (three January hours, 40 levels) the layer of
+largest outflux is $i_{\mathrm{LCL}} - 1$ in every column, and entrained mass
+/ $0.9\,m_{i_{\mathrm{LCL}}-1}$ is 1.000 at every percentile; the mass per
+event is 32–171 kg m⁻², median 79 (*measured*, `review/cfl_jan40.log`). The
+transport per event therefore depends on the **vertical grid** (the mass of
+the layer below the LCL) and on the **met cadence** (one event per window),
+not on CAPE, $M_b$ or `closure_c`. On 80 levels, same hours, the median mass
+per event falls to 37 kg m⁻² (21–77) and firing columns fall from 3,069 to
+1,695 (*measured*, `review/cfl_jan80.log`). With `closure_c` divided by 10
+the scale still binds in 23% of firing columns at 40 levels and 97% at 80
+(same files). This is an open question about the closure, to be settled
+before the physics freeze; the closure is not changed here.
+
+`CFL_MAX_OUTFLUX_FRAC`'s code comment said FLEXPART enforces an equivalent
+limit; it does not, and the comment is corrected. FLEXPART's `convect` sets
+`IFLAG = 4` when its own CFL test fails (`conv_mod.f90` lines 1901, 1929), but
+`calcmatrix` accepts `IFLAG` 1 or 4 and updates `fmassfrac` regardless, and
+convection is called every `LSYNCTIME` (900 s by default) rather than once per
+met window (*derived*, same file and `readoptions_mod.f90`).
 
 FLEXPART's closure does not use CAPE either (*derived*, same file): `CBMF`
 relaxes each call towards $0.1\,\alpha\,\Delta T/\mathrm{DAMPS}$ with
@@ -169,9 +212,11 @@ computed on these columns. The "0.05–0.5 kg m⁻² s⁻¹" range
 `docs/convection.md` attributes to FLEXPART could not be traced to a source.
 
 Options for Matt: (a) keep the cap and the CFL limit as they are: CAPE is an
-on/off switch and the transport per event is set by the CFL scale (the status
-quo, now documented); (b) lower `closure_c` or the cap until the CFL scale
-rarely binds, so that $M_b$ (and, with a higher cap, CAPE) sets the transport;
+on/off switch and the transport per event is $0.9\,m_{i_{\mathrm{LCL}}-1}$,
+set by the vertical grid and the met cadence (the status quo, now documented);
+(b) lower `closure_c` or the cap until the CFL scale rarely binds, so that
+$M_b$ (and, with a higher cap, CAPE) sets the transport (a tenfold lower
+`closure_c` is not enough on 80 levels, above);
 (c) a FLEXPART-like closure on the buoyancy at cloud base with relaxation
 memory, a bigger change and a Tier 2 comparison question. The cloud-top
 question goes with (c): FLEXPART's highest LNB would make the columns this
