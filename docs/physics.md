@@ -935,7 +935,14 @@ the runtime's short first step (*measured*: `tests/test_deposition_position.py`,
 `tests/test_tracer_benchmark.py::test_misaligned_release_residence_and_one_bin_emission_are_exact`,
 which also checks the predicted enhancement of an emission active in a single
 bin). With one bin (time-integrated, the default for FLEXPART comparisons) there
-is nothing to split and nothing is restricted.
+is nothing to split and nothing is restricted. The overlaps are computed in int64
+ticks of $2^{-20}$ s, not in float64 (which Apple's MPS backend cannot allocate):
+every float32 age of 8 s or more is a whole number of ticks, so the split is exact
+on the age the runtime carries, and each piece's seconds are one correctly
+rounded conversion to the grid's dtype; with the whole-second steps, bins and
+windows the config allows, this equals the earlier float64 arithmetic bit for bit
+(*measured*: `tests/test_age_bin_pieces.py`, ages 2.2–3.0 × 10⁶ s).
+`output_grid.accumulation_dtype: float64` is refused on an MPS device.
 
 `endpoint` is **unchanged** and still counts a whole step in the bin of its
 starting age. Where a release window ends off the step grid, it therefore moves
