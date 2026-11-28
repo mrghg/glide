@@ -169,8 +169,15 @@ scale 0.13 (0.25): one event moves an eighth to a quarter of $M_b\,\Delta t$,
 and the updraft entrains a median 13% (12%) of the sub-cloud air mass per hourly
 event, range 9–30%.
 
-**The limiting layer is always the one just below the LCL, and the mass per
-event is exactly $0.9\,m_{i_{\mathrm{LCL}}-1}$.** Layer $i_{\mathrm{LCL}} - 1$
+**In the sampled columns the limiting layer was the one just below the LCL, so
+the mass per event was exactly $0.9\,m_{i_{\mathrm{LCL}}-1}$.** This holds
+under two conditions: the CFL scale binds, and layer $i_{\mathrm{LCL}} - 1$
+has the largest fractional outflux of any row. The scale is set by the largest
+outflux ratio over *all* rows, so a thin cloud layer can limit the column
+instead: on a constructed grid (pressures 100000, 98000, 96000, 95950, 95900,
+95850 Pa; LCL index 2, cloud top 5; unscaled event mass 600 kg m⁻²) row 3
+limits and the boundary-layer-to-cloud transfer is 9.18 kg m⁻², not the
+183.55 kg m⁻² the formula gives (external review, 28 Nov 2026). Layer $i_{\mathrm{LCL}} - 1$
 sheds its own entrainment plus the subsidence it passes down,
 $e_{i_{\mathrm{LCL}}-1} + \Phi_{i_{\mathrm{LCL}}-2} = \sum_{i<i_{\mathrm{LCL}}} e_i
 = M_b\,\Delta t$, the whole updraft (*derived*, §5 of `docs/convection.md`),

@@ -207,8 +207,10 @@ $\rho_{\mathrm{LCL}}$.
 
 **And the CFL cap of §5 binds as well, so neither sets the transport.** On ERA5
 over Europe it binds in more than 99% of firing columns, with a median scale of
-0.13 (January) and 0.25 (summer). The layer that limits is always the one just
-below the LCL, $i_{\mathrm{LCL}} - 1$: it passes on the whole updraft flux
+0.13 (January) and 0.25 (summer). In those columns the layer that limits was
+the one just below the LCL, $i_{\mathrm{LCL}} - 1$ (in general the scale is set
+by the largest fractional outflux over all rows, so a thin cloud layer can limit
+instead; decision 0031 gives a constructed counter-example): it passes on the whole updraft flux
 (its own entrainment plus the subsidence from the boundary layer below it), so
 it sheds $M_b\,\Delta t_{\mathrm{met}}$, and the scaled matrix entrains exactly
 $0.9\,m_{i_{\mathrm{LCL}}-1}$ per event. The mass a firing column moves in one
