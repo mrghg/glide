@@ -38,8 +38,11 @@ class FootprintGridder:
     sequence of bin edges in metres above ground level (so
     `z_edges_m=(0, 40, 1000, 5000)` defines three bins: surface 0-40 m,
     mixed-layer 40-1000 m, free-troposphere 1000-5000 m). The number of
-    vertical bins is `len(z_edges_m) - 1`. See the module docstring for the
-    units convention used by `accumulate`.
+    vertical bins is `len(z_edges_m) - 1`. Every axis is binned half-open,
+    [lo, hi): layer k holds `z_edges_m[k] <= z < z_edges_m[k + 1]`, so a particle
+    on the ground (z = 0) is in the first layer and one exactly at the top edge is
+    outside the grid, as a particle at exactly `lon_max` or `lat_max` is. See the
+    module docstring for the units convention used by `accumulate`.
     """
 
     # Hard cap on the dense in-memory footprint tensor. Stops misconfigured
@@ -123,7 +126,7 @@ class FootprintGridder:
         weights: torch.Tensor,
         t_idx: torch.Tensor,
         release_idx: torch.Tensor,
-        dt_seconds: float,
+        dt_seconds: float | torch.Tensor,
         inv_density: torch.Tensor | None = None,
     ) -> None:
         """Accumulate weighted residence time into the 5D footprint grid.
@@ -148,7 +151,9 @@ class FootprintGridder:
                         [0, n_time_bins). Out-of-range values are filtered.
                 release_idx: int64 tensor [N] of per-particle release indices
                         in [0, n_releases). Out-of-range values are filtered.
-                dt_seconds: timestep length over which `weights` apply.
+                dt_seconds: timestep length over which `weights` apply: one value, or
+                        a float tensor [N] of per-particle seconds (the trapezoid's
+                        age-bin pieces, `lpdm.main._age_bin_pieces`).
                 inv_density: optional float tensor [N], 1 / (dry-air density) at
                         each particle (m3 kg-1), from `lpdm.air_density` (decision
                         0022). When given, each contribution is divided by the
@@ -172,8 +177,12 @@ class FootprintGridder:
         y_idx = torch.floor(
             (lat - self.lat_min) / max(1e-6, self.lat_max - self.lat_min) * self.n_y
         ).long()
-        # bucketize: smallest i with z < edges[i]; -1 => half-open bin in [0, n_z-1].
-        z_idx = torch.bucketize(z_coord, self.z_edges, right=False) - 1
+        # Half-open layers [lo, hi), like the floor() above for lon/lat and the
+        # time-ago bins: with right=True bucketize returns the smallest i with
+        # z < edges[i], so z = edges[0] (the ground) is in layer 0, a height exactly
+        # on an interior edge is in the layer above it, and z = edges[-1] is dropped.
+        # (right=False gave (lo, hi], which dropped every deposit at z = 0.)
+        z_idx = torch.bucketize(z_coord, self.z_edges, right=True) - 1
 
         valid = (
             active_mask
@@ -202,6 +211,12 @@ class FootprintGridder:
         stride_z = self.n_y * self.n_x
         flat_idx = r_c * stride_r + t_c * stride_t + z_c * stride_z + y_c * self.n_x + x_c
 
+        # A float64 grid (output_grid.accumulation_dtype) takes float32 inputs;
+        # `.to` is a no-op when the dtypes already match, so a float32 grid is
+        # unchanged.
+        weights = weights.to(self.dtype)
+        if inv_density is not None:
+            inv_density = inv_density.to(self.dtype)
         if inv_density is None:
             w_eff = weights * valid.to(weights.dtype) * dt_seconds
         else:

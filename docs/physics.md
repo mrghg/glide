@@ -887,7 +887,17 @@ the attributes `density_weighting` and `units` of the dataset and of its
 `footprint_units`. The vertical bins are set
 by `output_grid.z_edges_m`, an arbitrary strictly-ascending edge list — e.g.
 `[0, 40, 1000, 5000]` gives a 0–40 m surface bin matching the FLEXPART/NAME
-convention, a mixed-layer bin, and a free-troposphere bin. Accumulating *directly*
+convention, a mixed-layer bin, and a free-troposphere bin. Every axis of the grid
+is binned half-open, $[\text{lo}, \text{hi})$: layer $k$ holds
+$z_k \le z < z_{k+1}$, as the horizontal cells hold $[\text{lo}, \text{hi})$ of
+longitude and latitude and time-ago bin $k$ the ages $[k, k+1)$ × the bin width.
+So a particle on the ground ($z = 0$, for example a release at 0 m, counted by
+`trapezoid` at its release point) is in the first layer, a particle exactly on an
+interior edge is in the layer above it, and one exactly at the top edge is
+outside the grid, as one at exactly the east or north edge is. (Until the review
+of PR #66 the layers were $(\text{lo}, \text{hi}]$, which dropped every deposit
+at exactly $z = 0$; nothing else lands exactly on an edge in practice.)
+Accumulating *directly*
 into a bin that matches the reference's surface layer makes the downstream unit
 conversion exact rather than a depth-weighted approximation.
 
@@ -900,7 +910,12 @@ interval for all its particles. Every particle is followed for
 start of its window reaches an age of the length plus the window's duration.
 `n_time_bins` counts the bins of travel to resolve, and the `time_ago` axis adds
 one bin per started bin width of the longest release window, so that travel
-stays on the axis. `time_ago_start_hours` and `time_ago_end_hours` give each
+stays on the axis. (A particle is counted from the step boundary at or below its
+release, so when a window starts between steps its counted ages run up to that
+offset, less than one step, past the length plus the duration; with `trapezoid`,
+which splits each step's ages exactly between bins, the axis also covers that
+offset, which can add one bin; `endpoint` bins each step by its starting age,
+which stays on the axis, so its axis is unchanged.) `time_ago_start_hours` and `time_ago_end_hours` give each
 bin's edges. With `n_time_bins: 1` all ages collapse into one bin, giving the
 time-integrated footprint the FLEXPART comparison uses. With more bins,
 `n_time_bins × time_bin_seconds` must cover the simulation length; a
@@ -910,6 +925,221 @@ dropped rather than clamped, so the axis labels stay honest.
 
 Particles outside the grid horizontally, vertically, in time-ago, or in release
 index contribute nothing.
+
+### 7.1 Explainer: counting a particle's residence within a step
+
+**The problem.** A footprint cell's value is the time the released particles
+spend in that cell (per unit released mass, divided by the air density), summed
+over the particles. For one particle it is the time integral
+
+$$
+\int 1[\mathbf{x}(t)\in\text{cell}]\ \frac{m_p}{\rho_d}\ dt ,
+$$
+
+where $1[\cdot]$ is 1 while the particle is in the cell and 0 otherwise. The model
+does not know the path between steps: it knows each particle's position at the
+step times $t_0 = $ release, $t_1 = t_0 - \Delta t$, $t_2$, … (backward in time,
+$\Delta t = 60$ s by default). So the integral over each step has to be estimated
+from the step's two end positions, and the **counting rule**
+(`output_grid.deposition.position`, task A2) says how.
+
+**The rules** (figure, panel a: one particle's height over its first five steps
+from a 10 m release, with the 0–40 m layer shaded):
+
+![Where endpoint and trapezoid count a particle's residence, and how trapezoid splits a half step between age bins](img/residence-counting.png)
+
+*Panel (a): an illustrative height path (not a GLIDE trajectory); the deposits
+and totals are counted by GLIDE's own `_deposit_step`. Panel (b): the age-bin
+split, by GLIDE's `_age_bin_pieces`. Script:
+`scripts/validation/figures/residence_counting.py`.*
+
+- `endpoint` (the default): all of $\Delta t$ at the step's **end** position, a
+  right-rectangle rule in time. Its blind spot is the first step: the particle's
+  release position is never counted, and a step's residence is credited to
+  wherever the particle has got to after 60 s. For a surface inlet this removes
+  about half a step of residence from the receptor's own cell, where the footprint
+  is largest (−10.8% in the receptor's 0–40 m cell of the smoke run; decision
+  0029). Away from the release it is unbiased at 60 s.
+- `trapezoid`: $\Delta t/2$ at the step's **start** position and $\Delta t/2$ at
+  its **end** position, i.e. the trapezoidal rule for the time integral. Summed
+  over a trajectory it counts the same interior positions as `endpoint` with the
+  same weights, plus half a step at the release and minus half a step at the
+  particle's last position (*derived*), so it supplies exactly what `endpoint`
+  misses. Scored against fine-time residence it is within 0.5% everywhere on the
+  smoke run (decision 0029). What it still gets wrong is what any two-point rule
+  gets wrong: a crossing between two step times is credited by where the step's
+  end points fall, so single cells only a few steps wide carry errors of a few
+  per cent (±2% with 1 km cells at 3 m s⁻¹).
+- Two rules were tried and **removed**. The RK2 `midpoint` (decision 0026)
+  counted at the advection predictor, which leaves out the step's turbulent and
+  convective motion, so in the vertical it counted the first step at the
+  release height (+5% on the smoke run's 0–40 m total relative to `endpoint`). `step_mean` counted all
+  of $\Delta t$ at the mean of the start and end positions; averaging two heights
+  moves residence away from the ground when a step's vertical displacement is
+  comparable to the 40 m layer (−3 to −5% of the 0–40 m layer outside the
+  receptor's cell on the smoke run, up to −15% in strong turbulence; decision
+  0029). Configuration validation rejects both, with the reason.
+
+In panel (a) the particle truly spends 158 s in the layer over the five steps;
+`trapezoid` counts 150 s and `endpoint` 120 s, the difference being the half step
+at the release (*measured*, the figure script). Over a whole trajectory only the
+release end matters, because the trajectory's other end is days back and far
+away.
+
+**Age bins, and how trapezoid splits a half step between them.** With
+`n_time_bins > 1` the footprint also resolves *when*: bin $k$ holds residence at
+ages $[k, k+1)$ × `time_bin_seconds`, the age being the time before the particle's
+own release window's end. A backward step covers each particle's ages
+$[e, e + \Delta t)$, $e$ its age at the step's start. The particles of a batch
+share one step clock, but each counts its age from its own release window's
+end, so whenever a window ends between steps (a column or satellite sounding at
+an arbitrary time, say) the step's age interval straddles bin edges, even when the
+bin width is a multiple of $\Delta t$. `trapezoid` therefore treats its start half
+as standing for the ages $[e, e + \Delta t/2)$ and its end half for
+$[e + \Delta t/2, e + \Delta t)$, and splits each half by its overlap with the
+bins; each piece keeps its half's position and density (panel b: a step of ages
+80–140 s against 120 s bins gives 30 + 10 = 40 s to the first bin and 20 s to the
+second, the exact split; binning each half by one age gave 60 / 0). A half spans
+at most ⌈(Δt/2) / width⌉ + 1 bins, which is two for any bin at least half a step
+wide; the number of pieces depends only on the configuration, so the shapes are
+static and there is no host sync. For a stationary particle the seconds per bin
+are then exact for any alignment of release windows, steps and bins, including
+the runtime's short first step (*measured*: `tests/test_deposition_position.py`,
+`tests/test_tracer_benchmark.py::test_misaligned_release_residence_and_one_bin_emission_are_exact`,
+which also checks the predicted enhancement of an emission active in a single
+bin). With one bin (time-integrated, the default for FLEXPART comparisons) there
+is nothing to split and nothing is restricted. The overlaps are computed in int64
+ticks of $2^{-20}$ s, not in float64 (which Apple's MPS backend cannot allocate):
+every float32 age of 8 s or more is a whole number of ticks, so the split is exact
+on the age the runtime carries, and each piece's seconds are one correctly
+rounded conversion to the grid's dtype; with the whole-second steps, bins and
+windows the config allows, this equals the earlier float64 arithmetic bit for bit
+(*measured*: `tests/test_age_bin_pieces.py`, ages 2.2–3.0 × 10⁶ s).
+`output_grid.accumulation_dtype: float64` is refused on an MPS device.
+
+`endpoint` is **unchanged** and still counts a whole step in the bin of its
+starting age. Where a release window ends off the step grid, it therefore moves
+up to $\Delta t$ of each straddling step into the neighbouring bin: in fully
+covered bins the shifts in and out cancel, but at the ends of a release's
+lifetime they do not (up to 4.4 s of 120 s per bin in the test above,
+*measured*), and an emission active in only some bins is mistimed by up to one
+step. When windows end on the step grid and the bin width is a multiple of
+$\Delta t$ (every shipped configuration), both rules put every step in one bin.
+
+### 7.2 Implementation details
+
+`endpoint` deposits with $\rho_d$ at the end position and the step's mid-time.
+`trapezoid` deposits each half with its own $\rho_d$, at its own position and time
+(the start at $t$, the end at $t-\Delta t$, in the step's met window). A
+particle's first step is counted half at its release point; a particle that
+leaves the met domain keeps the start half of its last step, and the end half is
+dropped, like `endpoint`'s, if it lies outside the output grid. Vertical layers
+are half-open, as above, so a release at 0 m is counted in the first layer.
+
+For `trapezoid` the runtime copies the start positions before the step, outside
+the captured graph, so the static (CUDA) step's graph, shapes and outputs are the
+same as for `endpoint` (decision 0004). Each half is one scatter per age-bin
+piece ($\lceil(\Delta t/2)/w\rceil + 1$ pieces per half with several bins of width $w$, so two when $w \ge \Delta t/2$ and more for narrower bins; one with a single bin). Kernel
+deposition (decision 0012) is deferred to after v1; deposition is a delta at the
+chosen position(s).
+
+**Scored against fine-time residence** (decision 0029;
+`scripts/validation/score_residence_counting.py`, outputs in
+`$GLIDE_AGENT_OUTPUTS/agents/A2/counting/`). The scorer measures each rule's
+counting error apart from the trajectory error. It records the production
+step's sub-step positions (60 s outer step, 16 sub-steps of 3.75 s), rebuilds
+each particle's path at the sub-step times (advection and meander spread
+uniformly over the step), and takes as reference the midpoint rule on that path
+with 8 samples per sub-step (0.47 s), each sample binned by its own cell and age
+and divided by its own $\rho_d$. The three rules are counted from the same
+trajectories. The reference is converged: 1, 2 and 4 samples per sub-step differ
+from 8 by ≤ 0.025% in every region of the smoke run and the synthetic columns, and the composite trapezoid on the sub-step positions by ≤ 0.1%.
+The offline tallies of each rule match production runs of that rule, same seed,
+to the float32 accumulation of the production grid (exactly, with a float64
+grid), and the hooked run is bit-identical to an unhooked one.
+
+Error against the reference on the smoke run (Mace Head, 10 m inlet, 1 day, CPU,
+three seeds, 0–40 m unless stated, mean over seeds; the s.d. over seeds is
+≤ 0.27 percentage points; `tables/scores_smoke_w.md`):
+
+| rule | receptor cell | ring 1 | rings 2–3 | rings 4–10 | beyond 10 | 0–40 m total | 40–1000 m | first hour | cell-wise L1 |
+|---|---|---|---|---|---|---|---|---|---|
+| `endpoint` | −10.77% | +0.17% | −0.12% | +0.03% | +0.07% | −1.25% | +0.04% | −7.59% | 1.62% |
+| `step_mean` | +0.74% | −2.87% | −3.85% | −4.91% | −4.02% | −3.46% | +0.21% | +0.09% | 3.64% |
+| `trapezoid` | −0.44% | +0.17% | −0.12% | +0.03% | +0.02% | −0.03% | +0.00% | −0.34% | 0.35% |
+
+(Rings are Chebyshev distances in cells from the receptor's cell; "first hour" is
+the first hourly time-ago bin; the L1 error is Σ|rule − reference| over the
+0–40 m cells divided by the reference's 0–40 m total.) The same release at 12 UTC
+(daytime; `tables/scores_smokeday_w.md`, three seeds): `endpoint` −7.69% in the
+receptor's cell and −0.60% in total, `step_mean` +0.59% and −0.1 to −1.4% in the
+rings, `trapezoid` −0.28% and within ±0.06% elsewhere (L1 0.88 / 0.80 / 0.28%).
+
+- `endpoint` misses about one step of release residence in the receptor's cell
+  and is unbiased elsewhere. The right-rectangle rule on the sub-step positions
+  has a receptor-cell error proportional to its spacing (−0.66, −1.32, −2.6,
+  −5.2% at 3.75, 7.5, 15 and 30 s), which locates the error at the first step.
+- `step_mean` gets the first step about right but undercounts the surface layer
+  everywhere else: the mean of two heights a layer-depth apart lies above the
+  layer the particle spent its time in. In horizontally uniform, equilibrated
+  Hanna columns at Δt = 60 s (no receptor, so nothing but this mechanism) it
+  undercounts 0–40 m by 14.6% ($u_*$ = 1 m s⁻¹, $h$ = 300 m and 1,000 m), 6.4%
+  (convective, $h$ = 1,500 m) and 0.9% ($u_*$ = 0.4 m s⁻¹), while `endpoint`
+  and `trapezoid` are within 0.1%.
+- `trapezoid` is within 0.5% of the reference in every region of the smoke run
+  and of the synthetic plumes from a 10 m release (neutral, convective, stable;
+  25 km cells), with cell-wise L1 errors of 0.05–0.35%.
+- Where cells are only a few steps wide, single crossings show: with 1 km cells
+  and a 3 m s⁻¹ wind (5.5 steps per cell) `trapezoid` is −2.0% in the receptor's
+  cell and +1.9% in the next ring, `step_mean` +3.6% and −0.9%, `endpoint`
+  −23% and +1.9%; the 0–40 m totals of `trapezoid` and `step_mean` are within
+  0.01%, and the L1 errors are 0.72%, 0.94% and 3.25%.
+- The analytic plume (`tests/test_plume_footprint.py`: homogeneous OU, $u' = 0$,
+  release at 50 m, 500 m cells = 100 s of travel; run here with 16 OU sub-steps
+  per outer step) cannot rank the rules. Its release is above the 0–40 m layer,
+  so `trapezoid` and `endpoint` count the same 0–40 m residence (*derived* above;
+  *measured* equal). With deterministic along-wind motion, the cell indicator is
+  sampled at fixed phases, so the column errors are aliasing, and which of
+  `endpoint` and `step_mean` wins depends on where the cell edges fall: near the
+  receptor (< 2 $T_L$), mean relative column error against the reference,
+  `endpoint` / `step_mean`, three seeds, is 2.0% / 0.0% at Δt = 5 s with the
+  test's geometry (edges on step times) and 0.4% / 2.0% with the receptor 0.63
+  of a cell from the edge; 8.4% / 0.8% and 7.6% / 4.0% at 20 s; 21% / 38% and
+  41% / 21% at 60 s, where every rule is 26% off in the far field (one or two
+  samples per 100 s column). The reference itself is within 1–2% of the closed
+  form at every Δt (`tables/scores_synth_u.md`). The A2 acceptance test ("`step_mean`
+  no worse at Δt, better at 4Δt") passes partly because of that alignment: with
+  the edges moved, `step_mean` is still better at 20 s but worse at 5 s.
+
+Against `endpoint` on production runs (same seeds, so the changes are paired;
+`tables/production_*.md`): on the smoke run `trapezoid` adds +11.66% (s.d. over
+seeds 0.03) to the receptor's 0–40 m cell and +1.25% to the 0–40 m total, and
+changes every ring by ≤ 0.05%; `step_mean` gives +12.9% in the cell, −3.0 to
+−4.9% in the rings and −2.24% in total. On the reference configuration (`configs/ab_multisite_perf.yaml`, GPU, 144
+releases from Mace Head 10 m, Ridge Hill 90 m and Tacolneston 185 m, 5 days back,
+seeds 42/43/44; `tables/production_ref.md`), `trapezoid` changes only the 10 m
+inlet: Mace Head +7.49% in the receptor's cell and +0.37% on the 0–40 m total
+(day +0.26%, night +0.45%), every ring ≤ 0.05%; at the two elevated inlets the
+release half lies above the 0–40 m layer and the change is ≤ 0.04% everywhere.
+`step_mean` lowers the 0–40 m total at every site (−2.0% Mace Head, −3.2% Ridge
+Hill, −3.5% Tacolneston), most near elevated inlets at night (Ridge Hill rings
+2–3 −16%, Tacolneston receptor cell −13%). The s.d. over seeds of these paired
+changes is ≤ 0.01 points for `trapezoid` and ≤ 0.08 for `step_mean` except its receptor cells (≤ 2.1);
+for scale, endpoint's own 0–40 m total varies between seeds by 0.26–0.44% per
+release (median).
+
+**Accumulation precision.** The footprint is summed in float32 by default.
+`output_grid.accumulation_dtype: float64` (a prototype, off by default) sums in
+float64 and rounds once when the batch is written; the store stays float32. On
+the reference configuration (seed 42, worst cell per release among cells above
+25% of the layer's maximum, outside the receptor's 3 × 3; decision 0029) the
+float32 error against float64 is p90 0.11–0.14%, max 0.29% in 40–1000 m for
+`endpoint`, and p90 0.51–0.76%, max 1.21% for `trapezoid`, which adds twice as
+many half-sized contributions. With float64 grids the two rules agree to
+≤ 0.026% in 0–1000 m outside the receptor's cells; the remaining 1–5 km
+difference is the half step `trapezoid` does not count at each particle's final
+position (correlation 0.9986 with that prediction). Cost: about 0.1 GiB more
+device memory (one batch's grid), no measurable time.
 
 **The dry-air density at the particle.** $\rho_d = (p - e)/(R_d T)$ with
 $R_d = 287.05$ J kg⁻¹ K⁻¹ and the vapour pressure $e = q p / (0.622 + 0.378 q)$
@@ -972,6 +1202,7 @@ Stated plainly, because they bound what the model can be trusted for.
 | Turbulent exchange across a stable boundary-layer top is set by the numerical floor $\sigma_{\min}$ = 1 mm s⁻¹ (§3.3, decision 0030) | The Hanna profile vanishes at a stable $h$, so the floor, through the interface, passes $\sigma_{\min}/\sqrt{2\pi}$ (0.4 mm s⁻¹) each way; exchange scales with $\sigma_{\min}$ below about 10⁻² m s⁻¹. The value was chosen for numerical safety, not as a physical exchange rate; FLEXPART reflects at $h$ instead. Open question. |
 | Turbulence support fields ($\rho$, free-troposphere $\sigma/T_L$, meander $\sigma$) built once per meteorology hour at the window midpoint | A met-cadence approximation (<1%/hr drift), matching how FLEXPART-class models refresh turbulence fields. Per-particle interpolation through those fields is unchanged. |
 | Deep convection assigns each particle to the nearest meteorology column | Each (lon, lat) column has its own parcel lift, trigger and matrix (task A02), fired once per meteorology interval read from the store. A particle near a column boundary takes the nearest column's matrix rather than a blend. See [convection.md](convection.md) §1 and §7. |
+| Each step's residence is counted from at most two positions: the step's end (`output_grid.deposition.position: endpoint`, the default) or half at each end (`trapezoid`; decision 0029) | The cell indicator is sampled at 60 s, so a particle crossing a cell or bin edge during a step is credited by where its sample points fall, not by when it crossed. Scored against fine-time residence on the same trajectories (§7): `endpoint` misses the first half step at the release point (−10.8% in the receptor's 0–40 m cell and −1.25% on the 0–40 m total of the smoke run) and is otherwise within ±0.2%; the removed `step_mean` undercounted the 0–40 m layer wherever a step's vertical displacement is comparable to it (−3 to −5% outside the receptor's cell on the smoke run, up to −15% in strong turbulence); `trapezoid` is within 0.5% in every region scored. Where cells are only a few steps wide, single crossings leave errors of a few per cent per cell for every rule (±2% with 1 km cells at 3 m s⁻¹), and with deterministic along-wind motion (the analytic plume) they alias. |
 | Initial $u', v', w' = 0$ rather than sampled from the local $\sigma$ | Particles equilibrate within one $T_L$ (typically ~100 s), which is shorter than the release window. |
 | Virtual temperature approximated as $T$ in the Obukhov length | Humidity correction is small; deferred. |
 | Free-troposphere horizontal turbulence treated as isotropic with the vertical | The unresolved-mesoscale horizontal spread is carried separately by the meander process. |

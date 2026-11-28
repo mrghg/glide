@@ -337,6 +337,138 @@ def test_backward_prediction_matches_the_forward_solution(
     np.testing.assert_allclose(c, expected, rtol=0.005)
 
 
+_STATIONARY_T0 = datetime(2024, 1, 1, 12, 0, tzinfo=UTC)
+
+
+def _stationary_config(tmp_path: Path, position: str, static: bool) -> RunConfig:
+    """Two stationary releases (no wind, no turbulence) at 20 m in one batch, 600 s
+    windows: S0 from 12:00:00 (ending on the 60 s step grid), S1 from 12:00:20
+    (ending 20 s off it). 1 h runs, 60 s steps, 120 s age bins, one 0-40 m layer.
+    The batch starts at S1's window end, so the runtime's first step is 20 s."""
+
+    base = _make_run_config(
+        output_uri=str(tmp_path / f"{position}-{static}"),
+        start_time=_STATIONARY_T0,
+        simulation_length_seconds=3600,
+        dt_seconds=60,
+        output_lon_bounds=(-0.75, 0.75),
+        output_lat_bounds=(-0.75, 0.75),
+        output_n_x=3,
+        output_n_y=3,
+        z_edges_m=(0.0, 40.0),
+        n_time_bins=30,
+    ).model_dump(mode="json")
+    base["output_grid"]["time_bin_seconds"] = 120
+    base["output_grid"]["deposition"] = {"position": position}
+    base["release"] = {
+        "kind": "samples",
+        "samples": [
+            {
+                "name": f"S{i}",
+                "lon": 0.0,
+                "lat": 0.0,
+                "start_time": (_STATIONARY_T0 + timedelta(seconds=20 * i)).isoformat(),
+                "duration_seconds": 600,
+                "alt_min_agl_m": 20.0,
+                "alt_max_agl_m": 20.0,
+            }
+            for i in range(2)
+        ],
+        "n_particles_per_release": 64,
+        "seed": 3,
+    }
+    return RunConfig.model_validate(base)
+
+
+def _exact_seconds_by_bin(cfg: RunConfig, n_bins: int) -> np.ndarray:
+    """Exact residence per (release, age bin) of the stationary particles over the
+    intervals the runtime counts: the same particles (same seeds), the same backward
+    steps (a short step first when the span is not a whole number of steps), and a
+    particle counted for a step when active at its upper end; each counted step
+    contributes its ages [e, e + delta) in full, split by the bins."""
+
+    from lpdm.main import _backward_step_seconds
+    from lpdm.release_generator import generate_batch_particles
+
+    (batch,) = cfg.expand_to_batches()
+    pb = generate_batch_particles(batch, device="cpu")
+    released = pb.release_time_offsets_s.double().numpy()
+    window_end = pb.release_window_end_offsets_s.double().numpy()
+    weight = pb.particles[:, 3].double().numpy()
+    rel = (pb.release_idx - batch.releases[0].release_idx).numpy()
+    length, dt, width = cfg.simulation.length_seconds, cfg.simulation.dt_seconds, 120.0
+    edges = np.arange(n_bins + 1) * width
+    out = np.zeros((len(batch.releases), n_bins))
+    cursor, terminus = float(window_end.max()), -float(length)
+    while cursor > terminus:
+        delta = _backward_step_seconds(cursor - terminus, float(dt))
+        active = (released >= cursor) & (released - length <= cursor)
+        lo = (window_end - cursor)[:, None]
+        overlap = np.clip(
+            np.minimum(lo + delta, edges[None, 1:]) - np.maximum(lo, edges[None, :-1]), 0.0, None
+        )
+        np.add.at(out, rel[active], weight[active, None] * overlap[active])
+        cursor -= delta
+    return out
+
+
+@pytest.mark.parametrize("static", [False, True], ids=["dynamic", "static"])
+def test_misaligned_release_residence_and_one_bin_emission_are_exact(
+    tmp_path: Path, monkeypatch, static: bool
+) -> None:
+    """Age bins with a release window ending off the step grid (reviews of PR #66):
+    `trapezoid` splits each half step by its overlap with the age bins, so the
+    seconds per bin of stationary particles are exact for both releases, including
+    the partly covered first and last bins, and the predicted enhancement of an
+    emission active in a single bin is exact. `endpoint` counts each step in the
+    bin of its starting age: exact for S0 (ages on the step grid, bins two steps
+    wide) but not for S1, whose steps (ages 20 + 60 k s) straddle the bin edges."""
+
+    monkeypatch.setenv("GLIDE_STATIC_SUBSTEPS", "1" if static else "0")
+    scheme = PlaceholderConstantOU()
+    scheme.sigma_w2 = 0.0
+    per_bin, datasets = {}, {}
+    for position in ("trapezoid", "endpoint"):
+        cfg = _stationary_config(tmp_path, position, static)
+        _run(cfg, reader=_make_reader(cfg, wind_fn=lambda _: (0.0, 0.0, 0.0)), scheme=scheme)
+        ds = xr.open_zarr(Path(cfg.io.output_uri) / "footprints.zarr").load()
+        fp = ds["footprint"].isel(z_bin=0)
+        total = fp.sum(dim=("latitude", "longitude")).values
+        # Every particle stays in the release cell.
+        np.testing.assert_array_equal(total, fp.isel(latitude=1, longitude=1).values)
+        per_bin[position] = total.astype(np.float64)
+        datasets[position] = ds
+    # Each particle is counted for 3600 s, from the step boundary at or below its
+    # release, so S1's oldest counted ages reach 4220 s: past the 30 + 5 bins
+    # (4200 s) that endpoint's axis has, so trapezoid's axis gets a bin more.
+    assert per_bin["endpoint"].shape[1] == 35
+    assert per_bin["trapezoid"].shape[1] == 36
+    exact = _exact_seconds_by_bin(cfg, 36)
+    np.testing.assert_allclose(exact.sum(axis=1), 3600.0, rtol=1e-12)
+    np.testing.assert_allclose(per_bin["trapezoid"].sum(axis=1), 3600.0, rtol=1e-6)
+    assert np.count_nonzero(exact[1] % 120.0) > 2  # S1 has partly covered bins
+    np.testing.assert_allclose(per_bin["trapezoid"], exact, rtol=1e-5, atol=1e-4)
+    np.testing.assert_allclose(per_bin["endpoint"][0], exact[0, :35], rtol=1e-5, atol=1e-4)
+    # Endpoint moves 20 s of each S1 step into the next-younger bin; in fully
+    # covered bins the shifts in and out cancel, in the partly covered ones not.
+    endpoint_error = np.abs(per_bin["endpoint"][1] - exact[1, :35])
+    assert endpoint_error.max() > 1.0
+    np.testing.assert_allclose(endpoint_error[6:29], 0.0, atol=1e-4)
+
+    # An emission of mass M over exactly S1's age bin 2 (ages 240-360 s from its
+    # window end at 12:10:20), a partly covered bin: the enhancement is M / 120 s
+    # times the exact residence in that bin, over the source volume.
+    ds = datasets["trapezoid"]
+    box_deg = 0.5
+    e = Emission(T("2024-01-01 12:04:20"), T("2024-01-01 12:06:20"), mass=600.0, lat=0.0, lon=0.0)
+    c = concentration.predict_from_dataset(ds, [e], source_deg=box_deg, basis="ambient")
+    lat_e, lon_e = ds["latitude_edge"].values, ds["longitude_edge"].values
+    w = concentration.source_box_weights(lat_e, lon_e, 0.0, 0.0, box_deg)
+    volume = float(np.sum(w * concentration.cell_area_m2(lat_e, lon_e))) * 40.0
+    assert 0.0 < exact[1, 2] < 120.0
+    np.testing.assert_allclose(c[1], e.rate * exact[1, 2] / volume, rtol=1e-5)
+
+
 # ---------------------------------------------------------------------------
 # the benchmark's plumbing
 # ---------------------------------------------------------------------------
