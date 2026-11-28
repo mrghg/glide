@@ -659,6 +659,13 @@ class MemoryConfig(_Frozen):
     guard_check_every_steps: int = Field(1, gt=0)
 
 
+MPS_FLOAT64_ACCUMULATION_MESSAGE = (
+    "output_grid.accumulation_dtype: float64 cannot run on an MPS (Apple GPU) device: "
+    "PyTorch's MPS backend has no float64 tensors. Use accumulation_dtype: float32 "
+    "(the default), or run on cuda or cpu."
+)
+
+
 class RunConfig(_Frozen):
     """Top-level GLIDE run configuration.
 
@@ -700,6 +707,15 @@ class RunConfig(_Frozen):
                 f"{self.simulation.length_seconds}, so older residence would be dropped. "
                 "Add bins, widen them, or set output_grid.drop_older_ages: true (decision 0016)."
             )
+        return self
+
+    @model_validator(mode="after")
+    def _check_accumulation_dtype_on_mps(self) -> RunConfig:
+        # Apple's MPS backend has no float64, so a float64 footprint grid cannot be
+        # allocated there. `device: auto` is checked at run time, once the device
+        # is resolved (`lpdm.main._check_device_dtypes`).
+        if self.simulation.device == "mps" and self.output_grid.accumulation_dtype == "float64":
+            raise ValueError(MPS_FLOAT64_ACCUMULATION_MESSAGE)
         return self
 
     @model_validator(mode="after")

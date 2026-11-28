@@ -29,7 +29,12 @@ import numpy as np
 import torch
 
 from lpdm.air_density import DENSITY_WEIGHTING_ATTRS, ParticleDryAirDensity
-from lpdm.config import N_SUBSTEPS_DEFAULT, ConcreteRelease, RunConfig
+from lpdm.config import (
+    MPS_FLOAT64_ACCUMULATION_MESSAGE,
+    N_SUBSTEPS_DEFAULT,
+    ConcreteRelease,
+    RunConfig,
+)
 from lpdm.convection import (
     ConvectionScheme,
 )
@@ -281,6 +286,18 @@ def _resolve_device(name: str) -> str:
             f"device={name!r} requested but torch.backends.mps.is_available() is False."
         )
     return name
+
+
+def _check_device_dtypes(cfg: RunConfig, device_str: str) -> None:
+    """Refuse a configuration whose dtypes the resolved device cannot allocate.
+
+    The config validator catches an explicit ``device: mps``; this catches
+    ``device: auto`` resolving to MPS, which has no float64 tensors, before any
+    met or particle work is done.
+    """
+
+    if torch.device(device_str).type == "mps" and cfg.output_grid.accumulation_dtype == "float64":
+        raise PreflightValidationError(MPS_FLOAT64_ACCUMULATION_MESSAGE)
 
 
 def _current_rss_bytes() -> int | None:
@@ -1068,6 +1085,19 @@ def _time_weight(met_window: HourlyMetTensors, t_eval_s: float) -> float:
     return max(0.0, min(1.0, (t_eval_s - t_start_s) / max(1.0, float(t_end_s - t_start_s))))
 
 
+# Ticks per second of the exact age arithmetic in `_age_bin_pieces`: 2**20 (about
+# 0.95 us). A power of two, so a float32 age converts to ticks by an exact scaling,
+# and every float32 age >= 8 s (whose spacing is >= 2**-20 s) is a whole number of
+# ticks. int64 ticks reach 2**43 s, far beyond any run.
+_AGE_TICKS_PER_S = 1 << 20
+
+
+def _seconds_to_ticks(seconds: float) -> int:
+    """A host-side length (s) in `_AGE_TICKS_PER_S` ticks, to the nearest tick."""
+
+    return round(seconds * _AGE_TICKS_PER_S)
+
+
 def _age_bin_pieces(
     age_s: torch.Tensor,
     length_s: float,
@@ -1084,23 +1114,32 @@ def _age_bin_pieces(
     length and the configured width, never on the data, so the shapes are static
     and there is no host sync. Pieces that do not overlap carry 0 s (an exact
     no-op in the scatter). With one bin (time-integrated) every age is bin 0 and
-    the interval is one piece. The seconds are computed in float64 and returned in
-    ``dtype`` (the grid's); pieces are yielded one at a time, so only one piece's
-    temporaries are alive while it is scattered.
+    the interval is one piece. Pieces are yielded one at a time, so only one
+    piece's temporaries are alive while it is scattered.
+
+    The overlaps are computed exactly in int64 ticks of 2**-20 s
+    (`_AGE_TICKS_PER_S`), never in float64, which Apple's MPS backend cannot
+    allocate: the float32 age is scaled by 2**20 (exact) and rounded to int64,
+    which is exact for every age >= 8 s and within 2**-21 s below; ``length_s``
+    and ``time_bin_s`` are host floats rounded to the nearest tick (exact for the
+    whole and half seconds the config produces). Each piece's seconds are its
+    ticks converted to ``dtype`` (the grid's) and scaled by 2**-20, which is one
+    correctly rounded conversion of the exact overlap, so they equal the float64
+    computation rounded to ``dtype`` whenever that computation was exact.
     """
 
     if n_time_bins == 1:
         yield _time_ago_index(age_s, time_bin_s, 1), length_s
         return
-    lo = age_s.to(torch.float64)
-    hi = lo + length_s
-    first = torch.floor(lo / time_bin_s)
-    for j in range(math.ceil(length_s / time_bin_s) + 1):
-        bin_lo = (first + j) * time_bin_s
-        overlap = (torch.minimum(hi, bin_lo + time_bin_s) - torch.maximum(lo, bin_lo)).clamp_(
-            min=0.0
-        )
-        yield (first + j).to(torch.int64), overlap.to(dtype)
+    width = _seconds_to_ticks(time_bin_s)
+    length = _seconds_to_ticks(length_s)
+    lo = torch.round(age_s * float(_AGE_TICKS_PER_S)).to(torch.int64)
+    hi = lo + length
+    first = torch.div(lo, width, rounding_mode="floor")
+    for j in range(-(-length // width) + 1):
+        bin_lo = (first + j) * width
+        overlap = (torch.minimum(hi, bin_lo + width) - torch.maximum(lo, bin_lo)).clamp_(min=0)
+        yield first + j, overlap.to(dtype) * (1.0 / _AGE_TICKS_PER_S)
 
 
 def _deposit_step(
@@ -1584,6 +1623,7 @@ def _run(
     mem = cfg.memory
     out_grid = cfg.output_grid
     device_str = _resolve_device(sim.device)
+    _check_device_dtypes(cfg, device_str)
 
     if scheme is None:
         scheme = get_scheme(cfg.turbulence.scheme, **_scheme_kwargs(cfg))
