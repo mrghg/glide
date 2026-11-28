@@ -1,6 +1,6 @@
 # CONV — Buoyancy closure with exact exponential application (decision 0033)
 
-- status: PR OPEN (see the PR "CONV: buoyancy closure with exact exponential application (decision 0033)")
+- status: PR OPEN #78
 - queue: none (Matt's request and approval of 28 Nov 2026; adopted as "Decision 5")   model: claude-opus-5-5   branch: agent/CONV-closure
 - started: 2026-11-28   updated: 2026-11-28
 - plan:
@@ -18,7 +18,7 @@
     - `tests/test_convection.py`: the A02/T1 construction tests pin the legacy options.
   - Decision 0033. Updated: docs/convection.md §1, §4–§8; README; STATUS; VALIDATION; decisions 0007, 0031 and the decisions README.
   - Scripts under `scripts/validation/conv/`.
-- verified: see the PR description (full CPU suite, GPU compiled smoke, CPU smoke and JFJ before/after with the seed pair).
+- verified: CPU suite 756 passed, 38 skipped, 0 failed (19.1 min, 8 threads, at e6ecbeb). GPU compiled smoke: compiles=2, no WON'T CONVERT (defaults and legacy). CPU smoke main vs branch: bit-identical (seeds 42 and 43; legacy options too). JFJ July 2019: 0-40 m -2.1% / -0.1% (seeds 42/43), against seed-to-seed -3.3%. Courant max 1.5. Files: outputs/agents/CONV/pr/.
 - docs: dev/decisions/0033 (new), 0007 and 0031 status lines, decisions README; docs/convection.md; docs/VALIDATION.md; README; STATUS.md.
 - handoff: Decision 6 (trigger) is the next study. The trigger's ΔT_v test at the level LCL+1 depends on the grid (firing columns 11,263 / 7,243 / 3,849 on 23 / 40 / 80 levels, January), and GLIDE fires in ~1% of column-hours against FLEXPART's ~60%. See outputs/agents/CONV/review/fp_trigger_split.log and trigger_grid.log.
 - proposed follow-ups:
