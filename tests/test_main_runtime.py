@@ -1952,8 +1952,11 @@ def _capture_engine(frame_kind: str, wind_dtype: torch.dtype):
     return GPUEngine(device="cpu", frame=frame, wind_gather_dtype=wind_dtype)
 
 
+@pytest.mark.parametrize("horizontal_frame", ["grid", "wind"])  # decision 0032
 @_CAPTURE_CASES
-def test_step_core_traces_as_one_graph_no_breaks(frame_kind: str, wind_dtype: torch.dtype) -> None:
+def test_step_core_traces_as_one_graph_no_breaks(
+    frame_kind: str, wind_dtype: torch.dtype, horizontal_frame: str
+) -> None:
     """The whole per-step core must trace as ONE graph (no graph breaks) so it captures
     as a single CUDA graph on GPU — otherwise the eager glue between sub-graphs keeps the
     run launch-bound (the phase-4 failure mode). `fullgraph=True` + `backend="eager"`
@@ -1971,7 +1974,8 @@ def test_step_core_traces_as_one_graph_no_breaks(frame_kind: str, wind_dtype: to
     torch._dynamo.config.suppress_errors = False  # make breaks raise, don't swallow
     try:
         engine = _capture_engine(frame_kind, wind_dtype)
-        scheme = HannaScheme(meander_enabled=True, n_substeps=4)  # meander on → trace that path too
+        # meander on → trace that path too; both horizontal frames (decision 0032)
+        scheme = HannaScheme(meander_enabled=True, n_substeps=4, horizontal_frame=horizontal_frame)
         met = _wmc_met_window(blh_m=2000.0, ustar_m_s=0.4)
 
         n = 48
@@ -2012,8 +2016,11 @@ def test_step_core_traces_as_one_graph_no_breaks(frame_kind: str, wind_dtype: to
         torch._dynamo.reset()
 
 
+@pytest.mark.parametrize("horizontal_frame", ["grid", "wind"])  # decision 0032
 @_CAPTURE_CASES
-def test_step_core_does_not_recompile_per_step(frame_kind: str, wind_dtype: torch.dtype) -> None:
+def test_step_core_does_not_recompile_per_step(
+    frame_kind: str, wind_dtype: torch.dtype, horizontal_frame: str
+) -> None:
     """The compiled core must NOT recompile as `alpha` and the met-field VALUES change
     step to step (only shapes/grid are constant). Passing `alpha` (the RK2-midpoint
     weight, different every step) as a Python float would specialize the graph per value
@@ -2032,7 +2039,7 @@ def test_step_core_does_not_recompile_per_step(frame_kind: str, wind_dtype: torc
     torch._dynamo.config.error_on_recompile = True
     try:
         engine = _capture_engine(frame_kind, wind_dtype)
-        scheme = HannaScheme(meander_enabled=True, n_substeps=4)
+        scheme = HannaScheme(meander_enabled=True, n_substeps=4, horizontal_frame=horizontal_frame)
         n = 48
         compiled = torch.compile(scheme._step_core, fullgraph=True, backend="eager")
 

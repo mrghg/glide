@@ -455,6 +455,40 @@ uniform under constant $\rho$
 $\rho$-weighted under varying $\rho$
 (`test_v1_density_weighted_well_mixed_with_F2`).
 
+### 3.4 Which way the horizontal components point
+
+Hanna's horizontal statistics are **along** the mean wind ($\sigma_u$, $T_{Lu}$)
+and **across** it ($\sigma_v$, $T_{Lv}$). They differ in stable conditions
+($K_u/K_v \approx 3.3$) and neutral ones ($\sigma_u > \sigma_v$), and are equal in
+convective conditions and the free troposphere. `turbulence.horizontal_frame`
+(decision 0032; Hanna only) sets which way they point:
+
+- `grid` (the default): $u'$ is applied eastward and $v'$ northward, whatever
+  the wind. A stable plume is then wider east–west than north–south whichever
+  way it travels (the along-wind to cross-wind width ratio of a test plume was
+  1.75 with an easterly-bound wind and 0.57 with a northerly-bound one).
+- `wind`: inside each outer step $u'$ and $v'$ are the along-wind and cross-wind
+  components; the OU update, the $\sigma$ carry, the boundary-layer-top
+  interface and the $4\sigma$ clip act on them, and each horizontal displacement
+  rotates them to east/north by the direction of the mean wind at the particle
+  (one direction per particle per outer step). Between steps the carried $u'$,
+  $v'$ are east/north. Where the mean wind is no faster than $\sigma_u$ the
+  direction is not meaningful and the particle keeps the grid axes for that
+  step. FLEXPART rotates the same way (`windalign`), but carries the velocities
+  wind-relative between steps. That is exact when the wind turns in time, but
+  where the direction varies in space it turns a particle's velocity as the
+  particle moves, which collects tracer at calm points even in isotropic
+  turbulence; the east/north carry is exact for isotropic turbulence and after a
+  fast turn in time leaves only a covariance transient lasting about $T_L$
+  (decision 0032, measured).
+
+The proposed default is `wind` (decision 0032); the code default stays `grid`
+until that is decided. The meander process (§7 of
+[turbulence.md](turbulence.md)) is defined on the grid's u and v and is not
+rotated, as in FLEXPART. With either frame there is no horizontal well-mixed
+drift (above), which with `wind` leaves a small sink at calm points (decision
+0032).
+
 ---
 
 ## 4. Running backward in time
@@ -1249,6 +1283,9 @@ Stated plainly, because they bound what the model can be trusted for.
 | Each step's residence is counted from at most two positions: the step's end (`output_grid.deposition.position: endpoint`, the default) or half at each end (`trapezoid`; decision 0029) | The cell indicator is sampled at 60 s, so a particle crossing a cell or bin edge during a step is credited by where its sample points fall, not by when it crossed. Scored against fine-time residence on the same trajectories (§7): `endpoint` misses the first half step at the release point (−10.8% in the receptor's 0–40 m cell and −1.25% on the 0–40 m total of the smoke run) and is otherwise within ±0.2%; the removed `step_mean` undercounted the 0–40 m layer wherever a step's vertical displacement is comparable to it (−3 to −5% outside the receptor's cell on the smoke run, up to −15% in strong turbulence); `trapezoid` is within 0.5% in every region scored. Where cells are only a few steps wide, single crossings leave errors of a few per cent per cell for every rule (±2% with 1 km cells at 3 m s⁻¹), and with deterministic along-wind motion (the analytic plume) they alias. |
 | Initial $u', v', w' = 0$ rather than sampled from the local $\sigma$ | Particles equilibrate within one $T_L$ (typically ~100 s), which is shorter than the release window. |
 | Virtual temperature approximated as $T$ in the Obukhov length | Humidity correction is small; deferred. |
+| Horizontal turbulence on the grid axes (`turbulence.horizontal_frame: grid`, the code default) | Hanna's along-wind statistics are applied east–west and the cross-wind ones north–south, so stable and neutral plume spread depends on the wind direction relative to the grid (§3.4). `wind` applies them along and across the wind, as FLEXPART does; proposed as the default (decision 0032). |
+| No horizontal well-mixed drift, for either frame | Particles collect slowly where horizontal $K$ is small (the meander row below is the same effect). With `wind`, $K$'s orientation follows the wind, which adds a sink at calm points of $2\pi(K_u - K_v)$ times the concentration, a disk of tracer of about 220 m (stable) to 540 m (neutral) radius per hour (decision 0032, derived; measured in a test vortex). |
+| $u'$, $v'$ carry no correction for the vertical gradient of $\sigma_u$, $\sigma_v$ | Near a stable boundary-layer top, where $\sigma_{u,v} \to 0$ and $T_{Lu}$ reaches ~30 min, a particle's horizontal velocity relative to the local $\sigma$ grows (its mean square reached about 2 at $z > 0.75h$ in a test column within an hour); the horizontal spread there is somewhat overstated. Same in FLEXPART. Found by the decision-0032 tests; not yet quantified for footprints. A cheap exact fix, not yet made: rescale $u'$, $v'$ at every sub-step by $\sigma(z_{\rm new})/\sigma(z_{\rm old})$, as the $\sigma$ carry does for changes in time (decision 0028). |
 | Free-troposphere horizontal turbulence treated as isotropic with the vertical | The unresolved-mesoscale horizontal spread is carried separately by the meander process. |
 | Meander process has no drift correction for its spatially varying $\sigma_m$ | Particles collect slowly where $\sigma_m$ is small: after 10 days, 0.8–1.9% systematic unevenness in 0.25° cells and 0.35–0.75% in 1° cells, below particle noise at validation particle counts (task A03; [turbulence.md §7](turbulence.md#7-meander-unresolved-mesoscale-motion)). Left uncorrected in v1 (decision of 24 Nov 2026). |
 

@@ -434,6 +434,8 @@ def test_scheme_kwargs_forwards_meander_only_for_hanna() -> None:
         # (T_L floors on, legacy surface-layer override off).
         "flexpart_tl_floors": True,
         "surface_layer_override": False,
+        # Horizontal turbulence on the grid axes unless configured (decision 0032).
+        "horizontal_frame": "grid",
         # Boundary-layer depth limits default to the long-standing 50 m floor and
         # no ceiling (A03, decision 0024).
         "blh_min_m": 50.0,

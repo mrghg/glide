@@ -1353,6 +1353,7 @@ def _scheme_kwargs(cfg: RunConfig) -> dict[str, object]:
         "n_substeps": cfg.turbulence.n_substeps,
         "flexpart_tl_floors": cfg.turbulence.flexpart_tl_floors,
         "surface_layer_override": cfg.turbulence.surface_layer_override,
+        "horizontal_frame": cfg.turbulence.horizontal_frame,
         "blh_min_m": cfg.turbulence.boundary_layer_depth_min_m,
         "blh_max_m": cfg.turbulence.boundary_layer_depth_max_m,
     }

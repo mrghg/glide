@@ -208,6 +208,11 @@ $$
 Note the differing Ekman-decay exponents, $3|f|$ for $\sigma_u$ against $2|f|$ for
 the other two.
 
+In both the stable and neutral regimes $u$ is the **along-wind** component and
+$v$ the **cross-wind** one. Whether GLIDE applies them along and across the wind
+or east and north is `horizontal_frame` (§9; [physics.md](physics.md) §3.4,
+decision 0032).
+
 $f = 2\Omega\sin\phi$ is the true per-latitude Coriolis parameter (FLEXPART
 hardcodes $10^{-4}\ \mathrm{s^{-1}}$), but taken in **absolute value**, floored at
 $10^{-5}$. Without the absolute value the decay exponents change sign in the
@@ -526,6 +531,7 @@ turbulence:
   n_substeps: 16              # sub-steps per outer step, every particle (physics.md §6)
   flexpart_tl_floors: true    # §5 — leave on
   surface_layer_override: false   # §8 — leave off
+  horizontal_frame: grid      # grid | wind; wind proposed as default (decision 0032)
   boundary_layer_depth_min_m: 50    # §2; validation runs: 100
   boundary_layer_depth_max_m: null  # §2; null = no maximum; validation runs: 4500
   meander:
@@ -534,6 +540,13 @@ turbulence:
     stencil_radius: 1         # 3×3 neighbourhood
     timescale_seconds: null   # null → half the store's met interval (1800 s hourly)
 ```
+
+`horizontal_frame` sets which way Hanna's along-wind ($\sigma_u$, $T_{Lu}$) and
+cross-wind ($\sigma_v$, $T_{Lv}$) statistics point: `grid` applies them east and
+north (GLIDE's behaviour before decision 0032, and still the code default);
+`wind` applies them along and across the mean wind at each particle, as
+FLEXPART does ([physics.md](physics.md) §3.4). It matters in stable and neutral
+conditions only. `wind` is proposed as the default (decision 0032).
 
 `n_substeps` is the number of equal sub-steps every particle takes in every
 outer step, with every coefficient re-evaluated at the particle's height at the

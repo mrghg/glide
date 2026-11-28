@@ -167,6 +167,19 @@ Z_UBL_DEFAULT_M = 2.0
 # implementation (see flexpart.f90 in their turbulence routines).
 W_PRIME_SIGMA_RATIO_MAX = 4.0
 
+# Orientation of the horizontal turbulent velocities (decision 0032,
+# docs/physics.md §3.4). Hanna's σ_u, T_Lu are along the mean wind and σ_v, T_Lv
+# across it. "grid" applies u' eastward and v' northward (GLIDE before 0032);
+# "wind" runs the OU updates on along-wind and cross-wind components and rotates
+# them to east/north for the displacement, as FLEXPART's `windalign` does.
+HORIZONTAL_FRAMES = ("grid", "wind")
+HORIZONTAL_FRAME_DEFAULT = "grid"
+# Calm limit for the "wind" frame: a particle whose mean horizontal wind speed is
+# at most this multiple of its along-wind σ_u keeps the grid axes for the step.
+# Below it the turbulent fluctuations exceed the mean wind and the mean wind
+# direction does not define an along-wind axis (decision 0032, "Calm winds").
+WIND_FRAME_CALM_RATIO = 1.0
+
 # Boundary-layer top interface (decision 0028, docs/physics.md §6). A particle
 # transmitted into, or reflected back into, the free troposphere is placed at
 # least this far above h, so that rounding never leaves it at z = h, which
@@ -596,8 +609,15 @@ class HannaScheme(TurbulenceScheme):
         static_substeps: bool | None = None,
         flexpart_tl_floors: bool = True,
         surface_layer_override: bool = False,
+        horizontal_frame: str = HORIZONTAL_FRAME_DEFAULT,
     ) -> None:
         """Construct the scheme.
+
+        ``horizontal_frame`` (decision 0032): ``"grid"`` (default) applies u' to
+        east and v' to north, with σ_u, T_Lu on u' and σ_v, T_Lv on v'. ``"wind"``
+        treats u' and v' as the along-wind and cross-wind components inside each
+        outer step and rotates them to east/north by the mean wind direction at the
+        particle for every horizontal displacement; the carried state stays east/north.
 
         Meander (unresolved-mesoscale horizontal turbulence) is off by default so
         existing runs stay bit-identical; enable it via the YAML ``turbulence.meander``
@@ -664,6 +684,10 @@ class HannaScheme(TurbulenceScheme):
             raise ValueError("exceedance_c must be > 0")
         if z_ubl_m < 0:
             raise ValueError("z_ubl_m must be >= 0")
+        if horizontal_frame not in HORIZONTAL_FRAMES:
+            raise ValueError(f"horizontal_frame must be one of {HORIZONTAL_FRAMES}")
+        # A construction-time constant: the compiled step specialises on it once.
+        self.horizontal_frame = str(horizontal_frame)
         self.z_ubl_m = float(z_ubl_m)
         self.meander_enabled = bool(meander_enabled)
         self.meander_coefficient = float(meander_coefficient)
@@ -787,6 +811,19 @@ class HannaScheme(TurbulenceScheme):
     # PRIVATE, for A/B tests only (no configuration sets it): True restores the
     # ±δ stencil for every particle, i.e. the drift gradient before decision 0030.
     _fd_drift_gradient_only: bool = False
+    # PRIVATE, for A/B tests only (no configuration sets it): with the "wind" frame,
+    # True carries u', v' from step to step as along-wind and cross-wind components,
+    # unrotated when the wind turns, as FLEXPART does; False (production) carries
+    # them as east/north components. Neither is exact everywhere (decision 0032,
+    # "A turning wind"): the wind-relative carry keeps the wind-frame distribution
+    # through a turn in time, but where the direction varies in space a particle's
+    # own turbulent motion turns its velocity, which makes calm points sources of
+    # order 2π·K·c even in isotropic turbulence (measured: a convective vortex
+    # gained 7,000 particles at its centre in an hour, against 0 for the east/north
+    # carry and for "grid"); the east/north carry is exact for isotropic turbulence
+    # and leaves a covariance (σ_u² − σ_v²) sinΔ cosΔ after a turn Δ in time,
+    # relaxing over T_L.
+    _carry_wind_relative: bool = False
 
     def step(
         self,
@@ -919,6 +956,24 @@ class HannaScheme(TurbulenceScheme):
             half_dsig2_dz_backward,
             density_drift_backward,
         ) = coeffs_at(z_agl)
+        wind_axes = None
+        if self.horizontal_frame == "wind":
+            # The u, v stacks in the wind-gather dtype, as the static path holds them.
+            uv_start, uv_end = met_window.channels("u", "v")
+            wind_axes = self._wind_axes(
+                uv_start.to(device=device, dtype=engine.wind_dtype),
+                uv_end.to(device=device, dtype=engine.wind_dtype),
+                t_alpha,
+                sigma_u,
+                x=x,
+                y=y,
+                z=z_eval,
+                grid_bounds=grid_bounds,
+                engine=engine,
+            )
+        u_prime_in, v_prime_in = self._grid_to_wind(
+            u_prime_in, v_prime_in, self._state_axes(wind_axes)
+        )
         u_prime_in, v_prime_in, w_prime_in = self._carry_velocities(
             u_prime_in,
             v_prime_in,
@@ -955,6 +1010,10 @@ class HannaScheme(TurbulenceScheme):
             dt_seconds=dt_seconds,
             engine=engine,
             interface_sigmas=self._interface_sigmas(**col_kwargs),
+            wind_axes=wind_axes,
+        )
+        u_prime_active, v_prime_active = self._wind_to_grid(
+            u_prime_active, v_prime_active, self._state_axes(wind_axes)
         )
         self._accumulate_exceedance(exceed_counts, exceed_worst)
         sigma_last_active = self._sigmas_at(moved[:, 2], **col_kwargs)
@@ -1382,8 +1441,24 @@ class HannaScheme(TurbulenceScheme):
             half_dsig2_dz_backward,
             density_drift_backward,
         ) = coeffs_at(z_agl)
+        wind_axes = None
+        if self.horizontal_frame == "wind":
+            wind_axes = self._wind_axes(
+                m_start_uvw[:2],
+                m_end_uvw[:2],
+                alpha,
+                sigma_u,
+                x=x,
+                y=y,
+                z=z_eval,
+                grid_bounds=grid_bounds,
+                engine=engine,
+                level_arr=level_arr,
+                ascending=ascending,
+            )
+        u_prime_in, v_prime_in = self._grid_to_wind(u_prime, v_prime, self._state_axes(wind_axes))
         u_prime_in, v_prime_in, w_prime_in = self._carry_velocities(
-            u_prime, v_prime, w_prime, sigma_last, sigma_u, sigma_v, sigma_w
+            u_prime_in, v_prime_in, w_prime, sigma_last, sigma_u, sigma_v, sigma_w
         )
 
         (
@@ -1413,6 +1488,10 @@ class HannaScheme(TurbulenceScheme):
             engine=engine,
             active_mask=active_mask,
             interface_sigmas=self._interface_sigmas(**col_kwargs),
+            wind_axes=wind_axes,
+        )
+        u_prime_new, v_prime_new = self._wind_to_grid(
+            u_prime_new, v_prime_new, self._state_axes(wind_axes)
         )
         sigma_last_new = self._sigmas_at(moved[:, 2], **col_kwargs)
 
@@ -1574,6 +1653,7 @@ class HannaScheme(TurbulenceScheme):
         blh: torch.Tensor | None = None,
         active_mask: torch.Tensor | None = None,
         interface_sigmas: torch.Tensor | None = None,
+        wind_axes: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, ...]:
         """The sub-step loop: OU velocity update + displacement + ground reflection,
         ``self.n_substeps`` equal sub-steps of ``dt / n_substeps`` for every particle
@@ -1625,6 +1705,12 @@ class HannaScheme(TurbulenceScheme):
 
         Ground reflection (W&F §6) is applied inside the loop, so a particle that
         crosses z=0 within a substep is reflected before the next substep.
+
+        **Horizontal frame.** ``u_prime_in`` / ``v_prime_in`` and the returned
+        u', v' are in whatever frame σ_u / σ_v belong to. With ``wind_axes`` (the
+        ``[2, N]`` unit vector of the mean wind, ``_wind_axes``) they are the
+        along-wind and cross-wind components and are rotated to east/north for each
+        displacement only; without it they are east/north already (decision 0032).
         """
 
         n = self.n_substeps
@@ -1716,8 +1802,9 @@ class HannaScheme(TurbulenceScheme):
             z_from = xyz[:, 2]
             backward = not self._forward_in_time
             xyz = engine.apply_vertical_turbulence(xyz, w_new, dt_seconds=sub_dt, backward=backward)
+            u_east, v_north = self._wind_to_grid(u_new, v_new, wind_axes)
             xyz = engine.apply_horizontal_turbulence(
-                xyz, u_new, v_new, dt_seconds=sub_dt, backward=backward
+                xyz, u_east, v_north, dt_seconds=sub_dt, backward=backward
             )
             if interface_sigmas is not None and blh is not None:
                 # Boundary-layer top (decision 0028): transmit or reflect the
@@ -1941,6 +2028,87 @@ class HannaScheme(TurbulenceScheme):
 
         su, sv, sw, *_ = self._column_turbulence(z_agl.clamp(min=self.z_ubl_m), **col_kwargs)
         return torch.stack([su, sv, sw], dim=1)
+
+    def _wind_axes(
+        self,
+        uv_start: torch.Tensor,
+        uv_end: torch.Tensor,
+        alpha: torch.Tensor | float,
+        sigma_u: torch.Tensor,
+        *,
+        x: torch.Tensor,
+        y: torch.Tensor,
+        z: torch.Tensor,
+        grid_bounds: GridInterpolationBounds,
+        engine: GPUEngine,
+        level_arr: torch.Tensor | None = None,
+        ascending: bool | None = None,
+    ) -> torch.Tensor:
+        """Unit vector ``[cos φ, sin φ]`` (``[2, N]``, east and north components) of
+        the mean horizontal wind at each particle, for the ``"wind"`` frame
+        (decision 0032). ``uv_start`` / ``uv_end`` are the ``[2, Z, Y, X]`` u and v
+        stacks (m/s) at the window's ends, sampled as the advection samples the wind
+        (``grid_sample``, or ``trilinear_sample`` for a 16-bit wind-gather dtype) and
+        interpolated in time with ``alpha``; ``(x, y)`` is the position in the frame
+        of ``grid_bounds`` and ``z`` the basally clamped height the coefficients use.
+        The direction does not depend on the position frame: u and v are east and
+        north in every frame.
+
+        Where the speed is at most ``WIND_FRAME_CALM_RATIO · σ_u`` the axes are the
+        grid's (``[1, 0]``), so u' stays east and v' north for that particle and
+        step. A ``torch.where`` on the device: no host sync, the same on both step
+        paths."""
+
+        a = torch.as_tensor(alpha, device=x.device, dtype=x.dtype)
+        xyz_norm = engine.normalize_particle_coordinates(
+            torch.stack([x, y, z], dim=1), grid_bounds, level_arr=level_arr, ascending=ascending
+        )
+        if uv_start.dtype.itemsize == 2:
+            s, e = trilinear_sample((uv_start, uv_end), xyz_norm)
+        else:
+            grid = xyz_norm.view(1, 1, 1, -1, 3)
+            sample = torch.nn.functional.grid_sample
+            s = sample(uv_start.unsqueeze(0), grid, align_corners=True).view(2, -1)
+            e = sample(uv_end.unsqueeze(0), grid, align_corners=True).view(2, -1)
+        uv = s.to(x.dtype) * (1.0 - a) + e.to(x.dtype) * a
+        speed = torch.hypot(uv[0], uv[1])
+        windy = speed > WIND_FRAME_CALM_RATIO * sigma_u
+        inv = 1.0 / speed.clamp(min=SIGMA_MIN_M_S)
+        cos_phi = torch.where(windy, uv[0] * inv, torch.ones_like(speed))
+        sin_phi = torch.where(windy, uv[1] * inv, torch.zeros_like(speed))
+        return torch.stack([cos_phi, sin_phi])
+
+    def _state_axes(self, wind_axes: torch.Tensor | None) -> torch.Tensor | None:
+        """The axes that rotate the carried u', v' into and out of the wind frame at
+        the start and end of an outer step: ``wind_axes``, or None (no rotation, the
+        state stays wind-relative) under the private ``_carry_wind_relative``."""
+
+        return None if self._carry_wind_relative else wind_axes
+
+    @staticmethod
+    def _grid_to_wind(
+        u_east: torch.Tensor, v_north: torch.Tensor, wind_axes: torch.Tensor | None
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """East/north components to (along-wind, cross-wind); the identity (the same
+        tensors) when ``wind_axes`` is None. Cross-wind is 90° to the left of the
+        wind, as in FLEXPART's ``windalign``."""
+
+        if wind_axes is None:
+            return u_east, v_north
+        c, s = wind_axes[0], wind_axes[1]
+        return c * u_east + s * v_north, c * v_north - s * u_east
+
+    @staticmethod
+    def _wind_to_grid(
+        along: torch.Tensor, cross: torch.Tensor, wind_axes: torch.Tensor | None
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """(along-wind, cross-wind) to east/north; the inverse of ``_grid_to_wind``
+        and likewise the identity when ``wind_axes`` is None."""
+
+        if wind_axes is None:
+            return along, cross
+        c, s = wind_axes[0], wind_axes[1]
+        return c * along - s * cross, s * along + c * cross
 
     @staticmethod
     def _carry_velocities(
