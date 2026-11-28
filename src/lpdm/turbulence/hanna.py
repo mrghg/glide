@@ -61,6 +61,15 @@ ABOVE_BL_T_L_S = 100.0
 
 # Surface-layer fraction of BLH (FLEXPART default)
 SURFACE_LAYER_FRACTION = 0.1
+# Logged once per run, and recorded in run_metadata.json, when the opt-in
+# surface-layer override is on (decision 0028, "Other boundaries").
+SURFACE_LAYER_OVERRIDE_WARNING = (
+    "turbulence.surface_layer_override is on: this legacy Monin-Obukhov treatment below "
+    "0.1 h is kept for A/B comparisons only. sigma_w jumps at the 0.1 h seam and the "
+    "well-mixed drift's finite difference straddles it, the defect decision 0028 removed "
+    "at h, so the model is not well-mixed consistent at 0.1 h. Do not use it for "
+    "production footprints (docs/turbulence.md section 8)."
+)
 
 # Numerical floors to avoid degenerate values at z=0 / very low ustar / etc.
 SIGMA_MIN_M_S = 1e-3
@@ -681,6 +690,13 @@ class HannaScheme(TurbulenceScheme):
         # per met window (`take_substep_exceedance`). Allocated on first use.
         self._exceed_counts: torch.Tensor | None = None
         self._exceed_worst: torch.Tensor | None = None
+        # Time direction. GLIDE runs backward in time; True integrates the same
+        # equations FORWARD in time (the drift of docs/physics.md §3.3 unnegated,
+        # displacements and advection +U·dt; reflection and the boundary-layer-top
+        # interface unchanged). It exists only for the forward–backward
+        # reciprocity test (tests/test_reciprocity.py, task A6) and is deliberately
+        # not a constructor argument, so no configuration can set it.
+        self._forward_in_time = False
 
         # CUDA-graph capture (phase 4): lazily-built `torch.compile(mode="reduce-overhead")`
         # wrapper of the WHOLE per-step core (`_step_core`). Built on first use on the
@@ -943,7 +959,11 @@ class HannaScheme(TurbulenceScheme):
                 dt_seconds=dt_seconds,
             )
             moved = engine.apply_horizontal_turbulence(
-                moved, u_meander_active, v_meander_active, dt_seconds=dt_seconds, backward=True
+                moved,
+                u_meander_active,
+                v_meander_active,
+                dt_seconds=dt_seconds,
+                backward=not self._forward_in_time,
             )
 
         particles[active_mask] = moved
@@ -1036,6 +1056,10 @@ class HannaScheme(TurbulenceScheme):
         rho_at_p = density_at_p[0].clamp(min=1e-3)
         density_drift_backward = -(sigma_w_sq * density_at_p[1] / rho_at_p)
         half_dsig2_dz_backward = -0.5 * dsig2_dz
+        if self._forward_in_time:
+            # Forward time (reciprocity test only): the forward drift, unnegated.
+            density_drift_backward = -density_drift_backward
+            half_dsig2_dz_backward = -half_dsig2_dz_backward
         return (
             sigma_u,
             sigma_v,
@@ -1197,8 +1221,13 @@ class HannaScheme(TurbulenceScheme):
 
         xyz = particles[:, :3]
         v1 = wind(xyz)
-        v2 = wind(xyz - 0.5 * dt_seconds * v1)
         out = particles.clone()
+        if self._forward_in_time:
+            # Forward time (reciprocity test only).
+            v2 = wind(xyz + 0.5 * dt_seconds * v1)
+            out[:, :3] = xyz + dt_seconds * v2
+            return out
+        v2 = wind(xyz - 0.5 * dt_seconds * v1)
         out[:, :3] = xyz - dt_seconds * v2
         return out
 
@@ -1364,7 +1393,11 @@ class HannaScheme(TurbulenceScheme):
                 dt_seconds=dt_seconds,
             )
             moved = engine.apply_horizontal_turbulence(
-                moved, u_meander_new, v_meander_new, dt_seconds=dt_seconds, backward=True
+                moved,
+                u_meander_new,
+                v_meander_new,
+                dt_seconds=dt_seconds,
+                backward=not self._forward_in_time,
             )
 
         # Mask-gated write-back (authoritative gate: covers advection + substep + meander).
@@ -1633,9 +1666,10 @@ class HannaScheme(TurbulenceScheme):
             v_new = torch.clamp(v_new, min=-v_max, max=v_max)
 
             z_from = xyz[:, 2]
-            xyz = engine.apply_vertical_turbulence(xyz, w_new, dt_seconds=sub_dt, backward=True)
+            backward = not self._forward_in_time
+            xyz = engine.apply_vertical_turbulence(xyz, w_new, dt_seconds=sub_dt, backward=backward)
             xyz = engine.apply_horizontal_turbulence(
-                xyz, u_new, v_new, dt_seconds=sub_dt, backward=True
+                xyz, u_new, v_new, dt_seconds=sub_dt, backward=backward
             )
             if interface_sigmas is not None and blh is not None:
                 # Boundary-layer top (decision 0028): transmit or reflect the

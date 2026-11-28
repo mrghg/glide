@@ -383,7 +383,7 @@ stable $h$: the Hanna profile has none, and the interface (§5) passes
 $\sigma_{\min}/\sqrt{2\pi}$, 0.4 mm s⁻¹, each way. Exchange scales with
 $\sigma_{\min}$ below about 10⁻² m s⁻¹ (0.11, 1 and 6 times the 10⁻³ value at
 10⁻⁴, 10⁻³ and 10⁻²). FLEXPART floors at 10⁻⁶ and reflects
-at $h$ instead. The value of the floor is an open question (decision 0030).
+at $h$ instead. The floor is kept at 10⁻³ m/s; choosing its value from physics or data is left for after the freeze (decision 0030).
 
 **The density term** exists because the well-mixed condition is enforced in
 Cartesian $z$, but the equilibrium distribution of air is $\propto \rho(z)$. Over
@@ -458,6 +458,51 @@ particle population lofted to ~2 km and stayed there.
 
 The random forcing is symmetric, so the noise term needs no sign treatment. The
 displacement of position simply runs the other way: $z_{n+1} = z_n - w'\Delta t$.
+
+**The reciprocity test** (`tests/test_reciprocity.py`, task A6). Flesch,
+Wilson & Yee's relation
+$\rho(\mathbf{x}_r)\,P_b(\mathbf{x}_s \mid \mathbf{x}_r) = \rho(\mathbf{x}_s)\,P_f(\mathbf{x}_r \mid \mathbf{x}_s)$
+(velocities started from the Eulerian distribution at both ends) makes the
+backward footprint of a receptor cell, counted as $\Delta t/\rho$, equal the
+forward model's time-integrated concentration at that cell from a unit source
+spread over each source cell. The test runs the forward model through the
+production scheme with a private flag (`HannaScheme._forward_in_time`, which
+no configuration can set): the same code with the drift unnegated and the
+displacement $+w'\Delta t$; ground reflection, the boundary-layer-top
+interface (§5) and the velocity carry are shared unchanged.
+
+What this can and cannot show:
+
+- **It checks the sign construction above, exactly.** In a steady,
+  horizontally uniform column the backward step with noise $\eta$ is, bit for
+  bit, the forward step with $-\eta$ from the negated velocities: with
+  $w' \to -w'$ the negated drift, the reversed displacement and the symmetric
+  noise reproduce the forward path (derived; measured bit-identical over
+  120 steps, both regimes, `outputs/agents/A6/review/pathwise.log`, and
+  asserted in the default suite by
+  `test_backward_step_is_the_forward_step_with_the_velocity_negated`). The
+  companion that removes the sign flip breaks this identity.
+- **Beyond the signs it tests the shared scheme, not "backward against
+  forward".** Because the start distribution is symmetric in $w'$, the
+  backward run is the forward process in law, so the comparison reduces to
+  the transfer symmetry of the one discrete scheme both directions use:
+  $\rho_s K(s \to r) = \rho_r K(r \to s)$ between cells (derived). A failure
+  cannot be assigned to the forward or the backward side.
+- **It does not test the backward formulation where time matters.** The
+  column is steady with a fixed $h$. A moving-$h$, time-varying case is the
+  outstanding test of the backward construction itself.
+- **Its start is not production's.** The harness starts both directions
+  from the equilibrium (Eulerian) turbulent velocities, as the theorem
+  assumes; production releases start at $w' = 0$.
+
+At the shipped 60 s step and 16 sub-steps the test does not pass the
+validation plan's criteria in every case: near the ground by the scheme's
+near-surface well-mixed error, and for receptors near a stable
+boundary-layer top by the drift defect where $\sigma_w$ reaches its floor
+(decision 0030, proposed in PR #75, not yet merged; with it merged in, the
+stable-top cells move most of the way to agreement and one stable case still
+fails narrowly, away from $h$). Results and the open acceptance are in
+[VALIDATION.md §3](VALIDATION.md#3-the-analytic-verification-tests).
 
 **Mass bookkeeping.** Each particle carries a weight $m_p = 1/N$, where $N$ is
 the number of particles in that release — so one particle represents $1/N$ of the

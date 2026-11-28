@@ -289,8 +289,11 @@ GLIDE's interface (decision 0028) makes the floor matter.
    reflection for well-mixed consistency; restricting it to stable columns
    would need a new decision.
 
-**The floor stays at 10⁻³ in this decision.** Its value is Matt's decision,
-recorded here as an open question.
+**The floor stays at 10⁻³** (Matt's decision, 28 Nov 2026). The value is kept
+as it was, now understood and documented as an exchange parameter: about
+0.4 mm/s across a stable top. Choosing it from physics or data (for example a
+nocturnal low-inlet comparison, or a floor scaled with u\*) is left for after
+the physics freeze.
 
 **Rationale.** The analytic gradient is exact where the stencil is wrong and
 is not used anywhere else, so it removes both defects at every floor tested
@@ -318,12 +321,12 @@ unless marked).
 - *A smooth floor*, $\sqrt{\sigma_H^2 + \sigma_{\min}^2}$ or
   $\sigma_H + \sigma_{\min}$ (FLEXPART `hanna`). Removes the kink but changes
   σ_w everywhere and, with it, the exchange (−6% for the additive form): a
-  floor-form choice, not a fix, so it goes with the open question above.
+  floor-form choice, not a fix, so it goes with that later choice.
 - *A smaller stencil* (δ = 0.01 m). Changes every gradient in the boundary
   layer; 1.04 at 10⁻³.
 - *Leaving the cut stencil at $h$ and fixing only the kink.* That is `kink`.
 
-**Status.** Proposed, 26 Nov 2026 (task SF, draft PR). Amends decision 0028
-item 1. The floor value is open (Matt). Docs:
+**Status.** Adopted, 28 Nov 2026 (task SF, PR #75), with the floor kept at
+10⁻³. Amends decision 0028 item 1. Docs:
 [physics.md §3.3, §6](../../docs/physics.md),
 [turbulence.md §2, §6](../../docs/turbulence.md).
