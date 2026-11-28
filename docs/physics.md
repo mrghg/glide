@@ -1076,7 +1076,10 @@ are half-open, as above, so a release at 0 m is counted in the first layer.
 
 For `trapezoid` the runtime copies the start positions before the step, outside
 the captured graph, so the static (CUDA) step's graph, shapes and outputs are the
-same as for `endpoint` (decision 0004). Each half is one scatter per age-bin
+same as for `endpoint` (decision 0004). The copied start positions are in the
+run's horizontal frame (§2), like the end positions: both halves convert to
+degrees at the gridder and look up $\rho_d$ with grid bounds in that frame, and
+the runtime refuses a gridder built in another frame than the engine's. Each half is one scatter per age-bin
 piece ($\lceil(\Delta t/2)/w\rceil + 1$ pieces per half with several bins of width $w$, so two when $w \ge \Delta t/2$ and more for narrower bins; one with a single bin). Kernel
 deposition (decision 0012) is deferred to after v1; deposition is a delta at the
 chosen position(s).
@@ -1094,7 +1097,10 @@ trajectories. The reference is converged: 1, 2 and 4 samples per sub-step differ
 from 8 by ≤ 0.025% in every region of the smoke run and the synthetic columns, and the composite trapezoid on the sub-step positions by ≤ 0.1%.
 The offline tallies of each rule match production runs of that rule, same seed,
 to the float32 accumulation of the production grid (exactly, with a float64
-grid), and the hooked run is bit-identical to an unhooked one.
+grid), and the hooked run is bit-identical to an unhooked one. The scorer's
+tallies are in degrees, so it runs GLIDE in the degrees frame
+(`GLIDE_POSITION_FRAME=degrees`, §2) and exits if given another; the scores above
+predate the metric frame, which differs from degrees by float32 rounding.
 
 Error against the reference on the smoke run (Mace Head, 10 m inlet, 1 day, CPU,
 three seeds, 0–40 m unless stated, mean over seeds; the s.d. over seeds is
