@@ -352,6 +352,7 @@ def analytic_plume(out_dir: Path) -> Path:
 
     from lpdm.comparison import to_stilt_surface_footprint
     from lpdm.footprint_gridder import FootprintGridder
+    from lpdm.local_frame import DEGREES
 
     K = core.N_SUBSETS
     cfg = dict(
@@ -366,6 +367,7 @@ def analytic_plume(out_dir: Path) -> Path:
         lat_bounds=(tp.Y0_M / tp.M_PER_DEG_LAT, (tp.Y0_M + tp.NY * tp.DY_M) / tp.M_PER_DEG_LAT),
         z_edges_m=(0.0, tp.H_SURF, 10000.0),
         n_time_bins=1, n_y=tp.NY, n_x=tp.NX, n_releases=K, device="cpu", dtype=torch.float64,
+        frame=DEGREES,
     )  # fmt: skip
     n = tp.N_PART
     p = torch.zeros((n, 4), dtype=torch.float64)

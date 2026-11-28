@@ -805,7 +805,7 @@ def _met_domain_bounds(cfg: RunConfig) -> SpatialBounds:
 
 
 def _within_met_domain(
-    particles: torch.Tensor, cfg: RunConfig, frame: HorizontalFrame = DEGREES
+    particles: torch.Tensor, cfg: RunConfig, frame: HorizontalFrame
 ) -> torch.Tensor:
     """Boolean [N] mask: True where a particle is inside ``met_domain``.
 
@@ -1214,8 +1214,14 @@ def _deposit_step(
       particle's first step is counted half at its release position; a particle
       that leaves the met domain in a step keeps the start half (the end half is
       dropped by the gridder if outside the output grid, as endpoint's is).
+
+    Positions (both halves) are in ``engine.frame``: the gridder converts them to
+    degrees at entry and the density is sampled with grid bounds in the same frame,
+    so the gridder must have been built with the engine's frame.
     """
 
+    if gridder.frame != engine.frame:
+        raise ValueError(f"gridder frame {gridder.frame} differs from the engine's {engine.frame}")
     if position == "trapezoid":
         half_s = 0.5 * delta_s
         t_start_s = t_cursor.timestamp()

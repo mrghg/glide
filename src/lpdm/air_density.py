@@ -40,7 +40,7 @@ import numpy as np
 import torch
 
 from lpdm.gpu_engine import GPUEngine, GridInterpolationBounds, frame_grid_bounds
-from lpdm.local_frame import DEGREES, HorizontalFrame
+from lpdm.local_frame import HorizontalFrame
 from lpdm.met_reader import HourlyMetTensors
 
 GRAVITY_M_S2 = 9.80665
@@ -129,7 +129,7 @@ class ParticleDryAirDensity:
         # Time weight of the window end, refilled each step (0-d, device).
         self._alpha = torch.zeros((), device=self.device, dtype=self.dtype)
 
-    def _refresh(self, met_window: HourlyMetTensors, frame: HorizontalFrame = DEGREES) -> None:
+    def _refresh(self, met_window: HourlyMetTensors, frame: HorizontalFrame) -> None:
         # The grid bounds are in the particles' horizontal frame (task A4), a
         # constant of the run, so the window alone keys the cache.
         key = (met_window.metadata.time_start, frame)

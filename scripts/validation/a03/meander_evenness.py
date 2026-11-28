@@ -49,6 +49,7 @@ import torch
 
 from lpdm.config import MetDomainConfig
 from lpdm.gpu_engine import GPUEngine
+from lpdm.local_frame import DEGREES
 from lpdm.met_reader import ArcoEra5ZarrReader, BoundingBoxRequest, SpatialBounds, TimeBounds
 from lpdm.turbulence import HannaScheme
 
@@ -197,7 +198,7 @@ def main() -> None:
         met = reader.fetch_hourly_window(
             BoundingBoxRequest(spatial=spatial, time=TimeBounds(start=w_end - interval, end=w_end))
         )
-        fields, bounds = scheme._meander_sigma_fields(met, device, dtype)
+        fields, bounds = scheme._meander_sigma_fields(met, device, dtype, frame=DEGREES)
         levels = torch.as_tensor(np.asarray(met.metadata.level), device=device, dtype=dtype)
         per_h = torch.stack([_height_slice(fields, levels, h) for h in heights])  # [G, 2, Y, X]
         kk = 0.5 * per_h.pow(2).sum(1) * tau

@@ -24,7 +24,7 @@ from collections.abc import Sequence
 import numpy as np
 import torch
 
-from lpdm.local_frame import DEGREES, HorizontalFrame
+from lpdm.local_frame import HorizontalFrame
 from lpdm.runtime import DEVICE
 
 
@@ -65,7 +65,7 @@ class FootprintGridder:
         n_releases: int = 1,
         device: torch.device | str = DEVICE,
         dtype: torch.dtype = torch.float32,
-        frame: HorizontalFrame = DEGREES,
+        frame: HorizontalFrame,
     ) -> None:
         z_edges_arr = np.asarray(list(z_edges_m), dtype=float)
         if z_edges_arr.ndim != 1 or z_edges_arr.size < 2:

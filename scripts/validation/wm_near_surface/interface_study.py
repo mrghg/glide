@@ -60,6 +60,7 @@ import torch
 from fixcount_study import GRAVITY, REGIMES, LidEngine
 
 from lpdm.gpu_engine import GPUEngine
+from lpdm.local_frame import DEGREES
 from lpdm.met_reader import HourlyMetTensors, MetFieldMetadata
 from lpdm.turbulence import HannaScheme
 from lpdm.turbulence import hanna as hanna_mod
@@ -146,7 +147,7 @@ def column_kwargs(scheme, met, h, ustar, shf, n):
     us = full(ustar)
     L = hanna_mod.obukhov_length(us, full(shf), tk, sp)
     w_star = hanna_mod.convective_velocity(blh, full(shf), tk, sp, blh_min_m=scheme.blh_min_m)
-    ft_fields, gb = scheme._free_trop_fields(met, dev, dt_)
+    ft_fields, gb = scheme._free_trop_fields(met, dev, dt_, frame=DEGREES)
     return dict(
         blh=blh, ustar=us, w_star=w_star, h_over_L=blh / L, L=L, lat=full(45.0),
         x=full(0.0), y=full(45.0), ft_fields=ft_fields, grid_bounds=gb, engine=GPUEngine(device="cpu"),

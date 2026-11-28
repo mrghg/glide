@@ -11,6 +11,7 @@ import pytest
 import torch
 
 from lpdm.footprint_gridder import FootprintGridder
+from lpdm.local_frame import DEGREES
 
 
 def _make_gridder(n_releases: int = 1) -> FootprintGridder:
@@ -31,6 +32,7 @@ def _make_gridder(n_releases: int = 1) -> FootprintGridder:
         n_releases=n_releases,
         device="cpu",
         dtype=torch.float64,
+        frame=DEGREES,
     )
 
 
@@ -263,6 +265,7 @@ def test_non_uniform_z_edges_assign_correct_bins() -> None:
         n_x=2,
         device="cpu",
         dtype=torch.float64,
+        frame=DEGREES,
     )
 
     # One particle in each of the three asymmetric vertical bins.
@@ -309,6 +312,7 @@ def test_vertical_layers_are_half_open_with_the_ground_in_the_first(dtype) -> No
         n_x=1,
         device="cpu",
         dtype=dtype,
+        frame=DEGREES,
     )
     heights = [0.0, 39.5, 40.0, 999.5, 1000.0, 4999.5, 5000.0, -0.5, 1.0]
     expected_layer = [0, 0, 1, 1, 2, 2, None, None, 0]
@@ -339,6 +343,7 @@ def test_z_edges_validation_rejects_non_ascending() -> None:
             n_time_bins=1,
             n_y=2,
             n_x=2,
+            frame=DEGREES,
         )
 
 
@@ -351,6 +356,7 @@ def test_z_edges_validation_rejects_too_few_values() -> None:
             n_time_bins=1,
             n_y=2,
             n_x=2,
+            frame=DEGREES,
         )
 
 
@@ -508,6 +514,7 @@ def test_n_releases_zero_rejected_at_construction() -> None:
             n_y=2,
             n_x=2,
             n_releases=0,
+            frame=DEGREES,
         )
 
 
@@ -526,6 +533,7 @@ def test_oversized_tensor_rejected_with_clear_error() -> None:
             n_x=391,
             n_releases=720,
             device="cpu",
+            frame=DEGREES,
         )
 
 
@@ -546,6 +554,7 @@ def test_env_var_lifts_footprint_cap(monkeypatch) -> None:
             n_x=391,
             n_releases=720,
             device="cpu",
+            frame=DEGREES,
         )
 
     # A tensor that would fail with default 32 GiB but FITS under 200 GiB:
@@ -560,5 +569,6 @@ def test_env_var_lifts_footprint_cap(monkeypatch) -> None:
         n_x=391,
         n_releases=240,
         device="cpu",
+        frame=DEGREES,
     )
     assert g.tensor.shape == (240, 24, 3, 293, 391)

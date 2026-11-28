@@ -127,7 +127,7 @@ class GridInterpolationBounds:
     level_agl_m: tuple[float, ...] | None = None
 
 
-def frame_grid_bounds(metadata, frame: HorizontalFrame = DEGREES) -> GridInterpolationBounds:
+def frame_grid_bounds(metadata, frame: HorizontalFrame) -> GridInterpolationBounds:
     """Interpolation bounds of a met window's grid, horizontally in ``frame``.
 
     ``metadata`` is a met window's metadata (``lon``, ``lat``, ``level`` arrays).

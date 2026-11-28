@@ -37,7 +37,7 @@ from lpdm.gpu_engine import (
     trilinear_sample,
     use_static_step_path,
 )
-from lpdm.local_frame import DEGREES, HorizontalFrame
+from lpdm.local_frame import HorizontalFrame
 from lpdm.met_reader import HourlyMetTensors
 from lpdm.turbulence.base import TurbulenceScheme, TurbulenceState, register_scheme
 
@@ -1156,7 +1156,7 @@ class HannaScheme(TurbulenceScheme):
         device,
         dtype,
         *,
-        frame: HorizontalFrame = DEGREES,
+        frame: HorizontalFrame,
         wind_dtype: torch.dtype | None = None,
     ):
         """Assemble the per-step pure-tensor inputs for `_step_core` (the torch.compile
@@ -2188,7 +2188,7 @@ class HannaScheme(TurbulenceScheme):
         met_window: HourlyMetTensors,
         device: torch.device,
         dtype: torch.dtype,
-        frame: HorizontalFrame = DEGREES,
+        frame: HorizontalFrame,
     ) -> tuple[torch.Tensor, GridInterpolationBounds]:
         """Build free-troposphere (σ_w, σ_uv, T_Lw, T_Luv) on the met grid [4, Z, Y, X].
 
@@ -2272,7 +2272,7 @@ class HannaScheme(TurbulenceScheme):
         met_window: HourlyMetTensors,
         device: torch.device,
         dtype: torch.dtype,
-        frame: HorizontalFrame = DEGREES,
+        frame: HorizontalFrame,
     ) -> tuple[torch.Tensor, GridInterpolationBounds]:
         """Meander (σ_u, σ_v) on the met grid [2, Z, Y, X] from local wind variability.
 
@@ -2316,7 +2316,7 @@ class HannaScheme(TurbulenceScheme):
 
     @staticmethod
     def _grid_bounds(
-        met_window: HourlyMetTensors, frame: HorizontalFrame = DEGREES
+        met_window: HourlyMetTensors, frame: HorizontalFrame
     ) -> GridInterpolationBounds:
         """Interpolation bounds for sampling met-grid fields per-particle, with the
         horizontal end points in ``frame`` (``gpu_engine.frame_grid_bounds``).
@@ -2415,7 +2415,7 @@ class HannaScheme(TurbulenceScheme):
         device: torch.device,
         dtype: torch.dtype,
         *,
-        frame: HorizontalFrame = DEGREES,
+        frame: HorizontalFrame,
     ) -> torch.Tensor:
         """Interpolate a surface (z-broadcast) channel at particle (x, y) in ``frame``.
 
@@ -2448,7 +2448,7 @@ class HannaScheme(TurbulenceScheme):
         device: torch.device,
         dtype: torch.dtype,
         *,
-        frame: HorizontalFrame = DEGREES,
+        frame: HorizontalFrame,
     ) -> torch.Tensor:
         """Interpolate temperature at the lowest model level (surface proxy)."""
 

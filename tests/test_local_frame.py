@@ -101,7 +101,7 @@ def test_met_domain_check_is_the_same_box_in_either_frame() -> None:
     lat = torch.tensor([0.0, 0.0, 0.0, 0.0, 2.9, -3.1, 0.0])
     alt = torch.tensor([100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 1e9])
     p = torch.stack([lon, lat, alt, torch.ones(7)], 1)
-    inside_deg = _within_met_domain(p, cfg)
+    inside_deg = _within_met_domain(p, cfg, frame=DEGREES)
     inside_m = _within_met_domain(frame.to_frame(p), cfg, frame)
     assert torch.equal(inside_deg, inside_m)
 
@@ -309,7 +309,9 @@ def test_gather_dtype_must_be_supported() -> None:
 # --------------------------------------------------------------------------- runtime
 
 
-def _hanna_run(tmp_path: Path, name: str, monkeypatch, frame: str, **over) -> Path:
+def _hanna_run(
+    tmp_path: Path, name: str, monkeypatch, frame: str, position: str = "endpoint", **over
+) -> Path:
     out = tmp_path / name
     cfg = _make_run_config(
         output_uri=str(out),
@@ -321,6 +323,9 @@ def _hanna_run(tmp_path: Path, name: str, monkeypatch, frame: str, **over) -> Pa
         dt_seconds=120,
         **over,
     )
+    og = cfg.output_grid
+    dep = og.deposition.model_copy(update={"position": position})
+    cfg = cfg.model_copy(update={"output_grid": og.model_copy(update={"deposition": dep})})
     reader = _make_hanna_reader(cfg, wind_fn=lambda _: (6.0, -2.0, 0.0), shf_w_m2=50.0)
     monkeypatch.setenv("GLIDE_POSITION_FRAME", frame)
     meta = _run(cfg, reader=reader)
@@ -328,16 +333,21 @@ def _hanna_run(tmp_path: Path, name: str, monkeypatch, frame: str, **over) -> Pa
     return out
 
 
+@pytest.mark.parametrize("position", ["endpoint", "trapezoid"])
 @pytest.mark.parametrize("static", ["0", "1"])
-def test_runtime_metric_frame_matches_degrees(tmp_path: Path, monkeypatch, static: str) -> None:
+def test_runtime_metric_frame_matches_degrees(
+    tmp_path: Path, monkeypatch, static: str, position: str
+) -> None:
     """The whole runtime (release, step, escape check, gridder, endpoint and
     diagnostic outputs, which convert back to degrees) in the two frames:
     endpoints within float32 rounding of positions, footprints the same up to
-    the particles that rounding moves across a cell edge."""
+    the particles that rounding moves across a cell edge. The trapezoid case
+    (three 1 h time-ago bins, so half steps are split by age) also deposits at
+    each step's start positions, which pass through the same conversion."""
 
     monkeypatch.setenv("GLIDE_STATIC_SUBSTEPS", static)
-    a = _hanna_run(tmp_path, "deg", monkeypatch, "degrees")
-    b = _hanna_run(tmp_path, "met", monkeypatch, "local_metric")
+    a = _hanna_run(tmp_path, "deg", monkeypatch, "degrees", position)
+    b = _hanna_run(tmp_path, "met", monkeypatch, "local_metric", position)
     ea = pd.read_parquet(a / "endpoint_particles.parquet")
     eb = pd.read_parquet(b / "endpoint_particles.parquet")
     pa = torch.tensor(ea[["lon", "lat", "alt"]].to_numpy())
@@ -352,3 +362,126 @@ def test_runtime_metric_frame_matches_degrees(tmp_path: Path, monkeypatch, stati
     tb = pd.read_parquet(b / "trajectory_diagnostics.parquet")
     np.testing.assert_allclose(tb["mean_lon"], ta["mean_lon"], atol=1e-5)
     np.testing.assert_allclose(tb["mean_lat"], ta["mean_lat"], atol=1e-5)
+
+
+# --------------------------------------------------------------------------- deposition
+
+
+def _density_met() -> HourlyMetTensors:
+    """``_met``'s grid with the dry-air density channels (t, q, sp) varying in x, y
+    and z, so a density looked up at the wrong horizontal position is wrong."""
+
+    met = _met()
+    shape = tuple(met.hour_start.shape[1:])
+    n_lev, n_lat, n_lon = shape
+    lev = torch.linspace(0.0, 1.0, n_lev).view(-1, 1, 1)
+    la = torch.linspace(0.0, 1.0, n_lat).view(1, -1, 1)
+    lo = torch.linspace(0.0, 1.0, n_lon).view(1, 1, -1)
+
+    def fields(phase: float) -> torch.Tensor:
+        t = 285.0 - 8.0 * lev + 6.0 * la - 4.0 * lo + phase
+        q = 0.008 * (1.0 - 0.5 * lev) + 0.002 * lo * la
+        sp = 101325.0 - 3000.0 * la + 1500.0 * lo + 0.0 * lev - 50.0 * phase
+        uvw = [met.channel(c)[0 if phase == 0.0 else 1] for c in ("u", "v", "w")]
+        chans = [*uvw, t.expand(shape), q.expand(shape), sp.expand(shape)]
+        return torch.stack([c.contiguous() for c in chans]).to(torch.float32)
+
+    return HourlyMetTensors(
+        hour_start=fields(0.0),
+        hour_end=fields(1.0),
+        metadata=met.metadata,
+        channel_names=("u", "v", "w", "t", "q", "sp"),
+        height_agl_m=met.height_agl_m,
+    )
+
+
+@pytest.mark.parametrize("position", ["endpoint", "trapezoid"])
+def test_deposit_step_metric_frame_matches_degrees(position: str) -> None:
+    """One step's deposit (`main._deposit_step`), dry-air weighted, three time-ago
+    bins: in the metric frame (positions in metres, gridder and density in that
+    frame) it equals the degrees frame's to float32 rounding. For the trapezoid
+    this covers both halves: the start positions and the end positions each
+    convert to degrees at the gridder and look up the density in the frame. A
+    gridder built in another frame than the engine's is refused."""
+
+    from lpdm.air_density import ParticleDryAirDensity
+    from lpdm.footprint_gridder import FootprintGridder
+    from lpdm.main import _deposit_step, _time_ago_index, _time_weight
+
+    met = _density_met()
+    md = met.metadata
+    metric = HorizontalFrame.local_metric((md.lon[0], md.lon[-1]), (md.lat[0], md.lat[-1]))
+    n, delta_s, bin_s = 4000, 600.0, 3600.0
+    g = torch.Generator().manual_seed(17)
+    start = _particles(n, seed=5)
+    end = start.clone()
+    end[:, 0] += torch.empty(n).uniform_(-0.3, 0.3, generator=g)
+    end[:, 1] += torch.empty(n).uniform_(-0.2, 0.2, generator=g)
+    end[:, 2] = torch.empty(n).uniform_(5.0, 1500.0, generator=g)
+    # Ages on and off the bin edges, so some half steps straddle one.
+    elapsed = torch.empty(n).uniform_(0.0, 3.0 * bin_s - delta_s, generator=g)
+    t_cursor = md.time_end - timedelta(seconds=600)
+    active = torch.ones(n, dtype=torch.bool)
+    active[::7] = False
+
+    def gridder(frame: HorizontalFrame) -> FootprintGridder:
+        return FootprintGridder(
+            (-3.0, 3.0),
+            (47.5, 52.5),
+            (0.0, 100.0, 500.0, 1000.0, 2000.0),
+            3,
+            25,
+            30,
+            device="cpu",
+            frame=frame,
+        )
+
+    out = {}
+    for frame in (DEGREES, metric):
+        engine = GPUEngine(device="cpu", frame=frame)
+        grid = gridder(frame)
+        _deposit_step(
+            grid,
+            position=position,
+            start_xyz=frame.to_frame(start)[:, :3].clone(),
+            end_xyz=frame.to_frame(end)[:, :3].clone(),
+            active_mask=active,
+            weights=start[:, 3],
+            elapsed_s=elapsed,
+            t_idx=_time_ago_index(elapsed, bin_s, 3),
+            time_bin_s=bin_s,
+            release_idx=torch.zeros(n, dtype=torch.int64),
+            delta_s=delta_s,
+            t_cursor=t_cursor,
+            particle_density=ParticleDryAirDensity("cpu"),
+            met_window=met,
+            t_alpha=_time_weight(met, t_cursor.timestamp() - delta_s),
+            engine=engine,
+        )
+        out[frame.kind] = grid.tensor.clone()
+
+    deg, met_fp = out["degrees"], out["local_metric"]
+    assert float(deg.sum()) > 0.0
+    assert (deg > 0).sum() > 100
+    assert float(met_fp.sum()) == pytest.approx(float(deg.sum()), rel=1e-5)
+    np.testing.assert_allclose(met_fp, deg, rtol=1e-5, atol=1e-6 * float(deg.max()))
+
+    with pytest.raises(ValueError, match="gridder frame"):
+        _deposit_step(
+            gridder(DEGREES),
+            position=position,
+            start_xyz=metric.to_frame(start)[:, :3],
+            end_xyz=metric.to_frame(end)[:, :3],
+            active_mask=active,
+            weights=start[:, 3],
+            elapsed_s=elapsed,
+            t_idx=_time_ago_index(elapsed, bin_s, 3),
+            time_bin_s=bin_s,
+            release_idx=torch.zeros(n, dtype=torch.int64),
+            delta_s=delta_s,
+            t_cursor=t_cursor,
+            particle_density=None,
+            met_window=met,
+            t_alpha=0.5,
+            engine=GPUEngine(device="cpu", frame=metric),
+        )

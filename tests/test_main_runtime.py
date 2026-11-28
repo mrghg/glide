@@ -21,6 +21,7 @@ import torch
 import xarray as xr
 
 from lpdm.config import RunConfig
+from lpdm.local_frame import DEGREES
 from lpdm.main import PreflightValidationError, _run, _within_met_domain
 from lpdm.met_reader import (
     BoundingBoxRequest,
@@ -1704,7 +1705,7 @@ def test_within_met_domain_flags_out_of_bounds_particles() -> None:
         ],
         dtype=torch.float64,
     )
-    within = _within_met_domain(particles, cfg)
+    within = _within_met_domain(particles, cfg, frame=DEGREES)
     assert within.tolist() == [True, True, False, False, False, False, True]
 
 
