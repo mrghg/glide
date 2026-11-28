@@ -66,7 +66,10 @@ turbulence, which affects the Tier 1 FLEXPART comparisons.
   independent of the position frame (and of PR #74's metric frame).
 - **Axes.** The unit vector of the mean horizontal wind at the particle:
   interpolated in space at the post-advection position (basal-clamped height, as
-  the coefficients are), and in time with the advection's weight. One direction
+  the coefficients are) with the same sampler as the advection (`grid_sample`,
+  or `trilinear_sample` for a 16-bit `wind_gather_dtype`, task A4), and in time
+  with the advection's weight. u and v are east and north in either position
+  frame, so the direction does not depend on the frame. One direction
   per particle per outer step; the sub-steps' turbulent displacements (tens of
   metres) do not change it materially.
 - **Carried state.** $u'$, $v'$ are rotated into the wind frame at the start of
@@ -112,10 +115,11 @@ exactly but turns an isotropic velocity with the wind. In the diffusion limit
 ($T_L \to 0$) the two are the same. Measured
 (`test_wind_turning_through_calm_keeps_velocity_statistics_and_adds_no_drift`, a
 wind turning through 180° via calm, half of it in ~3 min): the wind-relative
-carry kept both normalised variances within 0.05 of 1; the east/north carry
-departed by up to ~0.6 (cross-wind) for a few minutes at the turn, within the
-derived range $[1, \tfrac12(k + 1/k)]$ for the mean of the two, and was back
-within 0.05 once the turn ended. The exact form needs the previous direction per
+carry kept both normalised variances within 0.02 of 1 below $0.75h$; the
+east/north carry went to 0.89 (along-wind) and 1.17 (cross-wind) for about five
+minutes at the turn, with the mean of the two within the derived range
+$[1, \tfrac12(k + 1/k)]$, and was back within 0.02 a minute after the turn
+(`outputs/agents/ROT/logs/turning_series.log`). The exact form needs the previous direction per
 particle as a new state tensor. It is not implemented: wind directions change by
 a degree or less in a boundary-layer $T_L$ except at calm points. The east/north
 carry is chosen for the exact isotropic limit (the review expects "no change in
@@ -150,9 +154,15 @@ calm centre, where it integrates to $-2\pi$, whatever the calm treatment
 $2\pi(K_u - K_v)c$, and nothing else changes. The test
 (`test_vortex_with_a_calm_centre_loses_only_the_derived_neglected_drift_term`:
 a neutral column, $h$ = 300 m, $u_*$ = 0.4 m s⁻¹, a vortex with a 0.9 km calm
-region, 100,000 particles over ±4 km, 1 h, the expectation from the along-wind
+region, 156,250 particles over ±5 km, 1 h, the expectation from the along-wind
 and cross-wind displacement variances of a companion run in a uniform wind)
-measured VORTEX_RESULT. In a stable column ($T_{Lu}$ up to ~30 min near $h$, not
+measured, over 10 seeds, a loss of 1,391 ± 100 particles (mean ± sd) from the
+2.4 km disk round the centre against 1,436 expected (ratio 0.97; each seed
+within 1.9 of its standard deviation), and no significant change in a ring
+outside the calm region (within 2.3 standard deviations); with `grid` both
+were zero within 2.0 standard deviations (3 seeds;
+`outputs/agents/ROT/logs/vortex_calib_*_final.log`). The test asserts 4
+standard deviations. In a stable column ($T_{Lu}$ up to ~30 min near $h$, not
 short against the hour) the measured deficit was about 0.75 of the expectation
 (−509 against −693 particles, one seed;
 `outputs/agents/ROT/logs/vortex_calib_wind.log`, an earlier test design): the
@@ -167,7 +177,38 @@ for the neutral one (41 m² s⁻¹, from the test's companion run), against $\si
 (derived). This is the same class of error as the one `grid` already makes where
 $u_*$ or $h$ vary horizontally.
 
-**Effect.** EFFECT_PARAGRAPH
+**Effect.** Measured on CPU, 20,000 particles, 24 h backward, after merging
+PR #74 (`outputs/agents/ROT/logs/compare_smoke.log`):
+
+- `grid` is bit-identical to PR #74's head ea8bb16 (footprint, endpoint
+  particles, trajectory diagnostics; Mace Head smoke, seed 42), and before the
+  merge to main 7b6c5eb.
+- Mace Head smoke (`configs/smoke_mhd_single_release.yaml`, 10 m, 1 Jan 2024),
+  `wind` against `grid`, same seed: 0–40 m +0.36% (seed 42) and −0.11% (seed
+  43); total −0.055% and +0.013%. Seed to seed with `grid`: 0–40 m +0.42%, total
+  −0.02%. So no change beyond particle noise. Plume widths (footprint-weighted
+  principal-axis standard deviations) changed by ≤ 1%: 0–40 m cross-plume
+  38.5 → 38.2 km, along-plume 371.4 → 371.7 km. The flow was near-westerly, so
+  along-wind was close to east and the two frames nearly coincide here; this
+  case cannot show the effect's size in a cross-grid wind.
+- Tacolneston 185 m, stable night (31 Jan 2024 03 UTC, seed 42): 0–40 m −0.52%,
+  total +0.02% (seed spread of 0–40 m for this case ~0.7%, PR #75); widths
+  within 1%.
+- Calm fallback: no particle-step in either run had $|U| \le \sigma_u$, nor
+  $|U| \le 1$ m s⁻¹ (28.8 million each; read-only counter
+  `outputs/agents/ROT/scripts/calmcount.py`).
+- Carried state wind-relative (FLEXPART) against east/north, Mace Head seed 42:
+  0–40 m −0.15%, total +0.02%, within noise.
+- Cost: one extra wind sample and two rotations per particle per outer step, and one
+  rotation per sub-step; smoke wall time 6:21 (`wind`, seed 43) against 6:00 (`grid`) on a
+  shared, heavily loaded CPU node, not a benchmark; no GPU measurement.
+
+The idealised test (stable, 10 min, 90° rotation) shows what the switch is for:
+a plume's along-wind and cross-wind widths differ by 1.75:1 and with `grid` that
+ratio follows the grid, not the wind. Effects on footprints are largest for
+receptors in stable or neutral air with winds across the grid axes, and in
+the Tier 1 comparisons with FLEXPART, which rotates. Not run: a calm-prone
+case, a GPU run.
 
 **Rejected alternatives.**
 - *Rotate the displacement functions* (`apply_horizontal_turbulence` taking a
