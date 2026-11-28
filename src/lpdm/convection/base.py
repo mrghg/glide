@@ -55,6 +55,12 @@ class ConvectionScheme(ABC):
         del n_particles, device, dtype  # unused for stateless schemes
         return {}
 
+    def run_diagnostics(self) -> dict[str, object] | None:
+        """Run totals for ``runtime.convection`` in run_metadata.json, read once at
+        the end of a run. Default: none."""
+
+        return None
+
     @abstractmethod
     def maybe_convect(
         self,
