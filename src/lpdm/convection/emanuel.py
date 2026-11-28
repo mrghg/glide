@@ -112,8 +112,11 @@ Q_MIN_KG_KG = 0.0
 # this fraction of its air mass in a single convection event. Keeps the
 # diagonal (stay) probability of the redistribution non-negative. Because the
 # whole flux matrix is scaled by a single factor, non-divergence (hence the
-# well-mixed property) is preserved. FLEXPART enforces the equivalent limit on
-# the cloud-base mass flux inside convect43c.f.
+# well-mixed property) is preserved. FLEXPART has no counterpart: convect sets
+# IFLAG = 4 when its own CFL test fails, but calcmatrix accepts IFLAG = 4 and
+# updates fmassfrac anyway, and it is called every lsynctime (900 s by default)
+# rather than once per met window. With the default closure this scale binds in
+# almost every firing column, at the layer just below the LCL (decision 0031).
 CFL_MAX_OUTFLUX_FRAC = 0.9
 
 
@@ -370,8 +373,10 @@ def compute_lcl_lnb_cape(
         cape = torch.tensor(0.0, device=device, dtype=dtype)
     else:
         i_lcl_int = int(i_lcl)
-        # CAPE integration: ∫_LFC^LNB g · buoyancy dz, approximated as a sum
-        # over layers above LCL where buoyancy > 0.
+        # CAPE integration: ∫_LFC^LNB g · buoyancy dz, approximated as a sum of
+        # positive buoyancy over the levels [LCL, LNB]. Between them B > 0 at
+        # every level except possibly the LCL level itself, so the sum starts at
+        # the LFC and negative buoyancy (CIN) is left out, not subtracted.
         # Use AGL height differences for dz; we don't have them here, so use
         # the hypsometric estimate: dz ≈ R_d·T̄·d(ln p)/g.
         dz = torch.zeros(n_lev, device=device, dtype=dtype)
@@ -385,10 +390,6 @@ def compute_lcl_lnb_cape(
             )
             / GRAVITY_M_S2
         )
-        # Positive-buoyancy band above LCL.
-        positive = buoyancy.clamp(min=0.0)
-        positive[:i_lcl_int] = 0.0
-        cape = (GRAVITY_M_S2 * positive * dz).sum()
         # LNB = first level above LCL where buoyancy goes ≤ 0.
         above_lcl_neg = (buoyancy <= 0.0) & (torch.arange(n_lev, device=device) > i_lcl_int)
         if bool(above_lcl_neg.any()):
@@ -397,6 +398,12 @@ def compute_lcl_lnb_cape(
         else:
             # Parcel remains buoyant through the top of the column; cap at top.
             i_lnb = torch.tensor(n_lev - 1, dtype=torch.long, device=device)
+        # Positive buoyancy of the cloud [LCL, LNB] only (decision 0031): a
+        # buoyant layer above the cloud top is not this cloud's energy.
+        positive = buoyancy.clamp(min=0.0)
+        positive[:i_lcl_int] = 0.0
+        positive[int(i_lnb) + 1 :] = 0.0
+        cape = (GRAVITY_M_S2 * positive * dz).sum()
 
     return i_lcl, i_lnb, cape, dtv_lcl_plus_1
 
@@ -577,8 +584,17 @@ def compute_lcl_lnb_cape_columns(
     has_test = (i_lcl >= 0) & (i_lcl + 1 < n_lev)
     dtv_lcl_plus_1 = torch.where(has_test, dtv_at_test, torch.full_like(dtv_at_test, -1.0))
 
-    # CAPE: Σ g·max(B, 0)·dz over levels at and above the LCL, with the
-    # hypsometric layer thickness (same expression as the single column).
+    # LNB: first level above the LCL with B <= 0; the column top if none.
+    above_lcl_neg = (buoyancy <= 0.0) & (k.unsqueeze(0) > i_lcl.unsqueeze(1))
+    i_lnb = torch.where(
+        above_lcl_neg.any(dim=1),
+        above_lcl_neg.to(torch.int8).argmax(dim=1),
+        torch.full((n_col,), n_lev - 1, dtype=torch.long, device=device),
+    )
+    i_lnb = torch.where(has_lcl, i_lnb, torch.full_like(i_lnb, -1))
+
+    # CAPE: Σ g·max(B, 0)·dz over the cloud's levels [LCL, LNB] (decision 0031),
+    # with the hypsometric layer thickness (same expression as the single column).
     dz = torch.zeros_like(t_env)
     dz[:, 1:] = (
         R_DRY_AIR_J_KG_K
@@ -591,18 +607,10 @@ def compute_lcl_lnb_cape_columns(
         / GRAVITY_M_S2
     )
     positive = buoyancy.clamp(min=0.0)
-    positive = torch.where(k.unsqueeze(0) < i_lcl.unsqueeze(1), 0.0, positive)
+    in_cloud = (k.unsqueeze(0) >= i_lcl.unsqueeze(1)) & (k.unsqueeze(0) <= i_lnb.unsqueeze(1))
+    positive = torch.where(in_cloud, positive, 0.0)
     cape = (GRAVITY_M_S2 * positive * dz).sum(dim=1)
     cape = torch.where(has_lcl, cape, torch.zeros_like(cape))
-
-    # LNB: first level above the LCL with B <= 0; the column top if none.
-    above_lcl_neg = (buoyancy <= 0.0) & (k.unsqueeze(0) > i_lcl.unsqueeze(1))
-    i_lnb = torch.where(
-        above_lcl_neg.any(dim=1),
-        above_lcl_neg.to(torch.int8).argmax(dim=1),
-        torch.full((n_col,), n_lev - 1, dtype=torch.long, device=device),
-    )
-    i_lnb = torch.where(has_lcl, i_lnb, torch.full_like(i_lnb, -1))
     return i_lcl, i_lnb, cape, dtv_lcl_plus_1
 
 
