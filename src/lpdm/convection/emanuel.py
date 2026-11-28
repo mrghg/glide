@@ -121,6 +121,27 @@ FLEXPART_DAMPS = 0.3
 BUOYANCY_MASS_FLUX_PER_K = 0.1 * FLEXPART_ALPHA / FLEXPART_DAMPS  # 0.00833 kg m-2 s-1 K-1
 BUOYANCY_DTMAX_K = 0.9
 
+# Trigger options (Decision 6, controlled study). `glide` (default): ΔT_v ≥
+# trigger_dtv_k at the level LCL+1 (or trigger_height_above_lcl_m above the LCL),
+# CAPE ≥ min_cape_j_kg. `flexpart_cloud_base`: FLEXPART 11 `convect` without memory
+# (CBMF of the previous call = 0, decision 0033): skip if the parcel at the first
+# level above the LCL (ICB, GLIDE's i_lcl) is at least DTMAX = 0.9 K colder than
+# the environment, if the buoyancy closure's M_b is not positive (DTMIN <= 0), or
+# on FLEXPART's other skip conditions as GLIDE's columns allow them: parcel-level
+# T < 250 K or q <= 0 (GLIDE's parcel is the surface level), moist static energy
+# with no minimum below the top two levels (IHMIN = NL - 1), PLCL outside
+# 200-2000 hPa, ICB >= NL - 1. No CAPE floor. `min_cloud_depth_m` applies to both.
+TRIGGERS = ("glide", "flexpart_cloud_base")
+FLEXPART_TRIGGER_DTMAX_K = 0.9
+FLEXPART_PARCEL_T_MIN_K = 250.0
+FLEXPART_PLCL_MIN_PA = 20000.0
+FLEXPART_PLCL_MAX_PA = 200000.0
+# FLEXPART `convect` constants for its moist static energy HM.
+FLEXPART_CPD = 1005.7
+FLEXPART_CL = 2500.0
+FLEXPART_CPV = 1870.0
+FLEXPART_LV0 = 2.501e6
+
 # How the matrix is applied over the convection interval Δt (decision 0033):
 # - `exponential` (default): the matrix is a rate (kg m-2 s-1) and the transition
 #   over Δt is the exact exp(Δt·Q) of the rate generator Q, with no CFL scale;
@@ -646,6 +667,64 @@ def trigger_dtv_at_height_above_lcl(
     return torch.where(ok, out, torch.full_like(out, -1.0))
 
 
+def flexpart_cloud_base_trigger_columns(
+    t_env: torch.Tensor,
+    q_env: torch.Tensor,
+    height_m: torch.Tensor,
+    p_lcl: torch.Tensor,
+    i_lcl: torch.Tensor,
+    dtv: torch.Tensor,
+    dtmin: torch.Tensor,
+    dtmax_k: float = FLEXPART_TRIGGER_DTMAX_K,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """FLEXPART 11's convection trigger without memory, on GLIDE's columns: (pass, ΔT_v(ICB)), [C].
+
+    FLEXPART ``convect`` (conv_mod.f90) with the previous call's CBMF = 0, as in
+    GLIDE's steady-state closure (decision 0033). A column passes unless:
+
+    - the parcel level has ``T < 250 K`` or ``q <= 0`` (GLIDE's parcel is level 0);
+    - the moist static energy ``HM`` has no minimum below the top two levels:
+      FLEXPART's ``IHMIN`` (the lowest ``HM`` among levels where it decreases,
+      from the second level up) is missing or ``>= NL - 1``. ``HM`` uses
+      FLEXPART's constants, ``g·z`` from the level heights, and its own
+      reference temperature (level 0);
+    - ``PLCL`` is outside 200-2000 hPa;
+    - there is no first level above the LCL, or it is ``ICB >= NL - 1``;
+    - the parcel is at least ``dtmax_k`` colder than the environment at ICB,
+      ``ΔT_v(ICB) <= -dtmax_k`` (``TVP(ICB) <= TV(ICB) - DTMAX``);
+    - ``DTMIN <= 0``, so the closure's ``M_b = 0.1·ALPHA·DTMIN`` is not positive.
+
+    FLEXPART's levels ``1..NL+1`` map to GLIDE's ``0..Z-1``, so ``NL - 1`` is
+    ``Z - 3``. ICB is GLIDE's ``i_lcl`` (first level with ``p < p_lcl``).
+    ``dtv`` [C, Z] is the parcel-minus-environment ``T_v``. Static shapes, no host
+    synchronisation.
+    """
+
+    n_lev = t_env.shape[1]
+    q = q_env
+    lv = FLEXPART_LV0 - (FLEXPART_CL - FLEXPART_CPV) * (t_env - 273.15)
+    hm = (
+        (FLEXPART_CPD * (1.0 - q) + FLEXPART_CL * q) * (t_env - t_env[:, :1])
+        + lv * q
+        + GRAVITY_M_S2 * (height_m - height_m[:, :1])
+    )
+    decreasing = torch.zeros_like(hm, dtype=torch.bool)
+    decreasing[:, 1:] = hm[:, 1:] < hm[:, :-1]
+    big = torch.full_like(hm, float("inf"))
+    ihmin = torch.where(decreasing, hm, big).argmin(dim=1)
+    top = n_lev - 3  # FLEXPART's NL - 1
+    hm_ok = decreasing.any(dim=1) & (ihmin < top)
+    parcel_ok = (t_env[:, 0] >= FLEXPART_PARCEL_T_MIN_K) & (q_env[:, 0] > 0.0)
+    plcl_ok = (p_lcl >= FLEXPART_PLCL_MIN_PA) & (p_lcl < FLEXPART_PLCL_MAX_PA)
+    icb_ok = (i_lcl >= 0) & (i_lcl < top)
+    icb = i_lcl.clamp(min=0, max=n_lev - 1).unsqueeze(1)
+    dtv_icb = dtv.gather(1, icb).squeeze(1)
+    dtv_icb = torch.where(icb_ok, dtv_icb, torch.full_like(dtv_icb, -1.0e3))
+    buoyant_enough = dtv_icb.double() > -float(dtmax_k)
+    passes = parcel_ok & hm_ok & plcl_ok & icb_ok & buoyant_enough & (dtmin.double() > 0.0)
+    return passes, dtv_icb
+
+
 def compute_lcl_lnb_cape_columns(
     t_env: torch.Tensor,
     q_env: torch.Tensor,
@@ -1043,6 +1122,7 @@ class EmanuelReducedConvection(ConvectionScheme):
         buoyancy_mass_flux_per_k: float = BUOYANCY_MASS_FLUX_PER_K,
         updraft_w_max_m_s: float = UPDRAFT_W_MAX_M_S,
         trigger_height_above_lcl_m: float | None = None,
+        trigger: str = "glide",
     ) -> None:
         """Construct the scheme.
 
@@ -1066,6 +1146,12 @@ class EmanuelReducedConvection(ConvectionScheme):
                         the rate matrix), ``cfl_scaled`` (before 0033: one
                         CFL-scaled transfer per interval) or ``substeps``
                         (``n_substeps`` CFL-capped transfers per interval).
+                trigger: ``glide`` (default: ``trigger_dtv_k`` at LCL+1 or at
+                        ``trigger_height_above_lcl_m``, and ``min_cape_j_kg``) or
+                        ``flexpart_cloud_base`` (FLEXPART's tests without memory,
+                        `flexpart_cloud_base_trigger_columns`; ignores
+                        ``trigger_dtv_k`` and ``min_cape_j_kg``). Both apply
+                        ``min_cloud_depth_m``.
         """
 
         if closure_c <= 0:
@@ -1088,6 +1174,13 @@ class EmanuelReducedConvection(ConvectionScheme):
             raise ValueError("updraft_w_max_m_s must be > 0")
         if trigger_height_above_lcl_m is not None and trigger_height_above_lcl_m <= 0:
             raise ValueError("trigger_height_above_lcl_m must be > 0 (or None)")
+        if trigger not in TRIGGERS:
+            raise ValueError(f"trigger must be one of {TRIGGERS}, got {trigger!r}")
+        if trigger != "glide" and trigger_height_above_lcl_m is not None:
+            raise ValueError("trigger_height_above_lcl_m applies only to trigger 'glide'")
+        if trigger != "glide" and closure != "buoyancy":
+            raise ValueError("trigger 'flexpart_cloud_base' needs closure 'buoyancy' (M_b > 0)")
+        self.trigger = trigger
         self.trigger_height_above_lcl_m = (
             None if trigger_height_above_lcl_m is None else float(trigger_height_above_lcl_m)
         )
@@ -1204,13 +1297,21 @@ class EmanuelReducedConvection(ConvectionScheme):
             height_col.gather(1, i_lnb.clamp(min=0, max=n_lev - 1).unsqueeze(1))
             - height_col.gather(1, i_lcl.clamp(min=0, max=n_lev - 1).unsqueeze(1))
         ).squeeze(1)
-        fires = (
-            (i_lcl >= 0)
-            & (i_lnb > i_lcl)
-            & (cape.double() >= self.min_cape_j_kg)
-            & (dtv.double() >= self.trigger_dtv_k)
-            & (cloud_depth_m.double() >= self.min_cloud_depth_m)
-        )
+        if self.trigger == "glide":
+            fires = (
+                (i_lcl >= 0)
+                & (i_lnb > i_lcl)
+                & (cape.double() >= self.min_cape_j_kg)
+                & (dtv.double() >= self.trigger_dtv_k)
+                & (cloud_depth_m.double() >= self.min_cloud_depth_m)
+            )
+        else:
+            # FLEXPART's cloud-base trigger (Decision 6 study): no CAPE floor;
+            # `dtv` becomes ΔT_v at ICB, the first level above the LCL.
+            passes, dtv = flexpart_cloud_base_trigger_columns(
+                t_col, q_col, height_col, extra["p_lcl"], i_lcl, extra["dtv"], dtmin
+            )
+            fires = passes & (i_lnb > i_lcl) & (cloud_depth_m.double() >= self.min_cloud_depth_m)
         if self.closure == "buoyancy":
             m_b = self.buoyancy_mass_flux_per_k * dtmin.double().clamp(min=0.0)
         else:

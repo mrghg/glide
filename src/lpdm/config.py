@@ -496,6 +496,29 @@ class EmanuelConvectionConfig(_Frozen):
             "instead of at the level LCL+1, whose height depends on the vertical grid."
         ),
     )
+    trigger: Literal["glide", "flexpart_cloud_base"] = Field(
+        "glide",
+        description=(
+            "'glide': ΔT_v ≥ trigger_dtv_k at LCL+1 and CAPE ≥ min_cape_j_kg. "
+            "'flexpart_cloud_base': FLEXPART 11's tests without memory (parcel not "
+            "0.9 K colder than the environment at the first level above the LCL, "
+            "DTMIN > 0, and its other skip conditions); no CAPE floor. Both apply "
+            "min_cloud_depth_m. Needs closure 'buoyancy'."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _check_trigger(self) -> EmanuelConvectionConfig:
+        if self.trigger != "glide":
+            if self.closure != "buoyancy":
+                raise ValueError(
+                    "convection.emanuel.trigger 'flexpart_cloud_base' needs closure 'buoyancy'"
+                )
+            if self.trigger_height_above_lcl_m is not None:
+                raise ValueError(
+                    "convection.emanuel.trigger_height_above_lcl_m applies only to trigger 'glide'"
+                )
+        return self
 
 
 class ConvectionConfig(_Frozen):
