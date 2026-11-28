@@ -18,6 +18,7 @@ import numpy as np
 
 def pct(x):
     x = np.asarray(x, float)
+    x = x[np.isfinite(x)]
     if x.size == 0:
         return "n/a"
     return " / ".join(f"{v:.3g}" for v in np.percentile(x, [0, 10, 50, 90, 100]))
@@ -103,10 +104,12 @@ def main() -> None:
             if not acc:
                 continue
             a = {k: np.concatenate(x) for k, x in acc.items()}
+            pos = a["E"] > 0  # columns whose closure gives M_b = 0 move nothing
+            a = {k: x[pos] for k, x in a.items()}
             rate1 = a["E"] / a["dt"]
             rate3 = a["E3"] / (3 * a["dt"])
             totals[v][g] = tot
-            print(f"   -- {v}")
+            print(f"   -- {v} ({pos.sum()} of {pos.size} firing columns with M_b > 0)")
             print(f"      M_b kg m-2 s-1:            {pct(a['mb'])}")
             print(f"      Courant (unscaled M_b dt): {pct(a['courant'])}")
             print(f"      E/dt kg m-2 s-1 (1 h):     {pct(rate1)}")

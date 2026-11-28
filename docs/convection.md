@@ -390,6 +390,31 @@ convection:
 A YAML with no `convection:` block produces output identical to a run with no
 convection at all.
 
+**Prototype closure options (task CONV, branch `agent/CONV-closure`; not
+adopted).** The defaults reproduce the behaviour above bit for bit. The options
+exist for A/B comparison while Matt decides the closure:
+
+```yaml
+    closure: cape_velocity        # or "buoyancy": FLEXPART's steady-state CBMF,
+                                  #   buoyancy_mass_flux_per_k · max(DTMIN, 0)
+    buoyancy_mass_flux_per_k: 0.00833   # 0.1·ALPHA/DAMPS with FLEXPART's 0.025, 0.3
+    updraft_w_max_m_s: 5.0        # the cap on √(2·CAPE) in cape_velocity
+    application: cfl_scaled       # or "exponential": exact exp(Δt·Q) of the rate
+                                  #   matrix, no CFL scale; or "substeps"
+    n_substeps: 4                 # transfers per interval for "substeps"
+    trigger_height_above_lcl_m: null   # if set, test ΔT_v at this height above
+                                  #   the LCL instead of at the level LCL+1
+```
+
+With `exponential` the matrix of §5 is a rate (kg m⁻² s⁻¹, no CFL scale) and the
+transition over the interval is $\exp(\Delta t\,Q)$ of its generator
+(`generator_exponential`: uniformised scaling and squaring, non-negative and
+row-stochastic by construction, layer masses stationary, static shapes, no host
+synchronisation). One 3-hour event then equals three 1-hour events, and the
+transport per unit time no longer depends on the thickness of the layer below
+cloud base. The evidence and the choice are in
+`outputs/agents/CONV/SUMMARY.md` (main checkout).
+
 **What to expect when you turn it on:** more particles in the free troposphere at
 long backward times, and a more dispersed surface footprint (convective lofting
 feeds faster long-range transport). Mid-latitude January is a weak test — the
