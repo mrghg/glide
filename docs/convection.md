@@ -135,10 +135,34 @@ where $B$ crosses zero from positive) and
 
 $$
 \mathrm{CAPE} = \int_{\mathrm{LFC}}^{\mathrm{LNB}} g\ B\ \mathrm{d}z
+\ \approx \sum_{k = i_{\mathrm{LCL}}}^{i_{\mathrm{LNB}}} g\ \max(B_k, 0)\ \mathrm{d}z_k
 $$
 
 with layer thicknesses from the hypsometric relation,
-$\mathrm{d}z \approx R_d \bar{T}\ \mathrm{d}(\ln p)/g$.
+$\mathrm{d}z \approx R_d \bar{T}\ \mathrm{d}(\ln p)/g$ ($\mathrm{d}z_k$ is the
+layer below level $k$), and $i_{\mathrm{LCL}}$ the first level above the LCL
+(FLEXPART's `ICB`). The sum is the **cloud's** buoyant energy
+([decision 0031](../dev/decisions/0031-cape-bounded-at-the-cloud-top.md)):
+
+- **Upper bound: the diagnosed cloud top.** Positive buoyancy in a layer above
+  the LNB, separated from the cloud by stable air, does not count. Until
+  November 2026 it did: the sum ran to the top of the column, so a second
+  buoyant layer aloft could lift a lower cloud over the CAPE floor of §3.
+- **Lower bound: the LFC, within a level.** $B > 0$ at every level strictly
+  between $i_{\mathrm{LCL}}$ and $i_{\mathrm{LNB}}$ (that is how the LNB is
+  found), so the only level in the sum that can be negatively buoyant is
+  $i_{\mathrm{LCL}}$ itself. The LFC is therefore $i_{\mathrm{LCL}}$ or
+  $i_{\mathrm{LCL}} + 1$, and summing $\max(B, 0)$ from $i_{\mathrm{LCL}}$ is the
+  sum from the LFC.
+- **Convective inhibition is left out, not subtracted.** Negative buoyancy below
+  the LCL (the dry ascent) and at $i_{\mathrm{LCL}}$ does not reduce CAPE. A
+  column whose parcel is negatively buoyant at $i_{\mathrm{LCL}} + 1$ never fires,
+  whatever lies above: its cloud top is then $i_{\mathrm{LCL}} + 1$ and the
+  $\Delta T_v$ check of §3 fails there. GLIDE has no elevated LFC.
+
+The scalar reference (`compute_lcl_lnb_cape`) and the batched form
+(`compute_lcl_lnb_cape_columns`) apply the same bounds
+(`tests/test_cape_cloud_top.py`).
 
 ---
 
@@ -150,7 +174,7 @@ Convection fires only when **all** of the following hold:
 | --- | --- |
 | $i_{\mathrm{LCL}} \ge 0$ | the parcel reaches saturation somewhere in the column |
 | $i_{\mathrm{LNB}} > i_{\mathrm{LCL}}$ | positive cloud depth |
-| $\mathrm{CAPE} \ge 50\ \mathrm{J\ kg^{-1}}$ | sanity floor (`min_cape_j_kg`) |
+| $\mathrm{CAPE} \ge 50\ \mathrm{J\ kg^{-1}}$ | sanity floor (`min_cape_j_kg`), on the cloud's CAPE, LCL to LNB (§2) |
 | $\Delta T_v\big\vert_{\mathrm{LCL}+1} \ge 0.9\ \mathrm{K}$ | Forster (2007) Eq. 34 buoyancy threshold (`trigger_dtv_k`) |
 | cloud depth $\ge 500\ \mathrm{m}$ | deep convection only (`min_cloud_depth_m`) — shallow cumulus is the boundary-layer scheme's job |
 
@@ -173,6 +197,19 @@ with $c_{\text{closure}} = 0.03$ by default, evaluated in each column with that
 column's CAPE and its environmental temperature and pressure at the LCL level. One
 event moves $M_b\,\Delta t_{\mathrm{met}}$ per unit area, where
 $\Delta t_{\mathrm{met}}$ is the meteorology interval (§1).
+
+**At the defaults the cap binds in every column that fires.** It is reached at
+$\mathrm{CAPE} = 12.5\ \mathrm{J\ kg^{-1}}$ and the trigger needs
+$50\ \mathrm{J\ kg^{-1}}$, so a firing column always has
+$M_b = 5\,c_{\text{closure}}\,\rho_{\mathrm{LCL}}$: CAPE decides only *whether*
+a column convects, and $M_b$ varies between columns only through
+$\rho_{\mathrm{LCL}}$. On ERA5 over Europe the CFL scale of §5 binds as well,
+in more than 99% of firing columns with a median scale of 0.13 (January) and
+0.25 (summer), so the mass an event moves is set by that cap rather than by
+$M_b$ (decision 0031). An external review raised this in November 2026. It is an open
+question, recorded with what FLEXPART does in
+[decision 0031](../dev/decisions/0031-cape-bounded-at-the-cloud-top.md), and is
+not changed.
 
 The cap on $w_{\text{buoy}}$ is not decoration. Without it,
 $\mathrm{CAPE} > 500\ \mathrm{J\ kg^{-1}}$ gives
