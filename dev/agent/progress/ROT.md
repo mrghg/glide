@@ -1,6 +1,6 @@
 # ROT — Orientation of horizontal turbulence (along-wind / cross-wind)
 
-- status: PR OPEN #PRNUM
+- status: PR OPEN #77
 - queue: A   model: claude-opus-5-5   branch: agent/ROT-wind-frame-turbulence
 - started: 2026-11-28   updated: 2026-11-28
 - plan: Requested by Matt on 2026-11-28 (external review, "Horizontal spread and receptor setup"). Hanna's σ_u, T_Lu are along-wind and σ_v, T_Lv cross-wind, but GLIDE applied u′ to longitude and v′ to latitude. Add `turbulence.horizontal_frame: grid | wind` (default `grid`, bit-identical). Files: src/lpdm/turbulence/hanna.py, src/lpdm/config.py, src/lpdm/main.py, tests/test_horizontal_frame.py (new), tests/test_main_config.py, tests/test_main_runtime.py, dev/decisions/0032 (0031 is CAPE's, PR #76), docs/physics.md, docs/turbulence.md, README, STATUS. CPU only, ≤ 8 threads. Outputs: outputs/agents/ROT/. No GPU runs.
