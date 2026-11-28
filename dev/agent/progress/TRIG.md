@@ -1,0 +1,21 @@
+# TRIG — FLEXPART cloud-base convection trigger as default (decision 0034)
+
+- status: CLAIMED
+- queue: none (Matt's request and approval of 28 Nov 2026; "Decision 6")   model: claude-opus-5-5   branch: agent/TRIG-flexpart-trigger
+- started: 2026-11-28   updated: 2026-11-28
+- plan:
+  - From the Decision 6 study (branch agent/CONV-trigger-study, d9f09f0; outputs/agents/CONV/trigger/ in the main checkout), on top of PR #78 (agent/CONV-closure).
+  - Default `convection.emanuel.trigger: flexpart_cloud_base`; `glide` selectable and bit-identical to the pre-0034 behaviour.
+  - Warn (runtime.physics_warnings) when a glide-only trigger option is set under the FLEXPART trigger; remove such settings from shipped configs.
+  - Decision 0034; docs/convection.md, README, STATUS, docs/VALIDATION.md; correct "Forster Eq. 34 / matches FLEXPART" text.
+  - Tests: firing mask on a fixture column set, glide bit-identity, warnings, −0.5 K / −1.0 K at ICB.
+  - Effects: compiled GPU smoke on the default (~2 min, < 2 GiB), CPU smoke before/after. Outputs under outputs/agents/CONV/trigpr/.
+- done:
+- verified:
+- docs:
+- handoff:
+- proposed follow-ups:
+- reference issues: none
+- incidents:
+- question:
+- handled:
