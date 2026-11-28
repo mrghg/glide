@@ -36,6 +36,7 @@ from lpdm.comparison import (
 from lpdm.config import RunConfig
 from lpdm.footprint_gridder import FootprintGridder
 from lpdm.gpu_engine import GPUEngine
+from lpdm.local_frame import DEGREES
 from lpdm.main import PreflightValidationError, _run
 from lpdm.met_reader import BoundingBoxRequest, HourlyMetTensors, MetFieldMetadata, MetReader
 from lpdm.turbulence.base import TurbulenceScheme
@@ -559,8 +560,12 @@ def test_mean_factor_approximation_bound() -> None:
 def test_gridder_without_density_keeps_plain_seconds() -> None:
     """inv_density=None is the pre-0022 arithmetic; ones give the same bits."""
 
-    g1 = FootprintGridder((-1.0, 1.0), (-1.0, 1.0), (0.0, 40.0), 1, 2, 2, device="cpu")
-    g2 = FootprintGridder((-1.0, 1.0), (-1.0, 1.0), (0.0, 40.0), 1, 2, 2, device="cpu")
+    g1 = FootprintGridder(
+        (-1.0, 1.0), (-1.0, 1.0), (0.0, 40.0), 1, 2, 2, device="cpu", frame=DEGREES
+    )
+    g2 = FootprintGridder(
+        (-1.0, 1.0), (-1.0, 1.0), (0.0, 40.0), 1, 2, 2, device="cpu", frame=DEGREES
+    )
     torch.manual_seed(0)
     n = 50
     xyz = torch.stack([torch.rand(n) * 2 - 1, torch.rand(n) * 2 - 1, torch.rand(n) * 60], 1)

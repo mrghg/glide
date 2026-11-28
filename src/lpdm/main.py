@@ -45,7 +45,13 @@ from lpdm.convection import (
     list_schemes as list_convection_schemes,
 )
 from lpdm.footprint_gridder import FootprintGridder
-from lpdm.gpu_engine import GPUEngine, GridInterpolationBounds, use_static_step_path
+from lpdm.gpu_engine import (
+    GPUEngine,
+    frame_grid_bounds,
+    trilinear_sample,
+    use_static_step_path,
+)
+from lpdm.local_frame import DEGREES, HorizontalFrame
 from lpdm.met_reader import (
     ArcoEra5ZarrReader,
     BoundingBoxRequest,
@@ -798,8 +804,14 @@ def _met_domain_bounds(cfg: RunConfig) -> SpatialBounds:
     )
 
 
-def _within_met_domain(particles: torch.Tensor, cfg: RunConfig) -> torch.Tensor:
+def _within_met_domain(
+    particles: torch.Tensor, cfg: RunConfig, frame: HorizontalFrame
+) -> torch.Tensor:
     """Boolean [N] mask: True where a particle is inside ``met_domain``.
+
+    ``particles`` hold horizontal positions in ``frame`` (`lpdm.local_frame`); the
+    lon/lat bounds are converted to it (the frame is affine and increasing in
+    both, so the box is the same box).
 
     Outside the lon/lat bbox or above ``alt_max_m`` there is no valid met — the
     engine's coordinate normalisation clamps to the grid edge, so such a particle
@@ -810,16 +822,33 @@ def _within_met_domain(particles: torch.Tensor, cfg: RunConfig) -> torch.Tensor:
     """
 
     md = cfg.met_domain
-    lon = particles[:, 0]
-    lat = particles[:, 1]
+    x = particles[:, 0]
+    y = particles[:, 1]
     alt = particles[:, 2]
     return (
-        (lon >= md.lon_bounds[0])
-        & (lon <= md.lon_bounds[1])
-        & (lat >= md.lat_bounds[0])
-        & (lat <= md.lat_bounds[1])
+        (x >= frame.x_from_lon(md.lon_bounds[0]))
+        & (x <= frame.x_from_lon(md.lon_bounds[1]))
+        & (y >= frame.y_from_lat(md.lat_bounds[0]))
+        & (y <= frame.y_from_lat(md.lat_bounds[1]))
         & (alt <= md.alt_max_m)
     )
+
+
+def _position_frame(cfg: RunConfig) -> HorizontalFrame:
+    """The run's horizontal frame for particle positions (task A4).
+
+    Metres from the met domain's centre (`HorizontalFrame.local_metric`).
+    ``GLIDE_POSITION_FRAME=degrees`` keeps (lon, lat) in degrees, the arithmetic
+    of the code before the frame existed, for A/B checks (docs/architecture.md §8).
+    """
+
+    choice = os.environ.get("GLIDE_POSITION_FRAME", "local_metric")
+    if choice == "degrees":
+        return DEGREES
+    if choice != "local_metric":
+        raise ValueError(f"GLIDE_POSITION_FRAME must be local_metric or degrees, not {choice!r}")
+    md = cfg.met_domain
+    return HorizontalFrame.local_metric(md.lon_bounds, md.lat_bounds)
 
 
 def _get_hourly_met_window(
@@ -1185,8 +1214,14 @@ def _deposit_step(
       particle's first step is counted half at its release position; a particle
       that leaves the met domain in a step keeps the start half (the end half is
       dropped by the gridder if outside the output grid, as endpoint's is).
+
+    Positions (both halves) are in ``engine.frame``: the gridder converts them to
+    degrees at entry and the density is sampled with grid bounds in the same frame,
+    so the gridder must have been built with the engine's frame.
     """
 
+    if gridder.frame != engine.frame:
+        raise ValueError(f"gridder frame {gridder.frame} differs from the engine's {engine.frame}")
     if position == "trapezoid":
         half_s = 0.5 * delta_s
         t_start_s = t_cursor.timestamp()
@@ -1253,40 +1288,41 @@ def _advect_active_particles(
         met_window, t_cursor, delta_s, device, dtype, wind_mean_cache
     )
 
-    grid_bounds = GridInterpolationBounds(
-        lon_first=float(met_window.metadata.lon[0]),
-        lon_last=float(met_window.metadata.lon[-1]),
-        lat_first=float(met_window.metadata.lat[0]),
-        lat_last=float(met_window.metadata.lat[-1]),
-        alt_first=float(met_window.metadata.level[0]),
-        alt_last=float(met_window.metadata.level[-1]),
-        # F9 (audit 2026-05-30): pass the per-level AGL array so the vertical
-        # normalisation uses a piecewise-linear lookup rather than a linear-in-z
-        # approximation. Matters because pressure levels are log-linear in z.
-        level_agl_m=tuple(float(v) for v in met_window.metadata.level),
-    )
+    # Grid bounds in the engine's horizontal frame (`lpdm.local_frame`), with the
+    # per-level AGL array for the piecewise-linear vertical lookup (F9).
+    frame = engine.frame
+    grid_bounds = frame_grid_bounds(met_window.metadata, frame)
 
+    # The wind stacks in `simulation.wind_gather_dtype` (task A4): float32 is
+    # sampled with grid_sample as always, a 16-bit type with `trilinear_sample`.
+    wind_dtype = engine.wind_dtype
+    sample_16bit = wind_dtype.itemsize == 2
     m_start_uvw, m_end_uvw = met_window.channels("u", "v", "w")
-    m_start = m_start_uvw.unsqueeze(0).to(device=device, dtype=dtype)
-    m_end = m_end_uvw.unsqueeze(0).to(device=device, dtype=dtype)
+    m_start = m_start_uvw.unsqueeze(0).to(device=device, dtype=wind_dtype)
+    m_end = m_end_uvw.unsqueeze(0).to(device=device, dtype=wind_dtype)
 
     def wind_fn(xyz: torch.Tensor) -> torch.Tensor:
         xyz_norm = engine.normalize_particle_coordinates(xyz, grid_bounds)
-        grid = xyz_norm.view(1, 1, 1, -1, 3)
 
         # m_start/m_end are closed over from the enclosing scope; the `del` below
         # (a memory optimisation) confuses ruff's unbound analysis -> noqa: F821.
-        v_start = torch.nn.functional.grid_sample(m_start, grid, align_corners=True).view(3, -1).t()  # noqa: F821
-        v_end = torch.nn.functional.grid_sample(m_end, grid, align_corners=True).view(3, -1).t()  # noqa: F821
+        if sample_16bit:
+            s, e = trilinear_sample((m_start[0], m_end[0]), xyz_norm)  # noqa: F821
+            v_start, v_end = s.t(), e.t()
+        else:
+            grid = xyz_norm.view(1, 1, 1, -1, 3)
+            sampled = [
+                torch.nn.functional.grid_sample(m, grid, align_corners=True).view(3, -1).t()
+                for m in (m_start, m_end)  # noqa: F821
+            ]
+            v_start, v_end = sampled
         v_interp = v_start * (1.0 - alpha) + v_end * alpha
 
-        lat_deg = xyz[:, 1]
-        meters_per_deg_lat = 110540.0
-        meters_per_deg_lon = 111320.0 * torch.cos(torch.deg2rad(lat_deg)).abs().clamp(min=0.05)
-
+        # Metres per second to frame units per second at the particle's latitude.
+        lat_deg = frame.lat_from_y(xyz[:, 1])
         out = torch.empty_like(xyz)
-        out[:, 0] = v_interp[:, 0] / meters_per_deg_lon
-        out[:, 1] = v_interp[:, 1] / meters_per_deg_lat
+        out[:, 0] = v_interp[:, 0] / frame.metres_per_x(lat_deg)
+        out[:, 1] = v_interp[:, 1] / frame.metres_per_y
         out[:, 2] = v_interp[:, 2]
         return out
 
@@ -1706,7 +1742,24 @@ def _run(
             float(_agl[1]) if _agl.size > 1 else 0.0,
         )
     run_seed = _seed_global_generators(cfg)
-    engine = GPUEngine(device=device_str)
+    # Particle positions in metres from the met domain's centre (task A4,
+    # `lpdm.local_frame`), and the dtype of the wind stacks in the gather.
+    position_frame = _position_frame(cfg)
+    engine = GPUEngine(
+        device=device_str,
+        frame=position_frame,
+        wind_gather_dtype=getattr(torch, cfg.simulation.wind_gather_dtype),
+    )
+    LOGGER.info(
+        "particle positions: %s frame (lon0 %.4f, lat0 %.4f, %.3f x-units and %.3f "
+        "y-units per degree); wind gather dtype %s",
+        position_frame.kind,
+        position_frame.lon0,
+        position_frame.lat0,
+        position_frame.kx,
+        position_frame.ky,
+        cfg.simulation.wind_gather_dtype,
+    )
     writer = OutputWriter()
     device = torch.device(device_str)
 
@@ -1861,7 +1914,8 @@ def _run(
         _log_device_memory(f"batch {batch.batch_idx} start", device)
         with phase_timer.phase("particle_generation"):
             particle_batch = generate_batch_particles(batch, device=device_str)
-        particles = particle_batch.particles
+        # Released at (lon, lat); held in the engine's frame from here on.
+        particles = engine.frame.to_frame(particle_batch.particles)
         # release_idx from the batch is global; remap to batch-local for the
         # per-batch gridder, then offset back to global for the region write.
         batch_release_offset = batch.releases[0].release_idx
@@ -1880,6 +1934,7 @@ def _run(
             n_releases=len(batch.releases),
             device=device,
             dtype=accumulation_dtype,
+            frame=engine.frame,
         )
 
         if not footprint_store_created:
@@ -1940,7 +1995,7 @@ def _run(
         # instead of a `.item()` sync every step. On CUDA those per-step syncs
         # serialise the pipeline; on CPU it's equivalent. The host-side bookkeeping
         # (step index, time, active count) is collected alongside.
-        diag_pos_means: list[torch.Tensor] = []  # each (3,): mean lon/lat/alt over all particles
+        diag_pos_means: list[torch.Tensor] = []  # each (3,): mean x/y/alt over all particles
         diag_wind_means: list[
             torch.Tensor
         ] = []  # each (3,): grid-mean u/v/w (0 when no active set)
@@ -2068,7 +2123,7 @@ def _run(
                         engine=engine,
                     )
                 with phase_timer.phase("mask_liveness"):
-                    newly_escaped = active_mask & ~_within_met_domain(particles, cfg)
+                    newly_escaped = active_mask & ~_within_met_domain(particles, cfg, engine.frame)
                     alive = alive & ~newly_escaped
                     escaped_count = torch.count_nonzero(newly_escaped)
             else:
@@ -2165,7 +2220,9 @@ def _run(
                 # tensor summed at batch end.
                 if active_count > 0:
                     with phase_timer.phase("mask_liveness"):
-                        newly_escaped = active_mask & ~_within_met_domain(particles, cfg)
+                        newly_escaped = active_mask & ~_within_met_domain(
+                            particles, cfg, engine.frame
+                        )
                         alive = alive & ~newly_escaped
                         escaped_count = torch.count_nonzero(newly_escaped)
                 else:
@@ -2256,8 +2313,10 @@ def _run(
                         "step": st,
                         "batch_idx": bidx,
                         "time_hour_end": iso,
-                        "mean_lon": pm[0],
-                        "mean_lat": pm[1],
+                        # Mean position, from the frame back to degrees (affine,
+                        # so the mean converts exactly up to rounding).
+                        "mean_lon": float(engine.frame.lon_from_x(pm[0])),
+                        "mean_lat": float(engine.frame.lat_from_y(pm[1])),
                         "mean_alt_agl_m": pm[2],
                         "u_mean_m_s": wm[0],
                         "v_mean_m_s": wm[1],
@@ -2280,7 +2339,10 @@ def _run(
                 release_start=batch_release_offset,
                 release_stop=batch_release_offset + len(batch.releases),
             )
-            endpoint_particles_chunks.append(particles.detach().cpu().clone())
+            # Endpoints are written in (lon, lat): out of the frame here.
+            endpoint_particles_chunks.append(
+                engine.frame.to_lonlat(particles.detach()).cpu().clone()
+            )
             endpoint_release_idx_chunks.append(particle_batch.release_idx.detach().cpu().clone())
         _log_device_memory(f"batch {batch.batch_idx} end (pre-reclaim)", device)
         del gridder
@@ -2361,6 +2423,14 @@ def _run(
             # troposphere (decision 0027; replaced A1's substep_saturation), or None
             # for a scheme without sub-steps.
             substep_exceedance=exceedance.metadata(),
+            # Horizontal frame the particle positions were held in (task A4).
+            position_frame={
+                "kind": position_frame.kind,
+                "lon0_deg": position_frame.lon0,
+                "lat0_deg": position_frame.lat0,
+                "x_units_per_deg_lon": position_frame.kx,
+                "y_units_per_deg_lat": position_frame.ky,
+            },
             # Configured physics options that are not well-mixed consistent, as
             # logged at the start of the run; empty for the defaults.
             physics_warnings=physics_warnings,

@@ -15,6 +15,7 @@ import numpy as np
 import pytest
 import torch
 
+from lpdm.local_frame import DEGREES
 from lpdm.turbulence import HannaScheme, get_scheme, list_schemes
 from lpdm.turbulence.hanna import (
     ABOVE_BL_SIGMA_M_S,
@@ -639,7 +640,9 @@ def test_sigma_w_probe_is_bit_identical_to_the_full_profile(
     engine = GPUEngine(device="cpu")
     scheme = HannaScheme(surface_layer_override=override)
     met = _uniform_met(blh=800.0)
-    ft_fields, grid_bounds = scheme._free_trop_fields(met, torch.device("cpu"), torch.float32)
+    ft_fields, grid_bounds = scheme._free_trop_fields(
+        met, torch.device("cpu"), torch.float32, frame=DEGREES
+    )
     n = 2000
     z = torch.cat([torch.linspace(0.0, 3500.0, n - 3), torch.tensor([2.0, 800.0, 801.0])])
     blh = torch.full((n,), 800.0)
@@ -652,7 +655,8 @@ def test_sigma_w_probe_is_bit_identical_to_the_full_profile(
         h_over_L=torch.full((n,), h_over_L),
         L=L,
         lat=torch.linspace(-60.0, 60.0, n),
-        lon=torch.linspace(-1.5, 1.5, n),
+        x=torch.linspace(-1.5, 1.5, n),
+        y=torch.linspace(-60.0, 60.0, n),
         ft_fields=ft_fields,
         grid_bounds=grid_bounds,
         engine=engine,
@@ -710,7 +714,9 @@ def test_basal_zero_gradient_only_below_the_clamp(shf: float) -> None:
     out = {}
     for flag in (False, True):
         scheme = HannaScheme(basal_zero_gradient=flag)
-        ft_fields, grid_bounds = scheme._free_trop_fields(met, torch.device("cpu"), torch.float32)
+        ft_fields, grid_bounds = scheme._free_trop_fields(
+            met, torch.device("cpu"), torch.float32, frame=DEGREES
+        )
         density = scheme._density_fields(met, torch.device("cpu"), torch.float32)
         h_over_L = {-20.0: 5.0, 0.0: 0.0, 200.0: -50.0}[shf]
         col = dict(
@@ -720,7 +726,8 @@ def test_basal_zero_gradient_only_below_the_clamp(shf: float) -> None:
             h_over_L=torch.full((n,), h_over_L),
             L=torch.full((n,), 800.0 / h_over_L if h_over_L else 1e10),
             lat=torch.full((n,), 0.0),
-            lon=torch.full((n,), 0.0),
+            x=torch.full((n,), 0.0),
+            y=torch.full((n,), 0.0),
             ft_fields=ft_fields,
             grid_bounds=grid_bounds,
             engine=engine,
@@ -827,16 +834,16 @@ def test_per_window_field_cache_reuses_within_window_and_rebuilds_across() -> No
 
     # Within one window: every field function returns the *same* cached tensor
     # object on repeat calls (i.e. it is not recomputed).
-    f1, _ = scheme._meander_sigma_fields(met_a, dev, dt)
-    f2, _ = scheme._meander_sigma_fields(met_a, dev, dt)
+    f1, _ = scheme._meander_sigma_fields(met_a, dev, dt, frame=DEGREES)
+    f2, _ = scheme._meander_sigma_fields(met_a, dev, dt, frame=DEGREES)
     assert f1 is f2
 
     d1 = scheme._density_fields(met_a, dev, dt)
     d2 = scheme._density_fields(met_a, dev, dt)
     assert d1 is d2
 
-    ft1, _ = scheme._free_trop_fields(met_a, dev, dt)
-    ft2, _ = scheme._free_trop_fields(met_a, dev, dt)
+    ft1, _ = scheme._free_trop_fields(met_a, dev, dt, frame=DEGREES)
+    ft2, _ = scheme._free_trop_fields(met_a, dev, dt, frame=DEGREES)
     assert ft1 is ft2
 
     # Three distinct cache keys, one entry each — keys do not collide.
@@ -857,7 +864,7 @@ def test_per_window_field_cache_reuses_within_window_and_rebuilds_across() -> No
     # windows — compare against a snapshot of the old values instead.
     f1_values = f1.clone()
     met_b = _make_meander_test_window(t0 + timedelta(hours=1), u_start_val=20.0, u_end_val=40.0)
-    f3, _ = scheme._meander_sigma_fields(met_b, dev, dt)
+    f3, _ = scheme._meander_sigma_fields(met_b, dev, dt, frame=DEGREES)
     assert f3 is f1, "new window must refill the SAME static buffer, not allocate"
     assert not torch.allclose(f3, f1_values)
 
@@ -1054,8 +1061,8 @@ def test_gather_static_inputs_reuses_buffers_across_steps() -> None:
     scheme = HannaScheme(meander_enabled=False)
     dev, dtp = torch.device("cpu"), torch.float32
 
-    first = scheme._gather_static_inputs(met, 0.25, dev, dtp)
-    second = scheme._gather_static_inputs(met, 0.75, dev, dtp)
+    first = scheme._gather_static_inputs(met, 0.25, dev, dtp, frame=DEGREES)
+    second = scheme._gather_static_inputs(met, 0.75, dev, dtp, frame=DEGREES)
 
     for key in (
         "alpha",
@@ -1097,7 +1104,9 @@ def test_period_channels_held_at_window_end_in_both_paths() -> None:
     assert held.time_weight("blh", alpha) == alpha
 
     for window, shf_want, ustar_want in ((snapshots, -150.0, 0.3), (held, -300.0, 0.6)):
-        static = HannaScheme(meander_enabled=False)._gather_static_inputs(window, alpha, dev, dtp)
+        static = HannaScheme(meander_enabled=False)._gather_static_inputs(
+            window, alpha, dev, dtp, frame=DEGREES
+        )
         assert torch.allclose(static["shf_field"], torch.tensor(shf_want))
         assert torch.allclose(static["ustar_field"], torch.tensor(ustar_want))
         assert torch.allclose(static["blh_field"], torch.tensor(1250.0))  # snapshot
@@ -1105,7 +1114,9 @@ def test_period_channels_held_at_window_end_in_both_paths() -> None:
         lon = torch.tensor([0.3, -1.1])
         lat = torch.tensor([0.7, 1.2])
         for name, want in (("shf", shf_want), ("ustar", ustar_want), ("blh", 1250.0)):
-            got = HannaScheme._interp_surface_field(window, name, alpha, lon, lat, dev, dtp)
+            got = HannaScheme._interp_surface_field(
+                window, name, alpha, lon, lat, dev, dtp, frame=DEGREES
+            )
             assert torch.allclose(got, torch.tensor(want)), name
 
 
@@ -1277,7 +1288,10 @@ def test_meander_alone_gives_the_exact_ou_displacement_variance(static: bool, mo
     monkeypatch.setattr(
         scheme,
         "_meander_sigma_fields",
-        lambda met_window, device, dtype: (const_sigma, HannaScheme._grid_bounds(met_window)),
+        lambda met_window, device, dtype, frame=DEGREES: (
+            const_sigma,
+            HannaScheme._grid_bounds(met_window, frame),
+        ),
     )
 
     def _no_small_scale_turbulence(*, active_xyz, u_prime_in, v_prime_in, w_prime_in, **_):
@@ -1331,7 +1345,9 @@ def test_meander_alone_gives_the_exact_ou_displacement_variance(static: bool, mo
 def _interface_col(scheme: HannaScheme, met, n: int, h_over_L: float, *, blh: float = 800.0):
     from lpdm.gpu_engine import GPUEngine
 
-    ft_fields, grid_bounds = scheme._free_trop_fields(met, torch.device("cpu"), torch.float32)
+    ft_fields, grid_bounds = scheme._free_trop_fields(
+        met, torch.device("cpu"), torch.float32, frame=DEGREES
+    )
 
     def full(v: float) -> torch.Tensor:
         return torch.full((n,), float(v))
@@ -1343,7 +1359,8 @@ def _interface_col(scheme: HannaScheme, met, n: int, h_over_L: float, *, blh: fl
         h_over_L=full(h_over_L),
         L=full(blh / h_over_L if h_over_L else 1e10),
         lat=full(0.0),
-        lon=full(0.0),
+        x=full(0.0),
+        y=full(0.0),
         ft_fields=ft_fields,
         grid_bounds=grid_bounds,
         engine=GPUEngine(device="cpu"),

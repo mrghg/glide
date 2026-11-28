@@ -312,3 +312,102 @@ def _parcel_tv_for(t: torch.Tensor, q: torch.Tensor, p: torch.Tensor) -> tuple[t
     )
     has = bool((~below).any())
     return em.virtual_temperature(t_parcel, q_parcel), int((~below).nonzero()[0]) if has else -1
+
+
+# ---------------------------------------------------------------------------
+# Edge cases (review of PR #76)
+# ---------------------------------------------------------------------------
+
+
+def _column(buoyancy_from_lcl) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
+    """A column on the soundings' levels and surface parcel whose buoyancy is
+    weak CIN below the LCL, stable (-0.02) aloft, and the given values from the
+    LCL level upwards. Returns (t, q, p, i_lcl), float64."""
+
+    p = torch.as_tensor(P_HPA * 100.0, dtype=torch.float64)
+    n = p.numel()
+    tv_parcel, i_lcl = _parcel_tv(p)
+    q = Q_SFC * torch.exp(-torch.arange(n, dtype=torch.float64) / 8.0)
+    b = torch.full((n,), B_ALOFT, dtype=torch.float64)
+    b[0] = 0.0
+    b[1:i_lcl] = B_SUBCLOUD
+    vals = torch.as_tensor(buoyancy_from_lcl, dtype=torch.float64)[: n - i_lcl]
+    b[i_lcl : i_lcl + vals.numel()] = vals
+    return _environment(tv_parcel, q, b), q, p, i_lcl
+
+
+def _both_paths(t, q, p) -> tuple[tuple, tuple]:
+    """(scalar, batched) (i_lcl, i_lnb, cape, dtv) for one column, as Python numbers."""
+
+    def as_py(out) -> tuple:
+        return int(out[0]), int(out[1]), float(out[2]), float(out[3])
+
+    batched = compute_lcl_lnb_cape_columns(t[None], q[None], p[None])
+    return as_py(compute_lcl_lnb_cape(t, q, p)), as_py(tuple(x[0] for x in batched))
+
+
+def _positive_energy(t, q, p, lo: int, hi: int) -> float:
+    """Independent float64 sum of g·max(B, 0)·dz over levels lo..hi."""
+
+    tv_parcel, _ = _parcel_tv_for(t, q, p)
+    tv_env = em.virtual_temperature(t, q)
+    b = (tv_parcel - tv_env) / tv_env
+    return float((em.GRAVITY_M_S2 * b.clamp(min=0.0) * _layer_dz(t, p))[lo : hi + 1].sum())
+
+
+def test_buoyant_to_the_top_of_the_column() -> None:
+    """No level of neutral buoyancy: the cloud top is the column's top level and
+    CAPE is all the positive buoyancy from the LCL up, in both paths."""
+
+    n = len(P_HPA)
+    t, q, p, i_lcl = _column([0.004] * n)
+    scalar, batched = _both_paths(t, q, p)
+    assert scalar[:2] == batched[:2] == (i_lcl, n - 1)
+    expected = _positive_energy(t, q, p, i_lcl, n - 1)
+    assert expected > 100.0
+    assert scalar[2] == pytest.approx(expected, rel=1e-12)
+    assert batched[2] == pytest.approx(expected, rel=1e-12)
+
+
+def test_lcl_at_the_top_level() -> None:
+    """The column ends at the first level above the LCL: there is no level
+    above it, so the cloud top is the LCL level itself, ΔT_v is -1 K and the
+    column cannot fire (it needs i_lnb > i_lcl); both paths agree."""
+
+    t, q, p, i_lcl = _column([0.004] * 4)
+    k = i_lcl + 1
+    scalar, batched = _both_paths(t[:k], q[:k], p[:k])
+    assert scalar[:2] == batched[:2] == (i_lcl, i_lcl)
+    assert scalar[3] == batched[3] == -1.0
+    expected = _positive_energy(t[:k], q[:k], p[:k], i_lcl, i_lcl)
+    assert scalar[2] == pytest.approx(expected, rel=1e-12)
+    assert batched[2] == pytest.approx(expected, rel=1e-12)
+
+
+def test_weak_one_level_dip_ends_the_cloud() -> None:
+    """Sensitivity recorded in decision 0031: one level at B = -0.0005 (about
+    -0.15 K) ends the cloud and, since 0031, the CAPE sum. With the dip, CAPE is
+    that of the four levels below it (about 38 J/kg) and the column does not
+    fire at 50 J/kg; with B > 0 at that level instead, the cloud and its CAPE
+    (about 82 J/kg) run on through the layer above, and it fires."""
+
+    t, q, p, i_lcl = _column([0.004] * 4 + [-0.0005] + [0.004] * 4)
+    scalar, batched = _both_paths(t, q, p)
+    assert scalar[:2] == batched[:2] == (i_lcl, i_lcl + 4)
+    below = _positive_energy(t, q, p, i_lcl, i_lcl + 4)
+    through = _positive_energy(t, q, p, i_lcl, len(P_HPA) - 1)
+    assert scalar[2] == pytest.approx(below, rel=1e-12)
+    assert batched[2] == pytest.approx(below, rel=1e-12)
+    assert 30.0 < below < em.MIN_CAPE_J_KG < through
+
+    t_no, _, _, _ = _column([0.004] * 9)
+    s_no, b_no = _both_paths(t_no, q, p)
+    assert s_no[1] == b_no[1] == i_lcl + 9
+    assert b_no[2] == pytest.approx(_positive_energy(t_no, q, p, i_lcl, i_lcl + 9), rel=1e-12)
+    assert b_no[2] > em.MIN_CAPE_J_KG
+
+    met = _window({"p_pa": p, "q": q, "t": (t, t_no)})
+    cols = EmanuelReducedConvection().column_state(
+        met, t_alpha=0.0, device=torch.device("cpu"), dtype=torch.float64
+    )
+    assert cols.fires.tolist() == [False, True]

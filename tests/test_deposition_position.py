@@ -22,6 +22,8 @@ import xarray as xr
 from test_main_runtime import _make_hanna_reader, _make_reader, _make_run_config
 
 from lpdm.footprint_gridder import FootprintGridder
+from lpdm.gpu_engine import GPUEngine
+from lpdm.local_frame import DEGREES
 from lpdm.main import _deposit_step, _run, _time_ago_index, _time_weight
 from lpdm.turbulence.placeholder import PlaceholderConstantOU
 
@@ -197,6 +199,7 @@ def test_trapezoid_deposits_each_half_with_its_own_bin_and_density() -> None:
         n_releases=2,
         device="cpu",
         dtype=torch.float64,
+        frame=DEGREES,
     )
     t0 = datetime(2024, 1, 1, 12, 0, tzinfo=UTC)
     met_window = SimpleNamespace(
@@ -234,7 +237,7 @@ def test_trapezoid_deposits_each_half_with_its_own_bin_and_density() -> None:
         particle_density=density,
         met_window=met_window,
         t_alpha=0.123,  # the step's midpoint weight: the trapezoid must not use it
-        engine=None,
+        engine=GPUEngine(device="cpu", frame=DEGREES),
     )
     a_start = _time_weight(met_window, t_cursor.timestamp())
     a_end = _time_weight(met_window, t_cursor.timestamp() - dt)
@@ -299,7 +302,7 @@ def _deposit_one_step(gridder, position, start, end, age_s=0.0, dt=60.0, bin_s=3
         particle_density=None,
         met_window=met_window,
         t_alpha=0.5,
-        engine=None,
+        engine=GPUEngine(device="cpu", frame=DEGREES),
     )
 
 
@@ -313,6 +316,7 @@ def _single_cell_gridder(n_time_bins: int = 1) -> FootprintGridder:
         n_x=1,
         device="cpu",
         dtype=torch.float64,
+        frame=DEGREES,
     )
 
 
