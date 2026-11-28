@@ -9,7 +9,7 @@
   - `tests/test_convection_closure.py` (14 tests): exponential equals torch.linalg.matrix_exp (≤1e-11), non-negative, stochastic; stationarity and adjointness; one 3-h interval = three 1-h; 40→79-level refinement changes the exponential transport < 10% while the CFL-scaled one falls below 0.7×; DTMIN; trigger interpolation; defaults unchanged (bit-equal transition).
   - `scripts/validation/conv/`: grid/cadence diagnostics, real-cadence composition, FLEXPART CONVECT driver (extracted at build time from a local FLEXPART checkout, not copied), FLEXPART comparison, footprint runner and comparison, transition benchmark.
   - `docs/convection.md` §8: prototype options.
-- verified: see outputs/agents/CONV/SUMMARY.md (main checkout) for every number and its file.
+- verified: tests/test_convection*.py, test_cape_cloud_top.py, test_config*.py 49 passed; test_phase_timers.py, test_main_runtime.py, test_golden_harness.py 94 passed (full suite not run). Defaults bit-identical (test + smoke). Every number with its file: dev/agent/progress/CONV-SUMMARY.md (copy at outputs/agents/CONV/SUMMARY.md).
 - docs: docs/convection.md §8 (prototype options). No decision record: the choice is Matt's.
 - handoff: Matt decides the closure (SUMMARY.md "Decision needed"). If adopted: decision record superseding the closure part of 0007/0031, defaults switched, tests of the old defaults kept for A/B, golden regenerated, STATUS.
 - proposed follow-ups:
