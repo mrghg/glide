@@ -112,8 +112,11 @@ Q_MIN_KG_KG = 0.0
 # this fraction of its air mass in a single convection event. Keeps the
 # diagonal (stay) probability of the redistribution non-negative. Because the
 # whole flux matrix is scaled by a single factor, non-divergence (hence the
-# well-mixed property) is preserved. FLEXPART enforces the equivalent limit on
-# the cloud-base mass flux inside convect43c.f.
+# well-mixed property) is preserved. FLEXPART has no counterpart: convect sets
+# IFLAG = 4 when its own CFL test fails, but calcmatrix accepts IFLAG = 4 and
+# updates fmassfrac anyway, and it is called every lsynctime (900 s by default)
+# rather than once per met window. With the default closure this scale binds in
+# almost every firing column, at the layer just below the LCL (decision 0031).
 CFL_MAX_OUTFLUX_FRAC = 0.9
 
 
