@@ -6,8 +6,6 @@
 batch:
   max_releases_per_batch: 1
 convection:
-  emanuel:
-    closure_c: 0.03
   scheme: emanuel_reduced
 io:
   zarr_store: data/era5-arco/NAM_20190621-20190715_ERA5-ARCO.zarr

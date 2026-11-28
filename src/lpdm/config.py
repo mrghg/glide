@@ -442,7 +442,7 @@ class EmanuelConvectionConfig(_Frozen):
     closure_c: float = Field(
         0.03,
         gt=0,
-        description="Cloud-base mass-flux closure constant. M_b ∝ closure_c · ρ_LCL · √(2·CAPE).",
+        description="Cloud-base mass-flux constant of closure 'cape_velocity' only: M_b = closure_c · ρ_LCL · min(√(2·CAPE), updraft_w_max_m_s).",
     )
     trigger_dtv_k: float = Field(
         0.9,
@@ -458,6 +458,43 @@ class EmanuelConvectionConfig(_Frozen):
         500.0,
         ge=0,
         description="Skip shallow convection (cloud depth < this). This scheme is for DEEP convection.",
+    )
+    # Closure and time integration (decision 0033). The defaults are FLEXPART's
+    # steady-state buoyancy closure applied exactly over the met interval; the
+    # behaviour before 0033 is closure "cape_velocity" with application
+    # "cfl_scaled" (closure_c and updraft_w_max_m_s apply only to it).
+    closure: Literal["cape_velocity", "buoyancy"] = Field(
+        "buoyancy",
+        description=(
+            "Cloud-base mass flux. 'cape_velocity': closure_c·ρ_LCL·min(√(2·CAPE), "
+            "updraft_w_max_m_s). 'buoyancy': FLEXPART's steady state, "
+            "buoyancy_mass_flux_per_k·max(DTMIN, 0)."
+        ),
+    )
+    application: Literal["cfl_scaled", "exponential", "substeps"] = Field(
+        "exponential",
+        description=(
+            "How the matrix acts over the met interval: 'cfl_scaled' (one transfer, scaled "
+            "so no layer sheds > 90%), 'exponential' (exact exp(Δt·Q) of the rate), "
+            "'substeps' (n_substeps CFL-capped transfers)."
+        ),
+    )
+    n_substeps: int = Field(4, ge=1, description="Transfers per interval for 'substeps'.")
+    buoyancy_mass_flux_per_k: float = Field(
+        0.1 * 0.025 / 0.3,
+        gt=0,
+        description="kg m-2 s-1 per K of DTMIN for closure 'buoyancy' (FLEXPART: 0.1·ALPHA/DAMPS).",
+    )
+    updraft_w_max_m_s: float = Field(
+        5.0, gt=0, description="Cap on √(2·CAPE) in closure 'cape_velocity', m/s."
+    )
+    trigger_height_above_lcl_m: float | None = Field(
+        None,
+        gt=0,
+        description=(
+            "If set, test the ΔT_v trigger at this height above the LCL (interpolated) "
+            "instead of at the level LCL+1, whose height depends on the vertical grid."
+        ),
     )
 
 

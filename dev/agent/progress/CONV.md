@@ -1,0 +1,41 @@
+# CONV — Buoyancy closure with exact exponential application (decision 0033)
+
+- status: PR OPEN #78
+- queue: none (Matt's request and approval of 28 Nov 2026; adopted as "Decision 5")   model: claude-opus-5-5   branch: agent/CONV-closure
+- started: 2026-11-28   updated: 2026-11-28
+- plan:
+  - Investigation (done): why the CFL scale of the reduced Emanuel matrix binds in ~100% of firing columns. Rate closures prototyped as options, with the transport measured against levels (23/40/80) and cadence on the CAPE review's January hours and on July 2019. Compared with FLEXPART 11's own CONVECT.
+  - PR: buoyancy + exponential as the default, trigger unchanged, Courant guard, decision 0033, docs, tests, a compiled CUDA smoke run, and CPU smoke and Jungfraujoch runs before and after.
+- done:
+  - Investigation summary: outputs/agents/CONV/SUMMARY.md (main checkout). Independent review: outputs/agents/CONV/review/.
+  - Merged origin/main (#76, #74). The convection column lookup uses `engine.frame` (from #74); nothing added here reads positions.
+  - Defaults: `closure: buoyancy` (M_b = 0.00833·max(DTMIN, 0)) and `application: exponential` (`generator_exponential`).
+  - The previous scheme stays selectable: `cape_velocity` + `cfl_scaled`.
+  - The trigger is as on main. `trigger_height_above_lcl_m` is an option, off by default.
+  - Guard: Courant numbers above 0.5·2¹² are counted in `runtime.convection` of run_metadata.json (`ConvectionScheme.run_diagnostics`) and logged at the end of the run.
+  - Tests:
+    - `tests/test_convection_closure.py` (20): generator, exponential, adjoint, T1 small-step limit, cadence, grid independence of the scheme on a synthetic column, production defaults, legacy reproduces the old matrix, guard, end to end.
+    - `tests/test_convection.py`: the A02/T1 construction tests pin the legacy options.
+  - Decision 0033. Updated: docs/convection.md §1, §4–§8; README; STATUS; VALIDATION; decisions 0007, 0031 and the decisions README.
+  - Scripts under `scripts/validation/conv/`.
+- verified: CPU suite 756 passed, 38 skipped, 0 failed (19.1 min, 8 threads, at e6ecbeb). GPU compiled smoke: compiles=2, no WON'T CONVERT (defaults and legacy). CPU smoke main vs branch: bit-identical (seeds 42 and 43; legacy options too). JFJ July 2019: 0-40 m -2.1% / -0.1% (seeds 42/43), against seed-to-seed -3.3%. Courant max 1.5. Files: outputs/agents/CONV/pr/.
+- docs: dev/decisions/0033 (new), 0007 and 0031 status lines, decisions README; docs/convection.md; docs/VALIDATION.md; README; STATUS.md.
+- handoff: Decision 6 (trigger) is the next study. The trigger's ΔT_v test at the level LCL+1 depends on the grid (firing columns 11,263 / 7,243 / 3,849 on 23 / 40 / 80 levels, January), and GLIDE fires in ~1% of column-hours against FLEXPART's ~60%. See outputs/agents/CONV/review/fp_trigger_split.log and trigger_grid.log.
+- proposed follow-ups:
+  - Trigger study (Decision 6): level, sign, CAPE floor.
+  - Detrainment profile and cloud top (first vs highest LNB). In January GLIDE lifts ~10× less sub-cloud air above 3 km than FLEXPART in the same columns.
+- reference issues:
+  - FLEXPART 11 keeps the remembered CBMF per OpenMP thread (`cbaseflux(ix,jy,ithread)`, dynamic schedule) and updates it only in columns holding particles (derived, conv_mod.f90 at d4e0a86).
+  - Its relaxation is per call, so spin-up depends on lsynctime: one 3,600 s call gives 0.395× the CBMF of four 900 s calls (measured).
+- incidents:
+  - The CFL scale was added as a non-negativity guard (bb5c266, July 2026). Since then it set the convective transport in essentially every firing column: 0.9 × the mass of the layer below cloud base per event.
+    - So the transport depended on the vertical grid: domain totals ×3.66 / ×0.26 on 23 / 80 levels vs 40 (January).
+    - And on the cadence: 0.43× per unit time at 3-hourly.
+    - The code comment saying FLEXPART enforces the same limit was wrong (#76 corrected the comment).
+    - Found by the review of PR #76 and task CONV.
+  - The trigger tests buoyancy at the level LCL+1, whose height above the LCL depends on the grid (median 371 / 135 / 59 m on 23 / 40 / 80 levels, January). Found in task CONV; not changed (Decision 6).
+- question: none
+- handled:
+  - in-session: 2026-11-28 coordinator brief: investigate and prototype, branch only.
+  - in-session: 2026-11-28 coordinator: Matt adopted Decision 5. Turn the branch into a PR; do not change the trigger.
+  - in-session: 2026-11-28 coordinator: review of PR #78. Done: production-path direction test (the default transition equals the backward exponential; upper-cloud rows reach the sub-cloud layers 0.0077 backward vs 2e-5 forward); warnings for options the selected closure/application ignores; wiring tests (config default constant, kwargs passing closure/application, substeps dt/n); closure_c removed from shipped/validation configs; decision 0033 cites the review's JFJ legacy bit-identity and three-seed statistics.

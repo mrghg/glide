@@ -43,6 +43,12 @@ from lpdm.convection.emanuel import (
 )
 from lpdm.met_reader import HourlyMetTensors
 
+# The closure and time integration before decision 0033 (CAPE-velocity M_b, one
+# CFL-scaled transfer per interval). The tests below that pin the matrix
+# construction and the column batching of task A02 select it explicitly; the
+# production defaults are covered in tests/test_convection_closure.py.
+LEGACY = {"closure": "cape_velocity", "application": "cfl_scaled"}
+
 # ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
@@ -384,19 +390,22 @@ def test_no_convection_is_pass_through() -> None:
 
 
 def _build_convective_met_window(
-    blh_m: float = 1500.0, window_hours: float = 1.0
+    blh_m: float = 1500.0,
+    window_hours: float = 1.0,
+    column: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
 ) -> HourlyMetTensors:
     """Build a met window where Emanuel's parcel lift WILL trigger deep
     convection. Spatially uniform; columns built from a moist-unstable sounding.
 
     `window_hours` sets the bracket width, which is also the interval the scheme
-    fires on and therefore the timescale it scales the mass flux by."""
+    fires on and therefore the timescale it scales the mass flux by. `column`
+    replaces the default sounding with (t, q, p), surface first."""
 
     from datetime import datetime, timedelta
 
     from lpdm.met_reader import HourlyMetTensors, MetFieldMetadata
 
-    t_col, q_col, p_col = _moist_unstable_column(n_lev=12)
+    t_col, q_col, p_col = _moist_unstable_column(n_lev=12) if column is None else column
     # Spatially broadcast.
     n_lev, n_lat, n_lon = t_col.numel(), 3, 3
     shape = (n_lev, n_lat, n_lon)
@@ -467,7 +476,7 @@ def test_emanuel_backward_connects_aloft_particles_to_the_surface() -> None:
     # buoyancy that the default 0.9 K threshold is tuned for on 60-level ECMWF
     # columns. This test validates redistribution once fired, not the threshold
     # (covered by test_emanuel_does_not_fire_on_stable_column).
-    scheme = EmanuelReducedConvection(closure_c=0.1, trigger_dtv_k=0.1)
+    scheme = EmanuelReducedConvection(**LEGACY, closure_c=0.1, trigger_dtv_k=0.1)
 
     # Cloud extent for this column, so we can place particles inside it.
     t_col, q_col, p_col = _moist_unstable_column(n_lev=12)
@@ -710,7 +719,7 @@ def _event_m_b_for_window(window_hours: float) -> float:
     """
 
     met = _build_convective_met_window(window_hours=window_hours)
-    scheme = EmanuelReducedConvection(closure_c=0.1, trigger_dtv_k=0.1)
+    scheme = EmanuelReducedConvection(**LEGACY, closure_c=0.1, trigger_dtv_k=0.1)
     cols = scheme.column_state(met, t_alpha=0.5, device=torch.device("cpu"), dtype=torch.float32)
     assert bool(cols.fires.all())
     return float(cols.m_b[0]) * cols.interval_s
@@ -778,7 +787,7 @@ def test_uniform_box_gives_the_old_matrix_in_every_column() -> None:
     column. Checked bit for bit (float32 on CPU)."""
 
     met = _build_convective_met_window()
-    scheme = EmanuelReducedConvection(closure_c=0.1, trigger_dtv_k=0.1)
+    scheme = EmanuelReducedConvection(**LEGACY, closure_c=0.1, trigger_dtv_k=0.1)
     cols = scheme.column_state(met, t_alpha=0.5, device=torch.device("cpu"), dtype=torch.float32)
     fmass_cols = scheme.column_mass_flux_matrices(cols)
     fmass_old, height_old = _old_bbox_mean_matrix(scheme, met, t_alpha=0.5)
@@ -822,7 +831,7 @@ def test_mass_is_conserved_in_every_column() -> None:
     distributions, and its layer masses are stationary (mᵀP = mᵀ)."""
 
     met = _mixed_column_window()
-    scheme = EmanuelReducedConvection(closure_c=0.1, trigger_dtv_k=0.1)
+    scheme = EmanuelReducedConvection(**LEGACY, closure_c=0.1, trigger_dtv_k=0.1)
     cols = scheme.column_state(met, t_alpha=0.5, device=torch.device("cpu"), dtype=torch.float64)
     fmass = scheme.column_mass_flux_matrices(cols)
     assert int(cols.fires.sum()) >= 3, "most columns should fire"
@@ -842,7 +851,7 @@ def test_matrices_match_the_single_column_reference_in_every_column() -> None:
     functions column by column on a box whose columns all differ."""
 
     met = _mixed_column_window()
-    scheme = EmanuelReducedConvection(closure_c=0.1, trigger_dtv_k=0.1)
+    scheme = EmanuelReducedConvection(**LEGACY, closure_c=0.1, trigger_dtv_k=0.1)
     cols = scheme.column_state(met, t_alpha=0.5, device=torch.device("cpu"), dtype=torch.float64)
     fmass = scheme.column_mass_flux_matrices(cols)
     for c in range(fmass.shape[0]):
@@ -924,7 +933,7 @@ def test_convection_fires_in_the_unstable_column_only() -> None:
 
     torch.manual_seed(20261124)
     met = _two_column_window()
-    scheme = EmanuelReducedConvection(closure_c=0.1, trigger_dtv_k=0.1)
+    scheme = EmanuelReducedConvection(**LEGACY, closure_c=0.1, trigger_dtv_k=0.1)
     cols = scheme.column_state(met, t_alpha=0.5, device=torch.device("cpu"), dtype=torch.float32)
     assert cols.fires.tolist() == [True, False]
     fmass = scheme.column_mass_flux_matrices(cols)
@@ -1037,7 +1046,7 @@ def test_matrices_only_for_occupied_columns_give_identical_positions() -> None:
     from lpdm.gpu_engine import GPUEngine
 
     met = _wide_firing_box()
-    scheme = EmanuelReducedConvection(closure_c=0.1, trigger_dtv_k=0.1)
+    scheme = EmanuelReducedConvection(**LEGACY, closure_c=0.1, trigger_dtv_k=0.1)
     n = 3000
     gen = torch.Generator().manual_seed(11)
     particles = torch.zeros(n, 4)
@@ -1136,7 +1145,7 @@ def test_non_positive_met_window_is_refused_by_convection() -> None:
     from lpdm.gpu_engine import GPUEngine
 
     met = _build_convective_met_window(window_hours=0.0)
-    scheme = EmanuelReducedConvection(closure_c=0.1, trigger_dtv_k=0.1)
+    scheme = EmanuelReducedConvection(**LEGACY, closure_c=0.1, trigger_dtv_k=0.1)
     n = 8
     particles = torch.zeros(n, 4, dtype=torch.float32)
     particles[:, 2] = 3000.0

@@ -46,8 +46,6 @@ turbulence:
 
 convection:
   scheme: emanuel_reduced
-  emanuel:
-    closure_c: 0.03
 
 output_grid:
   lon_bounds: [-98.076, 39.556]

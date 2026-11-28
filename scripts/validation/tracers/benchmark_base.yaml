@@ -21,8 +21,6 @@ turbulence:
 
 convection:
   scheme: emanuel_reduced
-  emanuel:
-    closure_c: 0.03
 
 met_domain:
   alt_max_m: 15000.0
