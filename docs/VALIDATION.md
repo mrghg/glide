@@ -66,6 +66,7 @@ share no state and run order is irrelevant. Stochastic tests are seeded.
 | `test_diffusion_pde.py` | Langevin diffusion limit vs a PDE reference | 2 |
 | `test_near_surface_well_mixed.py` | Near-surface well-mixed gate through the production Hanna scheme at $\Delta t = 60$ s, three regimes | 3 |
 | `test_bl_top_well_mixed.py` | Boundary-layer-top well-mixed gate: open column uniform in $[0, 2h]$ through the production Hanna scheme at $\Delta t = 60$ s, three regimes; a full-strength copy is slow (`GLIDE_SLOW_TESTS=1`) | 3 + 3 slow |
+| `test_reciprocity.py` | Forward–backward reciprocity through the production Hanna scheme (forward-in-time test mode; exact pathwise check of the backward sign construction; the plan's criteria and companions are a slow release check, `GLIDE_SLOW_TESTS=1`) | 8 (+8 slow) |
 
 ---
 
@@ -134,6 +135,175 @@ vertical velocity.
 | --- | --- | --- |
 | `test_terrain_following_preserves_agl_crossing_hill` | a near-surface particle holds its AGL crossing an 800 m hill (slope correction cancels the imposed $w$) | max excursion ~2.7 m (limit 25 m) |
 | `test_no_slope_correction_lets_particle_ride_the_terrain` | **teeth**: without the resample the particle rides the terrain up | excursion ~784 m ≈ the hill height (limit > 200 m) |
+
+### Forward–backward reciprocity — `test_reciprocity.py`
+
+The backward footprint of a receptor should equal the concentration a forward
+run puts at that receptor from a unit source in each cell (Flesch, Wilson &
+Yee 1995; [physics.md §4](physics.md#4-running-backward-in-time)). The forward
+run uses the production `HannaScheme` with a private flag,
+`_forward_in_time`, that no configuration can set: the drift unnegated and the
+displacement and advection $+\Delta t$, with reflection, the boundary-layer-top
+interface and the velocity carry shared. The column is steady and horizontally
+uniform (Hanna profile below $h$, the free-troposphere closure above, a
+hydrostatic density, a westerly wind from 3 m s⁻¹ at the ground to 6 m s⁻¹ at
+$h$); cells are rows $h/10$ deep up to $1.3h$ and 3 km columns. Both
+directions count $\Delta t/\rho_d$ for 2 h at $\Delta t$ = 60 s and 16
+sub-steps and follow validation plan §3: two selection runs, one backward and
+one forward, each with its own seeds, keep the cells that at least 50
+different particles pass through in both (the plan states the rule for the
+backward run; it is applied to the forward map too); both maps are
+bootstrapped (400 resamples); the test passes if at least 90% of the tested
+cells and the sum over them agree within their 95% noise range. 40,000
+backward particles; 10,000 forward particles per source row (13 rows).
+
+**What it tests.** In a steady, horizontally uniform column the backward step
+is, pathwise, the forward step with $w' \to -w'$: a backward run with noise
+$\eta$ equals the forward run with $-\eta$ and negated start velocities, bit
+for bit (derived; measured over 120 steps, `outputs/agents/A6/review/pathwise.log`;
+asserted by the fourth test below). With a start distribution symmetric in
+$w'$ the backward run is therefore the forward process in law, so the
+comparison checks (i) the sign construction and (ii) the transfer symmetry of
+the one discrete scheme both directions share,
+$\rho_s K(s \to r) = \rho_r K(r \to s)$ between cells. It cannot say whether
+an error is "forward" or "backward". Two limits:
+
+- The harness starts both directions from the equilibrium (Eulerian)
+  turbulent velocities, as the theorem assumes. Production releases start at
+  $w' = 0$; what that does near the receptor is not measured.
+- The column is steady with a fixed $h$. A moving-$h$, time-varying case is
+  the outstanding test of the backward formulation itself.
+
+| Test | Asserts |
+| --- | --- |
+| `test_forward_mode_is_private_and_off_by_default` | the flag is not a constructor argument and defaults to backward |
+| `test_forward_step_static_and_dynamic_paths_agree` | forward, the CUDA-graph path and the CPU path agree (bit-identical but for the last bits of longitude, as backward) |
+| `test_forward_mode_flips_the_drift_and_the_displacement_only` | forward coefficients are the backward ones with the two drift pieces negated |
+| `test_backward_step_is_the_forward_step_with_the_velocity_negated` (4) | the sign construction, exactly: backward with $\eta$ equals forward with $-\eta$ and negated start velocities, bit for bit (positions after every step, $u', v', w'$ of opposite sign), stable and convective, both step paths, 30 steps with ground reflection and crossings of $h$; with the backward sign flip removed it breaks (about 5 s each) |
+| `test_removing_the_backward_sign_flip_breaks_reciprocity_quick` | quick companion (about 55 s on 8 threads): without the backward sign flip ≤ 30% of the cells agree (measured 5–8%, 3 seeds), with it ≥ 80% (89–95%) |
+| `test_backward_footprint_equals_forward_concentration` (slow, 5 cases) | **release check**, the plan's criteria; does not pass at the defaults (below) |
+| `test_reciprocity_fails_when_the_physics_is_broken` (slow, 3 companions) | the plan's criteria fail without the sign flip, without the interface rule, and with the drift stencil straddling $h$ |
+
+**The slow cases are an explicit release check** (`GLIDE_SLOW_TESTS=1`,
+about 15 minutes for all eight on 8 threads), not part of the default suite.
+A6 stays open against the plan's criterion: the results below are recorded as
+they are, and nothing was tuned to make them pass.
+
+Results at main's physics (this branch's backward steps are bit-identical to
+main d19755d; seed 0; `scripts/validation/reciprocity/run_cases.py`, outputs
+in `outputs/agents/A6/revise/main/`, measured). "Selected" is the cells each
+selection run keeps; "agree" the fraction of tested cells inside their range;
+"sum" backward over forward summed over the tested cells, with its 95% noise
+range.
+
+| Case (receptor row) | Selected bwd / fwd | Tested | Agree | Sum | Plan criteria |
+| --- | --- | --- | --- | --- | --- |
+| convective, 0–150 m | 153 / 144 | 144 | 0.882 | 1.0162 (−0.007, +0.006) | fail |
+| convective, $h$ to $h$ + 150 m | 179 / 160 | 160 | 0.938 | 0.9977 (−0.007, +0.008) | pass |
+| stable, 0–40 m | 116 / 108 | 108 | 0.769 | 0.9778 (±0.009) | fail |
+| stable, $h$ − 40 m to $h$ | 158 / 142 | 142 | 0.852 | 1.0113 (±0.010) | fail |
+| stable, $h$ to $h$ + 40 m | 113 / 64 | 64 | 0.922 | 1.0038 (±0.009) | pass, but blind to the boundary layer (below) |
+| companion: no backward sign flip (convective, 0–150 m) | 155 / 144 | 144 | 0.042 | 0.9947 | fail, as it must |
+| companion: no interface rule (convective, above $h$) | 171 / 185 | 171 | 0.175 | 0.2423 | fail, as it must |
+| companion: stencil straddling $h$ (convective, above $h$) | 182 / 32 | 32 | 0.844 | 0.9968 | fail, but only just (below) |
+
+With PR #75 merged in (decision 0030, the analytic drift gradient at the
+$\sigma_w$ floor; not merged into main or into this branch: a scratch merge of
+`agent/SF-sigma-floor-gradient` 505177c with this branch, same seeds, outputs
+in `outputs/agents/A6/revise/pr75/`, measured). The last column repeats each
+case's agreement over the cells the backward selection alone keeps (the
+procedure before the forward rule), main → PR #75.
+
+| Case (receptor row) | Selected bwd / fwd | Tested | Agree | Sum | Plan criteria | Agree, backward-selected cells |
+| --- | --- | --- | --- | --- | --- | --- |
+| convective, 0–150 m | 153 / 144 | 144 | 0.882 | 1.0162 (−0.007, +0.006) | fail | 0.876 → 0.876 |
+| convective, $h$ to $h$ + 150 m | 179 / 160 | 160 | 0.938 | 0.9977 (−0.007, +0.008) | pass | 0.927 → 0.927 |
+| stable, 0–40 m | 116 / 108 | 108 | 0.769 | 0.9778 (±0.009) | fail | 0.776 → 0.776 |
+| stable, $h$ − 40 m to $h$ | 159 / 141 | 141 | 0.894 | 1.0131 (±0.010) | fail | 0.861 → 0.899 |
+| stable, $h$ to $h$ + 40 m | 107 / 66 | 66 | 0.924 | 1.0013 (±0.009) | pass, blind to the boundary layer | 0.673 → 0.897 |
+| companions (no sign flip; no interface rule; straddling stencil) | as at main | | 0.042; 0.175; 0.844 | 0.9947; 0.2423; 0.9968 | fail, as they must | |
+
+The other three cases change only in the fifth digit of the sum. Near the stable
+top the fix moves the cells the defect touched towards agreement: for the
+receptor above $h$ the boundary-layer rows 7–8 go from backward/forward 1.31
+and 1.69 to 1.03 and 1.43, and for the receptor below $h$ the row above $h$
+from 0.86 to 0.95 (measured, the two `stable_*_h.npz`). With PR #75, three of
+the five cases still fail the plan's criteria; the stable just-below-$h$ case
+by a small margin (0.894 against 0.90, and its sum 1.3% high against a ±1.0%
+range). Its remaining disagreements are away from $h$: 9 of the 15 failing
+cells are in row 5 (200–240 m; backward/forward 1.10 there at both main and
+PR #75), whose cause is not identified (measured, `pr75/stable_below_h.npz`).
+
+What the failures are:
+
+- **Near the ground: the scheme's near-surface well-mixed error.** The
+  backward footprint summed over the tested cells is the total residence
+  time, which is conserved; the forward sum is the scheme's occupancy of the
+  receptor relative to its well-mixed share. A column started well mixed
+  holds 0.981 of its share in the lowest 150 m (convective, 16 sub-steps,
+  `outputs/agents/A6/explore/wm_dir_convective.json`, measured), and the
+  convective surface sum is 1.016–1.018 over three seeds (1.008 at
+  64 sub-steps, one seed; measured, `outputs/agents/A6/explore/`, before
+  the forward selection rule). We read this (argued) as the first-order
+  sub-step error of
+  [decision 0027](../dev/decisions/0027-fixed-substep-count.md); the
+  occupancy at 32 and 64 sub-steps (0.989, 0.988, one seed each) does not
+  resolve its convergence beyond 32.
+- **Near a stable boundary-layer top: the drift defect at the $\sigma_w$
+  floor.** In this stable column $\sigma_w = 1.3u_*(1 - z/h)$ reaches its
+  floor (10⁻³ m s⁻¹) 1.23 m below $h$ (derived), and the production ±1 m
+  drift stencil puts a drift inside that floor layer, where the floored
+  profile has none, and over-states it 5.5 times at its edge (measured,
+  `outputs/agents/A6/review/drift_profile.log`). This is the defect that
+  decision 0030 (PR #75, not yet merged) addresses: a defect of the
+  production drift, not a tall-tower question. At row level (cells
+  summed along the wind, 40,000 particles per row) the scheme's transfer
+  across $h$ is asymmetric: between each of the boundary-layer rows 6–8 and
+  the row above $h$, the downward residence exceeds the upward one by a factor
+  1.38–1.75 (±0.11–0.18) forward at 16 sub-steps, and 1.47–1.65 backward,
+  which is the same process; at 256 sub-steps the factor is 1.15–1.25
+  (±0.12–0.17). With PR #75 merged it is 0.99–1.21 forward and 1.00–1.25
+  backward at 16 sub-steps (measured; main from
+  `outputs/agents/A6/review/rowmat/`, PR #75 from
+  `outputs/agents/A6/revise/pr75/rowmat/`; summary in
+  `outputs/agents/A6/revise/logs/pr75_rowmat_summary.log`). The density
+  changes by under 4% across these rows (derived), and PR #75 expects about
+  1.15 at 16 sub-steps from decision 0027's sub-step error in its own column.
+  - With both selection rules the stable above-$h$ case passes at main, but
+    only because the forward rule removes every boundary-layer cell: rows
+    0–6 get too few of the 10,000 forward particles per source row, so only
+    rows 7–12 are tested. Of the 5 cells left in rows 7–8, 1 agrees, and
+    their backward/forward ratios summed by row are 1.31 and 1.69 (measured,
+    `outputs/agents/A6/revise/main/stable_above_h.npz`). At these counts the
+    cell test cannot see the defect for this receptor; the row matrices above,
+    and PR #75's transfer-symmetry gate, can.
+  - The earlier statement that the backward footprint in the boundary-layer
+    cells is "1.5–3 times" the forward concentration is not resolved by
+    particle noise in rows 0–4: those cells receive a few to a few tens of
+    forward particles each, and two independent forward runs differ by up to
+    a factor 2.8 there (measured, `outputs/agents/A6/review/null_stable_above_h.json`).
+  - At main the stable just-below-$h$ case fails mainly in rows 5 and 10
+    (4 of 13 and 9 of 15 tested cells agree; measured,
+    `main/stable_below_h.npz`); PR #75 fixes row 10 but not row 5 (above).
+- **The forward rule blinds the test where forward transfer is suppressed.**
+  A cell is dropped when too few forward particles reach the receptor from
+  it, which is exactly what a suppressed upward transfer does. The stable
+  above-$h$ case above is one example. The straddling-stencil companion is
+  another: the forward rule keeps only rows 10–11 (32 cells), so it fails
+  with 0.844 of the cells agreeing; on the 182 backward-selected cells 0.148
+  agree (measured, `teeth_straddling_stencil_convective_above_h.npz`;
+  0.148 and sum 1.126 before the forward rule, `outputs/agents/A6/cases/`).
+  Restoring coverage needs more forward particles from the boundary-layer
+  rows; that is a follow-up, not done here.
+- **The 90% criterion is tight for this procedure.** Comparing two
+  independent runs of the *same* direction (an exact null) through the same
+  backward selection and bootstrap gave 92.2% and 95.0% (forward) and 92.7% and
+  96.6% (backward) of the cells inside their ranges (convective, receptor above
+  $h$, two repeats, `outputs/agents/A6/explore/nullcal_conv10.json`): the
+  cells of a row share their forward particles, so the fraction varies by
+  several points between repeats, and the bootstrap may under-cover a little.
+  A correct model therefore fails the 90% criterion now and then at these
+  counts.
 
 ### A note on scope
 
@@ -205,10 +375,16 @@ degrades to eager rather than killing the run.
   well-mixed-preserving; whether it moves the *right amount* of mass is untested
   against a reference.
 
-**One deferred test.** A forward/backward reciprocity check (run a
-source–receptor pair both ways and require agreement) would test the backward
-formulation itself, which nothing else does directly. It is planned as queue
-task A6 ([docs/validation-plan.md](validation-plan.md), Tier 0).
+**Reciprocity at the defaults.** The forward–backward reciprocity test (§3,
+task A6) confirms the backward *sign construction* exactly (pathwise, bit for
+bit) and through its companions. Beyond the signs it tests the transfer
+symmetry of the scheme both directions share, and at the shipped 16 sub-steps
+that does not pass the validation plan's criteria in every case: near the
+ground by the scheme's near-surface well-mixed error (about 2%), and near a
+stable boundary-layer top by the drift defect at the $\sigma_w$ floor that
+decision 0030 (PR #75) addresses. The slow cases are a release check; A6 is
+open (§3). A moving-$h$, time-varying case is still needed to test the
+backward formulation itself.
 
 **Sequencing caveat.** Both the terrain-following coordinate and the move to
 native model levels change footprint magnitudes *everywhere*, not only over
@@ -550,7 +726,9 @@ rules of §6 once:
   stability regimes with the drift switched off as a companion, the analytic
   plume, the diffusion limit, a convergence preview (time step, sub-step
   target, particle count; the full study is task A5) and terrain. The
-  reciprocity figure waits for the forward mode (task A6).
+  reciprocity figure draws the slow reciprocity cases of §3 and the
+  sign-flip companion (task A6; about 15 minutes on 8 threads, so it is
+  best made with `scripts/validation/reciprocity/run_cases.py --figure`).
 - `gallery.py`: writes `docs/validation/gallery.md`, keyed by physics tag, with
   an index that has one column per tag so a figure can be compared across
   versions, and lists the figures still pending.

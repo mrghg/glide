@@ -14,7 +14,7 @@ expose them, so a figure cannot silently drift from what CI checks.
 | ``diffusion_limit`` | ``tests/test_diffusion_pde.py`` |
 | ``convergence`` | ``tests/test_dispersion_analytic.py`` (rotation, Euler bias with dt), particle count, Hanna ``n_substeps`` |
 | ``terrain`` | ``tests/test_terrain_transport.py`` |
-| ``reciprocity`` | pending: needs the forward-in-time mode (validation plan §2, Tier 0) |
+| ``reciprocity`` | ``tests/test_reciprocity.py`` (its cases and the sign-flip companion) |
 
 All cases run on CPU in float64 (float32 for the production Hanna path, as in
 its test); the whole set takes about eight minutes on 8 threads and under 0.5 GB.
@@ -55,12 +55,7 @@ FIGURES: list[FigureSpec] = [
     FigureSpec("well_mixed", "Well-mixed condition", "Well-mixed test"),
     FigureSpec("analytic_plume", "Analytic plume footprint", "Analytic plume"),
     FigureSpec("diffusion_limit", "Diffusion limit", "Diffusion limit"),
-    FigureSpec(
-        "reciprocity",
-        "Forward–backward reciprocity",
-        "Reciprocity",
-        status="pending: needs the forward-in-time mode (validation plan §2, Tier 0)",
-    ),
+    FigureSpec("reciprocity", "Forward–backward reciprocity", "Reciprocity"),
     FigureSpec("convergence", "Convergence", "Convergence"),
     FigureSpec("terrain", "Terrain-following transport", "Terrain"),
 ]
@@ -918,6 +913,88 @@ def terrain(out_dir: Path) -> Path:
     return _finish(fig, out_dir, spec, cfg, caption, metrics, "tests/test_terrain_transport.py")
 
 
+# --------------------------------------------------------------------------- reciprocity
+
+
+def reciprocity(out_dir: Path) -> Path:
+    import test_reciprocity as tr
+
+    cases = list(tr.CASES.values())
+    results = [tr.reciprocity(c) for c in cases]
+    teeth = tr.reciprocity(tr.CASES[tr.SIGN_TEETH_CASE], backward_variant="no_backward_sign_flip")
+    cfg = dict(
+        cases={k: vars(c) for k, c in tr.CASES.items()},
+        regimes=tr.REGIMES,
+        met="reciprocity_met: steady, horizontally uniform; theta const in BL, N=0.015 above; "
+        "hydrostatic density; westerly wind 3 m/s at the ground to 6 m/s at h",
+        sign_teeth_case=tr.SIGN_TEETH_CASE,
+        n_boot=results[0].n_boot,
+    )
+    spec = _spec("reciprocity")
+    fig, axes = core.new_figure(3, nrows=len(cases), width=4.3, height=3.2)
+    metrics = {}
+    for row_axes, (name, res) in zip(axes, zip(tr.CASES, results)):
+        a_f, a_b, a_s = row_axes
+        grid = res.case.grid
+        x = np.arange(grid.k_min, grid.k_max + 1) * grid.dx_m / 1000.0
+        zc = 0.5 * (np.asarray(grid.z_edges[1:]) + np.asarray(grid.z_edges[:-1]))
+        norm = core.footprint_norm(res.forward, res.backward, decades=3.0)
+        units = "s m³ kg⁻¹"
+        z_r = grid.z_edges[res.case.receptor_row : res.case.receptor_row + 2]
+        core.footprint_panel(a_f, x, zc, res.forward, norm, units=units,
+                             title=f"forward: receptor {z_r[0]:.0f}–{z_r[1]:.0f} m")  # fmt: skip
+        core.footprint_panel(
+            a_b, x, zc, res.backward, norm, units=units, title="backward footprint"
+        )
+        h = tr.REGIMES[res.case.regime][0]
+        for ax in (a_f, a_b):
+            ax.axhline(h, color=style.INK2, ls=":", lw=1.0)
+            ax.contour(x, zc, res.tested.astype(float), levels=[0.5], colors=style.INK2,
+                       linewidths=0.6)  # fmt: skip
+            ax.set_xlabel("source distance upwind (km)")
+        a_f.set_ylabel(f"{res.case.regime}\nsource height (m)")
+        t = res.tested
+        half = 0.5 * (res.hi - res.lo)
+        a_s.errorbar(res.forward[t], res.backward[t], yerr=half[t], fmt="o", ms=2.5,
+                     color=style.GLIDE, ecolor=style.GLIDE, elinewidth=0.6, alpha=0.8,
+                     label=f"tested cells ({t.sum()}), 95% noise range")  # fmt: skip
+        if name == tr.SIGN_TEETH_CASE:
+            tt = teeth.tested
+            a_s.plot(teeth.forward[tt], teeth.backward[tt], "x", ms=3, color=style.REFERENCE_MODEL,
+                     label="backward drift sign flip removed")  # fmt: skip
+            metrics[f"{name}_sign_teeth_frac_agree"] = teeth.frac_agree
+            metrics[f"{name}_sign_teeth_sum_ratio"] = teeth.sum_ratio
+        lim = [norm.vmin, norm.vmax * 1.5]
+        a_s.plot(lim, lim, color=style.EXACT, ls="--", lw=1.2, label="1:1")
+        a_s.set_xscale("log")
+        a_s.set_yscale("log")
+        a_s.set_xlim(lim)
+        a_s.set_ylim(lim)
+        a_s.set_xlabel("forward concentration")
+        a_s.set_ylabel("backward footprint")
+        a_s.set_title(f"agree {res.frac_agree:.0%} (≥ 90%); sum ratio {res.sum_ratio:.4f}",
+                      fontsize=9)  # fmt: skip
+        a_s.legend(loc="upper left", fontsize=7)
+        core.recessive_grid(a_s, "both")
+        for k, v in res.summary().items():
+            metrics[f"{name}_{k}"] = v
+    fig.subplots_adjust(wspace=0.35, hspace=0.45)
+    caption = (
+        "Left: the forward model's time-integrated concentration in the receptor cell (a row "
+        "of the (x, z) section, 3 km long) from a unit source spread over each cell, against "
+        "the source cell's distance upwind and height. Middle: the backward footprint of the "
+        "same receptor, released uniformly over its cell, both counting dt/ρ for 2 h. Both "
+        "are the production Hanna scheme (16 sub-steps, ground reflection, the "
+        "boundary-layer-top interface; dotted line h), forward with the drift and the "
+        "displacement signs reversed. Outlined: the cells tested, those at least 50 "
+        "particles of a separate backward run pass through. Right: backward against forward "
+        "for the tested cells with each cell's 95% particle-noise range of the difference "
+        "(bootstrap). The orange crosses repeat one case with the backward drift's sign flip "
+        "removed."
+    )
+    return _finish(fig, out_dir, spec, cfg, caption, metrics, "tests/test_reciprocity.py")
+
+
 BUILDERS = {
     "taylor_dispersion": taylor_dispersion,
     "well_mixed": well_mixed,
@@ -925,4 +1002,5 @@ BUILDERS = {
     "diffusion_limit": diffusion_limit,
     "convergence": convergence,
     "terrain": terrain,
+    "reciprocity": reciprocity,
 }
