@@ -4,8 +4,6 @@
 batch:
   max_releases_per_batch: 72
 convection:
-  emanuel:
-    closure_c: 0.03
   scheme: emanuel_reduced
 io:
   zarr_store: data/era5/EUROPE_*.zarr

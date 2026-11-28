@@ -1556,6 +1556,34 @@ def _physics_warnings(scheme: TurbulenceScheme) -> list[str]:
     return warnings
 
 
+def _convection_option_warnings(cfg: RunConfig) -> list[str]:
+    """Messages for convection options set in the config that the selected
+    closure or application ignores (decision 0033), for
+    ``runtime.physics_warnings``. Warned, not refused, so old configs still run.
+
+    ``closure_c`` and ``updraft_w_max_m_s`` act only with ``closure:
+    cape_velocity``; ``n_substeps`` only with ``application: substeps``.
+    """
+
+    if cfg.convection.scheme != "emanuel_reduced":
+        return []
+    e = cfg.convection.emanuel
+    given = e.model_fields_set
+    warnings: list[str] = []
+    for name in ("closure_c", "updraft_w_max_m_s"):
+        if name in given and e.closure != "cape_velocity":
+            warnings.append(
+                f"convection.emanuel.{name} is set but ignored: it applies only to "
+                f"closure 'cape_velocity', and the closure is {e.closure!r} (decision 0033)."
+            )
+    if "n_substeps" in given and e.application != "substeps":
+        warnings.append(
+            "convection.emanuel.n_substeps is set but ignored: it applies only to "
+            f"application 'substeps', and the application is {e.application!r}."
+        )
+    return warnings
+
+
 class _ExceedanceTally:
     """Run totals of the turbulence sub-steps that are long compared with T_Lw.
 
@@ -1689,6 +1717,9 @@ def _run(
         scheme = get_scheme(cfg.turbulence.scheme, **_scheme_kwargs(cfg))
     _log_substep_length(scheme, sim.dt_seconds)
     physics_warnings = _physics_warnings(scheme)
+    for message in _convection_option_warnings(cfg):
+        LOGGER.warning(message)
+        physics_warnings.append(message)
     if convection_scheme is None:
         convection_scheme = get_convection_scheme(
             cfg.convection.scheme,

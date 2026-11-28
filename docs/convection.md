@@ -222,8 +222,9 @@ where both are positive the correlation is 0.95 and the median ratio is 1.01–1
 uses the steady state, a function of the meteorology alone, because a
 backward model visits the hours in reverse (decision 0033).
 
-The transport per unit time is $M_b$. It no longer depends on the vertical grid
-or the met cadence, as it did under the closure below (§6).
+The transport per unit time is $M_b$. Per firing column it no longer depends on the
+vertical grid, nor (on the same meteorology) on the met cadence, as it did under
+the closure below (§6).
 
 **The closure before decision 0033** (`closure: cape_velocity`, kept for A/B) was
 
@@ -333,8 +334,9 @@ Accuracy against `scipy.linalg.expm` is ≤ 10⁻¹¹ up to a Courant number (Δ
 fractional exchange rate of a layer) of about 1,700 on 23–137 levels. Columns
 above the squaring cap of 2,048 are counted in `runtime.convection` of
 run_metadata.json and logged; the buoyancy closure gives at most 5.6 on ERA5
-over Europe. Because $\exp(3\Delta t\,Q) = \exp(\Delta t\,Q)^3$, the transport
-does not depend on the met cadence. Because no layer's mass caps it, it does not
+over Europe. Because $\exp(3\Delta t\,Q) = \exp(\Delta t\,Q)^3$, on the same
+meteorology the transport does not depend on the met cadence (a coarser cadence
+still samples a changing atmosphere less often). Because no layer's mass caps it, it does not
 depend on the vertical grid either: per firing column the median changes by
 less than 20% between 23, 40 and 80 levels, against ×2 per doubling before.
 
@@ -466,8 +468,11 @@ convection at all.
 which apply only to it) and `application: cfl_scaled`. These reproduce the
 earlier output bit for bit. `application: substeps` with `n_substeps` applies
 n CFL-capped transfers per interval instead; it is approximate and is kept for
-comparison. A config that sets only `closure_c` (as the shipped examples do)
-uses the new closure, because `closure_c` applies only to `cape_velocity`.
+comparison. `closure_c` and `updraft_w_max_m_s` apply only to
+`cape_velocity`, and `n_substeps` only to `substeps`. Setting one while another
+closure or application is selected is not an error, but the run logs a warning
+and records it in `runtime.physics_warnings` of run_metadata.json. The shipped
+configs no longer set `closure_c`.
 
 **What to expect when you turn it on:** more particles in the free troposphere at
 long backward times, and a more dispersed surface footprint (convective lofting
