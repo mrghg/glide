@@ -61,6 +61,15 @@ ABOVE_BL_T_L_S = 100.0
 
 # Surface-layer fraction of BLH (FLEXPART default)
 SURFACE_LAYER_FRACTION = 0.1
+# Logged once per run, and recorded in run_metadata.json, when the opt-in
+# surface-layer override is on (decision 0028, "Other boundaries").
+SURFACE_LAYER_OVERRIDE_WARNING = (
+    "turbulence.surface_layer_override is on: this legacy Monin-Obukhov treatment below "
+    "0.1 h is kept for A/B comparisons only. sigma_w jumps at the 0.1 h seam and the "
+    "well-mixed drift's finite difference straddles it, the defect decision 0028 removed "
+    "at h, so the model is not well-mixed consistent at 0.1 h. Do not use it for "
+    "production footprints (docs/turbulence.md section 8)."
+)
 
 # Numerical floors to avoid degenerate values at z=0 / very low ustar / etc.
 SIGMA_MIN_M_S = 1e-3
