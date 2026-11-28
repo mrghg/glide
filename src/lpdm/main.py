@@ -19,7 +19,7 @@ import resource
 import sys
 import time
 from collections import OrderedDict
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -29,7 +29,12 @@ import numpy as np
 import torch
 
 from lpdm.air_density import DENSITY_WEIGHTING_ATTRS, ParticleDryAirDensity
-from lpdm.config import N_SUBSTEPS_DEFAULT, ConcreteRelease, RunConfig
+from lpdm.config import (
+    MPS_FLOAT64_ACCUMULATION_MESSAGE,
+    N_SUBSTEPS_DEFAULT,
+    ConcreteRelease,
+    RunConfig,
+)
 from lpdm.convection import (
     ConvectionScheme,
 )
@@ -217,12 +222,39 @@ def _density_weighting_met_keys(cfg: RunConfig) -> tuple[str, ...]:
     return ()
 
 
+DEPOSITION_POSITION_DOC = {
+    "endpoint": (
+        "each step's residence is counted at the particle's position at the end of the "
+        "step (after advection, turbulence and convection)"
+    ),
+    "trapezoid": (
+        "each step's residence is split in two halves: dt/2 counted at the particle's "
+        "position at the start of the step and dt/2 at its position at the end (after "
+        "advection, turbulence and convection); each half is split between time-ago bins "
+        "by its overlap with them and, with dry-air weighting, uses the density at its own "
+        "position and time"
+    ),
+}
+
+
+def _deposition_attrs(cfg: RunConfig) -> dict[str, str]:
+    """Deposition settings for the footprint store attributes (task A2)."""
+
+    position = cfg.output_grid.deposition.position
+    return {
+        "deposition_position": position,
+        "deposition_position_description": DEPOSITION_POSITION_DOC[position],
+    }
+
+
 def _footprint_units_doc(cfg: RunConfig) -> dict[str, object]:
     """`footprint_units` block of run_metadata.json for the run's weighting."""
 
     weighting = cfg.output_grid.density_weighting
     doc: dict[str, object] = dict(FOOTPRINT_UNITS_DOC)
     doc.update(DENSITY_WEIGHTING_ATTRS[weighting])
+    doc.update(_deposition_attrs(cfg))
+    doc["accumulation_dtype"] = cfg.output_grid.accumulation_dtype
     if weighting == "dry_air":
         doc["value"] = (
             "Σ over active particles in cell of (weight_i × dt_step_seconds / rho_d,i), "
@@ -255,6 +287,18 @@ def _resolve_device(name: str) -> str:
             f"device={name!r} requested but torch.backends.mps.is_available() is False."
         )
     return name
+
+
+def _check_device_dtypes(cfg: RunConfig, device_str: str) -> None:
+    """Refuse a configuration whose dtypes the resolved device cannot allocate.
+
+    The config validator catches an explicit ``device: mps``; this catches
+    ``device: auto`` resolving to MPS, which has no float64 tensors, before any
+    met or particle work is done.
+    """
+
+    if torch.device(device_str).type == "mps" and cfg.output_grid.accumulation_dtype == "float64":
+        raise PreflightValidationError(MPS_FLOAT64_ACCUMULATION_MESSAGE)
 
 
 def _current_rss_bytes() -> int | None:
@@ -365,13 +409,41 @@ def _footprint_time_bin_count(cfg: RunConfig, releases: Sequence[ConcreteRelease
     adds enough bins for the longest release window, so no particle's resolved
     travel falls off the end. One bin stays one bin: the time-integrated
     footprint.
+
+    With `trapezoid` deposition the axis also covers the counted ages exactly. A
+    particle is counted from the step boundary at or below its release, for the
+    run length, so when a release window starts above the batch's step grid its
+    oldest counted ages run past the length plus the duration by that offset
+    (less than one step); trapezoid splits the step's ages exactly
+    (`_age_bin_pieces`), so the axis adds the largest such offset. `endpoint` bins
+    each step by its starting age, which stays inside the axis, so its axis is
+    unchanged.
     """
 
     n_time_bins = cfg.output_grid.n_time_bins
     if n_time_bins == 1:
         return 1
     longest_window_s = max(float(r.duration_seconds) for r in releases)
+    if cfg.output_grid.deposition.position == "trapezoid":
+        longest_window_s += _largest_start_offset_from_step_grid(cfg)
     return n_time_bins + math.ceil(longest_window_s / cfg.output_grid.time_bin_seconds)
+
+
+def _largest_start_offset_from_step_grid(cfg: RunConfig) -> float:
+    """Largest distance (s) of a release window's start above the step grid of its
+    batch. The runtime's steps end on the batch terminus (its earliest release start
+    minus the run length) plus whole steps; 0 when every start is on that grid."""
+
+    dt_s = float(cfg.simulation.dt_seconds)
+    largest = 0.0
+    for batch in cfg.expand_to_batches():
+        terminus = min(r.release_time for r in batch.releases) - timedelta(
+            seconds=cfg.simulation.length_seconds
+        )
+        for rel in batch.releases:
+            off = (rel.release_time - terminus).total_seconds() % dt_s
+            largest = max(largest, 0.0 if min(off, dt_s - off) < 1e-3 else off)
+    return largest
 
 
 def _build_footprint_dataset_metadata(
@@ -445,7 +517,10 @@ def _build_footprint_dataset_metadata(
         )
     # The weighting and units of the values (decision 0022), for downstream code
     # (e.g. `comparison.to_stilt_surface_footprint`) to read, not assume.
-    return coords, dict(DENSITY_WEIGHTING_ATTRS[cfg.output_grid.density_weighting])
+    return coords, {
+        **DENSITY_WEIGHTING_ATTRS[cfg.output_grid.density_weighting],
+        **_deposition_attrs(cfg),
+    }
 
 
 def _validate_meteorology_space_coverage(reader: MetReader, cfg: RunConfig) -> None:
@@ -985,6 +1060,178 @@ def _advection_alpha_wind_mean(
     return alpha, wind_mean
 
 
+def _time_ago_index(elapsed_s: torch.Tensor, time_bin_s: float, n_time_bins: int) -> torch.Tensor:
+    """Per-particle time-ago bin of an age (seconds since its release window's end).
+
+    Single-bin footprint = time-integrated: lump ALL residence ages into bin 0.
+    Multi-bin: leave out-of-range ages for the gridder to DROP (clamping them into
+    the last bin would contradict time_ago_end_hours).
+    """
+
+    t_idx = (elapsed_s / time_bin_s).floor().to(torch.int64)
+    if n_time_bins == 1:
+        t_idx.clamp_(max=0)
+    return t_idx
+
+
+def _time_weight(met_window: HourlyMetTensors, t_eval_s: float) -> float:
+    """Time-interpolation weight of the window end at ``t_eval_s`` (Unix seconds).
+
+    The same formula as ``_advection_alpha_wind_mean``, which evaluates it at the
+    step's midpoint; the trapezoid deposit evaluates it at each end of the step.
+    """
+
+    t_start_s = met_window.metadata.time_start.timestamp()
+    t_end_s = met_window.metadata.time_end.timestamp()
+    return max(0.0, min(1.0, (t_eval_s - t_start_s) / max(1.0, float(t_end_s - t_start_s))))
+
+
+# Ticks per second of the exact age arithmetic in `_age_bin_pieces`: 2**20 (about
+# 0.95 us). A power of two, so a float32 age converts to ticks by an exact scaling,
+# and every float32 age >= 8 s (whose spacing is >= 2**-20 s) is a whole number of
+# ticks. int64 ticks reach 2**43 s, far beyond any run.
+_AGE_TICKS_PER_S = 1 << 20
+
+
+def _seconds_to_ticks(seconds: float) -> int:
+    """A host-side length (s) in `_AGE_TICKS_PER_S` ticks, to the nearest tick."""
+
+    return round(seconds * _AGE_TICKS_PER_S)
+
+
+def _age_bin_pieces(
+    age_s: torch.Tensor,
+    length_s: float,
+    time_bin_s: float,
+    n_time_bins: int,
+    dtype: torch.dtype = torch.float32,
+) -> Iterator[tuple[torch.Tensor, torch.Tensor | float]]:
+    """Split each particle's age interval [age, age + length) by the time-ago bins.
+
+    Returns ``(t_idx, seconds)`` pieces whose seconds sum to ``length_s`` for every
+    particle: piece j is bin floor(age / width) + j, with the overlap of the
+    interval with that bin. The number of pieces, ceil(length / width) + 1 (two
+    whenever a bin is at least as wide as the interval), depends only on the step
+    length and the configured width, never on the data, so the shapes are static
+    and there is no host sync. Pieces that do not overlap carry 0 s (an exact
+    no-op in the scatter). With one bin (time-integrated) every age is bin 0 and
+    the interval is one piece. Pieces are yielded one at a time, so only one
+    piece's temporaries are alive while it is scattered.
+
+    The overlaps are computed exactly in int64 ticks of 2**-20 s
+    (`_AGE_TICKS_PER_S`), never in float64, which Apple's MPS backend cannot
+    allocate: the float32 age is scaled by 2**20 (exact) and rounded to int64,
+    which is exact for every age >= 8 s and within 2**-21 s below; ``length_s``
+    and ``time_bin_s`` are host floats rounded to the nearest tick (exact for the
+    whole and half seconds the config produces). Each piece's seconds are its
+    ticks converted to ``dtype`` (the grid's) and scaled by 2**-20, which is one
+    correctly rounded conversion of the exact overlap, so they equal the float64
+    computation rounded to ``dtype`` whenever that computation was exact.
+    """
+
+    if n_time_bins == 1:
+        yield _time_ago_index(age_s, time_bin_s, 1), length_s
+        return
+    width = _seconds_to_ticks(time_bin_s)
+    length = _seconds_to_ticks(length_s)
+    lo = torch.round(age_s * float(_AGE_TICKS_PER_S)).to(torch.int64)
+    hi = lo + length
+    first = torch.div(lo, width, rounding_mode="floor")
+    for j in range(-(-length // width) + 1):
+        bin_lo = (first + j) * width
+        overlap = (torch.minimum(hi, bin_lo + width) - torch.maximum(lo, bin_lo)).clamp_(min=0)
+        yield first + j, overlap.to(dtype) * (1.0 / _AGE_TICKS_PER_S)
+
+
+def _deposit_step(
+    gridder: FootprintGridder,
+    *,
+    position: str,
+    start_xyz: torch.Tensor | None,
+    end_xyz: torch.Tensor,
+    active_mask: torch.Tensor,
+    weights: torch.Tensor,
+    elapsed_s: torch.Tensor,
+    t_idx: torch.Tensor,
+    time_bin_s: float,
+    release_idx: torch.Tensor,
+    delta_s: float,
+    t_cursor: datetime,
+    particle_density: ParticleDryAirDensity | None,
+    met_window: HourlyMetTensors,
+    t_alpha: float,
+    engine: GPUEngine,
+) -> None:
+    """Count one backward step's residence, (t_cursor - delta_s, t_cursor], in the grid
+    (task A2, `output_grid.deposition.position`; docs/physics.md §7).
+
+    ``elapsed_s`` is each particle's age e at the step's start (``t_cursor``), counted
+    from its own release window's end, and ``t_idx`` its time-ago bin. The step
+    covers the ages [e, e + delta_s). Inactive rows are never counted (the gridder
+    masks them, and escaped particles are no longer active).
+
+    * ``endpoint``: all of ``delta_s`` at ``end_xyz``, in bin ``t_idx``, with the
+      density at ``end_xyz`` and the step's time weight ``t_alpha``. A step that
+      straddles a bin edge is counted wholly in the bin of its starting age (the
+      long-standing behaviour, kept).
+    * ``trapezoid``: ``delta_s / 2`` at ``start_xyz``, standing for the ages
+      [e, e + delta_s/2), and ``delta_s / 2`` at ``end_xyz``, for
+      [e + delta_s/2, e + delta_s). Each half is split by its overlap with the
+      time-ago bins (`_age_bin_pieces`), each piece keeping that half's position and
+      density, so a stationary particle's residence per bin is exact whatever the
+      alignment of release windows, steps and bins. With dry-air weighting each
+      half divides by the density at its own position and time (the start at
+      ``t_cursor``, the end at ``t_cursor - delta_s``), in the step's met window. A
+      particle's first step is counted half at its release position; a particle
+      that leaves the met domain in a step keeps the start half (the end half is
+      dropped by the gridder if outside the output grid, as endpoint's is).
+    """
+
+    if position == "trapezoid":
+        half_s = 0.5 * delta_s
+        t_start_s = t_cursor.timestamp()
+        halves = (
+            (start_xyz, elapsed_s, t_start_s),
+            (end_xyz, elapsed_s + half_s, t_start_s - delta_s),
+        )
+        for xyz, age_s, t_eval_s in halves:
+            inv_density = (
+                None
+                if particle_density is None
+                else particle_density.inverse_density(
+                    xyz, met_window, _time_weight(met_window, t_eval_s), engine
+                )
+            )
+            pieces = _age_bin_pieces(age_s, half_s, time_bin_s, gridder.n_t, gridder.dtype)
+            for piece_idx, piece_s in pieces:
+                gridder.accumulate(
+                    particles=xyz,
+                    active_mask=active_mask,
+                    weights=weights,
+                    t_idx=piece_idx,
+                    release_idx=release_idx,
+                    dt_seconds=piece_s,
+                    inv_density=inv_density,
+                )
+        return
+
+    deposit_xyz = end_xyz
+    inv_density = (
+        None
+        if particle_density is None
+        else particle_density.inverse_density(deposit_xyz, met_window, t_alpha, engine)
+    )
+    gridder.accumulate(
+        particles=deposit_xyz,
+        active_mask=active_mask,
+        weights=weights,
+        t_idx=t_idx,
+        release_idx=release_idx,
+        dt_seconds=delta_s,
+        inv_density=inv_density,
+    )
+
+
 def _advect_active_particles(
     engine: GPUEngine,
     device: torch.device,
@@ -1394,6 +1641,7 @@ def _run(
     mem = cfg.memory
     out_grid = cfg.output_grid
     device_str = _resolve_device(sim.device)
+    _check_device_dtypes(cfg, device_str)
 
     if scheme is None:
         scheme = get_scheme(cfg.turbulence.scheme, **_scheme_kwargs(cfg))
@@ -1484,6 +1732,17 @@ def _run(
             compile_core=use_static and bool(getattr(engine, "_compile_requested", False)),
         )
     LOGGER.info("footprint density weighting: %s", cfg.output_grid.density_weighting)
+    # Where each step's residence is counted (task A2, decision 0029): the endpoint
+    # (default) or half at each end of the step (`_deposit_step`). The runtime keeps
+    # the start, outside the captured step, so the step's graph and its outputs are
+    # the same for both.
+    deposition_position = cfg.output_grid.deposition.position
+    accumulation_dtype = (
+        torch.float64 if cfg.output_grid.accumulation_dtype == "float64" else torch.float32
+    )
+    LOGGER.info("footprint accumulation dtype: %s", cfg.output_grid.accumulation_dtype)
+    keep_step_start = deposition_position != "endpoint"
+    LOGGER.info("footprint deposition position: %s", cfg.output_grid.deposition.position)
     if use_static:
         LOGGER.info("runtime: static-shape per-step path (full-set, mask-gated)")
     _start_mem_history(device)
@@ -1614,7 +1873,7 @@ def _run(
             n_x=out_grid.n_x,
             n_releases=len(batch.releases),
             device=device,
-            dtype=torch.float32,
+            dtype=accumulation_dtype,
         )
 
         if not footprint_store_created:
@@ -1741,6 +2000,8 @@ def _run(
                     t_alpha, wind_mean = _advection_alpha_wind_mean(
                         met_window, t_cursor, delta_s, device, particles.dtype, wind_mean_cache
                     )
+                # Start-of-step positions (a copy, so nothing below can alias them).
+                start_xyz = particles[:, :3].clone() if keep_step_start else None
                 if not scheme.step_includes_advection(engine):
                     with phase_timer.phase("advect"):
                         advected_full = _advect_active_particles(
@@ -1780,28 +2041,25 @@ def _run(
                     last_convection_bracket_start = bracket_start
                 with phase_timer.phase("mask_liveness"):
                     elapsed_s = (release_window_end_offsets_s - cursor_offset_s).clamp_(min=0.0)
-                    t_idx = (elapsed_s / time_bin_s).floor().to(torch.int64)
-                    # Single-bin footprint = time-integrated: lump ALL residence ages into
-                    # bin 0. Multi-bin: leave out-of-range ages for the gridder to DROP
-                    # (clamping them into the last bin would contradict time_ago_end_hours).
-                    if gridder.n_t == 1:
-                        t_idx.clamp_(max=0)
+                    t_idx = _time_ago_index(elapsed_s, time_bin_s, gridder.n_t)
                 with phase_timer.phase("gridder"):
-                    inv_density = (
-                        None
-                        if particle_density is None
-                        else particle_density.inverse_density(
-                            particles[:, :3], met_window, t_alpha, engine
-                        )
-                    )
-                    gridder.accumulate(
-                        particles=particles[:, :3],
+                    _deposit_step(
+                        gridder,
+                        position=deposition_position,
+                        start_xyz=start_xyz,
+                        end_xyz=particles[:, :3],
                         active_mask=active_mask,
                         weights=particles[:, 3],
+                        elapsed_s=elapsed_s,
                         t_idx=t_idx,
+                        time_bin_s=time_bin_s,
                         release_idx=release_idx_local,
-                        dt_seconds=delta_s,
-                        inv_density=inv_density,
+                        delta_s=delta_s,
+                        t_cursor=t_cursor,
+                        particle_density=particle_density,
+                        met_window=met_window,
+                        t_alpha=t_alpha,
+                        engine=engine,
                     )
                 with phase_timer.phase("mask_liveness"):
                     newly_escaped = active_mask & ~_within_met_domain(particles, cfg)
@@ -1822,6 +2080,8 @@ def _run(
                         phase_timer.tick_fetch()
                     with phase_timer.phase("exceedance_poll"):
                         exceedance.poll(met_window.metadata.time_start)
+                    # Start-of-step positions; `particles` is updated in place below.
+                    start_xyz = particles[:, :3].clone() if keep_step_start else None
                     with phase_timer.phase("advect"):
                         advected_active, t_alpha, wind_mean = _advect_active_particles(
                             engine,
@@ -1872,29 +2132,25 @@ def _run(
                         # Per-particle time-ago bin: each particle measures elapsed time
                         # from *its own* release window's end (stage 3 semantics).
                         elapsed_s = (release_window_end_offsets_s - cursor_offset_s).clamp_(min=0.0)
-                        t_idx = (elapsed_s / time_bin_s).floor().to(torch.int64)
-                        # Single-bin footprint = time-integrated: lump ALL residence ages
-                        # into bin 0. Multi-bin: leave out-of-range ages for the gridder to
-                        # DROP (clamping them into the last bin would contradict
-                        # time_ago_end_hours).
-                        if gridder.n_t == 1:
-                            t_idx.clamp_(max=0)
+                        t_idx = _time_ago_index(elapsed_s, time_bin_s, gridder.n_t)
                     with phase_timer.phase("gridder"):
-                        inv_density = (
-                            None
-                            if particle_density is None
-                            else particle_density.inverse_density(
-                                particles[:, :3], met_window, t_alpha, engine
-                            )
-                        )
-                        gridder.accumulate(
-                            particles=particles[:, :3],
+                        _deposit_step(
+                            gridder,
+                            position=deposition_position,
+                            start_xyz=start_xyz,
+                            end_xyz=particles[:, :3],
                             active_mask=active_mask,
                             weights=particles[:, 3],
+                            elapsed_s=elapsed_s,
                             t_idx=t_idx,
+                            time_bin_s=time_bin_s,
                             release_idx=release_idx_local,
-                            dt_seconds=delta_s,
-                            inv_density=inv_density,
+                            delta_s=delta_s,
+                            t_cursor=t_cursor,
+                            particle_density=particle_density,
+                            met_window=met_window,
+                            t_alpha=t_alpha,
+                            engine=engine,
                         )
 
                 # Kill particles that left met_domain this step (drop-and-count). They
@@ -2013,7 +2269,8 @@ def _run(
         with phase_timer.phase("output_write"):
             writer.write_footprint_region(
                 outputs.footprints,
-                gridder.tensor,
+                # The store is float32; a float64 accumulator is rounded once here.
+                gridder.tensor.to(torch.float32),
                 release_start=batch_release_offset,
                 release_stop=batch_release_offset + len(batch.releases),
             )

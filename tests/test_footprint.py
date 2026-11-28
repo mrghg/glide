@@ -293,6 +293,43 @@ def test_non_uniform_z_edges_assign_correct_bins() -> None:
     assert g.tensor.sum().item() == 3.0
 
 
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_vertical_layers_are_half_open_with_the_ground_in_the_first(dtype) -> None:
+    """Layers are [lo, hi), as the horizontal cells and time-ago bins are: a particle
+    on the ground (z = 0) is in the first layer (it used to be dropped, A2 review of
+    PR #66), one exactly on an interior edge is in the layer above, and one exactly
+    at the top edge is outside the grid, like one at exactly lon_max."""
+
+    g = FootprintGridder(
+        lon_bounds=(-1.0, 1.0),
+        lat_bounds=(-1.0, 1.0),
+        z_edges_m=(0.0, 40.0, 1000.0, 5000.0),
+        n_time_bins=1,
+        n_y=1,
+        n_x=1,
+        device="cpu",
+        dtype=dtype,
+    )
+    heights = [0.0, 39.5, 40.0, 999.5, 1000.0, 4999.5, 5000.0, -0.5, 1.0]
+    expected_layer = [0, 0, 1, 1, 2, 2, None, None, 0]
+    particles = torch.tensor([[0.0, 0.0, z] for z in heights], dtype=torch.float32)
+    n = len(heights)
+    weights = torch.arange(1, n + 1, dtype=torch.float32)  # tells the particles apart
+    g.accumulate(
+        particles,
+        torch.ones(n, dtype=torch.bool),
+        weights,
+        t_idx=_t_idx(0, n),
+        release_idx=_release_idx(0, n),
+        dt_seconds=1.0,
+    )
+    per_layer = [0.0, 0.0, 0.0]
+    for w, layer in zip(weights.tolist(), expected_layer, strict=True):
+        if layer is not None:
+            per_layer[layer] += w
+    assert g.tensor[0, 0, :, 0, 0].tolist() == per_layer
+
+
 def test_z_edges_validation_rejects_non_ascending() -> None:
     with pytest.raises(ValueError, match="ascending"):
         FootprintGridder(

@@ -71,7 +71,9 @@ divides moist-air mass by the dry-air molar mass.
 - **GLIDE divides each particle's count by the dry-air density at the particle**
   as it is counted: ρ_d = (p − e) / (R_d T), at the particle's position and the
   step's time, using the same met window and time weight as the step
-  (`_step_window_time`, PR #41). The raw footprint's units become s m³ kg⁻¹
+  (`_step_window_time`, PR #41). *Amended by decision 0029:* with
+  `output_grid.deposition.position: trapezoid` each half-step deposit uses the
+  density at its own time (the step's start or end) in the step's met window. The raw footprint's units become s m³ kg⁻¹
   of dry air. M_air / h then gives m² s mol⁻¹ of dry air directly, with no
   density applied afterwards.
 - **§6 means the dry-air mole fraction.** ρ_p in §6 is the dry-air density.

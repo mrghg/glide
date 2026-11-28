@@ -49,6 +49,7 @@ class AnalyticMetReader(MetReader):
     t_kelvin: float = 280.0
     ustar_m_s: float = 0.4
     shf_w_m2: float = 0.0
+    q_kg_kg: float = 0.0
     channel_names: tuple[str, ...] = ("u", "v", "w", "blh", "sp")
     device: torch.device | str = "cpu"
     dtype: torch.dtype = torch.float32
@@ -82,6 +83,7 @@ class AnalyticMetReader(MetReader):
                 "t": torch.full(shape, self.t_kelvin, dtype=self.dtype, device=self.device),
                 "ustar": torch.full(shape, self.ustar_m_s, dtype=self.dtype, device=self.device),
                 "shf": torch.full(shape, self.shf_w_m2, dtype=self.dtype, device=self.device),
+                "q": torch.full(shape, self.q_kg_kg, dtype=self.dtype, device=self.device),
             }
             missing = [k for k in self.channel_names if k not in available]
             if missing:
